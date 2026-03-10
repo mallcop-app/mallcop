@@ -1,0 +1,1 @@
+"""New-actor detector plugin."""

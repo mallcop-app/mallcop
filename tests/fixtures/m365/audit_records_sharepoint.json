@@ -1,0 +1,19 @@
+[
+  {
+    "Id": "sp-rec-001",
+    "RecordType": 6,
+    "CreationTime": "2026-03-05T14:50:00",
+    "Operation": "SharingSet",
+    "OrganizationId": "00000000-0000-0000-0000-000000000099",
+    "UserType": 0,
+    "UserKey": "user-key-001",
+    "Workload": "SharePoint",
+    "ResultStatus": "Success",
+    "UserId": "admin@acme-corp.dev",
+    "ObjectId": "https://acme.sharepoint.com/sites/finance/Shared Documents/budget.xlsx",
+    "SiteUrl": "https://acme.sharepoint.com/sites/finance",
+    "SourceFileName": "budget.xlsx",
+    "TargetUserOrGroupName": "external@partner.com",
+    "EventData": "<SharePointSharingData><SharingType>Direct</SharingType></SharePointSharingData>"
+  }
+]

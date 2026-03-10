@@ -1,0 +1,29 @@
+name: azure
+description: Azure Activity Log, Container Apps, Cosmos DB, Defender
+version: 0.1.0
+
+auth:
+  required:
+    - tenant_id
+    - client_id
+    - client_secret
+  optional:
+    - subscription_id
+
+event_types:
+  - role_assignment
+  - login
+  - resource_modified
+  - defender_alert
+  - container_access
+
+discovery:
+  probes:
+    - "Azure AD tenant access"
+    - "Subscription enumeration"
+    - "Activity Log read permissions"
+
+tools:
+  - name: azure.query-activity-log
+    description: Query Azure Activity Log with OData filters
+    permission: read

@@ -1,0 +1,5 @@
+{
+  "contentType": "Audit.AzureActiveDirectory",
+  "status": "enabled",
+  "webhook": null
+}

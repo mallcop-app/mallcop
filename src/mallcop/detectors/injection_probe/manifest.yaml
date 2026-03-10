@@ -1,0 +1,6 @@
+name: injection-probe
+description: Flags events containing prompt injection patterns in string fields
+version: 0.1.0
+sources: "*"
+event_types: "*"
+severity_default: warn

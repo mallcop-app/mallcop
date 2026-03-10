@@ -1,0 +1,9 @@
+name: volume-anomaly
+description: Fires when event volume for a (source, event_type) pair exceeds N× the baseline frequency
+version: 0.1.0
+sources: "*"
+event_types: "*"
+severity_default: warn
+config:
+  ratio: 3.0
+  min_baseline_count: 5

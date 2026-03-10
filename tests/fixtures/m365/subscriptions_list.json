@@ -1,0 +1,22 @@
+[
+  {
+    "contentType": "Audit.AzureActiveDirectory",
+    "status": "enabled",
+    "webhook": null
+  },
+  {
+    "contentType": "Audit.Exchange",
+    "status": "enabled",
+    "webhook": null
+  },
+  {
+    "contentType": "Audit.SharePoint",
+    "status": "enabled",
+    "webhook": null
+  },
+  {
+    "contentType": "Audit.General",
+    "status": "enabled",
+    "webhook": null
+  }
+]

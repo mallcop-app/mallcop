@@ -1,0 +1,63 @@
+{
+  "projects": [
+    {
+      "id": "prj_abc123",
+      "name": "mallcop-docs",
+      "accountId": "team_xyz789",
+      "framework": "nextjs",
+      "createdAt": 1705276800000,
+      "updatedAt": 1709222400000,
+      "latestDeployments": [
+        {
+          "id": "dpl_latest1",
+          "url": "mallcop-docs-abc123.vercel.app",
+          "createdAt": 1709222400000,
+          "state": "READY",
+          "target": "production"
+        }
+      ],
+      "targets": {
+        "production": {
+          "alias": ["mallcop-docs.vercel.app"]
+        }
+      }
+    },
+    {
+      "id": "prj_def456",
+      "name": "acme-website",
+      "accountId": "team_xyz789",
+      "framework": "astro",
+      "createdAt": 1706486400000,
+      "updatedAt": 1709308800000,
+      "latestDeployments": [
+        {
+          "id": "dpl_latest2",
+          "url": "acme-website-def456.vercel.app",
+          "createdAt": 1709308800000,
+          "state": "READY",
+          "target": "production"
+        }
+      ],
+      "targets": {
+        "production": {
+          "alias": ["acme-corp.dev"]
+        }
+      }
+    },
+    {
+      "id": "prj_ghi789",
+      "name": "api-gateway",
+      "accountId": "team_xyz789",
+      "framework": null,
+      "createdAt": 1707696000000,
+      "updatedAt": 1709395200000,
+      "latestDeployments": [],
+      "targets": {}
+    }
+  ],
+  "pagination": {
+    "count": 3,
+    "next": null,
+    "prev": null
+  }
+}

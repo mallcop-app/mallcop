@@ -1,0 +1,29 @@
+name: m365
+description: Office 365 Management Activity API — Azure AD, Exchange, SharePoint, DLP
+version: 0.1.0
+
+auth:
+  required:
+    - tenant_id
+    - client_id
+    - client_secret
+  optional: []
+
+event_types:
+  - sign_in_success
+  - sign_in_failure
+  - admin_action
+  - oauth_consent
+  - guest_invited
+  - mailbox_access
+  - mail_forwarding_rule
+  - sharepoint_sharing
+  - sharepoint_activity
+  - dlp_alert
+
+discovery:
+  probes:
+    - "OAuth2 token acquisition"
+    - "Management Activity API subscription status"
+
+tools: []

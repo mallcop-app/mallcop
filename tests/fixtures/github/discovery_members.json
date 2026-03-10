@@ -1,0 +1,10 @@
+[
+  {
+    "login": "admin-user",
+    "id": 12345
+  },
+  {
+    "login": "devops-bot",
+    "id": 12346
+  }
+]

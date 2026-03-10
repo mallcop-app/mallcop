@@ -1,0 +1,13 @@
+name: priv-escalation
+description: Fires when an event indicates elevated permissions — new admin role, new repo owner, new org admin
+version: 0.1.0
+sources:
+  - azure
+  - github
+  - m365
+event_types:
+  - role_assignment
+  - collaborator_added
+  - permission_change
+  - admin_action
+severity_default: critical

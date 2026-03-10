@@ -1,0 +1,16 @@
+name: triage
+type: agent
+description: First-pass triage — resolve known-good, escalate unknowns
+version: 0.2.0
+
+model: sonnet
+tools:
+  - read-events
+  - check-baseline
+  - read-finding
+  - search-events
+  - resolve-finding
+permissions:
+  - read
+routes_to: investigate
+max_iterations: 3

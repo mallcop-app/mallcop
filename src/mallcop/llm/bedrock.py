@@ -1,0 +1,178 @@
+"""AWS Bedrock Converse API client."""
+
+from __future__ import annotations
+
+import json
+import logging
+from typing import Any
+
+import requests
+
+from mallcop.aws_sigv4 import sign_v4_request
+from mallcop.llm_types import LLMAPIError, LLMClient, LLMResponse, ToolCall
+from mallcop.llm.converters import _normalize_tool_schema, _extract_resolution
+
+_log = logging.getLogger(__name__)
+
+_MAX_TOKENS_DEFAULT = 4096
+
+
+def _convert_messages_bedrock(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Convert internal message format to Bedrock Converse API format."""
+    converted: list[dict[str, Any]] = []
+    tool_use_counter = 0
+
+    i = 0
+    while i < len(messages):
+        msg = messages[i]
+
+        if msg["role"] == "tool":
+            tool_use_counter += 1
+            tool_use_id = f"toolu_{tool_use_counter:04d}"
+
+            if converted and converted[-1]["role"] == "assistant":
+                converted.pop()
+                converted.append({
+                    "role": "assistant",
+                    "content": [{
+                        "toolUse": {
+                            "toolUseId": tool_use_id,
+                            "name": msg["name"],
+                            "input": {},
+                        }
+                    }],
+                })
+
+            converted.append({
+                "role": "user",
+                "content": [{
+                    "toolResult": {
+                        "toolUseId": tool_use_id,
+                        "content": [{"text": str(msg["content"])}],
+                    }
+                }],
+            })
+        elif msg["role"] == "assistant":
+            content = msg.get("content", "")
+            converted.append({
+                "role": "assistant",
+                "content": [{"text": content}] if isinstance(content, str) else content,
+            })
+        elif msg["role"] == "user":
+            content = msg.get("content", "")
+            if isinstance(content, str):
+                converted.append({"role": "user", "content": [{"text": content}]})
+            else:
+                converted.append({"role": "user", "content": content})
+        else:
+            converted.append(msg)
+        i += 1
+
+    return converted
+
+
+def _convert_tools_bedrock(tools: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """Convert internal tool schema format to Bedrock toolConfig format."""
+    if not tools:
+        return None
+
+    bedrock_tools = []
+    for tool in tools:
+        schema = _normalize_tool_schema(tool.get("parameters", {}))
+        bedrock_tools.append({
+            "toolSpec": {
+                "name": tool["name"],
+                "description": tool.get("description", ""),
+                "inputSchema": {"json": schema},
+            }
+        })
+
+    return {"tools": bedrock_tools}
+
+
+class BedrockClient(LLMClient):
+    """LLM client that calls AWS Bedrock Converse API with SigV4 signing."""
+
+    def __init__(
+        self,
+        model: str,
+        region: str = "us-east-1",
+        access_key: str = "",
+        secret_key: str = "",
+    ) -> None:
+        self._model = model
+        self._region = region
+        self._access_key = access_key
+        self._secret_key = secret_key
+
+    def chat(
+        self,
+        model: str,
+        system_prompt: str,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+    ) -> LLMResponse:
+        model_id = self._model
+        url = (
+            f"https://bedrock-runtime.{self._region}.amazonaws.com"
+            f"/model/{model_id}/converse"
+        )
+
+        bedrock_messages = _convert_messages_bedrock(messages)
+
+        body: dict[str, Any] = {
+            "modelId": model_id,
+            "messages": bedrock_messages,
+            "inferenceConfig": {"maxTokens": _MAX_TOKENS_DEFAULT},
+        }
+        if system_prompt:
+            body["system"] = [{"text": system_prompt}]
+
+        tool_config = _convert_tools_bedrock(tools)
+        if tool_config:
+            body["toolConfig"] = tool_config
+
+        body_bytes = json.dumps(body).encode("utf-8")
+
+        headers = {"content-type": "application/json"}
+        signed_headers = sign_v4_request(
+            "POST", url, headers, body_bytes,
+            self._region, "bedrock", self._access_key, self._secret_key,
+        )
+
+        resp = requests.post(url, headers=signed_headers, data=body_bytes, timeout=120)
+
+        if resp.status_code != 200:
+            _log.debug("Bedrock API error %d: %s", resp.status_code, resp.text)
+            raise LLMAPIError(
+                f"Bedrock API error {resp.status_code}"
+            )
+
+        data = resp.json()
+        usage = data.get("usage", {})
+        tokens_used = usage.get("inputTokens", 0) + usage.get("outputTokens", 0)
+
+        tool_calls: list[ToolCall] = []
+        raw_resolution: dict[str, Any] | None = None
+        text_content = ""
+
+        output_msg = data.get("output", {}).get("message", {})
+        for block in output_msg.get("content", []):
+            if "toolUse" in block:
+                tu = block["toolUse"]
+                tool_calls.append(ToolCall(
+                    name=tu["name"],
+                    arguments=tu.get("input", {}),
+                ))
+            elif "text" in block:
+                text_content += block["text"]
+
+        if not tool_calls and text_content:
+            raw_resolution = _extract_resolution(text_content)
+
+        return LLMResponse(
+            tool_calls=tool_calls,
+            resolution=None,
+            tokens_used=tokens_used,
+            raw_resolution=raw_resolution,
+        )

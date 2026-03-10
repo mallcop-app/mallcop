@@ -1,0 +1,33 @@
+name: aws-cloudtrail
+description: AWS CloudTrail audit log monitoring
+version: 0.1.0
+
+auth:
+  required:
+    - aws_access_key_id
+    - aws_secret_access_key
+  optional:
+    - region
+
+event_types:
+  - iam_change
+  - console_login
+  - role_assumed
+  - access_key_change
+  - instance_launch
+  - bucket_change
+  - logging_change
+  - policy_change
+  - security_group_change
+  - resource_modified
+
+discovery:
+  probes:
+    - "AWS STS identity verification"
+    - "CloudTrail trail enumeration"
+    - "Recent event access"
+
+tools:
+  - name: aws-cloudtrail.query-events
+    description: Query AWS CloudTrail events with filters
+    permission: read

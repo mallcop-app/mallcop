@@ -1,0 +1,34 @@
+[
+  {
+    "Id": "dlp-rec-001",
+    "RecordType": 11,
+    "CreationTime": "2026-03-05T15:45:00",
+    "Operation": "DlpRuleMatch",
+    "OrganizationId": "00000000-0000-0000-0000-000000000099",
+    "UserType": 0,
+    "UserKey": "user-key-001",
+    "Workload": "Exchange",
+    "ResultStatus": "",
+    "UserId": "user@acme-corp.dev",
+    "ObjectId": "message-id-001",
+    "PolicyDetails": [
+      {
+        "PolicyId": "policy-001",
+        "PolicyName": "Credit Card Detection",
+        "Rules": [
+          {
+            "RuleId": "rule-001",
+            "RuleName": "Credit Card Number Detected",
+            "Severity": "High",
+            "Actions": ["NotifyUser"],
+            "ConditionsMatched": {
+              "SensitiveInformation": [
+                {"SensitiveType": "Credit Card Number", "Count": 3}
+              ]
+            }
+          }
+        ]
+      }
+    ]
+  }
+]

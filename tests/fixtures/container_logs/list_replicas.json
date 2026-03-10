@@ -1,0 +1,18 @@
+{
+  "value": [
+    {
+      "id": "/subscriptions/00000000-0000-0000-0000-000000000001/resourceGroups/acme-rg/providers/Microsoft.App/containerApps/opensign/revisions/opensign--rev1/replicas/opensign--rev1-0",
+      "name": "opensign--rev1-0",
+      "type": "Microsoft.App/containerApps/revisions/replicas",
+      "properties": {
+        "createdTime": "2026-03-05T10:00:00Z",
+        "containers": [
+          {
+            "name": "opensign",
+            "containerId": "container-abc123"
+          }
+        ]
+      }
+    }
+  ]
+}

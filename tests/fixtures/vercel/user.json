@@ -1,0 +1,26 @@
+{
+  "user": {
+    "id": "usr_abc123def456",
+    "email": "admin@acme-corp.dev",
+    "name": "Admin User",
+    "username": "admin-user",
+    "avatar": "https://vercel.com/api/www/avatar/abc123",
+    "defaultTeamId": "team_xyz789",
+    "version": "northstar",
+    "createdAt": 1700000000000,
+    "softBlock": null,
+    "billing": {
+      "plan": "hobby",
+      "period": null,
+      "trial": null,
+      "cancelation": null,
+      "addons": null
+    },
+    "resourceConfig": {
+      "nodeType": "Edge",
+      "concurrentBuilds": 1
+    },
+    "stagingPrefix": "staging",
+    "hasTrialAvailable": false
+  }
+}

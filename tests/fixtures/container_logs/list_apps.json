@@ -1,0 +1,26 @@
+{
+  "value": [
+    {
+      "id": "/subscriptions/00000000-0000-0000-0000-000000000001/resourceGroups/acme-rg/providers/Microsoft.App/containerApps/opensign",
+      "name": "opensign",
+      "type": "Microsoft.App/containerApps",
+      "location": "eastus",
+      "properties": {
+        "provisioningState": "Succeeded",
+        "latestRevisionName": "opensign--rev1",
+        "latestReadyRevisionName": "opensign--rev1"
+      }
+    },
+    {
+      "id": "/subscriptions/00000000-0000-0000-0000-000000000001/resourceGroups/acme-rg/providers/Microsoft.App/containerApps/rudi",
+      "name": "rudi",
+      "type": "Microsoft.App/containerApps",
+      "location": "eastus",
+      "properties": {
+        "provisioningState": "Succeeded",
+        "latestRevisionName": "rudi--rev1",
+        "latestReadyRevisionName": "rudi--rev1"
+      }
+    }
+  ]
+}

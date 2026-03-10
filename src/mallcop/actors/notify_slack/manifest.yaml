@@ -1,0 +1,8 @@
+name: notify-slack
+type: channel
+description: Deliver finding digest to Slack via incoming webhook
+version: 0.1.0
+
+config:
+  webhook_url: ${SLACK_WEBHOOK_URL}
+format: digest

@@ -1,0 +1,43 @@
+{
+  "teams": [
+    {
+      "id": "team_xyz789",
+      "slug": "acme-corp",
+      "name": "Acme Corp",
+      "avatar": null,
+      "membership": {
+        "confirmed": true,
+        "confirmedAt": 1700000000000,
+        "role": "OWNER",
+        "teamId": "team_xyz789",
+        "uid": "usr_abc123def456",
+        "createdAt": 1700000000000,
+        "created": 1700000000000
+      },
+      "created": "2024-01-15T00:00:00.000Z",
+      "createdAt": 1705276800000
+    },
+    {
+      "id": "team_second456",
+      "slug": "acme-corp",
+      "name": "Acme Corp",
+      "avatar": null,
+      "membership": {
+        "confirmed": true,
+        "confirmedAt": 1710000000000,
+        "role": "MEMBER",
+        "teamId": "team_second456",
+        "uid": "usr_abc123def456",
+        "createdAt": 1710000000000,
+        "created": 1710000000000
+      },
+      "created": "2024-03-10T00:00:00.000Z",
+      "createdAt": 1710028800000
+    }
+  ],
+  "pagination": {
+    "count": 2,
+    "next": null,
+    "prev": null
+  }
+}

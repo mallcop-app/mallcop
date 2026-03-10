@@ -1,0 +1,6 @@
+{
+  "error": {
+    "code": "AF20024",
+    "message": "The subscription is already enabled. No property change."
+  }
+}

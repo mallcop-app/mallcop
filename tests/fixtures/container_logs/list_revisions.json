@@ -1,0 +1,14 @@
+{
+  "value": [
+    {
+      "id": "/subscriptions/00000000-0000-0000-0000-000000000001/resourceGroups/acme-rg/providers/Microsoft.App/containerApps/opensign/revisions/opensign--rev1",
+      "name": "opensign--rev1",
+      "type": "Microsoft.App/containerApps/revisions",
+      "properties": {
+        "active": true,
+        "replicas": 1,
+        "trafficWeight": 100
+      }
+    }
+  ]
+}

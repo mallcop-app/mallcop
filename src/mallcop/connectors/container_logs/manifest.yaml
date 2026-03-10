@@ -1,0 +1,21 @@
+name: container-logs
+description: Azure Container Apps stdout logs via REST API
+version: 0.1.0
+
+auth:
+  required:
+    - tenant_id
+    - client_id
+    - client_secret
+  optional:
+    - subscription_id
+
+event_types:
+  - log_line
+
+discovery:
+  probes:
+    - "Container Apps enumeration in resource group"
+    - "Active revision detection"
+
+tools: []

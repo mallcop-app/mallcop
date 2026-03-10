@@ -1,0 +1,6 @@
+name: new-actor
+description: Flags actors not seen in the baseline period
+version: 0.1.0
+sources: "*"
+event_types: "*"
+severity_default: warn

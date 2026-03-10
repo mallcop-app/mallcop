@@ -1,0 +1,19 @@
+[
+  {
+    "@timestamp": 1709665200000,
+    "action": "deploy_key.create",
+    "actor": "cibot",
+    "org": "acme-corp",
+    "repo": "acme-corp/webapp",
+    "created_at": 1709665200000,
+    "_document_id": "abc126"
+  },
+  {
+    "@timestamp": 1709668800000,
+    "action": "oauth_authorization.create",
+    "actor": "admin-user",
+    "org": "acme-corp",
+    "created_at": 1709668800000,
+    "_document_id": "abc127"
+  }
+]

@@ -1,0 +1,12 @@
+name: new-external-access
+description: Flags when external entities are granted access to internal resources
+version: 0.1.0
+sources:
+  - github
+  - m365
+event_types:
+  - collaborator_added
+  - guest_invited
+  - oauth_consent
+  - sharepoint_sharing
+severity_default: warn

@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+*.egg
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Mallcop operational artifacts (generated at runtime, not source)
+baseline.json
+costs.jsonl
+mallcop.yaml
+metering.db
+events/
+findings.jsonl
+checkpoints.yaml
+
+# Secrets
+.env
+.env.*
+
+# OS
+.DS_Store
+Thumbs.db

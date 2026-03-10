@@ -1,0 +1,19 @@
+name: investigate
+type: agent
+description: Second-tier investigation of escalated findings using stronger model
+version: 0.1.0
+
+model: sonnet
+tools:
+  - read-events
+  - check-baseline
+  - read-finding
+  - search-events
+  - read-config
+  - annotate-finding
+  - resolve-finding
+permissions:
+  - read
+  - write
+routes_to: notify-teams
+max_iterations: 10

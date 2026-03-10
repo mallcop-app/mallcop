@@ -1,0 +1,1481 @@
+"""Mallcop CLI entrypoint."""
+
+from __future__ import annotations
+
+import copy
+import json
+import re
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any
+
+import click
+import yaml
+
+from mallcop.config import load_config, BudgetConfig
+from mallcop.cost_estimator import estimate_costs
+from mallcop.plugins import discover_plugins, get_search_paths, instantiate_connector, load_plugin_class
+from mallcop.schemas import Finding, Severity
+from mallcop.secrets import ConfigError, EnvSecretProvider
+from mallcop.store import JsonlStore, Store
+
+
+def _emit_error(message: str, human: bool) -> None:
+    """Emit an error in the appropriate format."""
+    if human:
+        click.echo(f"ERROR: {message}", err=True)
+    else:
+        click.echo(json.dumps({"status": "error", "error": message}))
+
+
+def _warn_escalation_health(root: Path) -> None:
+    """Check escalation paths and warn to stderr if broken.
+
+    Non-blocking — just a warning. Called by any command that touches
+    a deployment repo so the operator always knows if alerting is dead.
+    """
+    try:
+        config = load_config(root)
+    except Exception:
+        return  # No config — not a deployment repo, nothing to check
+
+    from mallcop.actors.runtime import check_escalation_health
+    errors = check_escalation_health(config)
+    if errors:
+        click.echo("WARNING: Escalation paths are broken — findings cannot be delivered:", err=True)
+        for e in errors:
+            click.echo(f"  {e}", err=True)
+        click.echo("Fix your mallcop.yaml or set TEAMS_WEBHOOK_URL.", err=True)
+
+
+
+def _stub(name: str) -> None:
+    """Output JSON stub response for an unimplemented command."""
+    click.echo(json.dumps({"command": name, "status": "not_implemented"}))
+
+
+def _parse_since(since: str) -> datetime:
+    """Parse a time window string like '24h', '7d', '30m' into a datetime cutoff."""
+    match = re.match(r"^(\d+)([hdm])$", since)
+    if not match:
+        raise click.BadParameter(f"Invalid time window: {since}. Use e.g. 24h, 7d, 30m")
+    value, unit = int(match.group(1)), match.group(2)
+    if unit == "h":
+        delta = timedelta(hours=value)
+    elif unit == "d":
+        delta = timedelta(days=value)
+    elif unit == "m":
+        delta = timedelta(minutes=value)
+    else:
+        raise click.BadParameter(f"Unknown unit: {unit}")
+    return datetime.now(timezone.utc) - delta
+
+
+@click.group()
+@click.version_option(package_name="mallcop")
+def cli() -> None:
+    """Mallcop: Security monitoring for small cloud operators."""
+
+
+# --- Core pipeline ---
+
+
+def _setup_pro(config_data: dict[str, Any]) -> dict[str, Any] | None:
+    """Set up Pro managed inference after connector discovery.
+
+    Mutates config_data in place (adds 'pro' section, removes 'llm').
+    Returns a dict with pro account info for CLI output, or None on failure.
+    """
+    import subprocess
+
+    from mallcop.pro import ProClient
+
+    # Get email from git config
+    email = ""
+    try:
+        result = subprocess.run(
+            ["git", "config", "user.email"], capture_output=True, text=True
+        )
+        if result.returncode == 0:
+            email = result.stdout.strip()
+    except Exception:
+        pass
+
+    if not email:
+        click.echo(
+            json.dumps({"status": "error", "error": "No email found. Set git config user.email first."}),
+            err=True,
+        )
+        return None
+
+    account_url = "https://api.mallcop.dev"
+    client = ProClient(account_url)
+
+    # Create account
+    try:
+        account_id, service_token = client.create_account(email)
+    except ValueError:
+        click.echo(
+            json.dumps({
+                "status": "error",
+                "error": f"Email {email} already registered. Add pro config to mallcop.yaml manually.",
+            }),
+            err=True,
+        )
+        return None
+    except (RuntimeError, OSError) as e:
+        click.echo(
+            json.dumps({"status": "error", "error": "Account creation failed"}),
+            err=True,
+        )
+        return None
+
+    # Recommend plan tier based on connector count
+    num_connectors = len(config_data.get("connectors", {}))
+    if num_connectors <= 2:
+        recommended_plan = "small"
+        plan_price = "$29/mo"
+    elif num_connectors <= 5:
+        recommended_plan = "medium"
+        plan_price = "$59/mo"
+    else:
+        recommended_plan = "large"
+        plan_price = "$99/mo"
+
+    # Get checkout URL
+    checkout_url = None
+    try:
+        checkout_url = client.subscribe(account_id, recommended_plan, service_token)
+    except Exception:
+        pass
+
+    # Mutate config_data: add pro section, remove BYOK llm
+    config_data["pro"] = {
+        "account_id": account_id,
+        "service_token": service_token,
+        "account_url": account_url,
+        "inference_url": "https://api.mallcop.dev",
+    }
+    if "llm" in config_data:
+        del config_data["llm"]
+
+    # Build result for CLI output
+    pro_result: dict[str, Any] = {
+        "account_id": account_id,
+        "email": email,
+        "recommended_plan": recommended_plan,
+        "plan_price": plan_price,
+    }
+    if checkout_url:
+        pro_result["checkout_url"] = checkout_url
+        pro_result["next_step"] = (
+            "Open the checkout URL to activate your subscription, then run: mallcop watch"
+        )
+    else:
+        pro_result["next_step"] = "Run: mallcop watch"
+
+    return pro_result
+
+
+@cli.command()
+@click.option("--pro", is_flag=True, help="Set up Pro managed inference")
+def init(pro: bool) -> None:
+    """Discover environment, write config, estimate costs."""
+    cwd = Path.cwd()
+    search_paths = get_search_paths(cwd)
+    plugins = discover_plugins(search_paths)
+
+    connector_results: list[dict[str, Any]] = []
+    available_connectors: dict[str, dict[str, Any]] = {}
+    total_sample_events = 0
+
+    secrets = EnvSecretProvider()
+
+    for name, plugin_info in plugins["connectors"].items():
+        connector = instantiate_connector(name)
+        if connector is None:
+            continue
+
+        # Authenticate before discovery so connectors can make API calls
+        try:
+            connector.authenticate(secrets)
+        except Exception:
+            pass  # discover() will report missing credentials
+
+        result = connector.discover()
+
+        connector_entry: dict[str, Any] = {
+            "name": name,
+            "available": result.available,
+            "resources": result.resources,
+            "missing_credentials": result.missing_credentials,
+            "notes": result.notes,
+        }
+        connector_results.append(connector_entry)
+
+        if result.available:
+            connector_config: dict[str, Any] = {}
+            manifest_path = plugin_info.path / "manifest.yaml"
+            if manifest_path.exists():
+                with open(manifest_path) as f:
+                    manifest_data = yaml.safe_load(f)
+                auth_required = manifest_data.get("auth", {}).get("required", [])
+                for key in auth_required:
+                    env_var = f"{name.upper()}_{key.upper()}"
+                    connector_config[key] = f"${{{env_var}}}"
+
+            for k, v in result.suggested_config.items():
+                connector_config[k] = v
+
+            available_connectors[name] = connector_config
+
+            try:
+                # Apply connector-specific config from discovery
+                connector.configure(result.suggested_config)
+                sample_result = connector.poll(checkpoint=None)
+                total_sample_events += len(sample_result.events)
+                connector_entry["sample_events"] = len(sample_result.events)
+            except Exception:
+                connector_entry["sample_events"] = 0
+
+    budget = BudgetConfig()
+    config_data: dict[str, Any] = {
+        "secrets": {"backend": "env"},
+        "connectors": available_connectors,
+        "routing": {},
+        "actor_chain": {},
+        "budget": {
+            "max_findings_for_actors": budget.max_findings_for_actors,
+            "max_tokens_per_run": budget.max_tokens_per_run,
+            "max_tokens_per_finding": budget.max_tokens_per_finding,
+        },
+    }
+
+    # Pro setup modifies config_data before writing.
+    # Deep-copy so we can restore on failure (setup mutates in place).
+    pro_result: dict[str, Any] | None = None
+    if pro:
+        config_backup = copy.deepcopy(config_data)
+        pro_result = _setup_pro(config_data)
+        if pro_result is None:
+            # Restore config_data from backup — _setup_pro may have
+            # partially mutated it before failing.
+            config_data.clear()
+            config_data.update(config_backup)
+
+    config_path = cwd / "mallcop.yaml"
+    with open(config_path, "w") as f:
+        yaml.dump(config_data, f, default_flow_style=False, sort_keys=False)
+
+    cost_estimate = estimate_costs(
+        num_connectors=len(available_connectors),
+        sample_event_count=total_sample_events,
+        budget=budget,
+    )
+
+    # Collect required secrets from connector manifests
+    required_secrets: list[str] = []
+    for name, plugin_info in plugins["connectors"].items():
+        manifest_path = plugin_info.path / "manifest.yaml"
+        if manifest_path.exists():
+            with open(manifest_path) as f:
+                manifest_data = yaml.safe_load(f)
+            for key in manifest_data.get("auth", {}).get("required", []):
+                env_var = f"{name.upper()}_{key.upper()}"
+                if env_var not in required_secrets:
+                    required_secrets.append(env_var)
+
+    # Reference the example workflow template
+    workflow_ref = (
+        "See github-actions-example.yml in the mallcop package "
+        "(mallcop/templates/github-actions-example.yml) for a GitHub Actions workflow template. "
+        "Configure the required secrets in your repo settings."
+    )
+
+    output: dict[str, Any] = {
+        "status": "ok",
+        "config_path": str(config_path),
+        "connectors": connector_results,
+        "cost_estimate": cost_estimate,
+        "workflow_example": workflow_ref,
+        "required_secrets": required_secrets,
+    }
+
+    if pro_result:
+        output["pro"] = pro_result
+
+    click.echo(json.dumps(output))
+
+
+@cli.command()
+def scan() -> None:
+    """Poll all connectors, store events."""
+    from mallcop.app_integration import apply_parsers, get_configured_app_names
+
+    cwd = Path.cwd()
+
+    try:
+        config = load_config(cwd)
+    except ConfigError as e:
+        click.echo(json.dumps({"status": "error", "error": str(e)}))
+        raise SystemExit(1)
+
+    store = JsonlStore(cwd)
+    connector_summaries: dict[str, Any] = {}
+    total_events = 0
+    app_names = get_configured_app_names(config.connectors)
+
+    for name, connector_config in config.connectors.items():
+        connector = instantiate_connector(name)
+        if connector is None:
+            connector_summaries[name] = {
+                "status": "error",
+                "error": f"Unknown connector: {name}",
+                "events_ingested": 0,
+            }
+            continue
+
+        try:
+            provider = EnvSecretProvider()
+            connector.authenticate(provider)
+
+            # Apply connector-specific config
+            connector.configure(connector_config)
+
+            checkpoint = store.get_checkpoint(name)
+            poll_result = connector.poll(checkpoint)
+
+            # Apply parser transforms for container-logs apps with parser.yaml
+            events = poll_result.events
+            if name == "container-logs" and app_names:
+                events = apply_parsers(events, cwd, app_names)
+
+            if events:
+                store.append_events(events)
+
+            store.set_checkpoint(poll_result.checkpoint)
+
+            event_count = len(events)
+            total_events += event_count
+
+            connector_summaries[name] = {
+                "status": "ok",
+                "events_ingested": event_count,
+                "checkpoint": poll_result.checkpoint.value,
+            }
+
+        except Exception as e:
+            connector_summaries[name] = {
+                "status": "error",
+                "error": str(e),
+                "events_ingested": 0,
+            }
+
+    output: dict[str, Any] = {
+        "status": "ok",
+        "total_events_ingested": total_events,
+        "connectors": connector_summaries,
+    }
+
+    click.echo(json.dumps(output))
+
+
+@cli.command()
+@click.option("--dir", "dir_path", default=None, help="Deployment repo directory.", hidden=True)
+def detect(dir_path: str | None) -> None:
+    """Run detectors against new events."""
+    from mallcop.baseline import is_learning_mode
+    from mallcop.detect import run_detect
+    from mallcop.store import JsonlStore
+
+    root = Path(dir_path) if dir_path else Path.cwd()
+    store = JsonlStore(root)
+
+    # Get all events and baseline
+    all_events = store.query_events()
+    baseline = store.get_baseline()
+
+    # Determine which connectors are in learning mode
+    sources = {evt.source for evt in all_events}
+    learning: set[str] = set()
+    for source in sources:
+        source_events = [e for e in all_events if e.source == source]
+        if is_learning_mode(source, source_events):
+            learning.add(source)
+
+    # Load config for app detector integration
+    try:
+        detect_config = load_config(root)
+        config_connectors = detect_config.connectors
+    except ConfigError:
+        config_connectors = None
+
+    # Run detectors
+    findings = run_detect(
+        all_events, baseline, learning_connectors=learning,
+        root=root, config_connectors=config_connectors,
+    )
+
+    # Persist findings
+    if findings:
+        store.append_findings(findings)
+
+    # Update baseline AFTER detection so new actors are included for next run
+    try:
+        detect_config_full = load_config(root)
+        window_days: int | None = detect_config_full.baseline.window_days
+    except ConfigError:
+        from mallcop.config import BaselineConfig
+        window_days = BaselineConfig().window_days
+    store.update_baseline(all_events, window_days=window_days)
+
+    # Output summary
+    summary: dict[str, dict[str, int]] = {}
+    for f in findings:
+        det = f.detector
+        sev = f.severity.value
+        if det not in summary:
+            summary[det] = {}
+        summary[det][sev] = summary[det].get(sev, 0) + 1
+
+    click.echo(json.dumps({
+        "command": "detect",
+        "status": "ok",
+        "findings_count": len(findings),
+        "summary": summary,
+        "learning_connectors": sorted(learning),
+    }))
+
+
+@cli.command()
+@click.option("--dir", "dir_path", default=None, help="Deployment repo directory.", hidden=True)
+@click.option("--human", is_flag=True, help="Human-readable output.")
+@click.option("--no-actors", is_flag=True, help="Skip actor invocation (log findings only).")
+@click.option("--backend", default="anthropic", type=click.Choice(["anthropic", "claude-code"]),
+              help="LLM backend: 'anthropic' (API) or 'claude-code' (CLI, uses subscription).")
+def escalate(dir_path: str | None, human: bool, no_actors: bool, backend: str) -> None:
+    """Invoke actor chain on open findings."""
+    from mallcop.escalate import run_escalate
+
+    root = Path(dir_path) if dir_path else Path.cwd()
+
+    actor_runner = None
+    if not no_actors:
+        from mallcop.actors.runtime import EscalationPathError, build_actor_runner
+        from mallcop.llm import build_llm_client
+        try:
+            config = load_config(root)
+            store = JsonlStore(root)
+            llm_client = build_llm_client(config.llm, backend=backend, pro_config=config.pro)
+            if llm_client is None:
+                raise ValueError("No LLM client configured")
+            actor_runner = build_actor_runner(
+                root=root,
+                store=store,
+                config=config,
+                llm=llm_client,
+                validate_paths=True,
+            )
+        except EscalationPathError as e:
+            # Broken escalation path is fatal — security tool must deliver alerts
+            _emit_error(str(e), human)
+            raise SystemExit(1)
+        except Exception:
+            # No config or LLM not configured — fall back to no-actors mode
+            pass
+
+    result = run_escalate(root, actor_runner=actor_runner)
+    if human:
+        click.echo(f"Findings processed: {result['findings_processed']}")
+        if result.get("circuit_breaker_triggered"):
+            click.echo("Circuit breaker triggered -- actors bypassed.")
+        if result.get("budget_exhausted"):
+            click.echo("Budget exhausted -- some findings skipped.")
+        click.echo(f"Tokens used: {result.get('tokens_used', 0)}")
+    else:
+        click.echo(json.dumps(result))
+
+
+@cli.command()
+@click.option("--dry-run", is_flag=True, help="Run scan and detect without invoking actors.")
+@click.option("--dir", "dir_path", default=None, help="Deployment repo directory.", hidden=True)
+@click.option("--human", is_flag=True, help="Human-readable output.")
+@click.option("--backend", default="anthropic", type=click.Choice(["anthropic", "claude-code"]),
+              help="LLM backend: 'anthropic' (API) or 'claude-code' (CLI, uses subscription).")
+def watch(dry_run: bool, dir_path: str | None, human: bool, backend: str) -> None:
+    """Scan + detect + escalate (cron-friendly)."""
+    from mallcop.escalate import run_escalate
+
+    root = Path(dir_path) if dir_path else Path.cwd()
+    result: dict[str, Any] = {"command": "watch", "dry_run": dry_run}
+
+    # Step 0: Validate escalation paths before running pipeline
+    if not dry_run:
+        from mallcop.actors.runtime import EscalationPathError, build_actor_runner
+        from mallcop.llm import build_llm_client
+        try:
+            watch_config = load_config(root)
+            watch_store = JsonlStore(root)
+            watch_llm = build_llm_client(watch_config.llm, backend=backend, pro_config=watch_config.pro)
+            if watch_llm is None:
+                raise ValueError("No LLM client configured")
+            _watch_runner = build_actor_runner(
+                root=root, store=watch_store, config=watch_config, llm=watch_llm,
+                validate_paths=True,
+            )
+        except EscalationPathError as e:
+            # Broken escalation path is fatal
+            result["status"] = "error"
+            result["error"] = str(e)
+            click.echo(json.dumps(result))
+            raise SystemExit(1)
+        except Exception:
+            # No config — watch still runs scan+detect, just no actors
+            pass
+
+    # Step 1: Scan (fail-fast)
+    try:
+        scan_result = _run_scan_pipeline(root)
+        result["scan"] = scan_result
+    except Exception as e:
+        result["status"] = "error"
+        result["error"] = f"scan failed: {e}"
+        click.echo(json.dumps(result))
+        raise SystemExit(1)
+
+    # Step 2: Detect (fail-fast)
+    try:
+        detect_result = _run_detect_pipeline(root)
+        # Extract baseline for top-level output (backward compat)
+        if "baseline" in detect_result:
+            result["baseline"] = detect_result.pop("baseline")
+        result["detect"] = detect_result
+    except Exception as e:
+        result["status"] = "error"
+        result["error"] = f"detect failed: {e}"
+        click.echo(json.dumps(result))
+        raise SystemExit(1)
+
+    # Step 3: Escalate (skip if dry-run or learning mode)
+    learning = detect_result.get("learning_connectors", [])
+    skip_escalate = dry_run or bool(learning)
+    escalate_reason = "dry_run" if dry_run else ("learning_mode" if learning else None)
+
+    if skip_escalate:
+        result["escalate"] = {"skipped": True, "reason": escalate_reason}
+    else:
+        try:
+            from mallcop.actors.runtime import build_actor_runner
+            from mallcop.llm import build_llm_client
+
+            watch_config = load_config(root)
+            watch_store = JsonlStore(root)
+            watch_llm = build_llm_client(watch_config.llm, backend=backend, pro_config=watch_config.pro)
+            watch_runner = build_actor_runner(
+                root=root,
+                store=watch_store,
+                config=watch_config,
+                llm=watch_llm,
+            )
+            escalate_result = run_escalate(root, actor_runner=watch_runner)
+            result["escalate"] = escalate_result
+        except Exception as e:
+            result["status"] = "error"
+            result["error"] = f"escalate failed: {e}"
+            click.echo(json.dumps(result))
+            raise SystemExit(1)
+
+    result["status"] = "ok"
+
+    if human:
+        click.echo(f"Watch: {result['status']}")
+        if "scan" in result:
+            click.echo(f"  Scan: {result['scan'].get('total_events_ingested', 0)} events")
+        if "detect" in result:
+            click.echo(f"  Detect: {result['detect'].get('findings_count', 0)} findings")
+        if "escalate" in result:
+            esc = result["escalate"]
+            if esc.get("skipped"):
+                click.echo(f"  Escalate: skipped ({esc.get('reason', 'unknown')})")
+            else:
+                click.echo(f"  Escalate: {esc.get('findings_processed', 0)} processed")
+    else:
+        click.echo(json.dumps(result))
+
+
+def _run_scan_pipeline(root: Path, store: Store | None = None) -> dict[str, Any]:
+    """Run the scan step of the pipeline."""
+    from mallcop.app_integration import apply_parsers, get_configured_app_names
+
+    try:
+        config = load_config(root)
+    except ConfigError as e:
+        raise RuntimeError(str(e))
+
+    if store is None:
+        store = JsonlStore(root)
+    connector_summaries: dict[str, Any] = {}
+    total_events = 0
+    app_names = get_configured_app_names(config.connectors)
+
+    for name, connector_config in config.connectors.items():
+        connector = instantiate_connector(name)
+        if connector is None:
+            connector_summaries[name] = {
+                "status": "error",
+                "error": f"Unknown connector: {name}",
+                "events_ingested": 0,
+            }
+            continue
+
+        try:
+            provider = EnvSecretProvider()
+            connector.authenticate(provider)
+
+            connector.configure(connector_config)
+
+            checkpoint = store.get_checkpoint(name)
+            poll_result = connector.poll(checkpoint)
+
+            # Apply parser transforms for container-logs apps with parser.yaml
+            events = poll_result.events
+            if name == "container-logs" and app_names:
+                events = apply_parsers(events, root, app_names)
+
+            if events:
+                store.append_events(events)
+
+            store.set_checkpoint(poll_result.checkpoint)
+
+            event_count = len(events)
+            total_events += event_count
+
+            connector_summaries[name] = {
+                "status": "ok",
+                "events_ingested": event_count,
+                "checkpoint": poll_result.checkpoint.value,
+            }
+
+        except Exception as e:
+            connector_summaries[name] = {
+                "status": "error",
+                "error": str(e),
+                "events_ingested": 0,
+            }
+
+    return {
+        "status": "ok",
+        "total_events_ingested": total_events,
+        "connectors": connector_summaries,
+    }
+
+
+def _run_detect_pipeline(root: Path, store: Store | None = None) -> dict[str, Any]:
+    """Run the detect step of the pipeline."""
+    from mallcop.baseline import is_learning_mode
+    from mallcop.config import BaselineConfig
+    from mallcop.detect import run_detect
+
+    if store is None:
+        store = JsonlStore(root)
+    all_events = store.query_events()
+    baseline = store.get_baseline()
+
+    # Load baseline config for window_days
+    try:
+        config = load_config(root)
+        window_days: int | None = config.baseline.window_days
+        config_connectors: dict[str, Any] | None = config.connectors
+    except ConfigError:
+        window_days = BaselineConfig().window_days
+        config_connectors = None
+
+    # Run detection against current baseline BEFORE updating it with new events.
+    # This ensures new actors are flagged before they're added to the baseline.
+
+    sources = {evt.source for evt in all_events}
+    learning: set[str] = set()
+    for source in sources:
+        source_events = [e for e in all_events if e.source == source]
+        if is_learning_mode(source, source_events):
+            learning.add(source)
+
+    findings = run_detect(
+        all_events, baseline, learning_connectors=learning,
+        root=root, config_connectors=config_connectors,
+    )
+
+    if findings:
+        store.append_findings(findings)
+
+    # Update baseline AFTER detection so new actors are included for next run
+    store.update_baseline(all_events, window_days=window_days)
+    updated_baseline = store.get_baseline()
+
+    summary: dict[str, dict[str, int]] = {}
+    for f in findings:
+        det = f.detector
+        sev = f.severity.value
+        if det not in summary:
+            summary[det] = {}
+        summary[det][sev] = summary[det].get(sev, 0) + 1
+
+    return {
+        "status": "ok",
+        "findings_count": len(findings),
+        "summary": summary,
+        "learning_connectors": sorted(learning),
+        "baseline": {
+            "known_actor_count": len(updated_baseline.known_entities.get("actors", [])),
+            "frequency_table_entries": len(updated_baseline.frequency_tables),
+            "known_sources": updated_baseline.known_entities.get("sources", []),
+        },
+    }
+
+
+# --- Investigation (interactive mode) ---
+
+
+@cli.command()
+@click.option("--dir", "dir_path", default=None, help="Deployment repo directory.", hidden=True)
+@click.option("--human", is_flag=True, help="Human-readable output.")
+def review(dir_path: str | None, human: bool) -> None:
+    """Orient: POST.md + all open findings + commands."""
+    from mallcop.review import run_review
+
+    root = Path(dir_path) if dir_path else Path.cwd()
+    result = run_review(root)
+
+    if human:
+        _print_review_human(result)
+    else:
+        click.echo(json.dumps(result))
+
+
+def _print_review_human(result: dict[str, Any]) -> None:
+    """Print review output in human-readable format."""
+    click.echo("== MALLCOP SECURITY REVIEW ==")
+    click.echo()
+
+    if result.get("post_md"):
+        click.echo(f"POST: {result['post_md_source']}")
+        click.echo("---")
+        click.echo(result["post_md"])
+        click.echo("---")
+        click.echo()
+
+    findings_by_severity = result.get("findings_by_severity", {})
+    if not findings_by_severity:
+        click.echo("No open findings.")
+        return
+
+    for severity, findings in findings_by_severity.items():
+        count = len(findings)
+        click.echo(f"{severity.upper()} ({count} finding{'s' if count != 1 else ''}):")
+        for f in findings:
+            click.echo(f"  {f['id']}: {f['title']}")
+            for ann in f.get("annotations", []):
+                click.echo(f"    {ann['actor']}: \"{ann['content']}\"")
+        click.echo()
+
+    cmds = result.get("suggested_commands", [])
+    if cmds:
+        click.echo("COMMANDS:")
+        for cmd in cmds:
+            click.echo(f"  {cmd}")
+
+
+@cli.command()
+@click.argument("finding_id")
+@click.option("--dir", "dir_path", default=None, help="Deployment repo directory.", hidden=True)
+@click.option("--human", is_flag=True, help="Human-readable output.")
+def investigate(finding_id: str, dir_path: str | None, human: bool) -> None:
+    """Drill down: POST.md + deep context for one finding."""
+    from mallcop.investigate import run_investigate
+
+    root = Path(dir_path) if dir_path else Path.cwd()
+    result = run_investigate(root, finding_id)
+
+    if result.get("status") == "error":
+        click.echo(json.dumps(result))
+        raise SystemExit(1)
+
+    if human:
+        _print_investigate_human(result)
+    else:
+        click.echo(json.dumps(result))
+
+
+def _print_investigate_human(result: dict[str, Any]) -> None:
+    """Print investigate output in human-readable format."""
+    finding = result.get("finding", {})
+    click.echo(f"== INVESTIGATE: {finding.get('id')} ==")
+    click.echo(f"Title: {finding.get('title')}")
+    click.echo(f"Severity: {finding.get('severity', '').upper()}")
+    click.echo(f"Status: {finding.get('status')}")
+    click.echo(f"Detector: {finding.get('detector')}")
+    click.echo()
+
+    if result.get("post_md"):
+        click.echo(f"POST: {result['post_md_source']}")
+        click.echo("---")
+        click.echo(result["post_md"])
+        click.echo("---")
+        click.echo()
+
+    events = result.get("events", [])
+    if events:
+        click.echo(f"Triggering Events ({len(events)}):")
+        for e in events:
+            click.echo(f"  {e['id']}: {e['actor']} {e['action']} {e['target']} @ {e['timestamp']}")
+        click.echo()
+
+    annotations = finding.get("annotations", [])
+    if annotations:
+        click.echo(f"Annotations ({len(annotations)}):")
+        for ann in annotations:
+            click.echo(f"  [{ann['actor']}] {ann['content']}")
+        click.echo()
+
+    actor_history = result.get("actor_history", {})
+    if actor_history:
+        click.echo("Actor History:")
+        for actor, events_list in actor_history.items():
+            click.echo(f"  {actor}: {len(events_list)} events")
+        click.echo()
+
+    baseline = result.get("baseline", {})
+    actors = baseline.get("actors", {})
+    if actors:
+        click.echo("Baseline:")
+        for actor, profile in actors.items():
+            known_str = "KNOWN" if profile.get("known") else "UNKNOWN"
+            click.echo(f"  {actor}: {known_str}")
+
+
+@cli.command()
+@click.option("--status", default=None, help="Filter by status.")
+@click.option("--severity", default=None, help="Filter by severity (comma-separated).")
+@click.option("--since", default=None, help="Time window (e.g. 24h).")
+@click.option("--human", is_flag=True, help="Human-readable output.")
+@click.option("--dir", "dir_path", default=None, help="Deployment repo directory.", hidden=True)
+def report(
+    status: str | None,
+    severity: str | None,
+    since: str | None,
+    human: bool,
+    dir_path: str | None,
+) -> None:
+    """Show findings report."""
+    from mallcop.store import JsonlStore
+
+    root = Path(dir_path) if dir_path else Path.cwd()
+    store = JsonlStore(root)
+
+    findings = store.query_findings(status=status)
+
+    # Filter by severity (comma-separated)
+    if severity:
+        severity_set = {s.strip() for s in severity.split(",")}
+        findings = [f for f in findings if f.severity.value in severity_set]
+
+    # Filter by since
+    if since:
+        cutoff = _parse_since(since)
+        findings = [f for f in findings if f.timestamp >= cutoff]
+
+    if human:
+        if not findings:
+            click.echo("No findings.")
+        else:
+            for f in findings:
+                click.echo(
+                    f"[{f.severity.value.upper()}] {f.id}: {f.title} "
+                    f"({f.status.value}) @ {f.timestamp.isoformat()}"
+                )
+    else:
+        click.echo(json.dumps({
+            "command": "report",
+            "status": "ok",
+            "findings": [f.to_dict() for f in findings],
+        }))
+
+
+@cli.command()
+@click.argument("finding_id")
+@click.option("--dir", "dir_path", default=None, help="Deployment repo directory.", hidden=True)
+@click.option("--human", is_flag=True, help="Human-readable output.")
+def finding(finding_id: str, dir_path: str | None, human: bool) -> None:
+    """Full finding detail + annotation trail."""
+    root = Path(dir_path) if dir_path else Path.cwd()
+    store = JsonlStore(root)
+
+    findings = store.query_findings()
+    match = [f for f in findings if f.id == finding_id]
+
+    if not match:
+        click.echo(json.dumps({
+            "command": "finding",
+            "status": "error",
+            "error": f"Finding not found: {finding_id}",
+        }))
+        raise SystemExit(1)
+
+    fnd = match[0]
+    result = {
+        "command": "finding",
+        "status": "ok",
+        "finding": fnd.to_dict(),
+    }
+
+    if human:
+        _print_finding_human(fnd)
+    else:
+        click.echo(json.dumps(result))
+
+
+def _print_finding_human(fnd: Finding) -> None:
+    """Print finding detail in human-readable format."""
+    click.echo(f"== FINDING: {fnd.id} ==")
+    click.echo(f"Title: {fnd.title}")
+    click.echo(f"Severity: {fnd.severity.value.upper()}")
+    click.echo(f"Status: {fnd.status.value}")
+    click.echo(f"Detector: {fnd.detector}")
+    click.echo(f"Timestamp: {fnd.timestamp.isoformat()}")
+    click.echo(f"Event IDs: {', '.join(fnd.event_ids)}")
+    if fnd.metadata:
+        click.echo(f"Metadata: {json.dumps(fnd.metadata)}")
+    click.echo()
+    if fnd.annotations:
+        click.echo(f"Annotations ({len(fnd.annotations)}):")
+        for ann in fnd.annotations:
+            click.echo(f"  [{ann.timestamp.isoformat()}] {ann.actor}: {ann.content}")
+
+
+@cli.command()
+@click.option("--finding", "finding_id", default=None, help="Filter by finding ID.")
+@click.option("--actor", default=None, help="Filter by actor.")
+@click.option("--source", default=None, help="Filter by source connector.")
+@click.option("--hours", type=int, default=None, help="Time window in hours (default 24).")
+@click.option("--type", "event_type", default=None, help="Filter by event type.")
+@click.option("--dir", "dir_path", default=None, help="Deployment repo directory.", hidden=True)
+@click.option("--human", is_flag=True, help="Human-readable output.")
+def events(
+    finding_id: str | None,
+    actor: str | None,
+    source: str | None,
+    hours: int | None,
+    event_type: str | None,
+    dir_path: str | None,
+    human: bool,
+) -> None:
+    """Query events."""
+    root = Path(dir_path) if dir_path else Path.cwd()
+    store = JsonlStore(root)
+
+    # Default to 24 hours
+    effective_hours = hours if hours is not None else 24
+    since = datetime.now(timezone.utc) - timedelta(hours=effective_hours)
+
+    # If filtering by finding, resolve event_ids first
+    event_id_filter: set[str] | None = None
+    if finding_id is not None:
+        findings = store.query_findings()
+        match = [f for f in findings if f.id == finding_id]
+        if not match:
+            click.echo(json.dumps({
+                "command": "events",
+                "status": "error",
+                "error": f"Finding not found: {finding_id}",
+            }))
+            raise SystemExit(1)
+        event_id_filter = set(match[0].event_ids)
+        # When filtering by finding, don't apply time window
+        since = None  # type: ignore[assignment]
+
+    # Query from store
+    all_events = store.query_events(
+        source=source,
+        since=since,
+        actor=actor,
+    )
+
+    # Apply event_type filter
+    if event_type is not None:
+        all_events = [e for e in all_events if e.event_type == event_type]
+
+    # Apply finding event_ids filter
+    if event_id_filter is not None:
+        all_events = [e for e in all_events if e.id in event_id_filter]
+
+    # Sort newest first
+    all_events.sort(key=lambda e: e.timestamp, reverse=True)
+
+    result = {
+        "command": "events",
+        "status": "ok",
+        "events": [e.to_dict() for e in all_events],
+    }
+
+    if human:
+        if not all_events:
+            click.echo("No events found.")
+        else:
+            click.echo(f"Events ({len(all_events)}):")
+            for e in all_events:
+                click.echo(
+                    f"  {e.id}: {e.actor} {e.action} {e.target} "
+                    f"[{e.source}] @ {e.timestamp.isoformat()}"
+                )
+    else:
+        click.echo(json.dumps(result))
+
+
+@cli.command()
+@click.option("--actor", default=None, help="Show baseline for actor.")
+@click.option("--entity", default=None, help="Show baseline for entity.")
+@click.option("--dir", "dir_path", default=None, help="Deployment repo directory.", hidden=True)
+def baseline(actor: str | None, entity: str | None, dir_path: str | None) -> None:
+    """Query baseline data."""
+    from mallcop.store import JsonlStore
+
+    root = Path(dir_path) if dir_path else Path.cwd()
+    store = JsonlStore(root)
+    bl = store.get_baseline()
+    all_events = store.query_events()
+
+    if actor:
+        # Show baseline profile for a specific actor
+        freq_entries = {
+            k: v for k, v in bl.frequency_tables.items() if actor in k
+        }
+        prefix = f"{actor}:"
+        relationships = {
+            k[len(prefix):]: v for k, v in bl.relationships.items()
+            if k.startswith(prefix)
+        }
+        click.echo(json.dumps({
+            "command": "baseline",
+            "status": "ok",
+            "actor": actor,
+            "known": actor in bl.known_entities.get("actors", []),
+            "frequency_entries": freq_entries,
+            "relationships": relationships,
+        }))
+    elif entity:
+        # Lookup specific entity across all types
+        known = False
+        known_actors = bl.known_entities.get("actors", [])
+        known_sources = bl.known_entities.get("sources", [])
+        if entity in known_actors or entity in known_sources:
+            known = True
+        click.echo(json.dumps({
+            "command": "baseline",
+            "status": "ok",
+            "entity": entity,
+            "known": known,
+        }))
+    else:
+        # General baseline stats
+        known_actors = bl.known_entities.get("actors", [])
+        click.echo(json.dumps({
+            "command": "baseline",
+            "status": "ok",
+            "event_count": len(all_events),
+            "known_actor_count": len(known_actors),
+            "frequency_table_entries": len(bl.frequency_tables),
+            "known_sources": bl.known_entities.get("sources", []),
+        }))
+
+
+@cli.command()
+@click.argument("finding_id")
+@click.argument("text")
+@click.option("--author", default="interactive", help="Author of the annotation.")
+@click.option("--dir", "dir_path", default=None, help="Deployment repo directory.", hidden=True)
+@click.option("--human", is_flag=True, help="Human-readable output.")
+def annotate(finding_id: str, text: str, author: str, dir_path: str | None, human: bool) -> None:
+    """Add investigation note to a finding."""
+    from mallcop.schemas import Annotation
+
+    root = Path(dir_path) if dir_path else Path.cwd()
+    store = JsonlStore(root)
+
+    # Check finding exists
+    findings = store.query_findings()
+    target = None
+    for f in findings:
+        if f.id == finding_id:
+            target = f
+            break
+
+    if target is None:
+        click.echo(json.dumps({
+            "command": "annotate",
+            "status": "error",
+            "error": f"Finding not found: {finding_id}",
+        }))
+        raise SystemExit(1)
+
+    now = datetime.now(timezone.utc)
+    annotation = Annotation(
+        actor=author,
+        timestamp=now,
+        content=text,
+        action="annotate",
+        reason=None,
+    )
+
+    store.update_finding(finding_id, annotations=[annotation])
+
+    if human:
+        click.echo(f"[{annotation.actor}] {annotation.content}")
+    else:
+        click.echo(json.dumps({
+            "command": "annotate",
+            "status": "ok",
+            "finding_id": finding_id,
+            "annotation": annotation.to_dict(),
+        }))
+
+
+@cli.command()
+@click.argument("finding_id")
+@click.option("--author", default="interactive", help="Author of the ack.")
+@click.option("--reason", default=None, help="Reason for acknowledging.")
+@click.option("--dir", "dir_path", default=None, help="Deployment repo directory.", hidden=True)
+@click.option("--human", is_flag=True, help="Human-readable output.")
+def ack(finding_id: str, author: str, reason: str | None, dir_path: str | None, human: bool) -> None:
+    """Resolve finding, update baseline."""
+    from mallcop.schemas import Annotation, FindingStatus
+
+    root = Path(dir_path) if dir_path else Path.cwd()
+    store = JsonlStore(root)
+
+    # Look up the finding
+    findings = store.query_findings()
+    target = None
+    for f in findings:
+        if f.id == finding_id:
+            target = f
+            break
+
+    if target is None:
+        click.echo(json.dumps({
+            "command": "ack",
+            "status": "error",
+            "error": f"Finding not found: {finding_id}",
+        }))
+        raise SystemExit(1)
+
+    # Reject double-ack
+    if target.status == FindingStatus.ACKED:
+        click.echo(json.dumps({
+            "command": "ack",
+            "status": "error",
+            "error": f"Finding already acked: {finding_id}",
+        }))
+        raise SystemExit(1)
+
+    # Build annotation
+    now = datetime.now(timezone.utc)
+    annotation = Annotation(
+        actor=author,
+        timestamp=now,
+        content=f"Finding acknowledged by {author}" + (f": {reason}" if reason else ""),
+        action="acked",
+        reason=reason,
+    )
+
+    # Update finding: set status + add annotation
+    store.update_finding(finding_id, status=FindingStatus.ACKED, annotations=[annotation])
+
+    # Load triggering events and update baseline
+    triggering_events = []
+    if target.event_ids:
+        all_events = store.query_events()
+        event_id_set = set(target.event_ids)
+        triggering_events = [e for e in all_events if e.id in event_id_set]
+
+    if triggering_events:
+        try:
+            config = load_config(root)
+            ack_window_days: int | None = config.baseline.window_days
+        except ConfigError:
+            from mallcop.config import BaselineConfig
+            ack_window_days = BaselineConfig().window_days
+        store.update_baseline(triggering_events, window_days=ack_window_days)
+
+    # Re-read the updated finding for output
+    updated_findings = store.query_findings()
+    updated = [f for f in updated_findings if f.id == finding_id][0]
+
+    if human:
+        click.echo(f"Acked: {updated.id}")
+        click.echo(f"  Status: {updated.status.value}")
+        click.echo(f"  Author: {author}")
+        if reason:
+            click.echo(f"  Reason: {reason}")
+        click.echo(f"  Baseline updated with {len(triggering_events)} triggering events")
+    else:
+        click.echo(json.dumps({
+            "command": "ack",
+            "status": "ok",
+            "finding": updated.to_dict(),
+            "baseline_events_applied": len(triggering_events),
+        }))
+
+
+# --- Operational ---
+
+
+@cli.command()
+@click.option("--costs", is_flag=True, help="Show cost trends.")
+@click.option("--dir", "dir_path", default=None, help="Deployment repo directory.", hidden=True)
+@click.option("--human", is_flag=True, help="Human-readable output.")
+def status(costs: bool, dir_path: str | None, human: bool) -> None:
+    """Event/finding counts and operational status."""
+    from mallcop.status import run_status
+
+    root = Path(dir_path) if dir_path else Path.cwd()
+    result = run_status(root, costs=costs)
+
+    # Escalation health check — always included in status output
+    try:
+        from mallcop.actors.runtime import check_escalation_health
+        config_path = root / "mallcop.yaml"
+        if config_path.exists():
+            with open(config_path) as f:
+                raw = yaml.safe_load(f) or {}
+
+            # Load .env into os.environ so ${VAR} resolution works
+            import os
+            env_file = root / ".env"
+            if env_file.exists():
+                with open(env_file) as ef:
+                    for line in ef:
+                        line = line.strip()
+                        if line and not line.startswith("#") and "=" in line:
+                            k, v = line.split("=", 1)
+                            os.environ.setdefault(k.strip(), v.strip())
+
+            class _HealthConfig:
+                routing = raw.get("routing", {})
+                actors = raw.get("actors", {})
+
+            esc_errors = check_escalation_health(_HealthConfig())
+            if esc_errors:
+                result["escalation_health"] = {"status": "broken", "errors": esc_errors}
+            else:
+                result["escalation_health"] = {"status": "ok"}
+        else:
+            result["escalation_health"] = {"status": "unknown", "errors": ["No mallcop.yaml found"]}
+    except Exception as exc:
+        result["escalation_health"] = {"status": "unknown", "errors": [str(exc)]}
+
+    if human:
+        click.echo(f"Events: {result['total_events']}")
+        click.echo(f"Findings: {result['total_findings']}")
+        if result.get("events_by_source"):
+            click.echo("Events by source:")
+            for src, count in result["events_by_source"].items():
+                click.echo(f"  {src}: {count}")
+        if result.get("findings_by_status"):
+            click.echo("Findings by status:")
+            for st, count in result["findings_by_status"].items():
+                click.echo(f"  {st}: {count}")
+        if costs and "costs" in result:
+            c = result["costs"]
+            click.echo(f"Cost summary ({c['total_runs']} runs):")
+            click.echo(f"  Avg tokens/run: {c['avg_tokens_per_run']}")
+            click.echo(f"  Total tokens: {c['total_tokens']}")
+            click.echo(f"  Estimated total: ${c['estimated_total_usd']}")
+            click.echo(f"  Circuit breaker: triggered {c['circuit_breaker_triggered']} times")
+        esc = result.get("escalation_health", {})
+        esc_status = esc.get("status", "unknown")
+        if esc_status == "broken":
+            click.echo("ESCALATION: BROKEN")
+            for e in esc.get("errors", []):
+                click.echo(f"  {e}")
+        elif esc_status == "ok":
+            click.echo("Escalation: ok")
+        else:
+            click.echo(f"Escalation: {esc_status}")
+            for e in esc.get("errors", []):
+                click.echo(f"  {e}")
+    else:
+        click.echo(json.dumps(result))
+
+
+# --- Development ---
+
+
+@cli.command()
+@click.argument("plugin_type", type=click.Choice(["connector", "detector", "actor", "tool"]))
+@click.argument("name")
+def scaffold(plugin_type: str, name: str) -> None:
+    """Generate plugin directory with stubs."""
+    from mallcop.scaffold import scaffold_plugin, scaffold_tool
+
+    base_path = Path.cwd()
+    try:
+        if plugin_type == "tool":
+            tool_path = scaffold_tool(name, base_path)
+            click.echo(json.dumps({
+                "command": "scaffold",
+                "status": "ok",
+                "plugin_type": "tool",
+                "name": name,
+                "path": str(tool_path),
+            }))
+        else:
+            plugin_dir = scaffold_plugin(plugin_type, name, base_path)
+            click.echo(json.dumps({
+                "command": "scaffold",
+                "status": "ok",
+                "plugin_type": plugin_type,
+                "name": name,
+                "path": str(plugin_dir),
+            }))
+    except (ValueError, FileExistsError) as e:
+        click.echo(json.dumps({
+            "command": "scaffold",
+            "status": "error",
+            "error": str(e),
+        }))
+        raise SystemExit(1)
+
+
+@cli.command()
+@click.argument("plugin_path", required=False)
+@click.option("--all", "verify_all", is_flag=True, help="Verify all plugins.")
+def verify(plugin_path: str | None, verify_all: bool) -> None:
+    """Validate plugin against contracts."""
+    from mallcop.plugins import discover_plugins
+    from mallcop.verify import (
+        verify_plugin as _verify,
+        verify_tool_file as _verify_tool,
+        verify_app_artifacts as _verify_app,
+    )
+
+    results = []
+
+    if verify_all:
+        base_path = Path.cwd()
+        discovered = discover_plugins([base_path])
+        type_map = {
+            "connectors": "connector",
+            "detectors": "detector",
+            "actors": "actor",
+        }
+        for category, plugins in discovered.items():
+            ptype = type_map[category]
+            for pinfo in plugins.values():
+                results.append(_verify(pinfo.path, ptype))
+
+        # Also scan plugins/tools/*.py for tool files
+        for search_dir in [base_path / "plugins" / "tools", base_path]:
+            tools_dir = search_dir if search_dir.name == "tools" else search_dir / "plugins" / "tools"
+            if not tools_dir.exists():
+                continue
+            for py_file in sorted(tools_dir.glob("*.py")):
+                if py_file.name.startswith("_"):
+                    continue
+                results.append(_verify_tool(py_file))
+            break  # Only scan once
+
+        # Also scan apps/*/ for parser.yaml and detectors.yaml
+        apps_dir = base_path / "apps"
+        if apps_dir.exists():
+            for app_subdir in sorted(apps_dir.iterdir()):
+                if app_subdir.is_dir():
+                    results.extend(_verify_app(app_subdir))
+    elif plugin_path:
+        p = Path(plugin_path)
+        if p.suffix == ".py":
+            # It's a tool file
+            results.append(_verify_tool(p))
+        elif _is_app_dir(p):
+            # It's an app artifact directory (contains parser.yaml or detectors.yaml)
+            results.extend(_verify_app(p))
+        else:
+            # Infer plugin type from parent directory
+            ptype = _infer_plugin_type(p)
+            results.append(_verify(p, ptype))
+    else:
+        click.echo(json.dumps({
+            "command": "verify",
+            "status": "error",
+            "error": "Provide a plugin path or use --all",
+        }))
+        raise SystemExit(1)
+
+    all_passed = all(r.passed for r in results)
+    output = {
+        "command": "verify",
+        "status": "ok" if all_passed else "fail",
+        "results": [
+            {
+                "plugin": r.plugin_name,
+                "type": r.plugin_type,
+                "passed": r.passed,
+                "errors": r.errors,
+                "warnings": r.warnings,
+            }
+            for r in results
+        ],
+    }
+    click.echo(json.dumps(output))
+    if not all_passed:
+        raise SystemExit(1)
+
+
+def _infer_plugin_type(path: Path) -> str:
+    """Infer plugin type from parent directory name."""
+    parent_name = path.parent.name
+    mapping = {
+        "connectors": "connector",
+        "detectors": "detector",
+        "actors": "actor",
+    }
+    if parent_name in mapping:
+        return mapping[parent_name]
+    # Fallback: check path components
+    for part in path.parts:
+        if part in mapping:
+            return mapping[part]
+    raise ValueError(f"Cannot infer plugin type from path: {path}")
+
+
+def _is_app_dir(path: Path) -> bool:
+    """Check if a path is an app artifact directory."""
+    if not path.is_dir():
+        return False
+    return (path / "parser.yaml").exists() or (path / "detectors.yaml").exists()
+
+
+@cli.command("discover-app")
+@click.argument("app_name")
+@click.option("--lines", default=100, help="Number of recent log lines to sample.")
+@click.option(
+    "--refresh", is_flag=True,
+    help="Re-discover (same behavior, signals refresh intent).",
+)
+@click.option(
+    "--dir", "dir_path", default=None,
+    help="Deployment repo directory.", hidden=True,
+)
+def discover_app_cmd(
+    app_name: str, lines: int, refresh: bool, dir_path: str | None,
+) -> None:
+    """Sample container logs for an app, output structured context."""
+    from mallcop.discover_app import DiscoverAppError, discover_app_logic
+
+    cwd = Path(dir_path) if dir_path else Path.cwd()
+
+    try:
+        result = discover_app_logic(app_name, cwd, lines=lines, refresh=refresh)
+        click.echo(json.dumps(result))
+    except (DiscoverAppError, ConfigError) as e:
+        click.echo(json.dumps({"status": "error", "error": str(e)}))
+        raise SystemExit(1)

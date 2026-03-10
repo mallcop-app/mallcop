@@ -1,0 +1,17 @@
+[
+  {
+    "name": "mallcop",
+    "full_name": "acme-corp/mallcop",
+    "private": true
+  },
+  {
+    "name": "website",
+    "full_name": "acme-corp/website",
+    "private": false
+  },
+  {
+    "name": "infrastructure",
+    "full_name": "acme-corp/infrastructure",
+    "private": true
+  }
+]

@@ -1,0 +1,28 @@
+{
+  "logs": [
+    {
+      "TimeGenerated": "2026-03-05T14:30:00Z",
+      "Log_s": "opensign started on port 3000",
+      "ContainerName_s": "opensign",
+      "Stream_s": "stdout",
+      "RevisionName_s": "opensign--rev1",
+      "ContainerAppName_s": "opensign"
+    },
+    {
+      "TimeGenerated": "2026-03-05T15:00:00Z",
+      "Log_s": "GET /api/health 200 12ms",
+      "ContainerName_s": "opensign",
+      "Stream_s": "stdout",
+      "RevisionName_s": "opensign--rev1",
+      "ContainerAppName_s": "opensign"
+    },
+    {
+      "TimeGenerated": "2026-03-05T16:00:00Z",
+      "Log_s": "POST /api/documents/sign 201 340ms",
+      "ContainerName_s": "opensign",
+      "Stream_s": "stdout",
+      "RevisionName_s": "opensign--rev1",
+      "ContainerAppName_s": "opensign"
+    }
+  ]
+}

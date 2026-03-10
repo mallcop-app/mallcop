@@ -1,0 +1,69 @@
+{
+  "deployments": [
+    {
+      "uid": "dpl_aaa111bbb222",
+      "name": "mallcop-docs",
+      "url": "mallcop-docs-aaa111bbb222.vercel.app",
+      "created": 1709222400000,
+      "state": "READY",
+      "target": "production",
+      "projectId": "prj_abc123",
+      "creator": {
+        "uid": "usr_abc123def456",
+        "email": "admin@acme-corp.dev",
+        "username": "admin-user"
+      },
+      "meta": {
+        "githubCommitRef": "main",
+        "githubCommitSha": "abc123def456",
+        "githubCommitMessage": "Update docs landing page"
+      },
+      "inspectorUrl": "https://vercel.com/acme-corp/mallcop-docs/dpl_aaa111bbb222"
+    },
+    {
+      "uid": "dpl_ccc333ddd444",
+      "name": "acme-website",
+      "url": "acme-website-ccc333ddd444.vercel.app",
+      "created": 1709308800000,
+      "state": "READY",
+      "target": "production",
+      "projectId": "prj_def456",
+      "creator": {
+        "uid": "usr_abc123def456",
+        "email": "admin@acme-corp.dev",
+        "username": "admin-user"
+      },
+      "meta": {
+        "githubCommitRef": "main",
+        "githubCommitSha": "def456ghi789",
+        "githubCommitMessage": "Add pricing page"
+      },
+      "inspectorUrl": "https://vercel.com/acme-corp/acme-website/dpl_ccc333ddd444"
+    },
+    {
+      "uid": "dpl_eee555fff666",
+      "name": "acme-website",
+      "url": "acme-website-eee555fff666.vercel.app",
+      "created": 1709395200000,
+      "state": "ERROR",
+      "target": "preview",
+      "projectId": "prj_def456",
+      "creator": {
+        "uid": "usr_other789",
+        "email": "dev@acme-corp.dev",
+        "username": "devuser"
+      },
+      "meta": {
+        "githubCommitRef": "feature/dark-mode",
+        "githubCommitSha": "ghi789jkl012",
+        "githubCommitMessage": "WIP: dark mode toggle"
+      },
+      "inspectorUrl": "https://vercel.com/acme-corp/acme-website/dpl_eee555fff666"
+    }
+  ],
+  "pagination": {
+    "count": 3,
+    "next": null,
+    "prev": null
+  }
+}

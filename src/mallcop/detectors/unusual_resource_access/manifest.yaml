@@ -1,0 +1,6 @@
+name: unusual-resource-access
+description: Flags when a known actor touches a resource not in their baseline relationship set
+version: 0.1.0
+sources: "*"
+event_types: "*"
+severity_default: warn

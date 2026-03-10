@@ -1,0 +1,95 @@
+[
+  {
+    "Id": "aad-rec-001",
+    "RecordType": 15,
+    "CreationTime": "2026-03-05T14:30:00",
+    "Operation": "UserLoggedIn",
+    "OrganizationId": "00000000-0000-0000-0000-000000000099",
+    "UserType": 0,
+    "UserKey": "user-key-001",
+    "Workload": "AzureActiveDirectory",
+    "ResultStatus": "Success",
+    "UserId": "admin@acme-corp.dev",
+    "ClientIP": "203.0.113.10",
+    "ObjectId": "00000000-0000-0000-0000-000000000099",
+    "TargetContextId": "00000000-0000-0000-0000-000000000099",
+    "ApplicationId": "00000000-0000-0000-0000-000000000088",
+    "DeviceProperties": [
+      {"Name": "OS", "Value": "Windows 11"},
+      {"Name": "BrowserType", "Value": "Chrome"}
+    ],
+    "ExtendedProperties": [
+      {"Name": "ResultStatusDetail", "Value": "Success"},
+      {"Name": "UserAgent", "Value": "Mozilla/5.0"}
+    ]
+  },
+  {
+    "Id": "aad-rec-002",
+    "RecordType": 15,
+    "CreationTime": "2026-03-05T14:35:00",
+    "Operation": "UserLoginFailed",
+    "OrganizationId": "00000000-0000-0000-0000-000000000099",
+    "UserType": 0,
+    "UserKey": "user-key-002",
+    "Workload": "AzureActiveDirectory",
+    "ResultStatus": "Failed",
+    "UserId": "attacker@evil.com",
+    "ClientIP": "198.51.100.50",
+    "ObjectId": "00000000-0000-0000-0000-000000000099",
+    "TargetContextId": "00000000-0000-0000-0000-000000000099"
+  },
+  {
+    "Id": "aad-rec-003",
+    "RecordType": 8,
+    "CreationTime": "2026-03-05T15:00:00",
+    "Operation": "Add member to role.",
+    "OrganizationId": "00000000-0000-0000-0000-000000000099",
+    "UserType": 0,
+    "UserKey": "user-key-001",
+    "Workload": "AzureActiveDirectory",
+    "ResultStatus": "Success",
+    "UserId": "admin@acme-corp.dev",
+    "ObjectId": "Global Administrator",
+    "TargetContextId": "00000000-0000-0000-0000-000000000099",
+    "Target": [
+      {"ID": "newadmin@acme-corp.dev", "Type": 0}
+    ],
+    "ModifiedProperties": [
+      {"Name": "Role.DisplayName", "OldValue": "", "NewValue": "Global Administrator"}
+    ]
+  },
+  {
+    "Id": "aad-rec-004",
+    "RecordType": 15,
+    "CreationTime": "2026-03-05T15:30:00",
+    "Operation": "Consent to application.",
+    "OrganizationId": "00000000-0000-0000-0000-000000000099",
+    "UserType": 0,
+    "UserKey": "user-key-003",
+    "Workload": "AzureActiveDirectory",
+    "ResultStatus": "Success",
+    "UserId": "user@acme-corp.dev",
+    "ObjectId": "SuspiciousApp",
+    "TargetContextId": "00000000-0000-0000-0000-000000000099"
+  },
+  {
+    "Id": "aad-rec-005",
+    "RecordType": 8,
+    "CreationTime": "2026-03-05T16:00:00",
+    "Operation": "Add user.",
+    "OrganizationId": "00000000-0000-0000-0000-000000000099",
+    "UserType": 0,
+    "UserKey": "user-key-001",
+    "Workload": "AzureActiveDirectory",
+    "ResultStatus": "Success",
+    "UserId": "admin@acme-corp.dev",
+    "ObjectId": "guest@external.com",
+    "TargetContextId": "00000000-0000-0000-0000-000000000099",
+    "Target": [
+      {"ID": "guest@external.com", "Type": 5}
+    ],
+    "ExtendedProperties": [
+      {"Name": "additionalDetails", "Value": "{\"UserType\":\"Guest\"}"}
+    ]
+  }
+]

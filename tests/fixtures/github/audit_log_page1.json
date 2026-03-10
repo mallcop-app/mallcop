@@ -1,0 +1,30 @@
+[
+  {
+    "@timestamp": 1709654400000,
+    "action": "org.add_member",
+    "actor": "admin-user",
+    "org": "acme-corp",
+    "user": "newdev",
+    "created_at": 1709654400000,
+    "_document_id": "abc123"
+  },
+  {
+    "@timestamp": 1709658000000,
+    "action": "repo.access",
+    "actor": "admin-user",
+    "org": "acme-corp",
+    "repo": "acme-corp/secretproject",
+    "visibility": "public",
+    "created_at": 1709658000000,
+    "_document_id": "abc124"
+  },
+  {
+    "@timestamp": 1709661600000,
+    "action": "protected_branch.update_allow_force_pushes_enforcement_level",
+    "actor": "devops-bot",
+    "org": "acme-corp",
+    "repo": "acme-corp/infrastructure",
+    "created_at": 1709661600000,
+    "_document_id": "abc125"
+  }
+]

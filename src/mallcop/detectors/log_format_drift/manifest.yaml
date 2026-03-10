@@ -1,0 +1,8 @@
+name: log-format-drift
+description: Fires when a container app parser unmatched line ratio exceeds threshold
+version: 0.1.0
+sources:
+  - container-logs
+event_types:
+  - parser_summary
+severity_default: info

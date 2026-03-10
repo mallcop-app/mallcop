@@ -1,0 +1,140 @@
+{
+  "events": [
+    {
+      "id": "audit_001",
+      "action": "member.added",
+      "createdAt": 1709136000000,
+      "user": {
+        "id": "usr_abc123def456",
+        "username": "admin-user",
+        "email": "admin@acme-corp.dev"
+      },
+      "userId": "usr_abc123def456",
+      "entity": {
+        "type": "team",
+        "id": "team_xyz789",
+        "name": "Acme Corp"
+      },
+      "entityId": "team_xyz789"
+    },
+    {
+      "id": "audit_002",
+      "action": "project.created",
+      "createdAt": 1709222400000,
+      "user": {
+        "id": "usr_abc123def456",
+        "username": "admin-user",
+        "email": "admin@acme-corp.dev"
+      },
+      "userId": "usr_abc123def456",
+      "entity": {
+        "type": "project",
+        "id": "prj_abc123",
+        "name": "mallcop-docs"
+      },
+      "entityId": "prj_abc123"
+    },
+    {
+      "id": "audit_003",
+      "action": "env.created",
+      "createdAt": 1709308800000,
+      "user": {
+        "id": "usr_abc123def456",
+        "username": "admin-user",
+        "email": "admin@acme-corp.dev"
+      },
+      "userId": "usr_abc123def456",
+      "entity": {
+        "type": "project",
+        "id": "prj_abc123",
+        "name": "mallcop-docs"
+      },
+      "entityId": "prj_abc123"
+    },
+    {
+      "id": "audit_004",
+      "action": "domain.added",
+      "createdAt": 1709395200000,
+      "user": {
+        "id": "usr_abc123def456",
+        "username": "admin-user",
+        "email": "admin@acme-corp.dev"
+      },
+      "userId": "usr_abc123def456",
+      "entity": {
+        "type": "domain",
+        "id": "dom_abc123",
+        "name": "mallcop.acme-corp.dev"
+      },
+      "entityId": "dom_abc123"
+    },
+    {
+      "id": "audit_005",
+      "action": "access-token.created",
+      "createdAt": 1709481600000,
+      "user": {
+        "id": "usr_other789",
+        "username": "devuser",
+        "email": "dev@acme-corp.dev"
+      },
+      "userId": "usr_other789",
+      "entity": {
+        "type": "token",
+        "id": "tok_xyz789",
+        "name": "CI Deploy Token"
+      },
+      "entityId": "tok_xyz789"
+    },
+    {
+      "id": "audit_006",
+      "action": "integration.installed",
+      "createdAt": 1709568000000,
+      "user": {
+        "id": "usr_abc123def456",
+        "username": "admin-user",
+        "email": "admin@acme-corp.dev"
+      },
+      "userId": "usr_abc123def456",
+      "entity": {
+        "type": "integration",
+        "id": "int_github123",
+        "name": "GitHub"
+      },
+      "entityId": "int_github123"
+    },
+    {
+      "id": "audit_007",
+      "action": "team.updated",
+      "createdAt": 1709654400000,
+      "user": {
+        "id": "usr_abc123def456",
+        "username": "admin-user",
+        "email": "admin@acme-corp.dev"
+      },
+      "userId": "usr_abc123def456",
+      "entity": {
+        "type": "team",
+        "id": "team_xyz789",
+        "name": "Acme Corp"
+      },
+      "entityId": "team_xyz789"
+    },
+    {
+      "id": "audit_008",
+      "action": "member.role-updated",
+      "createdAt": 1709740800000,
+      "user": {
+        "id": "usr_abc123def456",
+        "username": "admin-user",
+        "email": "admin@acme-corp.dev"
+      },
+      "userId": "usr_abc123def456",
+      "entity": {
+        "type": "team",
+        "id": "team_xyz789",
+        "name": "Acme Corp"
+      },
+      "entityId": "team_xyz789"
+    }
+  ]
+}

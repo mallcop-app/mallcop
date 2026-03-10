@@ -1,0 +1,13 @@
+name: notify-email
+type: channel
+description: Deliver finding digest via email (SMTP)
+version: 0.1.0
+
+config:
+  smtp_host: ${SMTP_HOST}
+  smtp_port: "587"
+  from_addr: ${SMTP_FROM}
+  to_addrs: ${SMTP_TO}
+  username: ${SMTP_USERNAME}
+  password: ${SMTP_PASSWORD}
+format: digest

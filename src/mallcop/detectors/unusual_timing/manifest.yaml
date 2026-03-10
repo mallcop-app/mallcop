@@ -1,0 +1,6 @@
+name: unusual-timing
+description: Flags events occurring outside the baseline time-of-day pattern for a given actor
+version: 0.1.0
+sources: "*"
+event_types: "*"
+severity_default: warn

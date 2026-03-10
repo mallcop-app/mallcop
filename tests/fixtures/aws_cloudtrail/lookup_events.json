@@ -1,0 +1,70 @@
+{
+    "Events": [
+        {
+            "EventId": "abc-123-def-456",
+            "EventName": "ConsoleLogin",
+            "EventTime": "2026-03-10T10:00:00Z",
+            "Username": "admin@example.com",
+            "Resources": [
+                {
+                    "ResourceType": "AWS::IAM::User",
+                    "ResourceName": "admin"
+                }
+            ],
+            "CloudTrailEvent": "{\"eventVersion\":\"1.08\",\"userIdentity\":{\"type\":\"IAMUser\",\"principalId\":\"AIDAEXAMPLE\",\"arn\":\"arn:aws:iam::123456789012:user/admin\",\"accountId\":\"123456789012\",\"userName\":\"admin@example.com\"},\"eventTime\":\"2026-03-10T10:00:00Z\",\"eventSource\":\"signin.amazonaws.com\",\"eventName\":\"ConsoleLogin\",\"awsRegion\":\"us-east-1\",\"sourceIPAddress\":\"203.0.113.1\",\"responseElements\":{\"ConsoleLogin\":\"Success\"}}"
+        },
+        {
+            "EventId": "ghi-789-jkl-012",
+            "EventName": "CreateAccessKey",
+            "EventTime": "2026-03-10T11:30:00Z",
+            "Username": "deploy-bot",
+            "Resources": [
+                {
+                    "ResourceType": "AWS::IAM::AccessKey",
+                    "ResourceName": "AKIAEXAMPLE"
+                }
+            ],
+            "CloudTrailEvent": "{\"eventVersion\":\"1.08\",\"userIdentity\":{\"type\":\"IAMUser\",\"principalId\":\"AIDADEPLOY\",\"arn\":\"arn:aws:iam::123456789012:user/deploy-bot\",\"accountId\":\"123456789012\",\"userName\":\"deploy-bot\"},\"eventTime\":\"2026-03-10T11:30:00Z\",\"eventSource\":\"iam.amazonaws.com\",\"eventName\":\"CreateAccessKey\",\"awsRegion\":\"us-east-1\",\"sourceIPAddress\":\"198.51.100.5\",\"requestParameters\":{\"userName\":\"deploy-bot\"},\"responseElements\":{\"accessKey\":{\"accessKeyId\":\"AKIAEXAMPLE\",\"status\":\"Active\",\"userName\":\"deploy-bot\"}}}"
+        },
+        {
+            "EventId": "mno-345-pqr-678",
+            "EventName": "RunInstances",
+            "EventTime": "2026-03-10T14:00:00Z",
+            "Username": "deploy-bot",
+            "Resources": [
+                {
+                    "ResourceType": "AWS::EC2::Instance",
+                    "ResourceName": "i-0abcdef1234567890"
+                }
+            ],
+            "CloudTrailEvent": "{\"eventVersion\":\"1.08\",\"userIdentity\":{\"type\":\"IAMUser\",\"principalId\":\"AIDADEPLOY\",\"arn\":\"arn:aws:iam::123456789012:user/deploy-bot\",\"accountId\":\"123456789012\",\"userName\":\"deploy-bot\"},\"eventTime\":\"2026-03-10T14:00:00Z\",\"eventSource\":\"ec2.amazonaws.com\",\"eventName\":\"RunInstances\",\"awsRegion\":\"us-east-1\",\"sourceIPAddress\":\"198.51.100.5\"}"
+        },
+        {
+            "EventId": "stu-901-vwx-234",
+            "EventName": "StopLogging",
+            "EventTime": "2026-03-10T15:00:00Z",
+            "Username": "suspicious-user",
+            "Resources": [
+                {
+                    "ResourceType": "AWS::CloudTrail::Trail",
+                    "ResourceName": "main-trail"
+                }
+            ],
+            "CloudTrailEvent": "{\"eventVersion\":\"1.08\",\"userIdentity\":{\"type\":\"IAMUser\",\"principalId\":\"AIDASUSPECT\",\"arn\":\"arn:aws:iam::123456789012:user/suspicious-user\",\"accountId\":\"123456789012\",\"userName\":\"suspicious-user\"},\"eventTime\":\"2026-03-10T15:00:00Z\",\"eventSource\":\"cloudtrail.amazonaws.com\",\"eventName\":\"StopLogging\",\"awsRegion\":\"us-east-1\",\"sourceIPAddress\":\"192.0.2.99\"}"
+        },
+        {
+            "EventId": "err-111-err-222",
+            "EventName": "TerminateInstances",
+            "EventTime": "2026-03-10T16:00:00Z",
+            "Username": "attacker",
+            "Resources": [
+                {
+                    "ResourceType": "AWS::EC2::Instance",
+                    "ResourceName": "i-0targetinstance"
+                }
+            ],
+            "CloudTrailEvent": "{\"eventVersion\":\"1.08\",\"userIdentity\":{\"type\":\"IAMUser\",\"principalId\":\"AIDAATTACKER\",\"arn\":\"arn:aws:iam::123456789012:user/attacker\",\"accountId\":\"123456789012\",\"userName\":\"attacker\"},\"eventTime\":\"2026-03-10T16:00:00Z\",\"eventSource\":\"ec2.amazonaws.com\",\"eventName\":\"TerminateInstances\",\"awsRegion\":\"us-east-1\",\"sourceIPAddress\":\"192.0.2.50\",\"errorCode\":\"Client.UnauthorizedAccess\",\"errorMessage\":\"You are not authorized to perform this operation.\"}"
+        }
+    ],
+    "NextToken": null
+}

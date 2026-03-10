@@ -1,0 +1,16 @@
+name: auth-failure-burst
+description: Fires on N+ authentication failures within a configurable time window
+version: 0.1.0
+sources:
+  - azure
+  - m365
+  - container-logs
+event_types:
+  - sign_in_failure
+  - auth_failure
+  - login
+severity_default: warn
+config:
+  window_minutes: 30
+  threshold: 10
+  critical_threshold: 50

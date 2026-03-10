@@ -1,0 +1,28 @@
+{
+    "trailList": [
+        {
+            "Name": "main-trail",
+            "S3BucketName": "my-cloudtrail-logs",
+            "IncludeGlobalServiceEvents": true,
+            "IsMultiRegionTrail": true,
+            "HomeRegion": "us-east-1",
+            "TrailARN": "arn:aws:cloudtrail:us-east-1:123456789012:trail/main-trail",
+            "LogFileValidationEnabled": true,
+            "HasCustomEventSelectors": false,
+            "HasInsightSelectors": false,
+            "IsOrganizationTrail": false
+        },
+        {
+            "Name": "secondary-trail",
+            "S3BucketName": "my-secondary-logs",
+            "IncludeGlobalServiceEvents": false,
+            "IsMultiRegionTrail": false,
+            "HomeRegion": "us-west-2",
+            "TrailARN": "arn:aws:cloudtrail:us-west-2:123456789012:trail/secondary-trail",
+            "LogFileValidationEnabled": true,
+            "HasCustomEventSelectors": true,
+            "HasInsightSelectors": false,
+            "IsOrganizationTrail": false
+        }
+    ]
+}

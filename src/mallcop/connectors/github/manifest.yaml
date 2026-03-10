@@ -1,0 +1,27 @@
+name: github
+description: GitHub org audit log, Dependabot alerts, secret scanning alerts
+version: 0.1.0
+
+auth:
+  required:
+    - token
+  optional:
+    - org
+
+event_types:
+  - collaborator_added
+  - collaborator_removed
+  - repo_visibility_changed
+  - branch_protection_changed
+  - deploy_key_added
+  - oauth_app_authorized
+  - secret_scanning_alert
+  - dependabot_alert
+  - push
+  - permission_change
+
+discovery:
+  probes:
+    - "GitHub user authentication"
+    - "Org repository enumeration"
+    - "Org member enumeration"

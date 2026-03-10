@@ -1,0 +1,30 @@
+name: vercel
+description: Vercel deployment and team audit monitoring
+version: 0.1.0
+
+auth:
+  required:
+    - vercel_token
+  optional:
+    - team_id
+
+event_types:
+  - deployment
+  - project_change
+  - team_change
+  - member_change
+  - domain_change
+  - env_change
+  - integration_change
+  - security_change
+
+discovery:
+  probes:
+    - "Vercel API token validation"
+    - "Team enumeration"
+    - "Project enumeration"
+
+tools:
+  - name: vercel.query-events
+    description: Query Vercel deployment and audit events
+    permission: read

@@ -1,0 +1,100 @@
+{
+  "value": [
+    {
+      "authorization": {
+        "action": "Microsoft.Authorization/roleAssignments/write",
+        "scope": "/subscriptions/00000000-0000-0000-0000-000000000001"
+      },
+      "caller": "admin@acme-corp.dev",
+      "channels": "Operation",
+      "claims": {},
+      "correlationId": "corr-001",
+      "description": "",
+      "eventDataId": "evt-data-001",
+      "eventName": {"value": "BeginRequest", "localizedValue": "Begin request"},
+      "category": {"value": "Administrative", "localizedValue": "Administrative"},
+      "eventTimestamp": "2026-03-05T14:30:00Z",
+      "id": "/subscriptions/00000000-0000-0000-0000-000000000001/events/evt-data-001",
+      "level": "Informational",
+      "operationId": "op-001",
+      "operationName": {"value": "Microsoft.Authorization/roleAssignments/write", "localizedValue": "Create role assignment"},
+      "resourceGroupName": "rg-prod",
+      "resourceProviderName": {"value": "Microsoft.Authorization", "localizedValue": "Microsoft.Authorization"},
+      "resourceId": "/subscriptions/00000000-0000-0000-0000-000000000001/providers/Microsoft.Authorization/roleAssignments/ra-001",
+      "resourceType": {"value": "Microsoft.Authorization/roleAssignments", "localizedValue": "Role Assignments"},
+      "status": {"value": "Succeeded", "localizedValue": "Succeeded"},
+      "subStatus": {"value": "", "localizedValue": ""},
+      "submissionTimestamp": "2026-03-05T14:31:00Z",
+      "subscriptionId": "00000000-0000-0000-0000-000000000001",
+      "tenantId": "00000000-0000-0000-0000-000000000099",
+      "properties": {
+        "statusCode": "Created",
+        "serviceRequestId": "req-001"
+      }
+    },
+    {
+      "authorization": {
+        "action": "Microsoft.Compute/virtualMachines/write",
+        "scope": "/subscriptions/00000000-0000-0000-0000-000000000001"
+      },
+      "caller": "deploy-sp@acme-corp.dev",
+      "channels": "Operation",
+      "claims": {},
+      "correlationId": "corr-002",
+      "description": "",
+      "eventDataId": "evt-data-002",
+      "eventName": {"value": "EndRequest", "localizedValue": "End request"},
+      "category": {"value": "Administrative", "localizedValue": "Administrative"},
+      "eventTimestamp": "2026-03-05T15:00:00Z",
+      "id": "/subscriptions/00000000-0000-0000-0000-000000000001/events/evt-data-002",
+      "level": "Informational",
+      "operationId": "op-002",
+      "operationName": {"value": "Microsoft.Compute/virtualMachines/write", "localizedValue": "Create or Update Virtual Machine"},
+      "resourceGroupName": "rg-prod",
+      "resourceProviderName": {"value": "Microsoft.Compute", "localizedValue": "Microsoft.Compute"},
+      "resourceId": "/subscriptions/00000000-0000-0000-0000-000000000001/resourceGroups/rg-prod/providers/Microsoft.Compute/virtualMachines/vm-web-01",
+      "resourceType": {"value": "Microsoft.Compute/virtualMachines", "localizedValue": "Virtual Machines"},
+      "status": {"value": "Succeeded", "localizedValue": "Succeeded"},
+      "subStatus": {"value": "", "localizedValue": ""},
+      "submissionTimestamp": "2026-03-05T15:01:00Z",
+      "subscriptionId": "00000000-0000-0000-0000-000000000001",
+      "tenantId": "00000000-0000-0000-0000-000000000099",
+      "properties": {
+        "statusCode": "OK",
+        "serviceRequestId": "req-002"
+      }
+    },
+    {
+      "authorization": {
+        "action": "Microsoft.ContainerApp/containerApps/write",
+        "scope": "/subscriptions/00000000-0000-0000-0000-000000000001"
+      },
+      "caller": "admin@acme-corp.dev",
+      "channels": "Operation",
+      "claims": {},
+      "correlationId": "corr-003",
+      "description": "",
+      "eventDataId": "evt-data-003",
+      "eventName": {"value": "EndRequest", "localizedValue": "End request"},
+      "category": {"value": "Administrative", "localizedValue": "Administrative"},
+      "eventTimestamp": "2026-03-05T16:00:00Z",
+      "id": "/subscriptions/00000000-0000-0000-0000-000000000001/events/evt-data-003",
+      "level": "Warning",
+      "operationId": "op-003",
+      "operationName": {"value": "Microsoft.ContainerApp/containerApps/write", "localizedValue": "Create or Update Container App"},
+      "resourceGroupName": "rg-prod",
+      "resourceProviderName": {"value": "Microsoft.ContainerApp", "localizedValue": "Microsoft.ContainerApp"},
+      "resourceId": "/subscriptions/00000000-0000-0000-0000-000000000001/resourceGroups/rg-prod/providers/Microsoft.ContainerApp/containerApps/app-api",
+      "resourceType": {"value": "Microsoft.ContainerApp/containerApps", "localizedValue": "Container Apps"},
+      "status": {"value": "Succeeded", "localizedValue": "Succeeded"},
+      "subStatus": {"value": "", "localizedValue": ""},
+      "submissionTimestamp": "2026-03-05T16:01:00Z",
+      "subscriptionId": "00000000-0000-0000-0000-000000000001",
+      "tenantId": "00000000-0000-0000-0000-000000000099",
+      "properties": {
+        "statusCode": "OK",
+        "serviceRequestId": "req-003"
+      }
+    }
+  ]
+}
