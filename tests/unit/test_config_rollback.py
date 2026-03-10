@@ -45,7 +45,7 @@ class TestConfigRollbackOnProFailure:
 
     def test_pro_failure_after_mutation_config_restored(self, tmp_path):
         """When _setup_pro mutates config_data then fails, config is restored."""
-        runner = CliRunner(mix_stderr=False)
+        runner = CliRunner()
         mock_discover, mock_connector = self._make_mocks()
 
         def _fake_setup_pro(config_data):
@@ -71,7 +71,7 @@ class TestConfigRollbackOnProFailure:
 
     def test_pro_failure_after_mutation_llm_preserved(self, tmp_path):
         """When _setup_pro deletes llm then fails, llm key is restored."""
-        runner = CliRunner(mix_stderr=False)
+        runner = CliRunner()
         mock_discover, mock_connector = self._make_mocks()
 
         original_llm = {"provider": "anthropic", "api_key": "${ANTHROPIC_API_KEY}"}
