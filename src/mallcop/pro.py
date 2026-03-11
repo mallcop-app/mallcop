@@ -111,13 +111,13 @@ class ProClient:
         except (requests.RequestException, KeyError, ValueError):
             return None
 
-    def record_usage(self, account_id: str, model: str, input_tokens: int, output_tokens: int, service_token: str) -> dict:
+    def record_usage(self, account_id: str, model: str, input_tokens: int, output_tokens: int, service_token: str, operation_type: str = "triage") -> dict:
         """Record token usage."""
         return self._api_call(
             "post",
             f"/accounts/{account_id}/usage",
             token=service_token,
-            json={"model": model, "input_tokens": input_tokens, "output_tokens": output_tokens},
+            json={"model": model, "input_tokens": input_tokens, "output_tokens": output_tokens, "operation_type": operation_type},
         )
 
     def subscribe(self, account_id: str, plan_tier: str, service_token: str) -> str:
