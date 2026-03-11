@@ -52,15 +52,67 @@ baseline:
   known_entities:
     actors: [admin-user, ci-bot, deploy-svc, org-owner]
     sources: [azure, github]
+    actor_roles:
+      ci-bot: [Reader]
+      admin-user: [Owner, Contributor]
+      deploy-svc: [Contributor]
+      org-owner: [Contributor, UserAccessAdministrator]
   frequency_tables:
     "azure:login:ci-bot": 1823
     "azure:resource_list:ci-bot": 4401
+    "azure:read:ci-bot": 3812
     "azure:role_assignment:ci-bot": 0
+    "azure:write:ci-bot": 0
+    "github:push:ci-bot": 891
+    "github:workflow_run:ci-bot": 1247
+    "github:workflow_dispatch:ci-bot": 312
+    "github:check_run:ci-bot": 2104
+    "github:pull_request:ci-bot": 445
+    "github:status:ci-bot": 1891
+    "azure:container_registry_push:ci-bot": 678
+    "azure:container_app_revision:ci-bot": 234
     "azure:login:admin-user": 340
+    "azure:read:admin-user": 223
+    "azure:role_assignment:admin-user": 31
+    "azure:login:deploy-svc": 312
+    "azure:write:deploy-svc": 178
+    "azure:login:org-owner": 521
   relationships:
     "ci-bot:sub-169efd95/resourceGroups/atom-rg":
       count: 4401
       first_seen: "2024-03-01"
+      last_seen: "2026-03-09"
+    "ci-bot:acme-corp/atom-api":
+      count: 1204
+      first_seen: "2024-01-15"
+      last_seen: "2026-03-09"
+    "ci-bot:acme-corp/api":
+      count: 876
+      first_seen: "2024-02-01"
+      last_seen: "2026-03-09"
+    "ci-bot:acme-corp/infra":
+      count: 567
+      first_seen: "2024-03-15"
+      last_seen: "2026-03-09"
+    "ci-bot:sub-169efd95/resourceGroups/opensign-rg":
+      count: 789
+      first_seen: "2025-05-20"
+      last_seen: "2026-03-09"
+    "ci-bot:sub-169efd95/resourceGroups/rudi-dev":
+      count: 412
+      first_seen: "2025-06-01"
+      last_seen: "2026-03-09"
+    "admin-user:sub-169efd95/resourceGroups/atom-rg":
+      count: 156
+      first_seen: "2024-01-15"
+      last_seen: "2026-03-09"
+    "deploy-svc:sub-169efd95/resourceGroups/atom-rg":
+      count: 289
+      first_seen: "2024-04-01"
+      last_seen: "2026-03-09"
+    "org-owner:sub-169efd95":
+      count: 89
+      first_seen: "2024-01-15"
       last_seen: "2026-03-09"
 
 expected:

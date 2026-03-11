@@ -77,12 +77,32 @@ baseline:
   known_entities:
     actors: [admin-user, ci-bot, deploy-svc, tf-automation]
     sources: [azure, github]
+    actor_roles:
+      admin-user: [OrgOwner, Owner, Contributor]
+      ci-bot: [Reader]
+      deploy-svc: [Contributor]
+      tf-automation: [Contributor]
   frequency_tables:
     "github:org.add_member:admin-user": 3
     "github:repo.add_collaborator:admin-user": 2
     "github:push:admin-user": 312
     "github:pull_request:admin-user": 89
+    "github:review:admin-user": 156
+    "github:issue:admin-user": 78
     "github:org.settings:admin-user": 22
+    "github:branch_protection:admin-user": 11
+    "github:workflow_run:admin-user": 34
+    "github:team.manage:admin-user": 19
+    "github:repo.settings:admin-user": 31
+    "azure:login:admin-user": 412
+    "azure:read:admin-user": 201
+    "azure:role_assignment:admin-user": 28
+    "azure:config_change:admin-user": 47
+    "azure:resource_created:admin-user": 29
+    "azure:login:ci-bot": 1823
+    "github:push:ci-bot": 891
+    "github:workflow_run:ci-bot": 1247
+    "azure:login:deploy-svc": 312
   relationships:
     "admin-user:acme-corp":
       count: 856
@@ -92,6 +112,42 @@ baseline:
       count: 401
       first_seen: "2024-01-15"
       last_seen: "2026-03-09"
+    "admin-user:acme-corp/infra":
+      count: 213
+      first_seen: "2024-01-15"
+      last_seen: "2026-03-08"
+    "admin-user:acme-corp/api":
+      count: 178
+      first_seen: "2024-02-01"
+      last_seen: "2026-03-07"
+    "admin-user:sub-169efd95/resourceGroups/atom-rg":
+      count: 156
+      first_seen: "2024-01-15"
+      last_seen: "2026-03-09"
+    "admin-user:sub-169efd95/resourceGroups/opensign-rg":
+      count: 89
+      first_seen: "2025-05-20"
+      last_seen: "2026-03-08"
+    "admin-user:sub-169efd95/resourceGroups/rudi-dev":
+      count: 67
+      first_seen: "2025-06-01"
+      last_seen: "2026-03-07"
+    "admin-user:sub-169efd95":
+      count: 512
+      first_seen: "2024-01-01"
+      last_seen: "2026-03-09"
+    "ci-bot:acme-corp/atom-api":
+      count: 1204
+      first_seen: "2024-01-15"
+      last_seen: "2026-03-09"
+    "ci-bot:sub-169efd95/resourceGroups/atom-rg":
+      count: 4401
+      first_seen: "2024-03-01"
+      last_seen: "2026-03-09"
+    "tf-automation:sub-169efd95":
+      count: 167
+      first_seen: "2024-03-15"
+      last_seen: "2026-03-06"
 
 expected:
   chain_action: escalated

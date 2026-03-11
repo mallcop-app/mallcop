@@ -60,25 +60,83 @@ baseline:
   known_entities:
     actors: [admin-user, ci-bot, deploy-svc, tf-automation]
     sources: [azure, github]
+    actor_roles:
+      admin-user: [Owner, Contributor]
+      ci-bot: [Reader]
+      deploy-svc: [Contributor]
+      tf-automation: [Contributor]
   frequency_tables:
     "github:repo.add_collaborator:admin-user": 0
     "github:repo.settings:admin-user": 14
     "github:push:admin-user": 312
     "github:pull_request:admin-user": 89
+    "github:review:admin-user": 134
+    "github:issue:admin-user": 67
+    "github:workflow_run:admin-user": 45
+    "github:org.settings:admin-user": 18
+    "github:branch_protection:admin-user": 9
     "azure:login:admin-user": 412
+    "azure:read:admin-user": 289
     "azure:role_assignment:admin-user": 28
+    "azure:config_change:admin-user": 54
+    "azure:resource_created:admin-user": 37
+    "azure:resource_deleted:admin-user": 6
+    "azure:policy_assignment:admin-user": 12
+    "azure:diagnostic_setting:admin-user": 5
+    "azure:login:ci-bot": 1823
+    "azure:resource_list:ci-bot": 4401
+    "github:push:ci-bot": 891
+    "github:workflow_run:ci-bot": 1247
+    "azure:login:deploy-svc": 312
+    "azure:write:deploy-svc": 178
   relationships:
     "admin-user:acme-corp/atom-api":
       count: 401
       first_seen: "2024-01-15"
       last_seen: "2026-03-09"
+    "admin-user:acme-corp/infra":
+      count: 213
+      first_seen: "2024-01-15"
+      last_seen: "2026-03-08"
+    "admin-user:acme-corp/api":
+      count: 178
+      first_seen: "2024-02-01"
+      last_seen: "2026-03-07"
     "admin-user:acme-corp":
       count: 856
+      first_seen: "2024-01-01"
+      last_seen: "2026-03-09"
+    "admin-user:sub-169efd95/resourceGroups/atom-rg":
+      count: 156
+      first_seen: "2024-01-15"
+      last_seen: "2026-03-09"
+    "admin-user:sub-169efd95/resourceGroups/opensign-rg":
+      count: 89
+      first_seen: "2025-05-20"
+      last_seen: "2026-03-08"
+    "admin-user:sub-169efd95/resourceGroups/rudi-dev":
+      count: 67
+      first_seen: "2025-06-01"
+      last_seen: "2026-03-07"
+    "admin-user:sub-169efd95":
+      count: 512
       first_seen: "2024-01-01"
       last_seen: "2026-03-09"
     "ci-bot:acme-corp/atom-api":
       count: 1204
       first_seen: "2024-01-15"
+      last_seen: "2026-03-09"
+    "ci-bot:acme-corp/api":
+      count: 876
+      first_seen: "2024-02-01"
+      last_seen: "2026-03-09"
+    "ci-bot:sub-169efd95/resourceGroups/atom-rg":
+      count: 4401
+      first_seen: "2024-03-01"
+      last_seen: "2026-03-09"
+    "deploy-svc:sub-169efd95/resourceGroups/atom-rg":
+      count: 289
+      first_seen: "2024-04-01"
       last_seen: "2026-03-09"
 
 expected:
