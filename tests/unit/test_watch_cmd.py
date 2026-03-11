@@ -6,11 +6,12 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch, MagicMock, call
 
 import pytest
 import yaml
 
+from mallcop.config import ProConfig
 from mallcop.schemas import Finding, Severity, FindingStatus
 
 
@@ -210,3 +211,163 @@ class TestWatchPipeline:
         assert "scan" in result
         assert "detect" in result
         assert "escalate" in result
+
+
+# ─── Watch: Pro usage reporting ──────────────────────────────────────────────
+
+
+class TestWatchProUsageReporting:
+    """Tests for ProClient.record_usage() integration after escalate."""
+
+    def _make_fns(self, tokens_used: int = 1500) -> tuple:
+        def mock_scan(root: Path) -> dict[str, Any]:
+            return {"status": "ok", "total_events_ingested": 5, "connectors": {}}
+
+        def mock_detect(root: Path) -> dict[str, Any]:
+            return {"status": "ok", "findings_count": 2, "summary": {}, "learning_connectors": []}
+
+        def mock_escalate(root: Path, **kwargs: Any) -> dict[str, Any]:
+            return {
+                "status": "ok",
+                "findings_processed": 2,
+                "circuit_breaker_triggered": False,
+                "budget_exhausted": False,
+                "tokens_used": tokens_used,
+            }
+
+        return mock_scan, mock_detect, mock_escalate
+
+    def test_pro_config_calls_record_usage(self, tmp_path: Path) -> None:
+        """watch with pro config calls ProClient.record_usage after escalate."""
+        from mallcop.watch import run_watch
+
+        pro_config = ProConfig(
+            account_id="acct-123",
+            service_token="tok-abc",
+            account_url="https://api.mallcop.dev",
+            inference_url="",
+        )
+        mock_scan, mock_detect, mock_escalate = self._make_fns(tokens_used=1500)
+
+        mock_client = MagicMock()
+        mock_client.record_usage.return_value = {"recorded": True}
+
+        with patch("mallcop.watch.ProClient", return_value=mock_client) as MockProClient:
+            result = run_watch(
+                tmp_path,
+                scan_fn=mock_scan,
+                detect_fn=mock_detect,
+                escalate_fn=mock_escalate,
+                dry_run=False,
+                pro_config=pro_config,
+            )
+
+        assert result["status"] == "ok"
+        MockProClient.assert_called_once_with("https://api.mallcop.dev")
+        mock_client.record_usage.assert_called_once_with(
+            account_id="acct-123",
+            model="managed",
+            input_tokens=1500,
+            output_tokens=0,
+            service_token="tok-abc",
+        )
+
+    def test_byok_config_does_not_call_record_usage(self, tmp_path: Path) -> None:
+        """watch without pro config does NOT call ProClient.record_usage."""
+        from mallcop.watch import run_watch
+
+        mock_scan, mock_detect, mock_escalate = self._make_fns(tokens_used=500)
+
+        with patch("mallcop.watch.ProClient") as MockProClient:
+            result = run_watch(
+                tmp_path,
+                scan_fn=mock_scan,
+                detect_fn=mock_detect,
+                escalate_fn=mock_escalate,
+                dry_run=False,
+                pro_config=None,
+            )
+
+        assert result["status"] == "ok"
+        MockProClient.assert_not_called()
+
+    def test_record_usage_failure_does_not_fail_watch(self, tmp_path: Path) -> None:
+        """record_usage failure is logged as warning; watch still returns ok."""
+        from mallcop.watch import run_watch
+
+        pro_config = ProConfig(
+            account_id="acct-123",
+            service_token="tok-abc",
+            account_url="https://api.mallcop.dev",
+            inference_url="",
+        )
+        mock_scan, mock_detect, mock_escalate = self._make_fns(tokens_used=800)
+
+        mock_client = MagicMock()
+        mock_client.record_usage.side_effect = RuntimeError("service unavailable")
+
+        with patch("mallcop.watch.ProClient", return_value=mock_client):
+            result = run_watch(
+                tmp_path,
+                scan_fn=mock_scan,
+                detect_fn=mock_detect,
+                escalate_fn=mock_escalate,
+                dry_run=False,
+                pro_config=pro_config,
+            )
+
+        assert result["status"] == "ok"
+        mock_client.record_usage.assert_called_once()
+
+    def test_no_tokens_skips_record_usage(self, tmp_path: Path) -> None:
+        """If escalate used 0 tokens, record_usage is still called (0 tokens is valid)."""
+        from mallcop.watch import run_watch
+
+        pro_config = ProConfig(
+            account_id="acct-123",
+            service_token="tok-abc",
+            account_url="https://api.mallcop.dev",
+            inference_url="",
+        )
+        mock_scan, mock_detect, mock_escalate = self._make_fns(tokens_used=0)
+
+        mock_client = MagicMock()
+        mock_client.record_usage.return_value = {"recorded": True}
+
+        with patch("mallcop.watch.ProClient", return_value=mock_client):
+            result = run_watch(
+                tmp_path,
+                scan_fn=mock_scan,
+                detect_fn=mock_detect,
+                escalate_fn=mock_escalate,
+                dry_run=False,
+                pro_config=pro_config,
+            )
+
+        assert result["status"] == "ok"
+        mock_client.record_usage.assert_called_once()
+
+    def test_dry_run_does_not_call_record_usage(self, tmp_path: Path) -> None:
+        """dry_run skips escalate, so record_usage is also not called."""
+        from mallcop.watch import run_watch
+
+        pro_config = ProConfig(
+            account_id="acct-123",
+            service_token="tok-abc",
+            account_url="https://api.mallcop.dev",
+            inference_url="",
+        )
+        mock_scan, mock_detect, mock_escalate = self._make_fns(tokens_used=1000)
+
+        with patch("mallcop.watch.ProClient") as MockProClient:
+            result = run_watch(
+                tmp_path,
+                scan_fn=mock_scan,
+                detect_fn=mock_detect,
+                escalate_fn=mock_escalate,
+                dry_run=True,
+                pro_config=pro_config,
+            )
+
+        assert result["dry_run"] is True
+        MockProClient.assert_not_called()

@@ -2,8 +2,13 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Any, Callable
+
+from mallcop.pro import ProClient
+
+_log = logging.getLogger(__name__)
 
 
 def run_watch(
@@ -12,6 +17,7 @@ def run_watch(
     detect_fn: Callable[[Path], dict[str, Any]],
     escalate_fn: Callable[..., dict[str, Any]],
     dry_run: bool = False,
+    pro_config: Any = None,
 ) -> dict[str, Any]:
     """Run the scan -> detect -> escalate pipeline.
 
@@ -24,6 +30,9 @@ def run_watch(
         detect_fn: Function to run detect step.
         escalate_fn: Function to run escalate step.
         dry_run: If True, skip escalate.
+        pro_config: Optional ProConfig. If set, calls ProClient.record_usage()
+            after escalate with total tokens consumed. Failures are logged as
+            warnings and do not fail the watch run.
 
     Returns:
         Combined result dict.
@@ -58,6 +67,21 @@ def run_watch(
             result["status"] = "error"
             result["error"] = f"escalate failed: {e}"
             return result
+
+        # Step 4: report usage to Pro account service (graceful on failure)
+        if pro_config is not None and pro_config.account_id and pro_config.service_token:
+            tokens_used = result.get("escalate", {}).get("tokens_used", 0)
+            try:
+                client = ProClient(pro_config.account_url)
+                client.record_usage(
+                    account_id=pro_config.account_id,
+                    model="managed",
+                    input_tokens=tokens_used,
+                    output_tokens=0,
+                    service_token=pro_config.service_token,
+                )
+            except Exception as exc:
+                _log.warning("Failed to report usage to Pro account service: %s", exc)
 
     result["status"] = "ok"
     return result
