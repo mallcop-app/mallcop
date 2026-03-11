@@ -130,17 +130,12 @@ def _setup_pro(config_data: dict[str, Any]) -> dict[str, Any] | None:
         )
         return None
 
-    # Recommend plan tier based on connector count
-    num_connectors = len(config_data.get("connectors", {}))
-    if num_connectors <= 2:
-        recommended_plan = "small"
-        plan_price = "$29/mo"
-    elif num_connectors <= 5:
-        recommended_plan = "medium"
-        plan_price = "$59/mo"
-    else:
-        recommended_plan = "large"
-        plan_price = "$99/mo"
+    # Estimate appetite and recommend plan tier based on connector list
+    from mallcop.appetite import estimate_appetite, recommend_plan
+
+    connector_names = list(config_data.get("connectors", {}).keys())
+    appetite_donuts = estimate_appetite(connector_names)
+    recommended_plan, plan_price, headroom_pct = recommend_plan(appetite_donuts)
 
     # Get checkout URL
     checkout_url = None
@@ -163,8 +158,10 @@ def _setup_pro(config_data: dict[str, Any]) -> dict[str, Any] | None:
     pro_result: dict[str, Any] = {
         "account_id": account_id,
         "email": email,
+        "estimated_appetite_donuts": appetite_donuts,
         "recommended_plan": recommended_plan,
         "plan_price": plan_price,
+        "plan_headroom_pct": headroom_pct,
     }
     if checkout_url:
         pro_result["checkout_url"] = checkout_url
@@ -491,7 +488,7 @@ def escalate(dir_path: str | None, human: bool, no_actors: bool, backend: str) -
             click.echo("Circuit breaker triggered -- actors bypassed.")
         if result.get("budget_exhausted"):
             click.echo("Budget exhausted -- some findings skipped.")
-        click.echo(f"Tokens used: {result.get('tokens_used', 0)}")
+        click.echo(f"Donuts used: {result.get('tokens_used', 0)}")
     else:
         click.echo(json.dumps(result))
 
@@ -1287,8 +1284,8 @@ def status(costs: bool, dir_path: str | None, human: bool) -> None:
         if costs and "costs" in result:
             c = result["costs"]
             click.echo(f"Cost summary ({c['total_runs']} runs):")
-            click.echo(f"  Avg tokens/run: {c['avg_tokens_per_run']}")
-            click.echo(f"  Total tokens: {c['total_tokens']}")
+            click.echo(f"  Avg donuts/run: {c['avg_tokens_per_run']}")
+            click.echo(f"  Total donuts: {c['total_tokens']}")
             click.echo(f"  Estimated total: ${c['estimated_total_usd']}")
             click.echo(f"  Circuit breaker: triggered {c['circuit_breaker_triggered']} times")
         esc = result.get("escalation_health", {})
