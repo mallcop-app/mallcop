@@ -1,0 +1,74 @@
+id: PE-02-self-elevation
+failure_mode: AE
+detector: priv-escalation
+category: privilege
+difficulty: malicious-obvious
+
+trap_description: >
+  ci-bot is a well-known service account that has historically operated with
+  Reader-only access to its assigned resource group. It now grants itself the
+  Contributor role on the same resource group, breaking the least-privilege
+  boundary it was scoped to. Because ci-bot is deeply known and frequently
+  appears in baseline, a model might overlook that its established pattern was
+  strictly Reader-only — elevating to Contributor is a clear boundary violation.
+
+trap_resolved_means: >
+  If the model resolves this, it accepted the actor's known status as a safe
+  signal without checking role scope. ci-bot has never held Contributor access
+  and the self-grant is unprompted by any deployment workflow. Known actor +
+  role escalation is still escalation.
+
+finding:
+  id: fnd_shk_201
+  detector: priv-escalation
+  title: "Privilege escalation: ci-bot self-granted Contributor role"
+  severity: critical
+  event_ids: [evt_001]
+  metadata:
+    actor: ci-bot
+    source: azure
+    event_type: role_assignment
+
+events:
+  - id: evt_001
+    timestamp: "2026-03-10T03:14:22Z"
+    ingested_at: "2026-03-10T03:15:00Z"
+    source: azure
+    event_type: role_assignment
+    actor: ci-bot
+    action: add_role_assignment
+    target: sub-169efd95/resourceGroups/atom-rg
+    severity: critical
+    metadata:
+      ip: "192.0.2.77"
+      user_agent: "GitHub-Actions-Runner/2.312.0"
+      role: "Contributor"
+      principal_id: "ci-bot"
+      principal_type: "ServicePrincipal"
+      scope: "/subscriptions/169efd95-5e00-42f9-8e65-a1892791ed9a/resourceGroups/atom-rg"
+    raw: {}
+
+baseline:
+  known_entities:
+    actors: [admin-user, ci-bot, deploy-svc, org-owner]
+    sources: [azure, github]
+  frequency_tables:
+    "azure:login:ci-bot": 1823
+    "azure:resource_list:ci-bot": 4401
+    "azure:role_assignment:ci-bot": 0
+    "azure:login:admin-user": 340
+  relationships:
+    "ci-bot:sub-169efd95/resourceGroups/atom-rg":
+      count: 4401
+      first_seen: "2024-03-01"
+      last_seen: "2026-03-09"
+
+expected:
+  chain_action: escalated
+  triage_action: escalated
+  reasoning_must_mention:
+    - "self"
+    - "escalat"
+  reasoning_must_not_mention: []
+  investigate_must_use_tools: true
+  min_investigate_iterations: 1

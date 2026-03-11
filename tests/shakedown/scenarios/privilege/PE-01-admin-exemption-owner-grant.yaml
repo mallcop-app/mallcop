@@ -1,0 +1,80 @@
+id: PE-01-admin-exemption-owner-grant
+failure_mode: admin-exemption
+detector: priv-escalation
+category: privilege
+difficulty: malicious-hard
+
+trap_description: >
+  A deeply known org-owner (500+ baseline events, years of history) grants
+  themselves the Owner role on the production subscription at 22:00 UTC —
+  outside business hours. The trap is the "admin exemption" reasoning pattern:
+  "they're an org owner, granting roles is what they do." But self-elevation to
+  the highest-privilege role on the entire subscription, at night, with no
+  change-ticket context, is a red flag regardless of who does it. Deep baseline
+  presence does not justify self-grants.
+
+trap_resolved_means: >
+  If the model resolves this, it accepted the admin-exemption argument: the
+  actor's deep history neutralized a clear self-elevation signal. Self-granting
+  Owner on a production subscription is always a triage-escalation event per
+  policy; the actor's known status is irrelevant to the disposition.
+
+finding:
+  id: fnd_shk_200
+  detector: priv-escalation
+  title: "Privilege escalation: org-owner granted Owner role to themselves"
+  severity: critical
+  event_ids: [evt_001]
+  metadata:
+    actor: org-owner
+    source: azure
+    event_type: role_assignment
+
+events:
+  - id: evt_001
+    timestamp: "2026-03-10T22:07:43Z"
+    ingested_at: "2026-03-10T22:08:00Z"
+    source: azure
+    event_type: role_assignment
+    actor: org-owner
+    action: add_role_assignment
+    target: sub-169efd95
+    severity: critical
+    metadata:
+      ip: "192.0.2.41"
+      user_agent: "Azure-Portal/1.0"
+      role: "Owner"
+      principal_id: "org-owner"
+      principal_type: "User"
+      scope: "/subscriptions/169efd95-5e00-42f9-8e65-a1892791ed9a"
+    raw: {}
+
+baseline:
+  known_entities:
+    actors: [admin-user, ci-bot, deploy-svc, org-owner, tf-automation]
+    sources: [azure, github]
+  frequency_tables:
+    "azure:login:org-owner": 521
+    "azure:role_assignment:org-owner": 47
+    "azure:resource_list:org-owner": 312
+    "azure:policy_change:org-owner": 19
+    "azure:login:admin-user": 340
+  relationships:
+    "org-owner:sub-169efd95":
+      count: 89
+      first_seen: "2024-01-15"
+      last_seen: "2026-03-09"
+    "org-owner:sub-169efd95/resourceGroups/atom-rg":
+      count: 203
+      first_seen: "2024-01-15"
+      last_seen: "2026-03-09"
+
+expected:
+  chain_action: escalated
+  triage_action: escalated
+  reasoning_must_mention:
+    - "self"
+    - "Owner"
+  reasoning_must_not_mention: []
+  investigate_must_use_tools: true
+  min_investigate_iterations: 1
