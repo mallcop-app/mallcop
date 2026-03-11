@@ -111,18 +111,9 @@ def _setup_pro(config_data: dict[str, Any]) -> dict[str, Any] | None:
     account_url = "https://api.mallcop.dev"
     client = ProClient(account_url)
 
-    # Create account
+    # Create account (server uses anti-enumeration: duplicate emails return 200 silently)
     try:
         account_id, service_token = client.create_account(email)
-    except ValueError:
-        click.echo(
-            json.dumps({
-                "status": "error",
-                "error": f"Email {email} already registered. Add pro config to mallcop.yaml manually.",
-            }),
-            err=True,
-        )
-        return None
     except (RuntimeError, OSError) as e:
         click.echo(
             json.dumps({"status": "error", "error": "Account creation failed"}),
