@@ -1,12 +1,13 @@
 name: investigate
 type: agent
-description: Second-tier investigation of escalated findings using stronger model
-version: 0.1.0
+description: Level-2 investigation — determine legitimacy with evidence
+version: 0.2.0
 
 model: sonnet
 tools:
   - read-events
   - check-baseline
+  - baseline-stats
   - read-finding
   - search-events
   - read-config

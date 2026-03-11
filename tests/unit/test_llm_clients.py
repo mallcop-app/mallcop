@@ -201,10 +201,10 @@ class TestClaudeCodeClientErrors:
         """When claude CLI returns non-JSON text, _parse_response returns an
         empty LLMResponse (no exception, just empty)."""
 
-        def fake_run(cmd, stdout=None, stderr=None, env=None, timeout=None):
+        def fake_run(cmd, stdout=None, stderr=None, stdin=None, env=None, timeout=None):
             if stdout is not None:
                 stdout.write("not json at all")
-            return subprocess.CompletedProcess(args=cmd, returncode=0)
+            return subprocess.CompletedProcess(args=cmd, returncode=0, stderr=b"")
 
         mock_call.side_effect = fake_run
         resp = self._client().chat(*CHAT_ARGS)
@@ -218,10 +218,10 @@ class TestClaudeCodeClientErrors:
         """JSON with unknown 'action' field yields empty LLMResponse."""
         import json
 
-        def fake_run(cmd, stdout=None, stderr=None, env=None, timeout=None):
+        def fake_run(cmd, stdout=None, stderr=None, stdin=None, env=None, timeout=None):
             if stdout is not None:
                 stdout.write(json.dumps({"action": "unknown", "data": 42}))
-            return subprocess.CompletedProcess(args=cmd, returncode=0)
+            return subprocess.CompletedProcess(args=cmd, returncode=0, stderr=b"")
 
         mock_call.side_effect = fake_run
         resp = self._client().chat(*CHAT_ARGS)
@@ -233,14 +233,14 @@ class TestClaudeCodeClientErrors:
         """JSON with finding_id + action but no 'action: resolution' wrapper."""
         import json
 
-        def fake_run(cmd, stdout=None, stderr=None, env=None, timeout=None):
+        def fake_run(cmd, stdout=None, stderr=None, stdin=None, env=None, timeout=None):
             if stdout is not None:
                 stdout.write(json.dumps({
                     "finding_id": "f-001",
                     "action": "resolved",
                     "reason": "false positive",
                 }))
-            return subprocess.CompletedProcess(args=cmd, returncode=0)
+            return subprocess.CompletedProcess(args=cmd, returncode=0, stderr=b"")
 
         mock_call.side_effect = fake_run
         resp = self._client().chat(*CHAT_ARGS)
@@ -252,13 +252,13 @@ class TestClaudeCodeClientErrors:
         """Verify tool_call action is parsed correctly."""
         import json
 
-        def fake_run(cmd, stdout=None, stderr=None, env=None, timeout=None):
+        def fake_run(cmd, stdout=None, stderr=None, stdin=None, env=None, timeout=None):
             if stdout is not None:
                 stdout.write(json.dumps({
                     "action": "tool_call",
                     "tool_calls": [{"name": "get-events", "arguments": {"limit": 10}}],
                 }))
-            return subprocess.CompletedProcess(args=cmd, returncode=0)
+            return subprocess.CompletedProcess(args=cmd, returncode=0, stderr=b"")
 
         mock_call.side_effect = fake_run
         resp = self._client().chat(*CHAT_ARGS)

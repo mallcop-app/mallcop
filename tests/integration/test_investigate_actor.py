@@ -89,6 +89,10 @@ def _build_full_registry() -> ToolRegistry:
     def resolve_finding(finding_id: str, action: str, reason: str) -> dict[str, Any]:
         return {"finding_id": finding_id, "action": action, "reason": reason}
 
+    @tool(name="baseline-stats", description="Get baseline statistics", permission="read")
+    def baseline_stats(**kwargs: Any) -> dict[str, Any]:
+        return {"total_frequency_entries": 0, "known_entities": {}}
+
     reg.register(read_events)
     reg.register(check_baseline)
     reg.register(read_finding)
@@ -96,6 +100,7 @@ def _build_full_registry() -> ToolRegistry:
     reg.register(read_config)
     reg.register(annotate_finding)
     reg.register(resolve_finding)
+    reg.register(baseline_stats)
     return reg
 
 

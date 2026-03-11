@@ -581,6 +581,179 @@ class TestOutputValidation:
         }) is None
 
 
+# ─── Triage resolution policy ─────────────────────────────────────
+
+
+class TestTriageResolutionPolicy:
+    """Triage cannot resolve behavioral/access/privilege detectors.
+
+    Only identity (new-actor) and structural (log-format-drift) detectors
+    can be resolved at triage. Everything else must escalate to investigation.
+    This prevents the "rubber stamp" problem where triage resolves findings
+    because the actor is known, even when the detector fired on anomalous
+    behavior (which a stolen credential would also produce).
+    """
+
+    def _run_triage_resolve(self, detector: str) -> ActorResolution:
+        """Simulate triage resolving a finding from the given detector."""
+        finding = Finding(
+            id="fnd_test",
+            timestamp=datetime(2026, 3, 6, 12, 0, 0, tzinfo=timezone.utc),
+            detector=detector,
+            event_ids=["evt_001"],
+            title="Test finding",
+            severity=Severity.WARN,
+            status=FindingStatus.OPEN,
+            annotations=[],
+            metadata={},
+        )
+        manifest = ActorManifest(
+            name="triage",
+            type="agent",
+            description="Triage",
+            version="0.3.0",
+            model="haiku",
+            tools=["resolve-finding"],
+            permissions=["read"],
+            routes_to="investigate",
+            max_iterations=3,
+            config={},
+        )
+
+        class MockLLM(LLMClient):
+            def chat(self, model, system_prompt, messages, tools):
+                return LLMResponse(
+                    tool_calls=[ToolCall(
+                        name="resolve-finding",
+                        arguments={
+                            "finding_id": "fnd_test",
+                            "action": "resolved",
+                            "reason": "Known actor, normal activity",
+                        },
+                    )],
+                    resolution=None,
+                    tokens_used=10,
+                    raw_resolution=None,
+                )
+
+        reg = ToolRegistry()
+
+        @tool(name="resolve-finding", description="Resolve finding", permission="read")
+        def resolve_finding(finding_id: str, action: str, reason: str) -> dict:
+            return {"ok": True}
+
+        reg.register(resolve_finding)
+
+        runtime = ActorRuntime(manifest, reg, MockLLM())
+        result = runtime.run(finding, "system prompt")
+        return result.resolution
+
+    def test_triage_can_resolve_new_actor(self):
+        """Triage CAN resolve new-actor (identity detector)."""
+        resolution = self._run_triage_resolve("new-actor")
+        assert resolution.action == ResolutionAction.RESOLVED
+
+    def test_triage_can_resolve_log_format_drift(self):
+        """Triage CAN resolve log-format-drift (structural detector)."""
+        resolution = self._run_triage_resolve("log-format-drift")
+        assert resolution.action == ResolutionAction.RESOLVED
+
+    def test_triage_cannot_resolve_new_external_access(self):
+        """Triage CANNOT resolve new-external-access (access grant detector)."""
+        resolution = self._run_triage_resolve("new-external-access")
+        assert resolution.action == ResolutionAction.ESCALATED
+        assert "require investigation" in resolution.reason
+
+    def test_triage_cannot_resolve_unusual_timing(self):
+        """Triage CANNOT resolve unusual-timing (behavioral detector)."""
+        resolution = self._run_triage_resolve("unusual-timing")
+        assert resolution.action == ResolutionAction.ESCALATED
+
+    def test_triage_cannot_resolve_priv_escalation(self):
+        """Triage CANNOT resolve priv-escalation (privilege detector)."""
+        resolution = self._run_triage_resolve("priv-escalation")
+        assert resolution.action == ResolutionAction.ESCALATED
+
+    def test_triage_cannot_resolve_unusual_resource_access(self):
+        """Triage CANNOT resolve unusual-resource-access (behavioral)."""
+        resolution = self._run_triage_resolve("unusual-resource-access")
+        assert resolution.action == ResolutionAction.ESCALATED
+
+    def test_triage_cannot_resolve_volume_anomaly(self):
+        """Triage CANNOT resolve volume-anomaly (behavioral)."""
+        resolution = self._run_triage_resolve("volume-anomaly")
+        assert resolution.action == ResolutionAction.ESCALATED
+
+    def test_triage_cannot_resolve_auth_failure_burst(self):
+        """Triage CANNOT resolve auth-failure-burst (auth pattern)."""
+        resolution = self._run_triage_resolve("auth-failure-burst")
+        assert resolution.action == ResolutionAction.ESCALATED
+
+    def test_triage_cannot_resolve_injection_probe(self):
+        """Triage CANNOT resolve injection-probe (signature detector)."""
+        resolution = self._run_triage_resolve("injection-probe")
+        assert resolution.action == ResolutionAction.ESCALATED
+
+    def test_triage_override_preserves_original_reason(self):
+        """When triage is overridden, the original triage assessment is preserved."""
+        resolution = self._run_triage_resolve("new-external-access")
+        assert "Known actor, normal activity" in resolution.reason
+
+    def test_investigate_can_resolve_any_detector(self):
+        """Investigate actor is NOT subject to triage resolution policy."""
+        finding = Finding(
+            id="fnd_test",
+            timestamp=datetime(2026, 3, 6, 12, 0, 0, tzinfo=timezone.utc),
+            detector="new-external-access",
+            event_ids=["evt_001"],
+            title="Test finding",
+            severity=Severity.WARN,
+            status=FindingStatus.OPEN,
+            annotations=[],
+            metadata={},
+        )
+        manifest = ActorManifest(
+            name="investigate",
+            type="agent",
+            description="Investigate",
+            version="0.2.0",
+            model="sonnet",
+            tools=["resolve-finding"],
+            permissions=["read", "write"],
+            routes_to="notify-teams",
+            max_iterations=10,
+            config={},
+        )
+
+        class MockLLM(LLMClient):
+            def chat(self, model, system_prompt, messages, tools):
+                return LLMResponse(
+                    tool_calls=[ToolCall(
+                        name="resolve-finding",
+                        arguments={
+                            "finding_id": "fnd_test",
+                            "action": "resolved",
+                            "reason": "Verified benign: part of scheduled deploy",
+                        },
+                    )],
+                    resolution=None,
+                    tokens_used=10,
+                    raw_resolution=None,
+                )
+
+        reg = ToolRegistry()
+
+        @tool(name="resolve-finding", description="Resolve finding", permission="read")
+        def resolve_finding(finding_id: str, action: str, reason: str) -> dict:
+            return {"ok": True}
+
+        reg.register(resolve_finding)
+
+        runtime = ActorRuntime(manifest, reg, MockLLM())
+        result = runtime.run(finding, "system prompt")
+        assert result.resolution.action == ResolutionAction.RESOLVED
+
+
 # ─── Batch runtime: run_batch() ───────────────────────────────────
 
 

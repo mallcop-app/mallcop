@@ -3,6 +3,16 @@
 from __future__ import annotations
 
 import logging
+
+# Detectors that triage is allowed to resolve directly.
+# Behavioral, access, privilege, auth, and signature detectors must always
+# escalate from triage — they represent anomalies that require investigation.
+# A stolen credential IS a known actor, so "known actor" is not grounds
+# for triage to resolve behavioral findings.
+_TRIAGE_RESOLVABLE_DETECTORS = frozenset({
+    "new-actor",           # Identity: triage can verify onboarding
+    "log-format-drift",    # Structural: operational, not security
+})
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -354,15 +364,35 @@ class ActorRuntime:
             for tc in response.tool_calls:
                 if tc.name == "resolve-finding":
                     action_str = tc.arguments.get("action", "escalated")
+                    reason = tc.arguments.get("reason", "No reason provided")
                     if action_str == "resolved":
-                        action_enum = ResolutionAction.RESOLVED
+                        # Enforce triage resolution policy: triage can only
+                        # resolve identity/structural detectors. Behavioral,
+                        # access, privilege, auth, and signature detectors
+                        # must escalate to investigation.
+                        detector = getattr(finding, "detector", "")
+                        if (self._manifest.name == "triage"
+                                and detector not in _TRIAGE_RESOLVABLE_DETECTORS):
+                            _log.info(
+                                "Triage override: %s tried to resolve %s "
+                                "finding %s, forcing escalation",
+                                self._manifest.name, detector, finding.id,
+                            )
+                            action_enum = ResolutionAction.ESCALATED
+                            reason = (
+                                f"Triage attempted to resolve, but {detector} "
+                                f"findings require investigation. "
+                                f"Original triage assessment: {reason}"
+                            )
+                        else:
+                            action_enum = ResolutionAction.RESOLVED
                     else:
                         action_enum = ResolutionAction.ESCALATED
                     return RunResult(
                         resolution=ActorResolution(
                             finding_id=tc.arguments.get("finding_id", finding.id),
                             action=action_enum,
-                            reason=tc.arguments.get("reason", "No reason provided"),
+                            reason=reason,
                         ),
                         tokens_used=total_tokens,
                         iterations=iteration + 1,

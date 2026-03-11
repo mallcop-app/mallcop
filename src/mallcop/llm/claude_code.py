@@ -16,7 +16,7 @@ _log = logging.getLogger(__name__)
 
 _ENV_WHITELIST = frozenset({
     "PATH", "HOME", "USER", "LANG", "LC_ALL", "TERM", "SHELL",
-    "TMPDIR", "XDG_RUNTIME_DIR",
+    "TMPDIR", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS",
     "ANTHROPIC_API_KEY",
     "AZURE_CLIENT_ID", "AZURE_CLIENT_SECRET", "AZURE_TENANT_ID",
     "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_DEFAULT_REGION",
@@ -81,16 +81,30 @@ class ClaudeCodeClient(LLMClient):
 
         full_prompt = "\n".join(prompt_parts)
 
+        # Write prompt to a temp file and pass via stdin to avoid arg-length issues
+        prompt_file = tempfile.NamedTemporaryFile(
+            mode="w", suffix=".txt", delete=False,
+        )
+        prompt_file.write(full_prompt)
+        prompt_file.close()
+        prompt_path = prompt_file.name
+
         cmd = [
             self._claude_bin,
-            "-p", full_prompt,
+            "-p", "-",
             "--output-format", "text",
             "--model", self._model,
             "--dangerously-skip-permissions",
             "--no-session-persistence",
+            "--setting-sources", "",
         ]
         if system_prompt:
             cmd.extend(["--append-system-prompt", system_prompt])
+
+        # Claude Code kills child `claude` processes in its process tree.
+        # systemd-run --user launches in a separate cgroup, invisible to parent.
+        if os.environ.get("CLAUDECODE") == "1":
+            cmd = ["systemd-run", "--user", "--collect", "--pipe", "--quiet"] + cmd
 
         env = {k: v for k, v in os.environ.items() if k in _ENV_WHITELIST}
 
@@ -100,8 +114,8 @@ class ClaudeCodeClient(LLMClient):
             tmp_path = tmp.name
 
         try:
-            with open(tmp_path, "w") as out_f:
-                result = subprocess.run(cmd, stdout=out_f, stderr=subprocess.DEVNULL, env=env, timeout=300)
+            with open(prompt_path) as in_f, open(tmp_path, "w") as out_f:
+                result = subprocess.run(cmd, stdin=in_f, stdout=out_f, stderr=subprocess.PIPE, env=env, timeout=300)
         except subprocess.TimeoutExpired:
             raise LLMAPIError("Claude CLI timed out after 300 seconds")
         except KeyboardInterrupt:
@@ -112,10 +126,12 @@ class ClaudeCodeClient(LLMClient):
                 output = f.read().strip()
         finally:
             os.unlink(tmp_path)
+            os.unlink(prompt_path)
 
         rc = result.returncode
         if rc != 0:
-            raise LLMAPIError(f"Claude CLI exited with code {rc}")
+            stderr_text = result.stderr.decode("utf-8", errors="replace")[:500] if result.stderr else ""
+            raise LLMAPIError(f"Claude CLI exited with code {rc}: {stderr_text}")
 
         if not output:
             raise LLMAPIError("Claude CLI returned empty output")

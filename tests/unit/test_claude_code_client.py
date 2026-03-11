@@ -120,7 +120,7 @@ def _mock_run(stdout_text, returncode=0):
         stdout_file = kwargs.get("stdout")
         if stdout_file and hasattr(stdout_file, "write"):
             stdout_file.write(stdout_text)
-        return MagicMock(returncode=returncode)
+        return MagicMock(returncode=returncode, stderr=b"")
     return _side_effect
 
 
@@ -148,16 +148,17 @@ class TestClaudeCodeClientChat:
         # Verify subprocess was called with correct args
         call_args = mock_call.call_args
         cmd = call_args[0][0]
-        # When systemd-run is available, command is wrapped:
-        # ["systemd-run", "--user", "--scope", "--quiet", "--", "claude", ...]
+        # When CLAUDECODE=1, command is wrapped with systemd-run
         if cmd[0] == "systemd-run":
-            assert cmd[1:5] == ["--user", "--scope", "--quiet", "--"]
+            assert cmd[1:6] == ["--user", "--collect", "--pipe", "--quiet", client._claude_bin]
             claude_cmd = cmd[5:]
         else:
             claude_cmd = cmd
         assert claude_cmd[0] == client._claude_bin
+        # Prompt is passed via stdin (stdin=file), not as -p arg with content
         assert "-p" in claude_cmd
         assert "--model" in claude_cmd
+        assert "--setting-sources" in claude_cmd
         # Verify env uses whitelist (CLAUDECODE excluded)
         env = call_args[1]["env"]
         assert "CLAUDECODE" not in env
