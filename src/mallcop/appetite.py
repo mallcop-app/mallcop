@@ -29,9 +29,11 @@ AVG_DONUTS_PER_FINDING: float = 1.5
 
 # Pro plan tiers: name, monthly_donuts allocation, price string
 PLAN_TIERS: list[dict] = [
-    {"name": "small", "monthly_donuts": 300, "price": "$29/mo"},
-    {"name": "medium", "monthly_donuts": 750, "price": "$59/mo"},
-    {"name": "large", "monthly_donuts": 2000, "price": "$99/mo"},
+    {"name": "basic",      "monthly_donuts": 150,   "price": "$4.99/mo"},
+    {"name": "basic_plus", "monthly_donuts": 400,   "price": "$9.99/mo"},
+    {"name": "pro",        "monthly_donuts": 1200,  "price": "$19.99/mo"},
+    {"name": "pro_plus",   "monthly_donuts": 3000,  "price": "$39.99/mo"},
+    {"name": "team",       "monthly_donuts": 10000, "price": "$79.99/mo"},
 ]
 
 # Minimum headroom fraction: recommend only plans where allocation > appetite * (1 + HEADROOM)

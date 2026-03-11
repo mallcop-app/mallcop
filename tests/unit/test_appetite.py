@@ -78,31 +78,30 @@ class TestEstimateAppetite:
 class TestRecommendPlan:
     """recommend_plan returns smallest tier with ≥20% headroom over appetite."""
 
-    def test_small_appetite_gets_small_plan(self) -> None:
-        # appetite within small tier allocation with headroom
-        # find small tier allocation
-        small_alloc = next(t["monthly_donuts"] for t in PLAN_TIERS if t["name"] == "small")
-        max_fitting_appetite = int(small_alloc / 1.2)
+    def test_small_appetite_gets_basic_plan(self) -> None:
+        # appetite within basic tier allocation with headroom
+        basic_alloc = next(t["monthly_donuts"] for t in PLAN_TIERS if t["name"] == "basic")
+        max_fitting_appetite = int(basic_alloc / 1.2)
         tier, price, headroom_pct = recommend_plan(max_fitting_appetite)
-        assert tier == "small"
+        assert tier == "basic"
 
-    def test_large_appetite_gets_large_plan(self) -> None:
-        medium_alloc = next(t["monthly_donuts"] for t in PLAN_TIERS if t["name"] == "medium")
-        # appetite exceeds medium headroom
-        too_big = int(medium_alloc / 1.2) + 1
+    def test_large_appetite_gets_team_plan(self) -> None:
+        pro_plus_alloc = next(t["monthly_donuts"] for t in PLAN_TIERS if t["name"] == "pro_plus")
+        # appetite exceeds pro_plus headroom
+        too_big = int(pro_plus_alloc / 1.2) + 1
         tier, price, headroom_pct = recommend_plan(too_big)
-        assert tier == "large"
+        assert tier == "team"
 
-    def test_medium_appetite_gets_medium_plan(self) -> None:
-        small_alloc = next(t["monthly_donuts"] for t in PLAN_TIERS if t["name"] == "small")
-        # just above what fits in small
-        too_big_for_small = int(small_alloc / 1.2) + 1
-        tier, price, headroom_pct = recommend_plan(too_big_for_small)
-        assert tier == "medium"
+    def test_medium_appetite_gets_basic_plus_plan(self) -> None:
+        basic_alloc = next(t["monthly_donuts"] for t in PLAN_TIERS if t["name"] == "basic")
+        # just above what fits in basic
+        too_big_for_basic = int(basic_alloc / 1.2) + 1
+        tier, price, headroom_pct = recommend_plan(too_big_for_basic)
+        assert tier == "basic_plus"
 
-    def test_zero_appetite_gets_small_plan(self) -> None:
+    def test_zero_appetite_gets_basic_plan(self) -> None:
         tier, price, headroom_pct = recommend_plan(0)
-        assert tier == "small"
+        assert tier == "basic"
 
     def test_headroom_at_least_20pct(self) -> None:
         # For any appetite, headroom should be ≥ 20%
@@ -127,4 +126,5 @@ class TestRecommendPlan:
         # smoke test: estimate_appetite + recommend_plan end-to-end
         appetite = estimate_appetite(["azure"])
         tier, price, headroom_pct = recommend_plan(appetite)
-        assert tier in {"small", "medium", "large"}
+        valid_tiers = {t["name"] for t in PLAN_TIERS}
+        assert tier in valid_tiers

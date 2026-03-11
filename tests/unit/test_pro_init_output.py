@@ -81,9 +81,11 @@ class TestProInitAppetiteOutput:
         assert pro["plan_headroom_pct"] >= 20.0
 
     def test_pro_output_recommended_plan_is_valid_tier(self, tmp_path):
+        from mallcop.appetite import PLAN_TIERS
         result = self._run_pro_init(tmp_path)
         data = json.loads(result.output)
-        assert data["pro"]["recommended_plan"] in {"small", "medium", "large"}
+        valid_tiers = {t["name"] for t in PLAN_TIERS}
+        assert data["pro"]["recommended_plan"] in valid_tiers
 
     def test_pro_output_plan_price_is_dollar_string(self, tmp_path):
         result = self._run_pro_init(tmp_path)
@@ -92,8 +94,8 @@ class TestProInitAppetiteOutput:
         assert "$" in price
         assert "/mo" in price
 
-    def test_zero_connectors_gets_small_plan(self, tmp_path):
-        """When no connectors discovered, appetite is 0, recommend small plan."""
+    def test_zero_connectors_gets_basic_plan(self, tmp_path):
+        """When no connectors discovered, appetite is 0, recommend basic plan."""
         runner = CliRunner()
         mock_discover = MagicMock(return_value={
             "connectors": {},
@@ -117,7 +119,7 @@ class TestProInitAppetiteOutput:
         data = json.loads(result.output)
         pro = data["pro"]
         assert pro["estimated_appetite_donuts"] == 0
-        assert pro["recommended_plan"] == "small"
+        assert pro["recommended_plan"] == "basic"
 
     def test_appetite_scales_with_connector_count(self, tmp_path):
         """More connectors → higher appetite estimate."""
