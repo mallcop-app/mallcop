@@ -104,6 +104,42 @@ def tool(
     return decorator
 
 
+def make_query_events_tool(
+    tool_name: str,
+    description: str,
+    default_source: str,
+) -> Callable:
+    """Factory that creates a source-specific event query tool.
+
+    Returns a @tool-decorated function that queries events filtered
+    to the given source by default.
+    """
+
+    @tool(name=tool_name, description=description, permission="read")
+    def query_events(
+        context: ToolContext,
+        source: str | None = None,
+        actor: str | None = None,
+        since: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        from datetime import datetime as _dt
+
+        since_dt = None
+        if since:
+            since_dt = _dt.fromisoformat(since)
+        effective_source = source or default_source
+        events = context.store.query_events(
+            source=effective_source,
+            actor=actor,
+            since=since_dt,
+            limit=limit,
+        )
+        return [e.to_dict() for e in events]
+
+    return query_events
+
+
 class ToolRegistry:
     def __init__(self) -> None:
         self._tools: dict[str, Callable] = {}
