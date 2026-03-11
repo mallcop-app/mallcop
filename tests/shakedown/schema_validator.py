@@ -12,6 +12,8 @@ REQUIRED_TOP_LEVEL = {"id", "failure_mode", "detector", "category", "difficulty"
 REQUIRED_FINDING = {"id", "title", "severity"}
 REQUIRED_EXPECTED = {"chain_action", "triage_action"}
 REQUIRED_EVENT = {"id", "timestamp", "ingested_at", "source", "event_type", "actor", "action", "target", "severity"}
+VALID_ACTIONS = {"resolved", "escalated"}
+REQUIRED_CONNECTOR_TOOL = {"name"}
 
 
 class SchemaError:
@@ -53,6 +55,19 @@ def validate_scenario_file(path: Path) -> list[SchemaError]:
         for field in REQUIRED_EXPECTED:
             if field not in expected:
                 errors.append(SchemaError(str(path), f"Missing expected.{field}"))
+        for action_field in ("chain_action", "triage_action"):
+            val = expected.get(action_field)
+            if val and val not in VALID_ACTIONS:
+                errors.append(SchemaError(str(path), f"expected.{action_field} must be 'resolved' or 'escalated', got '{val}'"))
+
+    # Connector tools validation
+    connector_tools = data.get("connector_tools", [])
+    if isinstance(connector_tools, list):
+        for i, ct in enumerate(connector_tools):
+            if isinstance(ct, dict):
+                for field in REQUIRED_CONNECTOR_TOOL:
+                    if field not in ct:
+                        errors.append(SchemaError(str(path), f"Missing connector_tools[{i}].{field}"))
 
     # Event validation
     events = data.get("events", [])

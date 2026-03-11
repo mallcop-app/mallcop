@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.shakedown.harness import InstrumentedLLMClient, ShakedownHarness
+from tests.shakedown.harness import ShakedownHarness
 from tests.shakedown.scenario import load_all_scenarios, Scenario
 
 
@@ -35,16 +35,15 @@ def _build_llm_client():
 
 @pytest.fixture
 def shakedown_llm():
-    """LLM client for shakedown tests, wrapped in InstrumentedLLMClient."""
-    client = _build_llm_client()
-    return InstrumentedLLMClient(client)
+    """LLM client for shakedown tests."""
+    return _build_llm_client()
 
 
 @pytest.fixture
 def shakedown_harness(shakedown_llm):
     """ShakedownHarness configured with the test LLM client."""
     return ShakedownHarness(
-        llm=shakedown_llm.inner,  # harness wraps its own instrumented client
+        llm=shakedown_llm,
         scenario_dir=SCENARIOS_DIR,
     )
 

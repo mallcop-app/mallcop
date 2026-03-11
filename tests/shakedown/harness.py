@@ -97,11 +97,16 @@ class ShakedownResult:
 
     @property
     def triage_action(self) -> str:
-        """What did triage decide (before any policy override)?"""
+        """What did triage decide?"""
         triage_calls = [c for c in self.llm_calls if c.actor == "triage"]
-        if triage_calls and triage_calls[0].has_resolution:
-            return "resolved" if len(self.llm_calls) == 1 else "escalated"
-        return "unknown"
+        investigate_calls = [c for c in self.llm_calls if c.actor == "investigate"]
+        if not triage_calls:
+            return "unknown"
+        # If investigate was invoked, triage must have escalated
+        if investigate_calls:
+            return "escalated"
+        # Only triage calls — triage resolved
+        return "resolved"
 
     @property
     def chain_reason(self) -> str:
