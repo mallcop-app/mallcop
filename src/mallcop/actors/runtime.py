@@ -442,6 +442,7 @@ def build_actor_runner(
     actor_dirs: list[Path] | None = None,
     connector_dirs: list[Path] | None = None,
     validate_paths: bool = False,
+    extra_tools: list[Callable] | None = None,
 ) -> Callable[..., RunResult] | None:
     """Build an actor_runner closure for the escalate pipeline.
 
@@ -487,6 +488,10 @@ def build_actor_runner(
     tool_search_paths.append(builtin_tools_dir)
 
     registry = ToolRegistry.discover_tools(tool_search_paths)
+
+    if extra_tools:
+        for fn in extra_tools:
+            registry.register(fn)
 
     # Build ToolContext
     context = ToolContext(
