@@ -5,13 +5,12 @@ from __future__ import annotations
 import logging
 
 # Detectors that triage is allowed to resolve directly.
-# Behavioral, access, privilege, auth, and signature detectors must always
-# escalate from triage — they represent anomalies that require investigation.
-# A stolen credential IS a known actor, so "known actor" is not grounds
-# for triage to resolve behavioral findings.
+# Behavioral, access, privilege, auth, structural, and signature detectors
+# must always escalate from triage — they represent anomalies that require
+# investigation. A stolen credential IS a known actor, so "known actor" is
+# not grounds for triage to resolve behavioral findings.
 _TRIAGE_RESOLVABLE_DETECTORS = frozenset({
     "new-actor",           # Identity: triage can verify onboarding
-    "log-format-drift",    # Structural: operational, not security
 })
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -367,7 +366,7 @@ class ActorRuntime:
                     reason = tc.arguments.get("reason", "No reason provided")
                     if action_str == "resolved":
                         # Enforce triage resolution policy: triage can only
-                        # resolve identity/structural detectors. Behavioral,
+                        # resolve identity detectors. Behavioral, structural,
                         # access, privilege, auth, and signature detectors
                         # must escalate to investigation.
                         detector = getattr(finding, "detector", "")

@@ -585,13 +585,13 @@ class TestOutputValidation:
 
 
 class TestTriageResolutionPolicy:
-    """Triage cannot resolve behavioral/access/privilege detectors.
+    """Triage cannot resolve behavioral/access/privilege/structural detectors.
 
-    Only identity (new-actor) and structural (log-format-drift) detectors
-    can be resolved at triage. Everything else must escalate to investigation.
-    This prevents the "rubber stamp" problem where triage resolves findings
-    because the actor is known, even when the detector fired on anomalous
-    behavior (which a stolen credential would also produce).
+    Only identity (new-actor) detectors can be resolved at triage. Everything
+    else must escalate to investigation. This prevents the "rubber stamp"
+    problem where triage resolves findings because the actor is known, even
+    when the detector fired on anomalous behavior (which a stolen credential
+    would also produce).
     """
 
     def _run_triage_resolve(self, detector: str) -> ActorResolution:
@@ -653,10 +653,12 @@ class TestTriageResolutionPolicy:
         resolution = self._run_triage_resolve("new-actor")
         assert resolution.action == ResolutionAction.RESOLVED
 
-    def test_triage_can_resolve_log_format_drift(self):
-        """Triage CAN resolve log-format-drift (structural detector)."""
+    def test_triage_cannot_resolve_log_format_drift(self):
+        """Triage CANNOT resolve log-format-drift — requires parser adaptation."""
         resolution = self._run_triage_resolve("log-format-drift")
-        assert resolution.action == ResolutionAction.RESOLVED
+        assert resolution.action == ResolutionAction.ESCALATED
+        assert "Original triage assessment" in resolution.reason
+        assert "require investigation" in resolution.reason
 
     def test_triage_cannot_resolve_new_external_access(self):
         """Triage CANNOT resolve new-external-access (access grant detector)."""

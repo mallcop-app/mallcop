@@ -1,9 +1,8 @@
 """Integration test: triage resolution policy through the full escalation pipeline.
 
 Verifies that the triage agent cannot resolve behavioral, access, privilege,
-auth, or signature detectors — only identity (new-actor) and structural
-(log-format-drift) detectors. This is enforced at the runtime level, not
-just by prompting.
+auth, structural, or signature detectors — only identity (new-actor)
+detectors. This is enforced at the runtime level, not just by prompting.
 
 Tests exercise the full path: run_escalate() → run_batch() → actor_runner()
 → ActorRuntime.run() → resolve-finding interception → policy check.
@@ -231,8 +230,8 @@ class TestTriagePolicyChainWalk:
         assert "Known actor" in result.resolution.reason  # triage's reason
         assert len(llm.calls) == 1  # only triage
 
-    def test_log_format_drift_resolved_at_triage(self, pipeline):
-        """log-format-drift: triage CAN resolve structural detectors."""
+    def test_log_format_drift_escalated_from_triage(self, pipeline):
+        """log-format-drift: triage CANNOT resolve, must escalate to investigate."""
         root, config, store, triage_dir, investigate_dir = pipeline
         llm = TriageResolvesLLM()
 
@@ -245,8 +244,9 @@ class TestTriagePolicyChainWalk:
             actor_name="triage",
         )
 
-        assert result.resolution.action == ResolutionAction.RESOLVED
-        assert len(llm.calls) == 1  # triage only
+        # Triage override forces escalation to investigate
+        assert result.resolution.action == ResolutionAction.RESOLVED  # investigate resolves
+        assert len(llm.calls) == 2  # triage (overridden) + investigate
 
     def test_triage_override_preserves_assessment_in_escalation_reason(self, pipeline):
         """When triage is overridden, the finding's escalation reason includes
@@ -404,7 +404,7 @@ class TestTriagePolicyFullPipeline:
 
     def test_resolvable_detectors_accepted(self):
         """Verify the allowlist contains exactly the expected detectors."""
-        assert _TRIAGE_RESOLVABLE_DETECTORS == {"new-actor", "log-format-drift"}
+        assert _TRIAGE_RESOLVABLE_DETECTORS == {"new-actor"}
 
 
 # ─── Tests: Credential theft scenario ──────────────────────────────

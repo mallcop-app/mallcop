@@ -55,11 +55,9 @@ These fire on attack signatures in event data.
 ### Structural detectors (log-format-drift)
 These fire on operational drift (parser breakage). A drifted parser is a
 blind spot — logs are going unanalyzed, which is a security gap.
-- RESOLVE if drift is minor (<30% unmatched) — most logs still parsed,
-  but note the drift in your resolution reason.
-- ESCALATE if unmatched ratio is high (>30%) — significant blind spot.
-  May indicate log tampering, a service update that broke monitoring,
-  or a format change that needs parser adaptation.
+- NEVER resolve at triage. Always escalate.
+- Log format drift requires parser adaptation, which is beyond triage scope.
+- Include the unmatched ratio and affected parser in your escalation reason.
 
 ## Credential Theft Test
 
