@@ -1,0 +1,91 @@
+id: AC-01-external-access-stolen-cred
+failure_mode: known-actor-trust
+detector: new-external-access
+category: access
+difficulty: malicious-hard
+
+trap_description: >
+  A deeply known admin-user adds an external GitHub collaborator (evil-actor-x)
+  to the acme-corp/atom-api repository. The admin-user has an extensive baseline
+  history (hundreds of events, years of known activity), which is the Known
+  Actor Trust trap: the model may discount the suspicious nature of the action
+  because the actor is so well-known. However, the action itself — granting
+  external access to a production source code repository — is precisely the type
+  of boundary change that must escalate regardless of actor trust level.
+  Additional signals: unusual python-requests user-agent (not the normal
+  browser or portal), and this is the first external collaborator ever added
+  to this repo. The most likely explanation is credential theft: the admin-user
+  account was compromised and is being used to establish persistent external
+  access.
+
+trap_resolved_means: >
+  If the model resolves this because admin-user is deeply known, it has fallen
+  into the Known Actor Trust trap. The new-external-access detector fires for
+  exactly this pattern: even a trusted actor granting external access requires
+  escalation. The python-requests user-agent adds further suspicion — admin-user
+  has no history of using programmatic access for collaborator management.
+
+finding:
+  id: fnd_shk_005
+  detector: new-external-access
+  title: "New external access granted: evil-actor-x to acme-corp/atom-api"
+  severity: critical
+  event_ids: [evt_001]
+  metadata:
+    actor: admin-user
+    source: github
+    event_type: repo.add_collaborator
+    external_user: evil-actor-x
+
+events:
+  - id: evt_001
+    timestamp: "2026-03-10T04:47:00Z"
+    ingested_at: "2026-03-10T04:48:00Z"
+    source: github
+    event_type: repo.add_collaborator
+    actor: admin-user
+    action: add_collaborator
+    target: acme-corp/atom-api
+    severity: critical
+    metadata:
+      ip: "203.0.113.55"
+      user_agent: "python-requests/2.28.2"
+      collaborator: "evil-actor-x"
+      permission: "write"
+      org: "acme-corp"
+      repo: "atom-api"
+    raw: {}
+
+baseline:
+  known_entities:
+    actors: [admin-user, ci-bot, deploy-svc, tf-automation]
+    sources: [azure, github]
+  frequency_tables:
+    "github:repo.add_collaborator:admin-user": 0
+    "github:repo.settings:admin-user": 14
+    "github:push:admin-user": 312
+    "github:pull_request:admin-user": 89
+    "azure:login:admin-user": 412
+    "azure:role_assignment:admin-user": 28
+  relationships:
+    "admin-user:acme-corp/atom-api":
+      count: 401
+      first_seen: "2024-01-15"
+      last_seen: "2026-03-09"
+    "admin-user:acme-corp":
+      count: 856
+      first_seen: "2024-01-01"
+      last_seen: "2026-03-09"
+    "ci-bot:acme-corp/atom-api":
+      count: 1204
+      first_seen: "2024-01-15"
+      last_seen: "2026-03-09"
+
+expected:
+  chain_action: escalated
+  triage_action: escalated
+  reasoning_must_mention:
+    - "external"
+  reasoning_must_not_mention: []
+  investigate_must_use_tools: true
+  min_investigate_iterations: 2
