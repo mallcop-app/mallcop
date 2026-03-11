@@ -137,25 +137,84 @@ baseline:
   known_entities:
     actors: [admin-user, ci-bot, deploy-svc, tf-automation]
     sources: [azure, github]
+    actor_roles:
+      admin-user: [GlobalAdministrator, SubscriptionOwner]
+      ci-bot: [ContainerRegistryPush, ContainerAppsDeploy]
+      deploy-svc: [ContributorOnAtomRg, ContributorOnRudiDev]
+      tf-automation: [SubscriptionContributor]
   frequency_tables:
-    "azure:login:admin-user": 340
-    "azure:read_resource:admin-user": 89
-    "azure:update_config:admin-user": 45
-    "azure:role_assignment:admin-user": 28
-    "azure:api_call:admin-user": 12
+    # 3-part aggregate keys — admin-user is deeply characterized as infrastructure manager
+    "azure:login:admin-user": 487
+    "azure:read_resource:admin-user": 312
+    "azure:update_config:admin-user": 89
+    "azure:role_assignment:admin-user": 67
+    "azure:container_restart:admin-user": 38
+    "azure:keyvault_access:admin-user": 19
+    "azure:service_principal_created:admin-user": 14
+    "azure:policy_update:admin-user": 22
+    "azure:network_rule_change:admin-user": 11
+    "azure:api_call:admin-user": 12    # NOTE: historically only 12 raw API calls — never bulk enumeration
+    # 5-part time-dimensioned keys — admin-user works Pacific business hours (15:00-23:00 UTC)
+    "azure:login:admin-user:0:afternoon": 78    # Monday afternoon
+    "azure:login:admin-user:1:afternoon": 82    # Tuesday afternoon
+    "azure:login:admin-user:2:afternoon": 75    # Wednesday afternoon
+    "azure:login:admin-user:3:afternoon": 80    # Thursday afternoon
+    "azure:login:admin-user:4:afternoon": 71    # Friday afternoon
+    "azure:login:admin-user:0:evening": 45      # Monday evening
+    "azure:login:admin-user:1:evening": 48      # Tuesday evening
+    "azure:login:admin-user:2:evening": 41      # Wednesday evening
+    "azure:login:admin-user:3:evening": 43      # Thursday evening
+    "azure:login:admin-user:4:evening": 37      # Friday evening
+    "azure:read_resource:admin-user:1:afternoon": 65
+    "azure:read_resource:admin-user:3:afternoon": 59
+    "azure:update_config:admin-user:2:afternoon": 21
+    "azure:update_config:admin-user:4:afternoon": 19
+    # NOTE: no api_call time-dimensioned entries — the 12 historical calls were one-offs
+    # 50+ distinct API calls in 5 minutes is 4x the total historical API call count
   relationships:
+    # admin-user manages specific known resources — NOT subscription-wide enumeration targets
     "admin-user:acme-corp/tenant":
-      count: 340
+      count: 487
       first_seen: "2025-05-01"
       last_seen: "2026-03-09"
     "admin-user:sub-169efd95":
-      count: 89
+      count: 312
       first_seen: "2025-05-01"
       last_seen: "2026-03-09"
     "admin-user:sub-169efd95/resourceGroups/atom-rg":
-      count: 67
+      count: 156
       first_seen: "2025-05-15"
       last_seen: "2026-03-09"
+    "admin-user:sub-169efd95/resourceGroups/rudi-dev":
+      count: 98
+      first_seen: "2025-06-01"
+      last_seen: "2026-03-08"
+    "admin-user:sub-169efd95/resourceGroups/opensign-rg":
+      count: 73
+      first_seen: "2025-07-01"
+      last_seen: "2026-03-07"
+    "admin-user:sub-169efd95/resourceGroups/atom-rg/containerApps/atom-api":
+      count: 89
+      first_seen: "2025-05-15"
+      last_seen: "2026-03-09"
+    "admin-user:sub-169efd95/resourceGroups/atom-rg/containerApps/atom-bot":
+      count: 64
+      first_seen: "2025-05-15"
+      last_seen: "2026-03-09"
+    "admin-user:sub-169efd95/resourceGroups/atom-rg/keyVaults/atom-kv":
+      count: 19
+      first_seen: "2025-08-01"
+      last_seen: "2026-02-28"
+    "admin-user:acme-corp/service-principals":
+      count: 67
+      first_seen: "2025-06-15"
+      last_seen: "2026-02-14"
+    "admin-user:sub-169efd95/resourceGroups/rudi-dev/containerApps/ca-rudi":
+      count: 41
+      first_seen: "2025-06-15"
+      last_seen: "2026-03-08"
+    # NOTE: no relationships with VMs, storage accounts enumeration targets, or security alerts
+    # list_role_assignments / list_users / list_storage_accounts are outside normal interaction scope
 
 expected:
   chain_action: escalated

@@ -168,13 +168,43 @@ baseline:
   known_entities:
     actors: [admin-user, ci-bot, deploy-svc, tf-automation]
     sources: [azure, github]
+    actor_roles:
+      admin-user: [GlobalAdministrator, SubscriptionOwner]
+      ci-bot: [ContainerRegistryPush, ContainerAppsDeploy, AcrPush]
+      deploy-svc: [ContributorOnAtomRg, ContributorOnRudiDev]
+      tf-automation: [SubscriptionContributor]
   frequency_tables:
+    # 3-part aggregate keys — ci-bot is deeply characterized as a deploy/build account
     "azure:login:ci-bot": 1200
     "github:push:ci-bot": 450
     "azure:container_deploy:ci-bot": 380
     "azure:container_restart:ci-bot": 210
-    "azure:storage_access:ci-bot": 10
+    "github:workflow_run:ci-bot": 520
+    "azure:image_push:ci-bot": 448
+    "github:pr_merge:ci-bot": 89
+    "azure:container_build:ci-bot": 163
+    "azure:storage_access:ci-bot": 10   # ONLY 10 storage access events in 10 months
+    # 5-part time-dimensioned keys — ci-bot active during Pacific business hours + CI/CD triggers
+    "azure:login:ci-bot:0:afternoon": 198    # Monday — deploy heavy day
+    "azure:login:ci-bot:1:afternoon": 245    # Tuesday — highest deploy volume
+    "azure:login:ci-bot:2:afternoon": 221    # Wednesday
+    "azure:login:ci-bot:3:afternoon": 234    # Thursday
+    "azure:login:ci-bot:4:afternoon": 187    # Friday
+    "azure:login:ci-bot:0:morning": 42       # Monday morning (early deploys)
+    "azure:login:ci-bot:1:morning": 51       # Tuesday morning
+    "azure:login:ci-bot:2:morning": 47       # Wednesday morning
+    "azure:container_deploy:ci-bot:1:afternoon": 89
+    "azure:container_deploy:ci-bot:3:afternoon": 82
+    "azure:image_push:ci-bot:1:afternoon": 112
+    "azure:image_push:ci-bot:3:afternoon": 104
+    # NOTE: no bulk storage read events in 5-part keys — ci-bot has never done this
+    # NOTE: the 10 storage_access events are all single-blob artifact uploads, not reads
   relationships:
+    # ci-bot's world is container registries and container apps — deploy targets only
+    "ci-bot:sub-169efd95/resourceGroups/atom-rg/containerRegistries/atomregistry":
+      count: 450
+      first_seen: "2025-05-01"
+      last_seen: "2026-03-09"
     "ci-bot:sub-169efd95/resourceGroups/atom-rg/containerApps/atom-api":
       count: 380
       first_seen: "2025-05-01"
@@ -183,10 +213,28 @@ baseline:
       count: 280
       first_seen: "2025-05-01"
       last_seen: "2026-03-09"
-    "ci-bot:sub-169efd95/resourceGroups/atom-rg/containerRegistries/atomregistry":
-      count: 450
+    "ci-bot:sub-169efd95/resourceGroups/rudi-dev/containerRegistries/rudiregistry":
+      count: 163
+      first_seen: "2025-06-10"
+      last_seen: "2026-03-08"
+    "ci-bot:sub-169efd95/resourceGroups/rudi-dev/containerApps/ca-rudi":
+      count: 148
+      first_seen: "2025-06-10"
+      last_seen: "2026-03-08"
+    "ci-bot:sub-169efd95/resourceGroups/opensign-rg/containerRegistries/opensignregistry":
+      count: 97
+      first_seen: "2025-07-20"
+      last_seen: "2026-03-07"
+    "ci-bot:sub-169efd95/resourceGroups/opensign-rg/containerApps/opensign-server":
+      count: 87
+      first_seen: "2025-07-20"
+      last_seen: "2026-03-07"
+    "ci-bot:acme-corp/repositories":
+      count: 520
       first_seen: "2025-05-01"
       last_seen: "2026-03-09"
+    # NOTE: no storage account relationships — ci-bot has NEVER accessed storage blobs
+    # The finding events all target storage accounts which are entirely outside ci-bot's scope
 
 expected:
   chain_action: escalated
