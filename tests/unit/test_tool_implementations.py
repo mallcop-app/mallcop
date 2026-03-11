@@ -614,3 +614,79 @@ class TestReadConfig:
         assert "github" in result["connectors"]
         # github token should be redacted
         assert result["connectors"]["github"]["token"] == "***"
+
+
+# ---------------------------------------------------------------------------
+# search-findings tool
+# ---------------------------------------------------------------------------
+
+
+class TestSearchFindings:
+    """Tests for the search-findings tool."""
+
+    def test_search_findings_by_actor(self) -> None:
+        from mallcop.tools.findings import search_findings
+
+        f1 = _make_finding(id="fnd-a1", metadata={"actor": "alice@corp.com"})
+        f2 = _make_finding(id="fnd-a2", metadata={"actor": "bob@corp.com"})
+
+        store = MagicMock()
+        store.query_findings.return_value = [f1]
+        ctx = ToolContext(store=store, connectors={}, config=MagicMock())
+
+        result = search_findings(ctx, actor="alice@corp.com")
+        store.query_findings.assert_called_once_with(
+            status=None, actor="alice@corp.com", detector=None, since=None,
+        )
+        assert len(result) == 1
+        assert result[0]["id"] == "fnd-a1"
+
+    def test_search_findings_by_detector(self) -> None:
+        from mallcop.tools.findings import search_findings
+
+        f1 = _make_finding(id="fnd-d1", detector="priv-escalation")
+        store = MagicMock()
+        store.query_findings.return_value = [f1]
+        ctx = ToolContext(store=store, connectors={}, config=MagicMock())
+
+        result = search_findings(ctx, detector="priv-escalation")
+        store.query_findings.assert_called_once_with(
+            status=None, actor=None, detector="priv-escalation", since=None,
+        )
+        assert len(result) == 1
+        assert result[0]["id"] == "fnd-d1"
+
+    def test_search_findings_by_since(self) -> None:
+        from mallcop.tools.findings import search_findings
+
+        f1 = _make_finding(id="fnd-s1")
+        store = MagicMock()
+        store.query_findings.return_value = [f1]
+        ctx = ToolContext(store=store, connectors={}, config=MagicMock())
+
+        result = search_findings(ctx, since="2026-03-01T00:00:00+00:00")
+        call_kwargs = store.query_findings.call_args[1]
+        assert call_kwargs["since"] == datetime(2026, 3, 1, tzinfo=timezone.utc)
+
+    def test_search_findings_respects_limit(self) -> None:
+        from mallcop.tools.findings import search_findings
+
+        findings = [_make_finding(id=f"fnd-{i}") for i in range(10)]
+        store = MagicMock()
+        store.query_findings.return_value = findings
+        ctx = ToolContext(store=store, connectors={}, config=MagicMock())
+
+        result = search_findings(ctx, limit=3)
+        assert len(result) == 3
+
+    def test_search_findings_no_filters(self) -> None:
+        from mallcop.tools.findings import search_findings
+
+        store = MagicMock()
+        store.query_findings.return_value = []
+        ctx = ToolContext(store=store, connectors={}, config=MagicMock())
+
+        result = search_findings(ctx)
+        store.query_findings.assert_called_once_with(
+            status=None, actor=None, detector=None, since=None,
+        )

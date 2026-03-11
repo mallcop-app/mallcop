@@ -55,6 +55,9 @@ class Store(ABC):
         self,
         status: str | None = None,
         severity: str | None = None,
+        actor: str | None = None,
+        detector: str | None = None,
+        since: datetime | None = None,
     ) -> list[Finding]:
         """Query findings with optional filters."""
 
@@ -317,6 +320,9 @@ class JsonlStore(Store):
         self,
         status: str | None = None,
         severity: str | None = None,
+        actor: str | None = None,
+        detector: str | None = None,
+        since: datetime | None = None,
     ) -> list[Finding]:
         query = "SELECT * FROM findings WHERE 1=1"
         params: list[Any] = []
@@ -327,6 +333,15 @@ class JsonlStore(Store):
         if severity is not None:
             query += " AND severity = ?"
             params.append(severity)
+        if actor is not None:
+            query += " AND json_extract(metadata, '$.actor') LIKE ?"
+            params.append(f"%{actor}%")
+        if detector is not None:
+            query += " AND detector = ?"
+            params.append(detector)
+        if since is not None:
+            query += " AND timestamp >= ?"
+            params.append(since.isoformat())
 
         query += " ORDER BY timestamp ASC"
 

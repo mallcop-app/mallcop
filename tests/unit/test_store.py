@@ -365,6 +365,74 @@ class TestJsonlStoreFindings:
         assert len(results) == 1
         assert results[0].id == "fnd_persist"
 
+    def test_query_findings_by_actor(self, tmp_path: Path) -> None:
+        """Filter findings by actor stored in metadata."""
+        store = JsonlStore(tmp_path)
+        now = _utcnow()
+        f1 = _make_finding(id="fnd_a1", metadata={"actor": "alice@example.com"})
+        f2 = _make_finding(id="fnd_a2", metadata={"actor": "bob@example.com"})
+        f3 = _make_finding(id="fnd_a3", metadata={})
+        store.append_findings([f1, f2, f3])
+
+        results = store.query_findings(actor="alice@example.com")
+        assert len(results) == 1
+        assert results[0].id == "fnd_a1"
+
+    def test_query_findings_by_detector(self, tmp_path: Path) -> None:
+        """Filter findings by detector name."""
+        store = JsonlStore(tmp_path)
+        f1 = _make_finding(id="fnd_d1", detector="new-actor")
+        f2 = _make_finding(id="fnd_d2", detector="priv-escalation")
+        store.append_findings([f1, f2])
+
+        results = store.query_findings(detector="new-actor")
+        assert len(results) == 1
+        assert results[0].id == "fnd_d1"
+
+    def test_query_findings_by_since(self, tmp_path: Path) -> None:
+        """Filter findings by timestamp >= since."""
+        store = JsonlStore(tmp_path)
+        old_time = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        new_time = datetime(2026, 3, 10, tzinfo=timezone.utc)
+        f1 = _make_finding(id="fnd_old", timestamp=old_time)
+        f2 = _make_finding(id="fnd_new", timestamp=new_time)
+        store.append_findings([f1, f2])
+
+        cutoff = datetime(2026, 3, 1, tzinfo=timezone.utc)
+        results = store.query_findings(since=cutoff)
+        assert len(results) == 1
+        assert results[0].id == "fnd_new"
+
+    def test_query_findings_combined_filters(self, tmp_path: Path) -> None:
+        """Multiple filter params combine with AND logic."""
+        store = JsonlStore(tmp_path)
+        now = _utcnow()
+        f1 = _make_finding(
+            id="fnd_match",
+            detector="new-actor",
+            metadata={"actor": "alice@example.com"},
+            status=FindingStatus.OPEN,
+        )
+        f2 = _make_finding(
+            id="fnd_wrong_det",
+            detector="priv-escalation",
+            metadata={"actor": "alice@example.com"},
+            status=FindingStatus.OPEN,
+        )
+        f3 = _make_finding(
+            id="fnd_wrong_actor",
+            detector="new-actor",
+            metadata={"actor": "bob@example.com"},
+            status=FindingStatus.OPEN,
+        )
+        store.append_findings([f1, f2, f3])
+
+        results = store.query_findings(
+            actor="alice@example.com", detector="new-actor"
+        )
+        assert len(results) == 1
+        assert results[0].id == "fnd_match"
+
 
 class TestJsonlStoreCheckpoints:
     def test_set_and_get_checkpoint(self, tmp_path: Path) -> None:

@@ -39,6 +39,35 @@ def list_findings(
     return [f.to_dict() for f in findings[:limit]]
 
 
+@tool(name="search-findings", description="Search findings by actor, detector, or time range", permission="read")
+def search_findings(
+    context: ToolContext,
+    actor: str | None = None,
+    detector: str | None = None,
+    since: str | None = None,
+    status: str | None = None,
+    limit: int = 50,
+) -> list[dict[str, Any]]:
+    """Search findings with flexible filters.
+
+    Use this to find related findings — e.g., other findings for the same
+    actor, or recent findings from the same detector.
+    """
+    store = context.store
+    since_dt = None
+    if since:
+        from datetime import datetime as _dt
+
+        since_dt = _dt.fromisoformat(since)
+    findings = store.query_findings(
+        status=status,
+        actor=actor,
+        detector=detector,
+        since=since_dt,
+    )
+    return [f.to_dict() for f in findings[:limit]]
+
+
 @tool(name="resolve-finding", description="Resolve or escalate a finding with a reason. action must be 'resolved' or 'escalated'.", permission="read")
 def resolve_finding(
     context: ToolContext,
