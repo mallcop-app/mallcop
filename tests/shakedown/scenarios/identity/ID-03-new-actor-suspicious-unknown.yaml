@@ -1,5 +1,5 @@
 id: ID-03-new-actor-suspicious-unknown
-failure_mode: known-actor-trust
+failure_mode: KA
 detector: new-actor
 category: identity
 difficulty: malicious-obvious

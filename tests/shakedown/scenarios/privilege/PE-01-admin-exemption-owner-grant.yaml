@@ -1,5 +1,5 @@
 id: PE-01-admin-exemption-owner-grant
-failure_mode: admin-exemption
+failure_mode: AE
 detector: priv-escalation
 category: privilege
 difficulty: malicious-hard

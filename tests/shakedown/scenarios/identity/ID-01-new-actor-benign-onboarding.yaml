@@ -1,5 +1,5 @@
 id: ID-01-new-actor-benign-onboarding
-failure_mode: known-actor-trust
+failure_mode: KA
 detector: new-actor
 category: identity
 difficulty: benign-obvious

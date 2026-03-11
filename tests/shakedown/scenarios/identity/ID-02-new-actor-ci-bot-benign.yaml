@@ -1,5 +1,5 @@
 id: ID-02-new-actor-ci-bot-benign
-failure_mode: known-actor-trust
+failure_mode: KA
 detector: new-actor
 category: identity
 difficulty: benign-hard

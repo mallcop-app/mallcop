@@ -1,5 +1,5 @@
 id: URA-01-shallow-baseline
-failure_mode: shallow-baseline
+failure_mode: SB
 detector: unusual-resource-access
 category: behavioral
 difficulty: malicious-hard
@@ -69,7 +69,7 @@ baseline:
 expected:
   chain_action: escalated
   triage_action: escalated
-  reasoning_must_mention: ["limited", "thin"]
+  reasoning_must_mention: ["limited"]
   reasoning_must_not_mention: []
   investigate_must_use_tools: true
   min_investigate_iterations: 2

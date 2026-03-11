@@ -1,5 +1,5 @@
 id: VA-01-deploy-burst
-failure_mode: competing-signals
+failure_mode: CS
 detector: volume-anomaly
 category: behavioral
 difficulty: benign-obvious

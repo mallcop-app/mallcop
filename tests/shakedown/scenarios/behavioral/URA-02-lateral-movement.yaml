@@ -1,5 +1,5 @@
 id: URA-02-lateral-movement
-failure_mode: competing-signals
+failure_mode: CS
 detector: unusual-resource-access
 category: behavioral
 difficulty: malicious-obvious

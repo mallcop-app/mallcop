@@ -1,5 +1,5 @@
 id: UT-05-aitm-proxy
-failure_mode: known-actor-trust
+failure_mode: KA
 detector: unusual-timing
 category: behavioral
 difficulty: malicious-hard

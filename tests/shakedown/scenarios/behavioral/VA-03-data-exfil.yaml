@@ -1,5 +1,5 @@
 id: VA-03-data-exfil
-failure_mode: known-actor-trust
+failure_mode: KA
 detector: volume-anomaly
 category: behavioral
 difficulty: malicious-hard

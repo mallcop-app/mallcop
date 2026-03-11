@@ -1,5 +1,5 @@
 id: VA-02-month-end-batch
-failure_mode: competing-signals
+failure_mode: CS
 detector: volume-anomaly
 category: behavioral
 difficulty: benign-hard

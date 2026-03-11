@@ -1,5 +1,5 @@
 id: AC-02-external-access-admin-exemption
-failure_mode: admin-exemption
+failure_mode: AE
 detector: new-external-access
 category: access
 difficulty: malicious-hard

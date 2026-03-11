@@ -1,5 +1,5 @@
 id: UT-04-admin-travel
-failure_mode: competing-signals
+failure_mode: CS
 detector: unusual-timing
 category: behavioral
 difficulty: benign-hard

@@ -1,5 +1,5 @@
 id: URA-03-admin-new-resource
-failure_mode: admin-exception
+failure_mode: AE
 detector: unusual-resource-access
 category: behavioral
 difficulty: malicious-hard

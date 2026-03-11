@@ -1,5 +1,5 @@
 id: UT-01-competing-signals
-failure_mode: competing-signals
+failure_mode: CS
 detector: unusual-timing
 category: behavioral
 difficulty: malicious-hard

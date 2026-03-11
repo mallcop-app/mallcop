@@ -1,5 +1,5 @@
 id: ID-04-new-actor-ambiguous
-failure_mode: known-actor-trust
+failure_mode: KA
 detector: new-actor
 category: identity
 difficulty: ambiguous

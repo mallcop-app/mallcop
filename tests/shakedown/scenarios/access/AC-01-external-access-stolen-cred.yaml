@@ -1,5 +1,5 @@
 id: AC-01-external-access-stolen-cred
-failure_mode: known-actor-trust
+failure_mode: KA
 detector: new-external-access
 category: access
 difficulty: malicious-hard

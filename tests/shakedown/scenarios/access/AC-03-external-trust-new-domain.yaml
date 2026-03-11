@@ -1,5 +1,5 @@
 id: AC-03-external-trust-new-domain
-failure_mode: known-actor-trust
+failure_mode: KA
 detector: new-external-access
 category: access
 difficulty: malicious-obvious

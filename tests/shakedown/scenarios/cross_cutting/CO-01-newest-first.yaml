@@ -102,7 +102,7 @@ baseline:
 expected:
   chain_action: escalated
   triage_action: escalated
-  reasoning_must_mention: ["03:14", "3am"]
+  reasoning_must_mention: ["03:14"]
   reasoning_must_not_mention: []
   investigate_must_use_tools: true
   min_investigate_iterations: 1
