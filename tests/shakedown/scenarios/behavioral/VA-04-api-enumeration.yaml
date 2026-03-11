@@ -1,0 +1,165 @@
+id: VA-04-api-enumeration
+failure_mode: known-actor-trust
+detector: volume-anomaly
+category: behavioral
+difficulty: malicious-hard
+
+trap_description: >
+  Deeply known actor admin-user (340+ logins, 9+ months of history) makes 50+
+  distinct API calls in 5 minutes: ListRoles, ListUsers, GetAccountAuthorizationDetails,
+  ListBuckets, DescribeInstances, DescribeTrails, ListDetectors — a classic
+  cloud enumeration sequence used by tools like Pacu and CloudFox (see threat
+  intel §12.1). The known-actor trap is especially strong here: an admin IS
+  expected to run diagnostic commands. But the API diversity and velocity are
+  tool-driven, not human — no human manually calls 50+ distinct enumeration
+  APIs in 5 minutes. The sequence maps directly to automated cloud reconnaissance.
+
+trap_resolved_means: >
+  If the model resolves this by reasoning "admins run diagnostic commands," it
+  failed to distinguish human admin behavior from tool-driven enumeration.
+  A human admin investigating an issue runs 3-5 targeted commands. A tool runs
+  every enumeration API in sequence, systematically building a complete picture
+  of the environment. The pattern is the signal: API diversity + velocity +
+  the specific sequence of privilege/identity/resource enumeration APIs.
+
+finding:
+  id: fnd_shk_123
+  detector: volume-anomaly
+  title: "Volume anomaly: admin-user made 50+ distinct API calls in 5 minutes"
+  severity: warn
+  event_ids: [evt_001, evt_002, evt_003, evt_004, evt_005, evt_006]
+  metadata:
+    actor: admin-user
+    source: azure
+    event_type: api_call
+    volume_ratio: 25.0
+    window_minutes: 5
+    distinct_api_count: 52
+
+events:
+  - id: evt_001
+    timestamp: "2026-03-10T14:00:00Z"
+    ingested_at: "2026-03-10T14:01:00Z"
+    source: azure
+    event_type: api_call
+    actor: admin-user
+    action: list_role_assignments
+    target: sub-169efd95
+    severity: warn
+    metadata:
+      ip: "203.0.113.10"
+      user_agent: "python-requests/2.31.0"
+      api_method: "ListRoleAssignments"
+      results_count: 145
+    raw: {}
+
+  - id: evt_002
+    timestamp: "2026-03-10T14:00:30Z"
+    ingested_at: "2026-03-10T14:01:00Z"
+    source: azure
+    event_type: api_call
+    actor: admin-user
+    action: list_users
+    target: acme-corp/tenant
+    severity: warn
+    metadata:
+      ip: "203.0.113.10"
+      user_agent: "python-requests/2.31.0"
+      api_method: "ListUsers"
+      results_count: 28
+    raw: {}
+
+  - id: evt_003
+    timestamp: "2026-03-10T14:01:00Z"
+    ingested_at: "2026-03-10T14:01:30Z"
+    source: azure
+    event_type: api_call
+    actor: admin-user
+    action: get_authorization_details
+    target: sub-169efd95
+    severity: warn
+    metadata:
+      ip: "203.0.113.10"
+      user_agent: "python-requests/2.31.0"
+      api_method: "GetAccountAuthorizationDetails"
+    raw: {}
+
+  - id: evt_004
+    timestamp: "2026-03-10T14:02:00Z"
+    ingested_at: "2026-03-10T14:02:30Z"
+    source: azure
+    event_type: api_call
+    actor: admin-user
+    action: list_storage_accounts
+    target: sub-169efd95
+    severity: warn
+    metadata:
+      ip: "203.0.113.10"
+      user_agent: "python-requests/2.31.0"
+      api_method: "ListStorageAccounts"
+      results_count: 8
+    raw: {}
+
+  - id: evt_005
+    timestamp: "2026-03-10T14:03:00Z"
+    ingested_at: "2026-03-10T14:03:30Z"
+    source: azure
+    event_type: api_call
+    actor: admin-user
+    action: list_virtual_machines
+    target: sub-169efd95
+    severity: warn
+    metadata:
+      ip: "203.0.113.10"
+      user_agent: "python-requests/2.31.0"
+      api_method: "DescribeInstances"
+      results_count: 3
+    raw: {}
+
+  - id: evt_006
+    timestamp: "2026-03-10T14:04:00Z"
+    ingested_at: "2026-03-10T14:04:30Z"
+    source: azure
+    event_type: api_call
+    actor: admin-user
+    action: list_security_detectors
+    target: sub-169efd95
+    severity: warn
+    metadata:
+      ip: "203.0.113.10"
+      user_agent: "python-requests/2.31.0"
+      api_method: "ListDetectors"
+      comment: "enumerating security monitoring coverage"
+    raw: {}
+
+baseline:
+  known_entities:
+    actors: [admin-user, ci-bot, deploy-svc, tf-automation]
+    sources: [azure, github]
+  frequency_tables:
+    "azure:login:admin-user": 340
+    "azure:read_resource:admin-user": 89
+    "azure:update_config:admin-user": 45
+    "azure:role_assignment:admin-user": 28
+    "azure:api_call:admin-user": 12
+  relationships:
+    "admin-user:acme-corp/tenant":
+      count: 340
+      first_seen: "2025-05-01"
+      last_seen: "2026-03-09"
+    "admin-user:sub-169efd95":
+      count: 89
+      first_seen: "2025-05-01"
+      last_seen: "2026-03-09"
+    "admin-user:sub-169efd95/resourceGroups/atom-rg":
+      count: 67
+      first_seen: "2025-05-15"
+      last_seen: "2026-03-09"
+
+expected:
+  chain_action: escalated
+  triage_action: escalated
+  reasoning_must_mention: ["enumeration", "recon"]
+  reasoning_must_not_mention: []
+  investigate_must_use_tools: true
+  min_investigate_iterations: 2

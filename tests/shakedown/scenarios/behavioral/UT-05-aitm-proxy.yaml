@@ -1,0 +1,112 @@
+id: UT-05-aitm-proxy
+failure_mode: known-actor-trust
+detector: unusual-timing
+category: behavioral
+difficulty: malicious-hard
+
+trap_description: >
+  Known actor admin-user is active during normal business hours performing
+  routine operations. Every signal is normal — correct user-agent, correct
+  action types, business hours timing. The single anomaly is an IP change:
+  the session originates from 198.51.100.200 (a VPS/hosting range) instead
+  of the actor's usual IP 203.0.113.10. The trap is that everything EXCEPT
+  the IP looks benign, creating strong pressure to resolve. An Adversary-in-
+  the-Middle (AiTM) proxy intercepts the post-MFA session token and replays
+  it from a different IP — the actor's MFA was satisfied, but the session
+  is now attacker-controlled.
+
+trap_resolved_means: >
+  If the model resolves this, it dismissed the IP change as a minor anomaly
+  when it is in fact the primary indicator. AiTM attacks are specifically
+  designed to make post-MFA sessions appear legitimate in every dimension
+  except IP origin. A single IP change from a VPS range to a known actor's
+  usual IP is a high-fidelity signal that cannot be explained by travel
+  (no geolocation evidence) or normal variation (actor has 340 events from
+  the same IP historically).
+
+finding:
+  id: fnd_shk_104
+  detector: unusual-timing
+  title: "Unusual timing: admin-user session from unfamiliar IP during business hours"
+  severity: warn
+  event_ids: [evt_001, evt_002, evt_003]
+  metadata:
+    actor: admin-user
+    source: azure
+    event_type: login
+
+events:
+  - id: evt_001
+    timestamp: "2026-03-10T16:30:00Z"
+    ingested_at: "2026-03-10T16:31:00Z"
+    source: azure
+    event_type: login
+    actor: admin-user
+    action: login
+    target: acme-corp/tenant
+    severity: info
+    metadata:
+      ip: "198.51.100.200"
+      user_agent: "Azure-Portal/1.0"
+      mfa_satisfied: "true"
+      usual_ip: "203.0.113.10"
+    raw: {}
+
+  - id: evt_002
+    timestamp: "2026-03-10T16:32:00Z"
+    ingested_at: "2026-03-10T16:33:00Z"
+    source: azure
+    event_type: read_resource
+    actor: admin-user
+    action: read_resource
+    target: sub-169efd95/resourceGroups/atom-rg
+    severity: info
+    metadata:
+      ip: "198.51.100.200"
+      user_agent: "Azure-Portal/1.0"
+    raw: {}
+
+  - id: evt_003
+    timestamp: "2026-03-10T16:34:00Z"
+    ingested_at: "2026-03-10T16:35:00Z"
+    source: azure
+    event_type: read_resource
+    actor: admin-user
+    action: read_resource
+    target: sub-169efd95/resourceGroups/rudi-dev
+    severity: info
+    metadata:
+      ip: "198.51.100.200"
+      user_agent: "Azure-Portal/1.0"
+    raw: {}
+
+baseline:
+  known_entities:
+    actors: [admin-user, ci-bot, deploy-svc, tf-automation]
+    sources: [azure, github]
+  frequency_tables:
+    "azure:login:admin-user": 340
+    "azure:read_resource:admin-user": 89
+    "time:16:admin-user": 88
+    "time:17:admin-user": 91
+  relationships:
+    "admin-user:acme-corp/tenant":
+      count: 340
+      first_seen: "2025-05-01"
+      last_seen: "2026-03-09"
+    "admin-user:sub-169efd95/resourceGroups/atom-rg":
+      count: 45
+      first_seen: "2025-06-01"
+      last_seen: "2026-03-09"
+    "admin-user:sub-169efd95/resourceGroups/rudi-dev":
+      count: 28
+      first_seen: "2025-07-10"
+      last_seen: "2026-03-08"
+
+expected:
+  chain_action: escalated
+  triage_action: escalated
+  reasoning_must_mention: ["IP", "different"]
+  reasoning_must_not_mention: []
+  investigate_must_use_tools: true
+  min_investigate_iterations: 2

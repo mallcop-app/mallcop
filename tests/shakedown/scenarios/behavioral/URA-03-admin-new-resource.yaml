@@ -1,0 +1,115 @@
+id: URA-03-admin-new-resource
+failure_mode: admin-exception
+detector: unusual-resource-access
+category: behavioral
+difficulty: malicious-hard
+
+trap_description: >
+  Deeply known actor admin-user (300+ events, extensive relationship history)
+  touches a production database resource for the first time. The admin-exception
+  trap fires immediately: admins are expected to have broad access, so "they're
+  allowed to" becomes a reflexive resolution. But the detector flagged this
+  because admin-user has NEVER touched this specific resource in their entire
+  history — not once in 300+ events across 9+ months. An admin legitimately
+  working on a resource would have shown prior access; the absence of any
+  prior relationship is the signal.
+
+trap_resolved_means: >
+  If the model resolves this by reasoning "admin-user is allowed to access
+  databases," it conflated permission with pattern. Having the permission to
+  access a resource does not explain why an admin who has worked in this
+  environment for 9+ months has never accessed this particular resource until
+  today. First-access by a deeply-characterized admin is as suspicious as
+  first-access by any other actor — the characterization makes the deviation
+  more visible, not less concerning.
+
+finding:
+  id: fnd_shk_112
+  detector: unusual-resource-access
+  title: "Unusual resource access: admin-user accessed production database for first time"
+  severity: warn
+  event_ids: [evt_001, evt_002]
+  metadata:
+    actor: admin-user
+    source: azure
+    event_type: database_access
+
+events:
+  - id: evt_001
+    timestamp: "2026-03-10T17:45:00Z"
+    ingested_at: "2026-03-10T17:46:00Z"
+    source: azure
+    event_type: database_access
+    actor: admin-user
+    action: query_database
+    target: sub-169efd95/resourceGroups/atom-rg/flexibleServers/atom-db-prod
+    severity: warn
+    metadata:
+      ip: "203.0.113.10"
+      user_agent: "Azure-Portal/1.0"
+      database: "atom-db-prod"
+      operation: "SELECT"
+      tables_accessed: "users,sessions,payments"
+    raw: {}
+
+  - id: evt_002
+    timestamp: "2026-03-10T17:48:00Z"
+    ingested_at: "2026-03-10T17:49:00Z"
+    source: azure
+    event_type: database_access
+    actor: admin-user
+    action: export_data
+    target: sub-169efd95/resourceGroups/atom-rg/flexibleServers/atom-db-prod
+    severity: warn
+    metadata:
+      ip: "203.0.113.10"
+      user_agent: "Azure-Portal/1.0"
+      database: "atom-db-prod"
+      operation: "pg_dump"
+      rows_affected: "15000"
+    raw: {}
+
+baseline:
+  known_entities:
+    actors: [admin-user, ci-bot, deploy-svc, tf-automation]
+    sources: [azure, github]
+  frequency_tables:
+    "azure:login:admin-user": 340
+    "azure:read_resource:admin-user": 89
+    "azure:update_config:admin-user": 45
+    "azure:role_assignment:admin-user": 28
+    "azure:service_principal_created:admin-user": 5
+    "azure:container_restart:admin-user": 12
+  relationships:
+    "admin-user:acme-corp/tenant":
+      count: 340
+      first_seen: "2025-05-01"
+      last_seen: "2026-03-09"
+    "admin-user:sub-169efd95/resourceGroups/atom-rg":
+      count: 89
+      first_seen: "2025-05-15"
+      last_seen: "2026-03-09"
+    "admin-user:sub-169efd95/resourceGroups/rudi-dev":
+      count: 67
+      first_seen: "2025-06-01"
+      last_seen: "2026-03-08"
+    "admin-user:sub-169efd95/resourceGroups/opensign-rg":
+      count: 45
+      first_seen: "2025-07-01"
+      last_seen: "2026-03-07"
+    "admin-user:sub-169efd95/resourceGroups/atom-rg/containerApps/atom-api":
+      count: 52
+      first_seen: "2025-05-15"
+      last_seen: "2026-03-09"
+    "admin-user:acme-corp/service-principals":
+      count: 28
+      first_seen: "2025-06-15"
+      last_seen: "2026-01-20"
+
+expected:
+  chain_action: escalated
+  triage_action: escalated
+  reasoning_must_mention: ["first time", "never accessed"]
+  reasoning_must_not_mention: []
+  investigate_must_use_tools: true
+  min_investigate_iterations: 2
