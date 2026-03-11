@@ -1,0 +1,50 @@
+id: TEST-001-basic
+failure_mode: known-actor-trust
+detector: unusual-timing
+category: behavioral
+difficulty: malicious-hard
+trap_description: "Test trap"
+trap_resolved_means: "Test resolved means"
+
+finding:
+  id: fnd_test_001
+  detector: unusual-timing
+  title: "Test finding"
+  severity: warn
+  event_ids: [evt_001]
+  metadata:
+    actor: admin-user
+    source: azure
+
+events:
+  - id: evt_001
+    timestamp: "2026-03-10T03:14:00Z"
+    ingested_at: "2026-03-10T03:15:00Z"
+    source: azure
+    event_type: role_assignment
+    actor: admin-user
+    action: add_role_assignment
+    target: sub-169efd95/resourceGroups/atom-rg
+    severity: warn
+    metadata:
+      ip: "203.0.113.10"
+    raw: {}
+
+baseline:
+  known_entities:
+    actors: [admin-user, ci-bot]
+    sources: [azure]
+  frequency_tables:
+    "azure:login:admin-user": 340
+  relationships:
+    "admin-user:sub-169efd95/resourceGroups/atom-rg":
+      count: 45
+      first_seen: "2025-06-01"
+      last_seen: "2026-03-09"
+
+expected:
+  chain_action: escalated
+  triage_action: escalated
+  reasoning_must_mention:
+    - "role_assignment"
+  investigate_must_use_tools: true
