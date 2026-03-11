@@ -6,6 +6,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
+from mallcop.actors.runtime import _TRIAGE_RESOLVABLE_DETECTORS
+
 
 class Verdict(Enum):
     PASS = "pass"
@@ -165,8 +167,6 @@ class ShakedownEvaluator:
         if wrong_triage:
             # Check if this is a policy issue (detector should be in resolvable set)
             # vs a prompt issue (triage prompt doesn't guide correctly)
-            from mallcop.actors.runtime import _TRIAGE_RESOLVABLE_DETECTORS
-
             if scenario.detector in _TRIAGE_RESOLVABLE_DETECTORS:
                 return FixTarget.RUNTIME_POLICY, (
                     f"Triage policy allows resolving {scenario.detector} "
