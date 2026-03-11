@@ -20,6 +20,10 @@ couldn't triage determine? What question remains unanswered?
 Use the tools to build a picture around the finding:
 - **search-events**: Look for related activity by the same actor in a
   wider time window. Was this part of a larger session or an isolated event?
+- **search-findings**: Check for other open or recent findings involving
+  the same actor, source IP, or target. Multiple low-severity findings
+  from the same actor in a short window may indicate a coordinated
+  campaign, not isolated incidents.
 - **check-baseline**: Check the actor's full history — what do they
   normally do? What targets do they normally touch?
 - **read-config**: Understand what connectors are active and what the
@@ -43,11 +47,26 @@ For each finding, work through these questions IN ORDER:
   expected user-agent, actions that require physical presence)
 - Are there indicators of compromise? (new IP, new device, impossible
   travel, off-hours activity with no business justification)
+- Could this be an authorized user acting maliciously? (insider threat)
+  Don't assume that because an action was performed by a legitimate
+  account with proper authorization, it was sanctioned. Ask: is there
+  a business justification for this specific action at this specific time?
 
 **Baseline questions:**
 - Has the actor done this SPECIFIC action before (not just "been active")?
 - Is the target resource one the actor has historically accessed?
 - Is the volume/frequency consistent with the actor's pattern?
+- Has this actor been flagged before? If prior findings were resolved as
+  benign, re-evaluate — context changes. A resolution from 30 days ago
+  does not make today's anomaly benign. Each incident must be judged on
+  its own evidence.
+
+### Step 3.5: Use connector-specific tools when available
+Some connectors provide investigation tools (e.g., `azure-get-sign-in-logs`,
+`aws-cloudtrail.query-events`). If these tools are in your tool list, use
+them — they provide source-specific context that general tools cannot.
+For example, Azure sign-in logs show IP, location, and MFA status for
+each authentication. This data is critical for credential theft assessment.
 
 ### Step 4: Reach a conclusion
 - **RESOLVED (benign)**: You found POSITIVE evidence of legitimacy —

@@ -10,6 +10,7 @@ tools:
   - baseline-stats
   - read-finding
   - search-events
+  - search-findings
   - read-config
   - annotate-finding
   - resolve-finding
