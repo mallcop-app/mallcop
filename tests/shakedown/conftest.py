@@ -22,7 +22,7 @@ def _build_llm_client(backend: str | None = None, model: str | None = None):
     if backend is None:
         backend = os.environ.get("SHAKEDOWN_BACKEND", "api")
     if model is None:
-        model = os.environ.get("SHAKEDOWN_MODEL", "haiku")
+        model = os.environ.get("SHAKEDOWN_MODEL", "sonnet")  # was "haiku"
 
     if backend == "claude-code":
         from mallcop.llm.claude_code import ClaudeCodeClient

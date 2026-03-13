@@ -65,11 +65,12 @@ class TestShakedownScenarios:
             judge_model="sonnet",
         )
 
-        assert grade.verdict != Verdict.FAIL, (
-            f"Scenario {scenario_id} FAILED:\n"
-            f"action_correct={grade.action_correct}\n"
-            f"reasoning_quality={grade.reasoning_quality}\n"
-            f"judge_reasoning={grade.judge_reasoning}"
+        assert grade.verdict == Verdict.PASS, (
+            f"{scenario_id}: {grade.verdict.value} "
+            f"(action_correct={grade.action_correct}, "
+            f"reasoning={grade.reasoning_quality}, "
+            f"investigation={grade.investigation_thoroughness}) "
+            f"- {grade.judge_reasoning}"
         )
 
     @pytest.mark.parametrize("scenario_id", _get_scenario_ids())
