@@ -239,7 +239,7 @@ class TestSearchEvents:
         ctx = ToolContext(store=store, connectors={}, config=MagicMock())
 
         search_events(ctx, query="admin", source="azure")
-        store.query_events.assert_called_once_with(source="azure", limit=100)
+        store.query_events.assert_called_once_with(source="azure", actor=None, limit=100)
 
 
 # ---------------------------------------------------------------------------

@@ -585,17 +585,15 @@ class TestOutputValidation:
 
 
 class TestTriageResolutionPolicy:
-    """Triage cannot resolve behavioral/access/privilege/structural detectors.
+    """The runtime does NOT enforce a triage resolution policy.
 
-    Only identity (new-actor) detectors can be resolved at triage. Everything
-    else must escalate to investigation. This prevents the "rubber stamp"
-    problem where triage resolves findings because the actor is known, even
-    when the detector fired on anomalous behavior (which a stolen credential
-    would also produce).
+    Resolution criteria are defined in triage/POST.md (prompt-based guidance).
+    The runtime accepts whatever the triage LLM decides for any detector type.
+    The shakedown harness and evaluator verify prompt-based compliance.
     """
 
-    def _run_triage_resolve(self, detector: str) -> ActorResolution:
-        """Simulate triage resolving a finding from the given detector."""
+    def _run_triage(self, detector: str, action: str) -> ActorResolution:
+        """Simulate triage with the given LLM decision for the given detector."""
         finding = Finding(
             id="fnd_test",
             timestamp=datetime(2026, 3, 6, 12, 0, 0, tzinfo=timezone.utc),
@@ -627,7 +625,7 @@ class TestTriageResolutionPolicy:
                         name="resolve-finding",
                         arguments={
                             "finding_id": "fnd_test",
-                            "action": "resolved",
+                            "action": action,
                             "reason": "Known actor, normal activity",
                         },
                     )],
@@ -648,58 +646,33 @@ class TestTriageResolutionPolicy:
         result = runtime.run(finding, "system prompt")
         return result.resolution
 
-    def test_triage_can_resolve_new_actor(self):
-        """Triage CAN resolve new-actor (identity detector)."""
-        resolution = self._run_triage_resolve("new-actor")
-        assert resolution.action == ResolutionAction.RESOLVED
+    def test_triage_resolve_accepted_for_any_detector(self):
+        """Runtime accepts triage resolve for any detector (no override)."""
+        for detector in [
+            "new-actor", "new-external-access", "unusual-timing",
+            "priv-escalation", "log-format-drift", "injection-probe",
+            "auth-failure-burst", "volume-anomaly", "unusual-resource-access",
+        ]:
+            resolution = self._run_triage(detector, "resolved")
+            assert resolution.action == ResolutionAction.RESOLVED, (
+                f"Expected RESOLVED for {detector}, got {resolution.action}"
+            )
 
-    def test_triage_cannot_resolve_log_format_drift(self):
-        """Triage CANNOT resolve log-format-drift — requires parser adaptation."""
-        resolution = self._run_triage_resolve("log-format-drift")
-        assert resolution.action == ResolutionAction.ESCALATED
-        assert "Original triage assessment" in resolution.reason
-        assert "require investigation" in resolution.reason
+    def test_triage_escalate_accepted_for_any_detector(self):
+        """Runtime accepts triage escalate for any detector."""
+        for detector in [
+            "new-actor", "new-external-access", "unusual-timing",
+            "priv-escalation", "log-format-drift",
+        ]:
+            resolution = self._run_triage(detector, "escalated")
+            assert resolution.action == ResolutionAction.ESCALATED, (
+                f"Expected ESCALATED for {detector}, got {resolution.action}"
+            )
 
-    def test_triage_cannot_resolve_new_external_access(self):
-        """Triage CANNOT resolve new-external-access (access grant detector)."""
-        resolution = self._run_triage_resolve("new-external-access")
-        assert resolution.action == ResolutionAction.ESCALATED
-        assert "require investigation" in resolution.reason
-
-    def test_triage_cannot_resolve_unusual_timing(self):
-        """Triage CANNOT resolve unusual-timing (behavioral detector)."""
-        resolution = self._run_triage_resolve("unusual-timing")
-        assert resolution.action == ResolutionAction.ESCALATED
-
-    def test_triage_cannot_resolve_priv_escalation(self):
-        """Triage CANNOT resolve priv-escalation (privilege detector)."""
-        resolution = self._run_triage_resolve("priv-escalation")
-        assert resolution.action == ResolutionAction.ESCALATED
-
-    def test_triage_cannot_resolve_unusual_resource_access(self):
-        """Triage CANNOT resolve unusual-resource-access (behavioral)."""
-        resolution = self._run_triage_resolve("unusual-resource-access")
-        assert resolution.action == ResolutionAction.ESCALATED
-
-    def test_triage_cannot_resolve_volume_anomaly(self):
-        """Triage CANNOT resolve volume-anomaly (behavioral)."""
-        resolution = self._run_triage_resolve("volume-anomaly")
-        assert resolution.action == ResolutionAction.ESCALATED
-
-    def test_triage_cannot_resolve_auth_failure_burst(self):
-        """Triage CANNOT resolve auth-failure-burst (auth pattern)."""
-        resolution = self._run_triage_resolve("auth-failure-burst")
-        assert resolution.action == ResolutionAction.ESCALATED
-
-    def test_triage_cannot_resolve_injection_probe(self):
-        """Triage CANNOT resolve injection-probe (signature detector)."""
-        resolution = self._run_triage_resolve("injection-probe")
-        assert resolution.action == ResolutionAction.ESCALATED
-
-    def test_triage_override_preserves_original_reason(self):
-        """When triage is overridden, the original triage assessment is preserved."""
-        resolution = self._run_triage_resolve("new-external-access")
-        assert "Known actor, normal activity" in resolution.reason
+    def test_triage_reason_preserved_unchanged(self):
+        """The LLM's reason is passed through without modification."""
+        resolution = self._run_triage("new-external-access", "resolved")
+        assert resolution.reason == "Known actor, normal activity"
 
     def test_investigate_can_resolve_any_detector(self):
         """Investigate actor is NOT subject to triage resolution policy."""

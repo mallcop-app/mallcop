@@ -42,20 +42,21 @@ def search_events(
     context: ToolContext,
     query: str = "",
     source: str | None = None,
+    actor: str | None = None,
     limit: int = 100,
 ) -> list[dict[str, Any]]:
     """Search events with text matching across actor, target, action, event_type.
 
-    Queries events from the store (with optional source filter), then filters
+    Queries events from the store (with optional source/actor filter), then filters
     results where query appears (case-insensitive) in any searchable field.
     """
     store = context.store
-    events = store.query_events(source=source, limit=limit)
+    events = store.query_events(source=source, actor=actor, limit=limit)
     q = query.lower()
 
     results: list[dict[str, Any]] = []
     for evt in events:
         searchable = f"{evt.actor} {evt.target} {evt.action} {evt.event_type}".lower()
-        if q in searchable:
+        if not q or q in searchable:
             results.append(evt.to_dict())
     return results

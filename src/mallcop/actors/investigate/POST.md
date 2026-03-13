@@ -68,6 +68,29 @@ them — they provide source-specific context that general tools cannot.
 For example, Azure sign-in logs show IP, location, and MFA status for
 each authentication. This data is critical for credential theft assessment.
 
+### Structural detector findings (log-format-drift)
+
+Log-format-drift findings represent parser breakage — the log format has
+changed and events may be going unanalyzed. This is a security blind spot.
+
+- **ALWAYS escalate log-format-drift findings.** Never resolve them.
+- A drifted parser requires human intervention to update parsing rules.
+- Even if the drift appears benign (e.g., a known service update), the
+  parser gap means events are being missed until the parser is fixed.
+- Include the unmatched ratio, affected parser, and drift details in your
+  escalation reason.
+
+### Travel and location context
+
+When events include location data (IP geolocation, sign-in location):
+- Check if the actor's location is consistent with their baseline.
+- Look for travel indicators: login from a new city/country followed by
+  activity. Business travel is common and legitimate.
+- "Impossible travel" (two logins far apart in a short time) is suspicious.
+- If an actor is known to travel (e.g., consultant, executive), activity
+  from a new-but-plausible location with consistent user-agent/device is
+  likely legitimate.
+
 ### Step 4: Reach a conclusion
 - **RESOLVED (benign)**: You found POSITIVE evidence of legitimacy —
   not just absence of suspicion. Document what evidence convinced you.

@@ -23,6 +23,7 @@ env/
 .pytest_cache/
 .coverage
 htmlcov/
+test-runs/
 
 # Mallcop operational artifacts (generated at runtime, not source)
 baseline.json

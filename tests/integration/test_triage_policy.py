@@ -1,15 +1,15 @@
-"""Integration test: triage resolution policy through the full escalation pipeline.
+"""Integration test: triage prompt-based resolution policy.
 
-Verifies that the triage agent cannot resolve behavioral, access, privilege,
-auth, structural, or signature detectors — only identity (new-actor)
-detectors. This is enforced at the runtime level, not just by prompting.
+Verifies that:
+1. _TRIAGE_RESOLVABLE_DETECTORS is still exported (shakedown evaluator uses it)
+2. The runtime does NOT enforce a policy override — triage LLM decisions
+   are respected for all detector types
+3. The triage POST.md contains evidence-based criteria for each detector
+   category, including the credential theft test
 
-Tests exercise the full path: run_escalate() → run_batch() → actor_runner()
-→ ActorRuntime.run() → resolve-finding interception → policy check.
-
-The "credential theft test": a stolen credential IS a known actor. If triage
-resolves a finding just because the actor is known, it will miss stolen
-credential attacks. The policy prevents this for all behavioral detectors.
+The earlier runtime-enforcement model has been replaced with prompt-based
+guidance. The triage POST.md now provides per-category RESOLVE/ESCALATE
+criteria instead of a hard runtime block.
 """
 
 from __future__ import annotations
@@ -60,49 +60,8 @@ def _make_finding(
     )
 
 
-class TriageResolvesLLM(LLMClient):
-    """Mock LLM that always tries to resolve at triage, escalates at investigate."""
-
-    def __init__(self):
-        self.calls: list[dict[str, Any]] = []
-
-    def chat(self, model, system_prompt, messages, tools):
-        self.calls.append({"model": model, "system_prompt": system_prompt[:50]})
-        # Determine which actor is calling based on system prompt content
-        if "Level-1" in system_prompt or "triage" in system_prompt.lower()[:100]:
-            # Triage always tries to resolve — the policy should override this
-            return LLMResponse(
-                tool_calls=[ToolCall(
-                    name="resolve-finding",
-                    arguments={
-                        "finding_id": "fnd_001",
-                        "action": "resolved",
-                        "reason": "Known actor cmbaron, normal activity pattern",
-                    },
-                )],
-                resolution=None,
-                tokens_used=100,
-                raw_resolution=None,
-            )
-        else:
-            # Investigate actor resolves with actual evidence
-            return LLMResponse(
-                tool_calls=[ToolCall(
-                    name="resolve-finding",
-                    arguments={
-                        "finding_id": "fnd_001",
-                        "action": "resolved",
-                        "reason": "Verified: part of scheduled org migration by admin",
-                    },
-                )],
-                resolution=None,
-                tokens_used=200,
-                raw_resolution=None,
-            )
-
-
-class TriageAndInvestigateBothResolveLLM(LLMClient):
-    """Mock LLM where both triage and investigate try to resolve."""
+class AlwaysResolveLLM(LLMClient):
+    """Mock LLM that always resolves findings."""
 
     def __init__(self):
         self.calls: list[dict[str, Any]] = []
@@ -126,11 +85,55 @@ class TriageAndInvestigateBothResolveLLM(LLMClient):
         )
 
 
-# ─── Tests: Chain walk with build_actor_runner ──────────────────────
+class AlwaysEscalateLLM(LLMClient):
+    """Mock LLM that always escalates findings."""
+
+    def __init__(self):
+        self.calls: list[dict[str, Any]] = []
+        self._call_count = 0
+
+    def chat(self, model, system_prompt, messages, tools):
+        self._call_count += 1
+        self.calls.append({"call": self._call_count, "model": model})
+        return LLMResponse(
+            tool_calls=[ToolCall(
+                name="resolve-finding",
+                arguments={
+                    "finding_id": "fnd_001",
+                    "action": "escalated",
+                    "reason": f"Escalated on call {self._call_count}",
+                },
+            )],
+            resolution=None,
+            tokens_used=100,
+            raw_resolution=None,
+        )
 
 
-class TestTriagePolicyChainWalk:
-    """Test triage policy through the full chain walker."""
+# ─── Tests: Constant export (evaluator compatibility) ─────────────
+
+
+class TestTriageResolvableDetectorsExport:
+    """_TRIAGE_RESOLVABLE_DETECTORS is still exported for shakedown evaluator."""
+
+    def test_constant_exported(self):
+        """The constant is importable from runtime (evaluator depends on it)."""
+        assert _TRIAGE_RESOLVABLE_DETECTORS is not None
+
+    def test_constant_is_frozenset(self):
+        """The constant is a frozenset."""
+        assert isinstance(_TRIAGE_RESOLVABLE_DETECTORS, frozenset)
+
+    def test_resolvable_detectors_contains_new_actor(self):
+        """new-actor is in the set (identity detector, triage can resolve)."""
+        assert "new-actor" in _TRIAGE_RESOLVABLE_DETECTORS
+
+
+# ─── Tests: Runtime does NOT enforce policy ────────────────────────
+
+
+class TestRuntimeNoEnforcement:
+    """The runtime respects the LLM's resolution decision for all detector types."""
 
     @pytest.fixture
     def triage_dir(self) -> Path:
@@ -164,10 +167,10 @@ class TestTriagePolicyChainWalk:
         store = JsonlStore(tmp_path)
         return tmp_path, config, store, triage_dir, investigate_dir
 
-    def test_behavioral_finding_escalated_from_triage_to_investigate(self, pipeline):
-        """new-external-access: triage tries to resolve, gets overridden, escalates to investigate."""
+    def test_triage_resolve_accepted_for_behavioral(self, pipeline):
+        """When triage resolves a behavioral finding, the runtime accepts it."""
         root, config, store, triage_dir, investigate_dir = pipeline
-        llm = TriageResolvesLLM()
+        llm = AlwaysResolveLLM()
 
         runner = build_actor_runner(
             root=root, store=store, config=config, llm=llm,
@@ -178,16 +181,16 @@ class TestTriagePolicyChainWalk:
         finding = _make_finding(detector="new-external-access")
         result = runner(finding, actor_name="triage")
 
-        # Triage was overridden → escalated to investigate → investigate resolved
+        # Runtime does NOT override — triage's resolve is accepted
         assert result.resolution.action == ResolutionAction.RESOLVED
-        assert "Verified" in result.resolution.reason  # investigate's reason
-        assert len(llm.calls) == 2  # triage + investigate
-        assert result.tokens_used == 300  # 100 + 200
+        assert result.resolution.action == ResolutionAction.RESOLVED
+        # Only triage was called — no forced escalation to investigate
+        assert llm._call_count == 1
 
-    def test_unusual_timing_escalated_from_triage(self, pipeline):
-        """unusual-timing: triage cannot resolve, must escalate."""
+    def test_triage_resolve_accepted_for_unusual_timing(self, pipeline):
+        """unusual-timing: triage resolution is accepted by runtime."""
         root, config, store, triage_dir, investigate_dir = pipeline
-        llm = TriageResolvesLLM()
+        llm = AlwaysResolveLLM()
 
         runner = build_actor_runner(
             root=root, store=store, config=config, llm=llm,
@@ -196,28 +199,28 @@ class TestTriagePolicyChainWalk:
         result = runner(_make_finding(detector="unusual-timing"), actor_name="triage")
 
         assert result.resolution.action == ResolutionAction.RESOLVED
-        assert len(llm.calls) == 2  # forced through to investigate
+        assert llm._call_count == 1
 
-    def test_priv_escalation_always_reaches_investigate(self, pipeline):
-        """priv-escalation (CRITICAL): triage cannot resolve."""
+    def test_triage_escalate_accepted_for_any_detector(self, pipeline):
+        """When triage escalates, it reaches investigate regardless of detector."""
         root, config, store, triage_dir, investigate_dir = pipeline
-        llm = TriageResolvesLLM()
+        llm = AlwaysEscalateLLM()
 
         runner = build_actor_runner(
             root=root, store=store, config=config, llm=llm,
             actor_dirs=[triage_dir, investigate_dir],
         )
-        result = runner(
-            _make_finding(detector="priv-escalation", severity=Severity.CRITICAL),
-            actor_name="triage",
-        )
+        result = runner(_make_finding(detector="priv-escalation", severity=Severity.CRITICAL),
+                        actor_name="triage")
 
-        assert len(llm.calls) == 2  # triage + investigate
+        # Triage escalated → passed to investigate → investigate escalated
+        assert result.resolution.action == ResolutionAction.ESCALATED
+        assert llm._call_count == 2  # triage + investigate
 
     def test_identity_finding_resolved_at_triage(self, pipeline):
-        """new-actor: triage CAN resolve identity detectors."""
+        """new-actor: triage can resolve identity detectors."""
         root, config, store, triage_dir, investigate_dir = pipeline
-        llm = TriageResolvesLLM()
+        llm = AlwaysResolveLLM()
 
         runner = build_actor_runner(
             root=root, store=store, config=config, llm=llm,
@@ -225,67 +228,73 @@ class TestTriagePolicyChainWalk:
         )
         result = runner(_make_finding(detector="new-actor"), actor_name="triage")
 
-        # Triage resolved directly — no escalation to investigate
         assert result.resolution.action == ResolutionAction.RESOLVED
-        assert "Known actor" in result.resolution.reason  # triage's reason
-        assert len(llm.calls) == 1  # only triage
+        assert llm._call_count == 1
 
-    def test_log_format_drift_escalated_from_triage(self, pipeline):
-        """log-format-drift: triage CANNOT resolve, must escalate to investigate."""
-        root, config, store, triage_dir, investigate_dir = pipeline
-        llm = TriageResolvesLLM()
 
-        runner = build_actor_runner(
-            root=root, store=store, config=config, llm=llm,
-            actor_dirs=[triage_dir, investigate_dir],
+# ─── Tests: POST.md prompt content ────────────────────────────────
+
+
+class TestTriagePromptContent:
+    """The triage POST.md contains evidence-based criteria for each category."""
+
+    @pytest.fixture
+    def post_md(self) -> str:
+        path = (
+            Path(__file__).resolve().parents[2]
+            / "src" / "mallcop" / "actors" / "triage" / "POST.md"
         )
-        result = runner(
-            _make_finding(detector="log-format-drift", severity=Severity.INFO),
-            actor_name="triage",
-        )
+        return path.read_text()
 
-        # Triage override forces escalation to investigate
-        assert result.resolution.action == ResolutionAction.RESOLVED  # investigate resolves
-        assert len(llm.calls) == 2  # triage (overridden) + investigate
+    def test_behavioral_resolve_criteria_present(self, post_md):
+        """Behavioral section has RESOLVE criteria (not just NEVER resolve)."""
+        assert "RESOLVE if" in post_md
+        assert "scheduled maintenance" in post_md.lower() or "deploy pattern" in post_md.lower()
 
-    def test_triage_override_preserves_assessment_in_escalation_reason(self, pipeline):
-        """When triage is overridden, the finding's escalation reason includes
-        both the policy message and triage's original assessment."""
-        root, config, store, triage_dir, investigate_dir = pipeline
+    def test_access_resolve_criteria_present(self, post_md):
+        """Access section has RESOLVE criteria for onboarding patterns."""
+        assert "new-external-access" in post_md
+        assert "onboarding" in post_md.lower() or "expected organization" in post_md.lower()
 
-        # LLM where investigate also escalates (so we can see the chain end)
-        class AlwaysEscalateLLM(LLMClient):
-            def chat(self, model, system_prompt, messages, tools):
-                return LLMResponse(
-                    tool_calls=[ToolCall(
-                        name="resolve-finding",
-                        arguments={
-                            "finding_id": "fnd_001",
-                            "action": "escalated" if "Level-2" in system_prompt else "resolved",
-                            "reason": "Cannot confirm" if "Level-2" in system_prompt else "Known actor",
-                        },
-                    )],
-                    resolution=None,
-                    tokens_used=100,
-                    raw_resolution=None,
-                )
+    def test_privilege_resolve_criteria_present(self, post_md):
+        """Privilege section has RESOLVE criteria with approval chain."""
+        assert "priv-escalation" in post_md
+        assert "approval" in post_md.lower()
 
-        runner = build_actor_runner(
-            root=root, store=store, config=config, llm=AlwaysEscalateLLM(),
-            actor_dirs=[triage_dir, investigate_dir],
-        )
-        # Use volume-anomaly — behavioral, not resolvable at triage
-        result = runner(_make_finding(detector="volume-anomaly"), actor_name="triage")
+    def test_auth_resolve_criteria_present(self, post_md):
+        """Auth section has RESOLVE criteria for password reset follow-up."""
+        assert "auth-failure-burst" in post_md
+        assert "password reset" in post_md.lower() or "single source" in post_md.lower()
 
-        # Triage was overridden (escalated), investigate also escalated
-        assert result.resolution.action == ResolutionAction.ESCALATED
+    def test_structural_always_escalate(self, post_md):
+        """Structural (log-format-drift) still always escalates."""
+        assert "log-format-drift" in post_md
+        assert "ALWAYS ESCALATE" in post_md
+
+    def test_signature_always_escalate(self, post_md):
+        """Signature (injection-probe) still always escalates."""
+        assert "injection-probe" in post_md
+        assert "ALWAYS ESCALATE" in post_md
+
+    def test_credential_theft_test_present(self, post_md):
+        """Credential theft test is present in the prompt."""
+        assert "stolen" in post_md.lower() or "credential theft" in post_md.lower()
+        assert "ESCALATE" in post_md
+
+    def test_behavioral_escalate_criteria_present(self, post_md):
+        """Behavioral section specifies when to ESCALATE (not just resolve)."""
+        assert "ESCALATE if" in post_md
+
+    def test_never_resolve_solely_for_known_actor(self, post_md):
+        """The prompt warns against resolving solely because actor is in baseline."""
+        assert "solely" in post_md.lower() or "baseline" in post_md.lower()
 
 
 # ─── Tests: Full run_escalate pipeline ──────────────────────────────
 
 
 class TestTriagePolicyFullPipeline:
-    """Test triage policy through run_escalate() — the complete pipeline."""
+    """Test triage through run_escalate() — runtime respects LLM decisions."""
 
     @pytest.fixture
     def triage_dir(self) -> Path:
@@ -295,9 +304,8 @@ class TestTriagePolicyFullPipeline:
     def investigate_dir(self) -> Path:
         return Path(__file__).resolve().parents[2] / "src" / "mallcop" / "actors" / "investigate"
 
-    def test_mixed_findings_correct_routing(self, tmp_path, triage_dir, investigate_dir):
-        """Pipeline with mixed detector types: identity resolved at triage,
-        behavioral forced to investigate."""
+    def test_mixed_findings_triage_resolves_all(self, tmp_path, triage_dir, investigate_dir):
+        """With always-resolve LLM, triage resolves all findings in one pass."""
         config_data = {
             "secrets": {"backend": "env"},
             "connectors": {"azure": {"subscription_ids": ["sub-001"]}},
@@ -317,12 +325,11 @@ class TestTriagePolicyFullPipeline:
 
         store = JsonlStore(tmp_path)
 
-        # Two findings: one identity (resolvable), one behavioral (not resolvable)
         identity_finding = _make_finding(id="fnd_identity", detector="new-actor")
         behavioral_finding = _make_finding(id="fnd_behavioral", detector="new-external-access")
         store.append_findings([identity_finding, behavioral_finding])
 
-        llm = TriageAndInvestigateBothResolveLLM()
+        llm = AlwaysResolveLLM()
 
         runner = build_actor_runner(
             root=tmp_path, store=store, config=load_config(tmp_path), llm=llm,
@@ -334,35 +341,19 @@ class TestTriagePolicyFullPipeline:
 
         assert result["findings_processed"] == 2
 
-        # Check store: identity finding resolved by triage (1 call)
-        # behavioral finding resolved by investigate (2 calls: triage overridden + investigate)
         findings = store.query_findings()
         identity = next(f for f in findings if f.id == "fnd_identity")
         behavioral = next(f for f in findings if f.id == "fnd_behavioral")
 
+        # Both resolved by triage (no forced escalation)
         assert identity.status == FindingStatus.RESOLVED
         assert behavioral.status == FindingStatus.RESOLVED
 
-        # Identity finding has triage annotation
-        identity_annotations = [a for a in identity.annotations if a.actor == "triage"]
-        assert len(identity_annotations) >= 1
+        # Two findings, each resolved in 1 LLM call (triage only)
+        assert llm._call_count == 2
 
-        # Behavioral finding was escalated from triage to investigate
-        # It should have annotations from investigate (not just triage)
-        # The LLM was called at least 3 times: triage(identity), triage(behavioral), investigate(behavioral)
-        assert llm._call_count >= 3
-
-    def test_all_behavioral_detectors_blocked(self, tmp_path, triage_dir, investigate_dir):
-        """Every non-resolvable detector type is blocked at triage."""
-        blocked_detectors = [
-            "new-external-access",
-            "unusual-timing",
-            "unusual-resource-access",
-            "volume-anomaly",
-            "priv-escalation",
-            "auth-failure-burst",
-            "injection-probe",
-        ]
+    def test_triage_escalate_reaches_investigate(self, tmp_path, triage_dir, investigate_dir):
+        """When triage escalates, findings flow to investigate."""
         config_data = {
             "secrets": {"backend": "env"},
             "connectors": {"azure": {"subscription_ids": ["sub-001"]}},
@@ -382,13 +373,22 @@ class TestTriagePolicyFullPipeline:
 
         store = JsonlStore(tmp_path)
 
+        detectors = [
+            "new-external-access",
+            "unusual-timing",
+            "unusual-resource-access",
+            "volume-anomaly",
+            "priv-escalation",
+            "auth-failure-burst",
+            "injection-probe",
+        ]
         findings = []
-        for i, det in enumerate(blocked_detectors):
+        for i, det in enumerate(detectors):
             sev = Severity.CRITICAL if det == "priv-escalation" else Severity.WARN
             findings.append(_make_finding(id=f"fnd_{i}", detector=det, severity=sev))
         store.append_findings(findings)
 
-        llm = TriageAndInvestigateBothResolveLLM()
+        llm = AlwaysEscalateLLM()
 
         runner = build_actor_runner(
             root=tmp_path, store=store, config=load_config(tmp_path), llm=llm,
@@ -396,125 +396,7 @@ class TestTriagePolicyFullPipeline:
         )
         result = run_escalate(tmp_path, actor_runner=runner, store=store)
 
-        assert result["findings_processed"] == len(blocked_detectors)
+        assert result["findings_processed"] == len(detectors)
 
-        # Every blocked detector required 2 LLM calls (triage overridden + investigate)
-        # Total: 7 detectors × 2 calls = 14
-        assert llm._call_count == len(blocked_detectors) * 2
-
-    def test_resolvable_detectors_accepted(self):
-        """Verify the allowlist contains exactly the expected detectors."""
-        assert _TRIAGE_RESOLVABLE_DETECTORS == {"new-actor"}
-
-
-# ─── Tests: Credential theft scenario ──────────────────────────────
-
-
-class TestCredentialTheftScenario:
-    """Simulates the specific credential theft scenario:
-    attacker steals cmbaron's credentials and adds a collaborator to the org.
-
-    The system detects new-external-access. Triage sees "known actor cmbaron"
-    and tries to resolve. The policy MUST force escalation to investigation.
-    """
-
-    @pytest.fixture
-    def triage_dir(self) -> Path:
-        return Path(__file__).resolve().parents[2] / "src" / "mallcop" / "actors" / "triage"
-
-    @pytest.fixture
-    def investigate_dir(self) -> Path:
-        return Path(__file__).resolve().parents[2] / "src" / "mallcop" / "actors" / "investigate"
-
-    def test_stolen_credential_not_auto_resolved(self, tmp_path, triage_dir, investigate_dir):
-        """A stolen credential producing new-external-access MUST reach investigate."""
-        config_data = {
-            "secrets": {"backend": "env"},
-            "connectors": {"azure": {"subscription_ids": ["sub-001"]}},
-            "routing": {"warn": "triage"},
-            "actor_chain": {
-                "triage": {"routes_to": "investigate"},
-                "investigate": {"routes_to": "notify-teams"},
-            },
-            "budget": {
-                "max_findings_for_actors": 25,
-                "max_tokens_per_run": 50000,
-                "max_tokens_per_finding": 5000,
-            },
-        }
-        with open(tmp_path / "mallcop.yaml", "w") as f:
-            yaml.dump(config_data, f)
-
-        store = JsonlStore(tmp_path)
-        # The exact scenario: cmbaron (known actor) adds external collaborator
-        stolen_cred_finding = Finding(
-            id="fnd_stolen",
-            timestamp=datetime(2026, 3, 10, 3, 0, 0, tzinfo=timezone.utc),
-            detector="new-external-access",
-            event_ids=["evt_stolen_001"],
-            title="External access granted: collaborator_added on github by cmbaron",
-            severity=Severity.WARN,
-            status=FindingStatus.OPEN,
-            annotations=[],
-            metadata={
-                "source": "github",
-                "event_type": "collaborator_added",
-                "actor": "cmbaron",
-                "target": "3dl-dev",
-            },
-        )
-        store.append_findings([stolen_cred_finding])
-
-        # Triage LLM: "known actor, 33 prior interactions, resolve!"
-        # This is exactly the rubber-stamp behavior we observed in production.
-        class RubberStampTriageLLM(LLMClient):
-            def __init__(self):
-                self.calls = []
-
-            def chat(self, model, system_prompt, messages, tools):
-                self.calls.append({"system_prompt": system_prompt[:50]})
-                if "Level-1" in system_prompt or "triage" in system_prompt.lower()[:100]:
-                    return LLMResponse(
-                        tool_calls=[ToolCall(
-                            name="resolve-finding",
-                            arguments={
-                                "finding_id": "fnd_stolen",
-                                "action": "resolved",
-                                "reason": "Actor cmbaron is known with 33 prior interactions. Normal activity.",
-                            },
-                        )],
-                        resolution=None, tokens_used=100, raw_resolution=None,
-                    )
-                else:
-                    # Investigate escalates (suspicious — 3am, external access)
-                    return LLMResponse(
-                        tool_calls=[ToolCall(
-                            name="resolve-finding",
-                            arguments={
-                                "finding_id": "fnd_stolen",
-                                "action": "escalated",
-                                "reason": "3am external access grant by known actor. Cannot rule out credential theft. Recommend verifying with account owner.",
-                            },
-                        )],
-                        resolution=None, tokens_used=300, raw_resolution=None,
-                    )
-
-        llm = RubberStampTriageLLM()
-        runner = build_actor_runner(
-            root=tmp_path, store=store, config=load_config(tmp_path), llm=llm,
-            actor_dirs=[triage_dir, investigate_dir],
-        )
-
-        result = run_escalate(tmp_path, actor_runner=runner, store=store)
-
-        # The finding MUST NOT be resolved by triage's rubber stamp
-        findings = store.query_findings()
-        fnd = next(f for f in findings if f.id == "fnd_stolen")
-
-        # Finding should be escalated (investigate said "can't rule out credential theft")
-        assert fnd.status != FindingStatus.RESOLVED or any(
-            "credential theft" in a.content for a in fnd.annotations
-        ), "Stolen credential scenario was rubber-stamped by triage!"
-
-        # Investigate was called (not just triage)
-        assert len(llm.calls) == 2, "Finding never reached investigate!"
+        # Every finding: triage escalates → investigate escalates → 2 LLM calls each
+        assert llm._call_count == len(detectors) * 2

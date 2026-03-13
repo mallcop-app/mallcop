@@ -4,17 +4,17 @@ from __future__ import annotations
 
 import logging
 
-# Detectors that triage is allowed to resolve directly.
-# Behavioral, access, privilege, auth, structural, and signature detectors
-# must always escalate from triage — they represent anomalies that require
-# investigation. A stolen credential IS a known actor, so "known actor" is
-# not grounds for triage to resolve behavioral findings.
-_TRIAGE_RESOLVABLE_DETECTORS = frozenset({
-    "new-actor",           # Identity: triage can verify onboarding
-})
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
+
+# Detectors that triage is historically allowed to resolve at the prompt level.
+# NOTE: This constant is informational only — the runtime does NOT enforce it.
+# Resolution criteria are defined in triage/POST.md. The shakedown evaluator
+# uses this set to classify triage failures (prompt vs. policy fix target).
+_TRIAGE_RESOLVABLE_DETECTORS: frozenset[str] = frozenset({
+    "new-actor",           # Identity: triage can verify onboarding
+})
 
 from mallcop.actors._schema import ActorManifest, ActorResolution, ResolutionAction, load_actor_manifest
 from mallcop.llm_types import LLMClient, LLMResponse, ToolCall  # canonical home
@@ -364,29 +364,11 @@ class ActorRuntime:
                 if tc.name == "resolve-finding":
                     action_str = tc.arguments.get("action", "escalated")
                     reason = tc.arguments.get("reason", "No reason provided")
-                    if action_str == "resolved":
-                        # Enforce triage resolution policy: triage can only
-                        # resolve identity detectors. Behavioral, structural,
-                        # access, privilege, auth, and signature detectors
-                        # must escalate to investigation.
-                        detector = getattr(finding, "detector", "")
-                        if (self._manifest.name == "triage"
-                                and detector not in _TRIAGE_RESOLVABLE_DETECTORS):
-                            _log.info(
-                                "Triage override: %s tried to resolve %s "
-                                "finding %s, forcing escalation",
-                                self._manifest.name, detector, finding.id,
-                            )
-                            action_enum = ResolutionAction.ESCALATED
-                            reason = (
-                                f"Triage attempted to resolve, but {detector} "
-                                f"findings require investigation. "
-                                f"Original triage assessment: {reason}"
-                            )
-                        else:
-                            action_enum = ResolutionAction.RESOLVED
-                    else:
-                        action_enum = ResolutionAction.ESCALATED
+                    action_enum = (
+                        ResolutionAction.RESOLVED
+                        if action_str == "resolved"
+                        else ResolutionAction.ESCALATED
+                    )
                     return RunResult(
                         resolution=ActorResolution(
                             finding_id=tc.arguments.get("finding_id", finding.id),

@@ -86,6 +86,12 @@ class ScenarioStore(Store):
         if detector:
             result = [f for f in result if f.detector == detector]
         if since:
+            # Normalize timezone awareness for comparison
+            for f in result:
+                if f.timestamp.tzinfo is not None and since.tzinfo is None:
+                    from datetime import timezone
+                    since = since.replace(tzinfo=timezone.utc)
+                    break
             result = [f for f in result if f.timestamp >= since]
         return result
 

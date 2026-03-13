@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import copy
 import tempfile
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -29,10 +31,20 @@ class CapturedCall:
 
     actor: str
     model: str
-    message_count: int
-    tool_calls: list[str]
-    has_resolution: bool
     tokens_used: int
+    latency_ms: int
+    messages_sent: list[dict]
+    response_text: str
+    tool_calls_detail: list[dict]
+    has_resolution: bool
+
+    @property
+    def tool_calls(self) -> list[str]:
+        return [tc["name"] for tc in self.tool_calls_detail]
+
+    @property
+    def message_count(self) -> int:
+        return len(self.messages_sent)
 
 
 class InstrumentedLLMClient(LLMClient):
@@ -49,16 +61,29 @@ class InstrumentedLLMClient(LLMClient):
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]],
     ) -> LLMResponse:
+        messages_copy = copy.deepcopy(messages)
+
+        start = time.monotonic()
         response = self.inner.chat(model, system_prompt, messages, tools)
+        latency_ms = int((time.monotonic() - start) * 1000)
+
         self.calls.append(
             CapturedCall(
                 actor=self._infer_actor(system_prompt),
                 model=model,
-                message_count=len(messages),
-                tool_calls=[tc.name for tc in response.tool_calls],
+                tokens_used=response.tokens_used,
+                latency_ms=latency_ms,
+                messages_sent=messages_copy,
+                response_text=response.text if hasattr(response, "text") else "",
+                tool_calls_detail=[
+                    {
+                        "name": tc.name,
+                        "arguments": tc.arguments if hasattr(tc, "arguments") else {},
+                    }
+                    for tc in response.tool_calls
+                ],
                 has_resolution=response.resolution is not None
                 or response.raw_resolution is not None,
-                tokens_used=response.tokens_used,
             )
         )
         return response
@@ -113,6 +138,17 @@ class ShakedownResult:
         if self.chain_result.resolution:
             return self.chain_result.resolution.reason
         return ""
+
+    @property
+    def transcript(self) -> list[dict]:
+        """Complete ordered conversation across all LLM calls."""
+        result = []
+        for call in self.llm_calls:
+            for msg in call.messages_sent:
+                result.append(msg)
+            if call.response_text:
+                result.append({"role": "assistant", "content": call.response_text})
+        return result
 
     @property
     def investigate_tool_calls(self) -> list[str]:
