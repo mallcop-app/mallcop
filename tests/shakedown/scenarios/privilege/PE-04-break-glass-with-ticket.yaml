@@ -1,0 +1,117 @@
+id: PE-04-break-glass-with-ticket
+failure_mode: CS
+detector: priv-escalation
+category: privilege
+difficulty: benign-hard
+
+trap_description: >
+  sre-engineer elevates to Owner on the production subscription at 02:30 UTC
+  during an active incident. The combination of: self-elevation to the highest
+  role, off-hours timing, and targeting the production subscription scope all
+  pattern-match a malicious priv-escalation. The benign evidence is present
+  in the event metadata: break_glass: "true", incident_ticket: "INC-2026-0312",
+  approved_by: "on-call-manager", and a corresponding incident_declared event
+  appears in the event stream 8 minutes earlier from the on-call system.
+  The Owner role has auto_revert: "true" with a 4-hour TTL also in metadata.
+  A naive model sees "self-grant Owner on production at 2am" and escalates
+  without reading the break-glass authorization chain.
+
+trap_resolved_means: >
+  If the model escalates this, it pattern-matched on the role + scope + timing
+  without reading the break-glass authorization context. An active incident
+  ticket, manager approval, auto-revert TTL, and same-hour incident declaration
+  are collectively the correct break-glass pattern. Escalating every break-glass
+  access during live incidents would make the on-call process unworkable.
+
+finding:
+  id: fnd_shk_307
+  detector: priv-escalation
+  title: "Privilege escalation: sre-engineer granted Owner role on production subscription"
+  severity: critical
+  event_ids: [evt_001, evt_002]
+  metadata:
+    actor: sre-engineer
+    source: azure
+    event_type: role_assignment
+
+events:
+  - id: evt_001
+    timestamp: "2026-03-13T02:22:00Z"
+    ingested_at: "2026-03-13T02:23:00Z"
+    source: incident-system
+    event_type: incident_declared
+    actor: on-call-system
+    action: declare_incident
+    target: acme-corp/incidents/INC-2026-0312
+    severity: critical
+    metadata:
+      ip: "192.0.2.251"
+      user_agent: "PagerDuty/1.0"
+      incident_id: "INC-2026-0312"
+      severity: "P1"
+      affected_service: "atom-api"
+      on_call_engineer: "sre-engineer"
+      on_call_manager: "on-call-manager"
+    raw: {}
+
+  - id: evt_002
+    timestamp: "2026-03-13T02:30:00Z"
+    ingested_at: "2026-03-13T02:31:00Z"
+    source: azure
+    event_type: role_assignment
+    actor: sre-engineer
+    action: add_role_assignment
+    target: sub-169efd95
+    severity: critical
+    metadata:
+      ip: "192.0.2.30"
+      user_agent: "Azure-CLI/2.55.0"
+      role: "Owner"
+      principal_id: "sre-engineer"
+      principal_type: "User"
+      scope: "/subscriptions/169efd95-5e00-42f9-8e65-a1892791ed9a"
+      break_glass: "true"
+      incident_ticket: "INC-2026-0312"
+      approved_by: "on-call-manager"
+      auto_revert: "true"
+      revert_after_hours: "4"
+    raw: {}
+
+baseline:
+  known_entities:
+    actors: [admin-user, ci-bot, deploy-svc, on-call-manager, sre-engineer, tf-automation]
+    sources: [azure, github, incident-system]
+    actor_roles:
+      sre-engineer: [Contributor, Reader]
+      admin-user: [Owner]
+      on-call-manager: [Owner, UserAccessAdministrator]
+    break_glass_policy:
+      enabled: true
+      requires_incident_ticket: true
+      requires_manager_approval: true
+      auto_revert_hours: 4
+  frequency_tables:
+    "azure:login:sre-engineer": 623
+    "azure:role_assignment:sre-engineer": 2
+    "azure:resource_list:sre-engineer": 1204
+    "azure:config_change:sre-engineer": 89
+    "incident-system:incident_declared": 12
+  relationships:
+    "sre-engineer:sub-169efd95":
+      count: 45
+      first_seen: "2025-01-15"
+      last_seen: "2026-03-12"
+    "sre-engineer:sub-169efd95/resourceGroups/atom-rg":
+      count: 567
+      first_seen: "2025-01-15"
+      last_seen: "2026-03-12"
+
+expected:
+  chain_action: resolved
+  triage_action: resolved
+  reasoning_must_mention:
+    - "break-glass"
+    - "incident"
+  reasoning_must_not_mention: []
+  investigate_must_use_tools: false
+  min_investigate_iterations: 1
