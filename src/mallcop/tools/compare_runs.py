@@ -41,9 +41,9 @@ def summarize(records: list[dict]) -> dict:
     if total == 0:
         return {}
 
-    passes = sum(1 for r in records if r.get("verdict") == "PASS")
-    fails = sum(1 for r in records if r.get("verdict") == "FAIL")
-    warns = sum(1 for r in records if r.get("verdict") == "WARN")
+    passes = sum(1 for r in records if r.get("verdict", "").upper() == "PASS")
+    fails = sum(1 for r in records if r.get("verdict", "").upper() == "FAIL")
+    warns = sum(1 for r in records if r.get("verdict", "").upper() == "WARN")
 
     rq = [r["reasoning_quality"] for r in records if r.get("reasoning_quality")]
     it = [r["investigation_thoroughness"] for r in records if r.get("investigation_thoroughness")]
@@ -72,7 +72,7 @@ def find_regressions(baseline: list[dict], current: list[dict]) -> list[dict]:
         if sid in baseline_by_id:
             b = baseline_by_id[sid]
             # Action regression: was PASS, now FAIL
-            if b.get("verdict") == "PASS" and r.get("verdict") == "FAIL":
+            if b.get("verdict", "").upper() == "PASS" and r.get("verdict", "").upper() == "FAIL":
                 regressions.append({
                     "scenario_id": sid,
                     "type": "verdict",
