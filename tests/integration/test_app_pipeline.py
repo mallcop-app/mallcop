@@ -115,8 +115,8 @@ def _setup_deployment_repo(tmp_path: Path) -> Path:
         yaml.dump(_DETECTORS_YAML, f)
 
     # Store directories
-    (tmp_path / "events").mkdir(exist_ok=True)
-    (tmp_path / "findings").mkdir(exist_ok=True)
+    (tmp_path / ".mallcop" / "events").mkdir(parents=True, exist_ok=True)
+    (tmp_path / ".mallcop" / "findings").mkdir(parents=True, exist_ok=True)
 
     return tmp_path
 

@@ -159,7 +159,8 @@ class TestStatusCosts:
         from mallcop.status import run_status
 
         _write_config(tmp_path)
-        costs_file = tmp_path / "costs.jsonl"
+        (tmp_path / ".mallcop").mkdir(parents=True, exist_ok=True)
+        costs_file = tmp_path / ".mallcop" / "costs.jsonl"
         for i in range(3):
             entry = CostEntry(
                 timestamp=datetime(2026, 3, 6, 18, i, 0, tzinfo=timezone.utc),
@@ -198,7 +199,8 @@ class TestStatusCosts:
         from mallcop.status import run_status
 
         _write_config(tmp_path)
-        costs_file = tmp_path / "costs.jsonl"
+        (tmp_path / ".mallcop").mkdir(parents=True, exist_ok=True)
+        costs_file = tmp_path / ".mallcop" / "costs.jsonl"
         # 2 runs with actors, 1 without (circuit breaker)
         entries = [
             CostEntry(

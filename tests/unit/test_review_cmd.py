@@ -100,13 +100,15 @@ def _setup_actor_post_md(tmp_path: Path, actor_name: str, content: str) -> None:
 
 
 def _write_findings(tmp_path: Path, findings: list[Finding]) -> None:
-    with open(tmp_path / "findings.jsonl", "w") as f:
+    mallcop_dir = tmp_path / ".mallcop"
+    mallcop_dir.mkdir(parents=True, exist_ok=True)
+    with open(mallcop_dir / "findings.jsonl", "w") as f:
         for fnd in findings:
             f.write(fnd.to_json() + "\n")
 
 
 def _write_events(tmp_path: Path, events: list[Event]) -> None:
-    events_dir = tmp_path / "events"
+    events_dir = tmp_path / ".mallcop" / "events"
     events_dir.mkdir(parents=True, exist_ok=True)
     with open(events_dir / "azure-2026-03.jsonl", "w") as f:
         for evt in events:

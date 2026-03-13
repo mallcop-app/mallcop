@@ -716,7 +716,7 @@ class TestScenario4_FullPipelineCycle:
         result = run_escalate(root, actor_runner=None)
         assert result["status"] == "ok"
 
-        costs_path = root / "costs.jsonl"
+        costs_path = root / ".mallcop" / "costs.jsonl"
         assert costs_path.exists()
         costs_text = costs_path.read_text().strip()
         assert len(costs_text) > 0

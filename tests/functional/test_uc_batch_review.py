@@ -249,7 +249,7 @@ class TestBatchBudgetTracking:
         assert result["tokens_used"] == 3000
         assert call_count == 4  # INFO not routed
 
-        costs_path = root / "costs.jsonl"
+        costs_path = root / ".mallcop" / "costs.jsonl"
         assert costs_path.exists()
         cost_data = json.loads(costs_path.read_text().strip().split("\n")[-1])
         assert cost_data["tokens_used"] == 3000
@@ -289,7 +289,7 @@ class TestBatchZeroFindings:
         assert runner_called is False
 
         # costs.jsonl written but with zero tokens
-        costs_path = root / "costs.jsonl"
+        costs_path = root / ".mallcop" / "costs.jsonl"
         assert costs_path.exists()
         cost_data = json.loads(costs_path.read_text().strip().split("\n")[-1])
         assert cost_data["tokens_used"] == 0
@@ -335,6 +335,6 @@ class TestBatchSingleFinding:
         assert all_findings[0].annotations[0].content == "Single finding escalated"
 
         # Costs tracked
-        costs_path = root / "costs.jsonl"
+        costs_path = root / ".mallcop" / "costs.jsonl"
         cost_data = json.loads(costs_path.read_text().strip().split("\n")[-1])
         assert cost_data["tokens_used"] == 1200

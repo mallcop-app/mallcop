@@ -39,7 +39,9 @@ def _make_finding(
 
 
 def _write_findings(tmp_path: Path, findings: list[Finding]) -> None:
-    with open(tmp_path / "findings.jsonl", "w") as f:
+    mallcop_dir = tmp_path / ".mallcop"
+    mallcop_dir.mkdir(parents=True, exist_ok=True)
+    with open(mallcop_dir / "findings.jsonl", "w") as f:
         for fnd in findings:
             f.write(fnd.to_json() + "\n")
 

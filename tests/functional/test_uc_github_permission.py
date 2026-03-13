@@ -509,7 +509,7 @@ class TestTriageEscalation:
 
         run_escalate(root, actor_runner=mock_runner)
 
-        costs_path = root / "costs.jsonl"
+        costs_path = root / ".mallcop" / "costs.jsonl"
         assert costs_path.exists()
         cost_data = json.loads(costs_path.read_text().strip().split("\n")[-1])
         assert cost_data["tokens_used"] == 800

@@ -62,8 +62,8 @@ def _make_event(
 
 
 def _write_events(tmp_path: Path, events: list[Event]) -> None:
-    events_dir = tmp_path / "events"
-    events_dir.mkdir(exist_ok=True)
+    events_dir = tmp_path / ".mallcop" / "events"
+    events_dir.mkdir(parents=True, exist_ok=True)
     # Group by source+month
     groups: dict[str, list[Event]] = {}
     for evt in events:
@@ -93,7 +93,9 @@ def _make_finding(
 
 
 def _write_findings(tmp_path: Path, findings: list[Finding]) -> None:
-    with open(tmp_path / "findings.jsonl", "w") as f:
+    mallcop_dir = tmp_path / ".mallcop"
+    mallcop_dir.mkdir(parents=True, exist_ok=True)
+    with open(mallcop_dir / "findings.jsonl", "w") as f:
         for fnd in findings:
             f.write(fnd.to_json() + "\n")
 

@@ -346,7 +346,7 @@ class TestBaselineBuilds:
 
         assert result.exit_code == 0
 
-        baseline_path = root / "baseline.json"
+        baseline_path = root / ".mallcop" / "baseline.json"
         assert baseline_path.exists(), "baseline.json not written to disk"
 
         baseline_data = json.loads(baseline_path.read_text())
@@ -532,7 +532,7 @@ class TestWatchEventsAccumulate:
         events = _make_events("azure", now - timedelta(days=5), ["admin@example.com"])
         _seed_events(root, events)
 
-        events_dir = root / "events"
+        events_dir = root / ".mallcop" / "events"
         assert events_dir.exists(), "events/ directory should exist after seeding"
         event_files = list(events_dir.glob("*.jsonl"))
         assert len(event_files) > 0, "At least one event JSONL file should exist"
@@ -560,7 +560,7 @@ class TestWatchEventsAccumulate:
         assert data["findings_count"] > 0
 
         # Findings should be persisted
-        findings_path = root / "findings.jsonl"
+        findings_path = root / ".mallcop" / "findings.jsonl"
         assert findings_path.exists(), "findings.jsonl should be written"
 
         store = JsonlStore(root)

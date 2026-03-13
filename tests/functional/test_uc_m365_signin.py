@@ -434,7 +434,7 @@ class TestTriageEscalatesBruteForce:
         from mallcop.escalate import run_escalate
         run_escalate(root, actor_runner=mock_triage)
 
-        costs_path = root / "costs.jsonl"
+        costs_path = root / ".mallcop" / "costs.jsonl"
         assert costs_path.exists()
         cost_lines = costs_path.read_text().strip().split("\n")
         last_cost = json.loads(cost_lines[-1])
@@ -599,7 +599,7 @@ class TestFullM365SigninAnomalyWorkflow:
         assert len(inv_data["events"]) >= 1
 
         # Step 7: Verify costs were tracked
-        costs_path = root / "costs.jsonl"
+        costs_path = root / ".mallcop" / "costs.jsonl"
         assert costs_path.exists()
         cost_lines = costs_path.read_text().strip().split("\n")
         last_cost = json.loads(cost_lines[-1])

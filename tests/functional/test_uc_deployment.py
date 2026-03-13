@@ -191,9 +191,9 @@ class TestDeploymentInitWatchFlow:
 
         # Verify directory structure
         assert (root / "mallcop.yaml").exists(), "mallcop.yaml should exist"
-        assert (root / "events").is_dir(), "events/ directory should exist"
+        assert (root / ".mallcop" / "events").is_dir(), "events/ directory should exist"
         # Baseline is stored as baseline.json (single file, not directory)
-        assert (root / "baseline.json").exists(), "baseline.json should exist"
+        assert (root / ".mallcop" / "baseline.json").exists(), "baseline.json should exist"
 
     def test_mallcop_yaml_has_required_sections(self, tmp_path: Path, monkeypatch: Any) -> None:
         """mallcop.yaml written by init has secrets, connectors, budget sections."""
@@ -515,7 +515,7 @@ class TestStatePersistenceAcrossRuns:
         self._git_commit_all(root, "mallcop watch run 1")
 
         # Verify checkpoint was written
-        assert (root / "checkpoints.yaml").exists(), "checkpoints.yaml should exist after run 1"
+        assert (root / ".mallcop" / "checkpoints.yaml").exists(), "checkpoints.yaml should exist after run 1"
 
         # Run 2: same events available, checkpoint should filter them out
         with patch(
@@ -660,8 +660,8 @@ class TestStatePersistenceAcrossRuns:
                 catch_exceptions=False,
             )
 
-        assert (root / "baseline.json").exists(), "baseline.json should exist after run 1"
-        baseline1 = json.loads((root / "baseline.json").read_text())
+        assert (root / ".mallcop" / "baseline.json").exists(), "baseline.json should exist after run 1"
+        baseline1 = json.loads((root / ".mallcop" / "baseline.json").read_text())
         actors1 = baseline1.get("known_entities", {}).get("actors", [])
         assert any("alice@example.com" in a for a in actors1), \
             f"Expected 'alice@example.com' in sanitized actors: {actors1}"
@@ -697,7 +697,7 @@ class TestStatePersistenceAcrossRuns:
                 catch_exceptions=False,
             )
 
-        baseline2 = json.loads((root / "baseline.json").read_text())
+        baseline2 = json.loads((root / ".mallcop" / "baseline.json").read_text())
         actors2 = baseline2.get("known_entities", {}).get("actors", [])
         assert any("alice@example.com" in a for a in actors2), \
             "Alice should still be in baseline after run 2"
@@ -779,7 +779,8 @@ class TestStatePersistenceAcrossRuns:
         monkeypatch.setenv("AZURE_CLIENT_SECRET", "fake-secret")
 
         # Write a costs.jsonl manually to simulate a previous run
-        costs_path = root / "costs.jsonl"
+        (root / ".mallcop").mkdir(parents=True, exist_ok=True)
+        costs_path = root / ".mallcop" / "costs.jsonl"
         cost_entry_1 = {
             "timestamp": "2026-03-05T10:00:00+00:00",
             "findings_processed": 2,

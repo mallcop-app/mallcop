@@ -122,7 +122,8 @@ def _seed_store(
 
 def _write_cost_entries(root: Path, entries: list[dict[str, Any]]) -> None:
     """Write cost entries to costs.jsonl."""
-    with open(root / "costs.jsonl", "w") as f:
+    (root / ".mallcop").mkdir(parents=True, exist_ok=True)
+    with open(root / ".mallcop" / "costs.jsonl", "w") as f:
         for entry in entries:
             f.write(json.dumps(entry) + "\n")
 

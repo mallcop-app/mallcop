@@ -284,7 +284,7 @@ class TestEscalateTokenBudget:
 
         run_escalate(tmp_path, actor_runner=mock_runner)
 
-        costs_file = tmp_path / "costs.jsonl"
+        costs_file = tmp_path / ".mallcop" / "costs.jsonl"
         assert costs_file.exists()
         lines = costs_file.read_text().strip().split("\n")
         assert len(lines) == 1

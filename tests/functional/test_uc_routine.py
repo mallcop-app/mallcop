@@ -441,7 +441,7 @@ class TestCostTracking:
         result = run_escalate(root, actor_runner=mock_runner)
 
         # Verify costs.jsonl exists and has content
-        costs_path = root / "costs.jsonl"
+        costs_path = root / ".mallcop" / "costs.jsonl"
         assert costs_path.exists(), "costs.jsonl should be written after escalation"
 
         lines = costs_path.read_text().strip().split("\n")
@@ -512,7 +512,7 @@ class TestCostTracking:
         store2.append_findings([finding2])
         run_escalate(root, actor_runner=mock_runner)
 
-        costs_path = root / "costs.jsonl"
+        costs_path = root / ".mallcop" / "costs.jsonl"
         lines = costs_path.read_text().strip().split("\n")
         assert len(lines) == 2, f"Expected 2 cost entries, got {len(lines)}"
 
@@ -644,7 +644,7 @@ class TestBudgetControls:
         assert result["tokens_used"] == 0
 
         # costs.jsonl should still be written
-        costs_path = root / "costs.jsonl"
+        costs_path = root / ".mallcop" / "costs.jsonl"
         assert costs_path.exists()
 
 
@@ -789,7 +789,7 @@ class TestEndToEndWatchWithEscalation:
         assert still_open[0].id == "fnd_routine_2"
 
         # costs.jsonl has one entry
-        costs_path = root / "costs.jsonl"
+        costs_path = root / ".mallcop" / "costs.jsonl"
         assert costs_path.exists()
         cost_data = json.loads(costs_path.read_text().strip().split("\n")[-1])
         assert cost_data["tokens_used"] == 1800

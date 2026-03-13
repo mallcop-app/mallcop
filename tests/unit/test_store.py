@@ -147,7 +147,7 @@ class TestJsonlStoreEvents:
         evt = _make_event(id="evt_disk", source="azure", timestamp=ts)
         store.append_events([evt])
 
-        jsonl_path = tmp_path / "events" / "azure-2026-03.jsonl"
+        jsonl_path = tmp_path / ".mallcop" / "events" / "azure-2026-03.jsonl"
         assert jsonl_path.exists()
 
         lines = jsonl_path.read_text().strip().split("\n")
@@ -163,8 +163,8 @@ class TestJsonlStoreEvents:
         e_gh = _make_event(id="evt_gh", source="github", timestamp=ts)
         store.append_events([e_az, e_gh])
 
-        assert (tmp_path / "events" / "azure-2026-03.jsonl").exists()
-        assert (tmp_path / "events" / "github-2026-03.jsonl").exists()
+        assert (tmp_path / ".mallcop" / "events" / "azure-2026-03.jsonl").exists()
+        assert (tmp_path / ".mallcop" / "events" / "github-2026-03.jsonl").exists()
 
     def test_event_partitioning_by_month(self, tmp_path: Path) -> None:
         """Events in different months go to different files."""
@@ -181,8 +181,8 @@ class TestJsonlStoreEvents:
         )
         store.append_events([e_mar, e_apr])
 
-        mar_path = tmp_path / "events" / "azure-2026-03.jsonl"
-        apr_path = tmp_path / "events" / "azure-2026-04.jsonl"
+        mar_path = tmp_path / ".mallcop" / "events" / "azure-2026-03.jsonl"
+        apr_path = tmp_path / ".mallcop" / "events" / "azure-2026-04.jsonl"
         assert mar_path.exists()
         assert apr_path.exists()
 
@@ -202,7 +202,7 @@ class TestJsonlStoreEvents:
         results = store.query_events()
         assert len(results) == 2
 
-        jsonl_path = tmp_path / "events" / "azure-2026-03.jsonl"
+        jsonl_path = tmp_path / ".mallcop" / "events" / "azure-2026-03.jsonl"
         lines = jsonl_path.read_text().strip().split("\n")
         assert len(lines) == 2
 
@@ -224,7 +224,7 @@ class TestJsonlStoreEvents:
         evt = _make_event(id="evt_gh1", source="github", timestamp=ts)
         store.append_events([evt])
 
-        jsonl_path = tmp_path / "events" / "github-2026-03.jsonl"
+        jsonl_path = tmp_path / ".mallcop" / "events" / "github-2026-03.jsonl"
         assert jsonl_path.exists()
         data = json.loads(jsonl_path.read_text().strip())
         assert data["id"] == "evt_gh1"
@@ -268,7 +268,7 @@ class TestJsonlStoreEvents:
 
     def test_empty_events_directory_returns_empty(self, tmp_path: Path) -> None:
         """An empty events/ directory yields no events."""
-        (tmp_path / "events").mkdir()
+        (tmp_path / ".mallcop" / "events").mkdir(parents=True)
         store = JsonlStore(tmp_path)
         assert store.query_events() == []
 
@@ -346,7 +346,7 @@ class TestJsonlStoreFindings:
         fnd = _make_finding()
         store.append_findings([fnd])
 
-        jsonl_path = tmp_path / "findings.jsonl"
+        jsonl_path = tmp_path / ".mallcop" / "findings.jsonl"
         assert jsonl_path.exists()
         lines = jsonl_path.read_text().strip().split("\n")
         assert len(lines) == 1
@@ -475,7 +475,7 @@ class TestJsonlStoreCheckpoints:
         )
         store.set_checkpoint(cp)
 
-        yaml_path = tmp_path / "checkpoints.yaml"
+        yaml_path = tmp_path / ".mallcop" / "checkpoints.yaml"
         assert yaml_path.exists()
 
         data = yaml.safe_load(yaml_path.read_text())

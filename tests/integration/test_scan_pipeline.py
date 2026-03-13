@@ -157,7 +157,7 @@ class TestScanCommand:
         assert output["connectors"]["azure"]["events_ingested"] == 3
 
         # Verify events JSONL files created
-        events_dir = tmp_path / "events"
+        events_dir = tmp_path / ".mallcop" / "events"
         assert events_dir.exists()
         event_files = list(events_dir.glob("*.jsonl"))
         assert len(event_files) > 0
@@ -194,7 +194,7 @@ class TestScanCommand:
         assert result.exit_code == 0
 
         # Verify checkpoint written
-        checkpoints_path = tmp_path / "checkpoints.yaml"
+        checkpoints_path = tmp_path / ".mallcop" / "checkpoints.yaml"
         assert checkpoints_path.exists()
         checkpoints = yaml.safe_load(checkpoints_path.read_text())
         assert "azure" in checkpoints
@@ -237,7 +237,7 @@ class TestScanCommand:
         assert output2["connectors"]["azure"]["events_ingested"] == 0
 
         # Verify total events on disk is still 3 (no duplicates)
-        events_dir = tmp_path / "events"
+        events_dir = tmp_path / ".mallcop" / "events"
         all_events = []
         for ef in events_dir.glob("*.jsonl"):
             for line in ef.read_text().strip().split("\n"):

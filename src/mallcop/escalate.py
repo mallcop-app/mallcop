@@ -69,7 +69,7 @@ def run_escalate(
             estimated_cost_usd=0.0,
             budget_remaining_pct=100.0,
         )
-        append_cost_log(root / "costs.jsonl", cost_entry)
+        append_cost_log(root / ".mallcop" / "costs.jsonl", cost_entry)
         return {
             "status": "ok",
             "findings_processed": 0,
@@ -210,7 +210,7 @@ def run_escalate(
         estimated_cost_usd=estimated_cost,
         budget_remaining_pct=tracker.budget_remaining_pct(),
     )
-    append_cost_log(root / "costs.jsonl", cost_entry)
+    append_cost_log(root / ".mallcop" / "costs.jsonl", cost_entry)
 
     return {
         "status": "ok",

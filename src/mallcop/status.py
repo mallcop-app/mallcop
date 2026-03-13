@@ -11,7 +11,7 @@ from mallcop.store import JsonlStore
 
 
 def _load_cost_entries(root: Path) -> list[CostEntry]:
-    costs_file = root / "costs.jsonl"
+    costs_file = root / ".mallcop" / "costs.jsonl"
     if not costs_file.exists():
         return []
     entries: list[CostEntry] = []

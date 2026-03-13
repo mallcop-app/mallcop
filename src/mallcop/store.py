@@ -84,10 +84,12 @@ class JsonlStore(Store):
 
     def __init__(self, root: Path) -> None:
         self._root = Path(root)
-        self._events_dir = self._root / "events"
-        self._findings_path = self._root / "findings.jsonl"
-        self._checkpoints_path = self._root / "checkpoints.yaml"
-        self._baseline_path = self._root / "baseline.json"
+        self._data_dir = self._root / ".mallcop"
+        self._data_dir.mkdir(parents=True, exist_ok=True)
+        self._events_dir = self._data_dir / "events"
+        self._findings_path = self._data_dir / "findings.jsonl"
+        self._checkpoints_path = self._data_dir / "checkpoints.yaml"
+        self._baseline_path = self._data_dir / "baseline.json"
 
         self._db = sqlite3.connect(":memory:")
         self._init_schema()
