@@ -121,6 +121,10 @@ baseline:
       first_seen: "2025-05-01"
       last_seen: "2026-03-09"
 
+ground_truth:
+  expected_conclusion: "Escalate — ci-bot's baseline relationships show only two containerApp targets (atom-api and atom-bot); all five resources accessed in this finding (atom-kv, atomstorage01, atom-db-prod, build-vm-01, atomregistry) have zero prior relationship entries for ci-bot, and the rapid sequential enumeration across secrets, storage, database, VM, and registry within 4 minutes is a post-compromise lateral movement pattern."
+  trap: "ci-bot is an extremely well-characterized actor (1200+ logins, 450+ pushes) and the individual actions look like routine reads, but the model must check whether the specific resources accessed have ever appeared in ci-bot's relationship baseline — none have."
+
 expected:
   chain_action: escalated
   triage_action: escalated

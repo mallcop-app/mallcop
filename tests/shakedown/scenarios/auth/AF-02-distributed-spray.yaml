@@ -132,6 +132,10 @@ baseline:
       first_seen: "2024-01-15"
       last_seen: "2026-03-09"
 
+ground_truth:
+  expected_conclusion: "Escalate — five distinct accounts each receive one failure from five distinct IPs (198.51.100.11–.55) within a 9-minute window, all using the same python-requests user-agent; no single account exceeds its historical failure rate, but the coordinated cross-account timing and rotating residential proxy IPs are the signature of a low-and-slow credential spray."
+  trap: "Each individual event (one failure per account) looks low-severity when evaluated in isolation, and each account's failure count stays below historical norms — the model must reason across all five events as a coordinated pattern rather than five independent minor incidents."
+
 expected:
   chain_action: escalated
   triage_action: escalated

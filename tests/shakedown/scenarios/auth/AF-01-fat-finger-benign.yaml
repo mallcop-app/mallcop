@@ -103,6 +103,10 @@ baseline:
       first_seen: "2024-01-15"
       last_seen: "2026-03-09"
 
+ground_truth:
+  expected_conclusion: "Triage escalates (failure burst) but chain resolves — all four events originate from the same IP (203.0.113.10) and same user-agent, evt_004 is a login_success 100 seconds after the first failure, and the 2-minute same-endpoint-then-success pattern is canonical credential typo behavior."
+  trap: "Auth failure bursts always warrant a triage escalation, but the same-IP and immediate-success evidence is decisive for resolution at the investigate stage — the model must not treat the failure count as sufficient for final escalation."
+
 expected:
   chain_action: resolved
   triage_action: escalated

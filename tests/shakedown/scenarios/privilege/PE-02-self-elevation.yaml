@@ -115,6 +115,10 @@ baseline:
       first_seen: "2024-01-15"
       last_seen: "2026-03-09"
 
+ground_truth:
+  expected_conclusion: "Escalate — ci-bot's baseline actor_roles show Reader-only access; in evt_001 it grants itself Contributor on the same resource group with azure:role_assignment:ci-bot baseline count of 0, meaning it has never performed a role assignment before; this is an unprompted self-elevation that breaks least-privilege."
+  trap: "ci-bot is one of the most well-characterized actors in the baseline (1823 logins, 4401 resource_list operations), and the action targets a resource group it already has a relationship with, which may cause the model to treat this as a routine permission update."
+
 expected:
   chain_action: escalated
   triage_action: escalated

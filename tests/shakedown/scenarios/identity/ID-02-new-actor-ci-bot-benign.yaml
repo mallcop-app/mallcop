@@ -100,6 +100,10 @@ baseline:
       first_seen: "2025-07-01"
       last_seen: "2026-03-08"
 
+ground_truth:
+  expected_conclusion: "Resolve — all three events share user_agent 'terraform-provider-azurerm/3.90.0' and the same correlation_id tf-run-20260310-0217, indicating a single automated Terraform pipeline run; the baseline shows existing CI actors (ci-bot, deploy-svc) operating on atom-rg, and adding a Terraform automation service principal is consistent with infrastructure-as-code onboarding."
+  trap: "The 2:17 AM UTC timestamp makes the new actor look suspicious, but CI/CD pipelines triggered by merge-to-main routinely run at off-hours; the Terraform user-agent and shared correlation_id identify this as an automated pipeline, not a human attacker."
+
 expected:
   chain_action: resolved
   triage_action: resolved

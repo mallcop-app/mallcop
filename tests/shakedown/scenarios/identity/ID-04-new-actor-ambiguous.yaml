@@ -94,6 +94,10 @@ baseline:
       first_seen: "2025-05-01"
       last_seen: "2026-03-08"
 
+ground_truth:
+  expected_conclusion: "Escalate — contractor-jsmith is a completely new actor (not in baseline known_entities) and within 16 minutes of first login accessed atom-kv/secrets/db-password (evt_003), a production secret vault; the baseline shows secrets access is reserved for admin-user (12 times) and deploy-svc (88 times) — there is no established pattern for contractor access to production secrets."
+  trap: "The SSO login with MFA and corporate okta provider (evt_001) looks legitimate, and resource_list (evt_002) is routine, making the secrets access in evt_003 easy to overlook when the entry pattern appears benign."
+
 expected:
   chain_action: escalated
   triage_action: escalated

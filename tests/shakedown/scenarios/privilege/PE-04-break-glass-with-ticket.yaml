@@ -106,6 +106,10 @@ baseline:
       first_seen: "2025-01-15"
       last_seen: "2026-03-12"
 
+ground_truth:
+  expected_conclusion: "Resolve — evt_002 carries break_glass: 'true', incident_ticket: 'INC-2026-0312', and approved_by: 'on-call-manager' metadata; evt_001 (8 minutes earlier) shows the same incident INC-2026-0312 declared by the on-call system with sre-engineer as the assigned responder; the baseline defines a break_glass_policy requiring exactly these fields; auto_revert: 'true' with 4-hour TTL is present."
+  trap: "Self-elevation to Owner on the production subscription at 2:30 AM pattern-matches a malicious priv-escalation, causing the model to escalate without reading the complete break-glass authorization chain across both events."
+
 expected:
   chain_action: resolved
   triage_action: resolved

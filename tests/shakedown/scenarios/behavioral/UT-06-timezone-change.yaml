@@ -107,6 +107,10 @@ baseline:
       first_seen: "2024-03-15"
       last_seen: "2026-03-12"
 
+ground_truth:
+  expected_conclusion: "Resolve — all three events show location: London, UK in metadata, and the baseline includes azure:location_change:developer-alice count of 1 confirming a recent relocation; 07:00 UTC is standard morning working hours for a London-based employee, fully consistent with the location change."
+  trap: "The baseline time entries show zero prior activity at hour 07 (time:07:developer-alice: 0) against a Pacific-hours cluster, making the model anchor on the old pattern and miss the location change evidence."
+
 expected:
   chain_action: resolved
   triage_action: resolved

@@ -139,6 +139,10 @@ baseline:
       first_seen: "2024-04-01"
       last_seen: "2026-03-09"
 
+ground_truth:
+  expected_conclusion: "Escalate — external collaborator evil-actor-x granted write access to the production source code repo acme-corp/atom-api; the baseline shows zero prior repo.add_collaborator events for admin-user (count: 0), and the python-requests/2.28.2 user-agent is inconsistent with admin-user's usual browser-based access pattern; this is the first external collaborator ever added to this repo."
+  trap: "admin-user has an extremely deep baseline (hundreds of events, known since 2024), which may cause the model to discount the anomaly of the action because the actor is so familiar — but boundary-expansion events require escalation regardless of actor trust."
+
 expected:
   chain_action: escalated
   triage_action: escalated

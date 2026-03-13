@@ -81,6 +81,10 @@ baseline:
       first_seen: "2026-03-04"
       last_seen: "2026-03-09"
 
+ground_truth:
+  expected_conclusion: "Escalate — the baseline contains only 12 total events for admin-user over 6 days (frequency table max: 7 logins, 3 reads, 1 config update) and a single relationship entry first_seen 2026-03-04; with this thin baseline there is insufficient data to distinguish normal from anomalous behavior, and the 03:47 UTC role_assignment (count: 0 in baseline) has no precedent."
+  trap: "The model may call check-baseline (correct tool use) but then reason 'the actor is well-established' or 'extensive history shows this is normal' — if the tool output shows a 6-day shallow baseline, that conclusion directly contradicts the evidence and reveals the model ignored the tool result."
+
 expected:
   chain_action: escalated
   triage_action: escalated

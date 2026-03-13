@@ -149,6 +149,10 @@ baseline:
       first_seen: "2024-03-15"
       last_seen: "2026-03-06"
 
+ground_truth:
+  expected_conclusion: "Escalate — the new-external-access detector requires escalation regardless of actor privilege level; even a legitimate org owner (admin-user) adding contractor-dev99 as an outside collaborator expands the trust perimeter and cannot be cleared without human confirmation of the engagement authorization."
+  trap: "The model may conclude 'admin approved it, so it's fine' (Admin Exemption), but boundary-change events require escalation independent of actor trust level."
+
 expected:
   chain_action: escalated
   triage_action: escalated
