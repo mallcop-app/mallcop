@@ -13,6 +13,14 @@ from mallcop.schemas import Baseline, Event, Finding, FindingStatus, Severity
 
 
 @dataclass
+class GroundTruth:
+    """Rubric for LLM-as-judge evaluation."""
+
+    expected_conclusion: str  # What sound reasoning should conclude
+    trap: str  # What the scenario's deceptive element is
+
+
+@dataclass
 class ConnectorToolDef:
     """Canned connector tool definition from scenario YAML."""
 
@@ -51,6 +59,7 @@ class Scenario:
     expected: ExpectedOutcome
     connector_tools: list[ConnectorToolDef] = field(default_factory=list)
     tags: list[str] = field(default_factory=list)
+    ground_truth: GroundTruth | None = None
 
 
 def _parse_event(data: dict[str, Any]) -> Event:
@@ -118,6 +127,14 @@ def _parse_connector_tool(data: dict[str, Any]) -> ConnectorToolDef:
     )
 
 
+def _parse_ground_truth(data: dict[str, Any]) -> GroundTruth:
+    """Parse ground truth rubric from YAML."""
+    return GroundTruth(
+        expected_conclusion=data["expected_conclusion"],
+        trap=data["trap"],
+    )
+
+
 def load_scenario(path: Path) -> Scenario:
     """Load a single scenario from a YAML file."""
     data = yaml.safe_load(path.read_text())
@@ -126,6 +143,9 @@ def load_scenario(path: Path) -> Scenario:
     # Copy detector from top-level if not in finding
     if "detector" not in finding_data:
         finding_data["detector"] = data["detector"]
+
+    gt_data = data.get("ground_truth")
+    ground_truth = _parse_ground_truth(gt_data) if gt_data else None
 
     return Scenario(
         id=data["id"],
@@ -143,6 +163,7 @@ def load_scenario(path: Path) -> Scenario:
             _parse_connector_tool(t) for t in data.get("connector_tools", [])
         ],
         tags=data.get("tags", []),
+        ground_truth=ground_truth,
     )
 
 

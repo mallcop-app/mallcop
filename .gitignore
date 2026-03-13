@@ -24,6 +24,7 @@ env/
 .coverage
 htmlcov/
 test-runs/
+runs/*.jsonl
 
 # Mallcop operational artifacts (generated at runtime, not source)
 baseline.json

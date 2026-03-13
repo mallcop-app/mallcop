@@ -175,6 +175,7 @@ class ClaudeCodeClient(LLMClient):
                 resolution=None,
                 tokens_used=0,
                 raw_resolution=None,
+                text=text,
             )
 
         action = obj.get("action", "")
@@ -191,6 +192,7 @@ class ClaudeCodeClient(LLMClient):
                 resolution=None,
                 tokens_used=0,
                 raw_resolution=None,
+                text=text,
             )
 
         if action == "resolution":
@@ -199,6 +201,7 @@ class ClaudeCodeClient(LLMClient):
                 resolution=None,
                 tokens_used=0,
                 raw_resolution=obj,
+                text=text,
             )
 
         if "finding_id" in obj and "action" in obj:
@@ -207,12 +210,15 @@ class ClaudeCodeClient(LLMClient):
                 resolution=None,
                 tokens_used=0,
                 raw_resolution=obj,
+                text=text,
             )
 
-        _log.warning("Unknown response format from claude CLI: %s", text[:200])
+        # Unknown format — pass through as text (e.g., judge responses)
+        _log.debug("Non-standard response format from claude CLI: %s", text[:200])
         return LLMResponse(
             tool_calls=[],
             resolution=None,
             tokens_used=0,
             raw_resolution=None,
+            text=text,
         )

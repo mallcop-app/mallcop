@@ -8,17 +8,21 @@ from pathlib import Path
 import pytest
 
 from mallcop.config import LLMConfig
+from tests.shakedown.evaluator import JudgeEvaluator
 from tests.shakedown.harness import ShakedownHarness
+from tests.shakedown.runs import RunRecorder
 from tests.shakedown.scenario import load_all_scenarios, Scenario
 
 
 SCENARIOS_DIR = Path(__file__).parent / "scenarios"
 
 
-def _build_llm_client():
+def _build_llm_client(backend: str | None = None, model: str | None = None):
     """Build LLM client based on environment configuration."""
-    backend = os.environ.get("SHAKEDOWN_BACKEND", "api")
-    model = os.environ.get("SHAKEDOWN_MODEL", "haiku")
+    if backend is None:
+        backend = os.environ.get("SHAKEDOWN_BACKEND", "api")
+    if model is None:
+        model = os.environ.get("SHAKEDOWN_MODEL", "haiku")
 
     if backend == "claude-code":
         from mallcop.llm.claude_code import ClaudeCodeClient
@@ -73,6 +77,25 @@ def all_scenarios():
     if not SCENARIOS_DIR.exists():
         return []
     return load_all_scenarios(SCENARIOS_DIR)
+
+
+@pytest.fixture(scope="session")
+def judge_llm():
+    """Separate LLM client for judge evaluation — always sonnet, not instrumented."""
+    backend = os.environ.get("JUDGE_BACKEND", os.environ.get("SHAKEDOWN_BACKEND", "api"))
+    return _build_llm_client(backend=backend, model="sonnet")
+
+
+@pytest.fixture(scope="session")
+def judge_evaluator(judge_llm):
+    """JudgeEvaluator using a dedicated LLM judge."""
+    return JudgeEvaluator(judge_llm=judge_llm, judge_model="sonnet")
+
+
+@pytest.fixture(scope="session")
+def run_recorder():
+    """Records per-scenario grades to a JSONL file under runs/."""
+    return RunRecorder()
 
 
 def pytest_collection_modifyitems(config, items):

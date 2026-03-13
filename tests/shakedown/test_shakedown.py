@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
 
-from tests.shakedown.evaluator import ShakedownEvaluator, Verdict
+from tests.shakedown.evaluator import JudgeEvaluator, Verdict
 from tests.shakedown.harness import ShakedownHarness
 from tests.shakedown.scenario import load_all_scenarios
 
@@ -38,24 +39,41 @@ class TestShakedownScenarios:
         if not SCENARIOS_DIR.exists() or not list(SCENARIOS_DIR.rglob("*.yaml")):
             pytest.skip("No scenario files found")
 
-    @pytest.fixture
-    def evaluator(self):
-        return ShakedownEvaluator()
-
     @pytest.mark.parametrize("scenario_id", _get_scenario_ids())
-    def test_scenario(self, shakedown_harness, evaluator, scenario_id):
+    def test_scenario(
+        self,
+        shakedown_harness,
+        judge_evaluator,
+        run_recorder,
+        scenario_id,
+    ):
         """Run a single scenario and verify it doesn't FAIL."""
         scenarios = _get_scenarios_map()
         scenario = scenarios[scenario_id]
         result = shakedown_harness.run_scenario(scenario)
-        grade = evaluator.evaluate(result, scenario)
+        grade = judge_evaluator.evaluate(result, scenario)
+
+        # Record to JSONL
+        model = os.environ.get("SHAKEDOWN_MODEL", "haiku")
+        backend = os.environ.get("SHAKEDOWN_BACKEND", "api")
+        run_recorder.record(
+            grade=grade,
+            result=result,
+            scenario=scenario,
+            model=model,
+            backend=backend,
+            judge_model="sonnet",
+        )
+
         assert grade.verdict != Verdict.FAIL, (
             f"Scenario {scenario_id} FAILED:\n"
-            + "\n".join(grade.notes)
+            f"action_correct={grade.action_correct}\n"
+            f"reasoning_quality={grade.reasoning_quality}\n"
+            f"judge_reasoning={grade.judge_reasoning}"
         )
 
     @pytest.mark.parametrize("scenario_id", _get_scenario_ids())
-    def test_scenario_stability(self, shakedown_harness, evaluator, scenario_id):
+    def test_scenario_stability(self, shakedown_harness, scenario_id):
         """Run the same scenario 3 times — action should be consistent (X1)."""
         scenarios = _get_scenarios_map()
         scenario = scenarios[scenario_id]

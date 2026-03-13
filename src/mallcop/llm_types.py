@@ -23,6 +23,7 @@ class LLMResponse:
     resolution: Any  # ActorResolution | None — uses Any to avoid circular import
     tokens_used: int
     raw_resolution: Any = None  # Raw dict from LLM before validation
+    text: str = ""  # Raw text content from the LLM response
 
 
 class LLMClient(ABC):

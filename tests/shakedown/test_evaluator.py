@@ -8,7 +8,7 @@ import pytest
 
 from tests.shakedown.evaluator import (
     FixTarget,
-    Grade,
+    LegacyGrade as Grade,
     ShakedownEvaluator,
     Verdict,
 )
