@@ -46,12 +46,14 @@ class ActorResolution:
     finding_id: str
     action: ResolutionAction
     reason: str
+    confidence: float = field(default=0.0)
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "finding_id": self.finding_id,
             "action": self.action.value,
             "reason": self.reason,
+            "confidence": self.confidence,
         }
 
     @classmethod
@@ -60,6 +62,7 @@ class ActorResolution:
             finding_id=data["finding_id"],
             action=ResolutionAction(data["action"]),
             reason=data["reason"],
+            confidence=float(data.get("confidence", 0.0)),
         )
 
 

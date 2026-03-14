@@ -65,6 +65,8 @@ class RunResult:
     resolution: ActorResolution | None
     tokens_used: int
     iterations: int
+    tool_calls: int = field(default=0)
+    distinct_tools: int = field(default=0)
 
 
 @dataclass

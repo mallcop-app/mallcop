@@ -503,7 +503,7 @@ class TestOutputValidation:
         assert result.reason == "Known actor"
         # Verify the result is a clean ActorResolution with only expected fields
         d = result.to_dict()
-        assert set(d.keys()) == {"finding_id", "action", "reason"}
+        assert set(d.keys()) == {"finding_id", "action", "reason", "confidence"}
 
     def test_malformed_non_dict_rejected(self) -> None:
         """Test 6: Malformed (non-dict) data handled gracefully."""
