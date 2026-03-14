@@ -15,6 +15,7 @@ from typing import Any
 
 import yaml
 
+from mallcop.feedback import FeedbackRecord
 from mallcop.sanitize import sanitize_event, sanitize_finding
 from mallcop.schemas import (
     Annotation,
@@ -78,6 +79,18 @@ class Store(ABC):
         """Update baseline with events. If window_days is set, frequency tables
         only count events within that window. Known entities use all events."""
 
+    @abstractmethod
+    def append_feedback(self, record: FeedbackRecord) -> None:
+        """Persist a feedback record to .mallcop/feedback.jsonl."""
+
+    @abstractmethod
+    def query_feedback(
+        self,
+        actor: str | None = None,
+        detector: str | None = None,
+    ) -> list[FeedbackRecord]:
+        """Query accumulated feedback records with optional filters."""
+
 
 class JsonlStore(Store):
     """Store implementation backed by JSONL files and in-memory SQLite."""
@@ -90,6 +103,8 @@ class JsonlStore(Store):
         self._findings_path = self._data_dir / "findings.jsonl"
         self._checkpoints_path = self._data_dir / "checkpoints.yaml"
         self._baseline_path = self._data_dir / "baseline.json"
+
+        self._feedback_path = self._data_dir / "feedback.jsonl"
 
         self._db = sqlite3.connect(":memory:")
         self._init_schema()
@@ -481,3 +496,40 @@ class JsonlStore(Store):
         # Persist
         with open(self._baseline_path, "w") as f:
             json.dump(self._baseline.to_dict(), f)
+
+    def append_feedback(self, record: FeedbackRecord) -> None:
+        """Persist a feedback record to .mallcop/feedback.jsonl."""
+        self._feedback_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(self._feedback_path, "a") as f:
+            f.write(record.to_json() + "\n")
+
+    def query_feedback(
+        self,
+        actor: str | None = None,
+        detector: str | None = None,
+    ) -> list[FeedbackRecord]:
+        """Query feedback records from .mallcop/feedback.jsonl with optional filters."""
+        if not self._feedback_path.exists():
+            return []
+        text = self._feedback_path.read_text().strip()
+        if not text:
+            return []
+        results: list[FeedbackRecord] = []
+        for line in text.splitlines():
+            if not line:
+                continue
+            rec = FeedbackRecord.from_json(line)
+            if detector is not None and rec.detector != detector:
+                continue
+            # actor filter: check if actor appears in events or baseline_snapshot
+            if actor is not None:
+                actors_in_events = {e.get("actor", "") for e in rec.events}
+                bl_actors = rec.baseline_snapshot.get("actors", [])
+                if isinstance(bl_actors, list):
+                    actors_in_baseline = set(bl_actors)
+                else:
+                    actors_in_baseline = set()
+                if actor not in actors_in_events and actor not in actors_in_baseline:
+                    continue
+            results.append(rec)
+        return results

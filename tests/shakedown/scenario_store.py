@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from dataclasses import dataclass
 from typing import Any
 
+from mallcop.feedback import FeedbackRecord
 from mallcop.schemas import (
     Annotation,
     Baseline,
@@ -142,3 +143,13 @@ class ScenarioStore(Store):
         self, events: list[Event], window_days: int | None = None
     ) -> None:
         pass
+
+    def append_feedback(self, record: FeedbackRecord) -> None:
+        pass
+
+    def query_feedback(
+        self,
+        actor: str | None = None,
+        detector: str | None = None,
+    ) -> list[FeedbackRecord]:
+        return []

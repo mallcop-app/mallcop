@@ -1467,3 +1467,86 @@ def discover_app_cmd(
     except (DiscoverAppError, ConfigError) as e:
         click.echo(json.dumps({"status": "error", "error": str(e)}))
         raise SystemExit(1)
+
+
+@cli.command()
+@click.argument("finding_id")
+@click.argument("action", type=click.Choice(["agree", "override"], case_sensitive=False))
+@click.option("--reason", default=None, help="Explanation for this feedback (free text).")
+@click.option("--dir", "dir_path", default=None, help="Deployment repo directory.", hidden=True)
+def feedback(finding_id: str, action: str, reason: str | None, dir_path: str | None) -> None:
+    """Record human feedback on an agent finding.
+
+    FINDING_ID is the finding to give feedback on (e.g. fnd_001).
+    ACTION is 'agree' (agent was right) or 'override' (agent was wrong).
+
+    Example: mallcop feedback fnd_001 override --reason "Baron is US/Eastern"
+    """
+    from mallcop.feedback import FeedbackRecord, HumanAction
+    from mallcop.sanitize import sanitize_field
+
+    root = Path(dir_path) if dir_path else Path.cwd()
+    store = JsonlStore(root)
+
+    # Resolve the finding
+    findings = store.query_findings()
+    match = [f for f in findings if f.id == finding_id]
+    if not match:
+        click.echo(json.dumps({
+            "command": "feedback",
+            "status": "error",
+            "error": f"Finding not found: {finding_id}",
+        }))
+        raise SystemExit(1)
+
+    fnd = match[0]
+
+    # Sanitize reason — free text is untrusted input
+    sanitized_reason = sanitize_field(reason) if reason is not None else None
+
+    # Build snapshot: capture events + baseline + annotations at time of override
+    event_ids = fnd.event_ids
+    events_raw = store.query_events()
+    fnd_events = [e.to_dict() for e in events_raw if e.id in set(event_ids)]
+
+    baseline = store.get_baseline()
+    # Capture actor-relevant baseline entries
+    actor_keys = {k for k in baseline.frequency_tables if fnd.metadata.get("actor", "") in k}
+    baseline_snapshot: dict = {
+        "actors": baseline.known_entities.get("actors", []),
+        "frequency_subset": {k: baseline.frequency_tables[k] for k in actor_keys},
+    }
+
+    # Original action: last annotation's action, or status
+    annotations = fnd.annotations
+    if annotations:
+        original_action = annotations[-1].action
+        original_reason = annotations[-1].reason
+    else:
+        original_action = fnd.status.value
+        original_reason = None
+
+    # Detector from finding
+    detector = fnd.detector
+
+    record = FeedbackRecord(
+        finding_id=finding_id,
+        human_action=HumanAction(action.lower()),
+        reason=sanitized_reason,
+        original_action=original_action,
+        original_reason=original_reason,
+        timestamp=datetime.now(timezone.utc),
+        events=fnd_events,
+        baseline_snapshot=baseline_snapshot,
+        annotations=[a.to_dict() for a in annotations],
+        detector=detector,
+    )
+
+    store.append_feedback(record)
+
+    click.echo(json.dumps({
+        "command": "feedback",
+        "status": "ok",
+        "finding_id": finding_id,
+        "human_action": action.lower(),
+    }))
