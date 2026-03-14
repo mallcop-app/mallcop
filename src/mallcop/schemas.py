@@ -262,16 +262,69 @@ class PollResult:
 
 
 @dataclass
+class ActorProfile:
+    """Structured context about an actor learned from human feedback.
+
+    Contains only structured values (location names, timezone strings, type labels).
+    Raw free text from feedback reasons is never stored here — only extracted signals.
+
+    Fields:
+        location: Recognized location name (e.g. "London", "New York") or None.
+        timezone: Recognized timezone string (e.g. "US/Eastern", "UTC") or None.
+        type: Actor type — "human", "automation", or "service".
+        last_confirmed: When this profile was last updated via feedback.
+        source_feedback_ids: Which feedback records contributed to this profile.
+    """
+
+    location: str | None
+    timezone: str | None
+    type: str
+    last_confirmed: datetime
+    source_feedback_ids: list[str]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "location": self.location,
+            "timezone": self.timezone,
+            "type": self.type,
+            "last_confirmed": _dt_to_str(self.last_confirmed),
+            "source_feedback_ids": self.source_feedback_ids,
+        }
+
+    def to_json(self) -> str:
+        return json.dumps(self.to_dict())
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> ActorProfile:
+        return cls(
+            location=data.get("location"),
+            timezone=data.get("timezone"),
+            type=data.get("type", "human"),
+            last_confirmed=_str_to_dt(data["last_confirmed"]),
+            source_feedback_ids=data.get("source_feedback_ids", []),
+        )
+
+    @classmethod
+    def from_json(cls, line: str) -> ActorProfile:
+        return cls.from_dict(json.loads(line))
+
+
+@dataclass
 class Baseline:
     frequency_tables: dict[str, Any]
     known_entities: dict[str, Any]
     relationships: dict[str, Any]
+    actor_context: dict[str, ActorProfile] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "frequency_tables": self.frequency_tables,
             "known_entities": self.known_entities,
             "relationships": self.relationships,
+            "actor_context": {
+                actor: profile.to_dict()
+                for actor, profile in self.actor_context.items()
+            },
         }
 
     def to_json(self) -> str:
@@ -279,10 +332,16 @@ class Baseline:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Baseline:
+        raw_ctx = data.get("actor_context", {})
+        actor_context: dict[str, ActorProfile] = {
+            actor: ActorProfile.from_dict(profile_data)
+            for actor, profile_data in raw_ctx.items()
+        }
         return cls(
             frequency_tables=data["frequency_tables"],
             known_entities=data["known_entities"],
             relationships=data["relationships"],
+            actor_context=actor_context,
         )
 
     @classmethod

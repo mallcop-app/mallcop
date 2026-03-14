@@ -417,6 +417,21 @@ def detect(dir_path: str | None) -> None:
         window_days = BaselineConfig().window_days
     store.update_baseline(all_events, window_days=window_days)
 
+    # Update actor context from accumulated feedback
+    try:
+        from mallcop.baseline import update_actor_context
+        feedback_records = store.query_feedback()
+        if feedback_records:
+            updated_baseline = update_actor_context(store.get_baseline(), feedback_records)
+            # Persist the updated baseline with actor_context
+            import json as _json
+            bl_path = root / ".mallcop" / "baseline.json"
+            bl_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(bl_path, "w") as _f:
+                _json.dump(updated_baseline.to_dict(), _f)
+    except Exception:
+        pass  # Actor context update is non-critical; never block detect
+
     # Output summary
     summary: dict[str, dict[str, int]] = {}
     for f in findings:
