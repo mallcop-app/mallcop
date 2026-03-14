@@ -42,11 +42,21 @@ def check_baseline(
                 target = rel_key[len(prefix):]
                 actor_relationships[target] = rel_data
 
+        # Related actors: other actors sharing the same resource group / parent path
+        related_actors: dict[str, int] = _compute_related_actors(actor, rels)
+
+        # Actor context profile if available
+        actor_ctx = getattr(baseline, "actor_context", {}) or {}
+        profile = actor_ctx.get(actor)
+
         result: dict[str, Any] = {
             "known": is_known,
             "frequency": actor_freq,
             "relationships": actor_relationships,
+            "related_actors": related_actors,
         }
+        if profile is not None:
+            result["actor_context"] = profile.to_dict()
         return result
 
     if entity is not None:
@@ -56,6 +66,60 @@ def check_baseline(
         return {"known": False}
 
     return {"known": False, "error": "Provide either actor or entity parameter"}
+
+
+def _compute_related_actors(actor: str, relationships: dict[str, Any]) -> dict[str, int]:
+    """Find actors sharing resource group / parent path prefixes with the given actor.
+
+    For each target the actor has accessed, computes a 3-segment prefix
+    (e.g. "subscriptions/sub-1/resourceGroups/atom-rg" for Azure paths).
+    Then finds other actors who have accessed any target with the same prefix.
+
+    Returns: dict mapping other_actor -> total event count on shared resources.
+    """
+    # Gather target prefixes for the given actor
+    actor_prefixes: set[str] = set()
+    actor_prefix = f"{actor}:"
+    for rel_key in relationships:
+        if rel_key.startswith(actor_prefix):
+            target = rel_key[len(actor_prefix):]
+            prefix = _target_prefix(target)
+            if prefix:
+                actor_prefixes.add(prefix)
+
+    if not actor_prefixes:
+        return {}
+
+    # Find other actors sharing any of those prefixes
+    related: dict[str, int] = {}
+    for rel_key, rel_data in relationships.items():
+        if ":" not in rel_key:
+            continue
+        other_actor, target = rel_key.split(":", 1)
+        if other_actor == actor:
+            continue
+        prefix = _target_prefix(target)
+        if prefix and prefix in actor_prefixes:
+            count = rel_data.get("count", 0) if isinstance(rel_data, dict) else 0
+            related[other_actor] = related.get(other_actor, 0) + count
+
+    return related
+
+
+def _target_prefix(target: str) -> str | None:
+    """Compute the parent prefix of a target path (up to 3 segments).
+
+    Examples:
+      "subscriptions/sub-1/resourceGroups/atom-rg/vm-1" → "subscriptions/sub-1/resourceGroups/atom-rg"
+      "github/org/repo"                                  → "github/org"
+      "simple"                                           → None (no useful prefix)
+    """
+    parts = target.split("/")
+    if len(parts) < 2:
+        return None
+    # Use up to 4 segments for Azure-style paths (sub/rg depth), otherwise 2
+    depth = min(4, len(parts) - 1)
+    return "/".join(parts[:depth])
 
 
 @tool(name="baseline-stats", description="Get baseline statistics", permission="read")
