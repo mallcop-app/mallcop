@@ -122,12 +122,25 @@ def _setup_pro(config_data: dict[str, Any]) -> dict[str, Any] | None:
         )
         return None
 
-    # Estimate appetite and recommend plan tier based on connector list
-    from mallcop.appetite import estimate_appetite, recommend_plan
-
+    # Get plan recommendation from service API (no local pricing data needed)
     connector_names = list(config_data.get("connectors", {}).keys())
-    appetite_donuts = estimate_appetite(connector_names)
-    recommended_plan, plan_price, headroom_pct = recommend_plan(appetite_donuts)
+    try:
+        recommendation = client.recommend_plan(connector_names)
+    except RuntimeError as e:
+        click.echo(
+            json.dumps({"status": "error", "error": str(e)}),
+            err=True,
+        )
+        return None
+
+    appetite_donuts = recommendation.get("estimated_donuts", 0)
+    recommended_plan = recommendation.get("recommended_tier", "starter")
+    headroom_pct = recommendation.get("headroom_pct", 0.0)
+    # Format price from tiers list
+    plan_price = next(
+        (t["price"] for t in recommendation.get("tiers", []) if t["name"] == recommended_plan),
+        "",
+    )
 
     # Get checkout URL
     checkout_url = None

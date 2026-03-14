@@ -140,3 +140,29 @@ class ProClient:
     def get_usage(self, account_id: str, service_token: str) -> dict:
         """Get usage summary."""
         return self._api_call("get", f"/accounts/{account_id}/usage", token=service_token)
+
+    def recommend_plan(self, connectors: list[str]) -> dict:
+        """Get plan recommendation from service API.
+
+        Calls POST /recommend-plan (unauthenticated) with connector list.
+        Returns dict with recommended_tier, estimated_donuts, headroom_pct, tiers.
+
+        Raises:
+            RuntimeError: If the service is unreachable or returns an error.
+        """
+        try:
+            resp = requests.post(
+                f"{self._url}/recommend-plan",
+                json={"connectors": connectors},
+                timeout=30,
+            )
+        except requests.RequestException as exc:
+            raise RuntimeError(
+                "Could not reach mallcop.app — try again or visit mallcop.app/pricing"
+            ) from exc
+        if resp.status_code != 200:
+            _log.debug("recommend_plan failed: HTTP %d: %s", resp.status_code, resp.text)
+            raise RuntimeError(
+                "Could not reach mallcop.app — try again or visit mallcop.app/pricing"
+            )
+        return resp.json()
