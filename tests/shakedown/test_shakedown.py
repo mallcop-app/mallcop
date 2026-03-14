@@ -73,9 +73,15 @@ class TestShakedownScenarios:
             f"- {grade.judge_reasoning}"
         )
 
+    @pytest.mark.stability
     @pytest.mark.parametrize("scenario_id", _get_scenario_ids())
     def test_scenario_stability(self, shakedown_harness, scenario_id):
-        """Run the same scenario 3 times — action should be consistent (X1)."""
+        """Run the same scenario 3 times — action should be consistent (X1).
+
+        Skipped by default. Run with: pytest -m stability
+        """
+        if not os.environ.get("SHAKEDOWN_STABILITY"):
+            pytest.skip("Set SHAKEDOWN_STABILITY=1 to run stability tests")
         scenarios = _get_scenarios_map()
         scenario = scenarios[scenario_id]
         actions = []
