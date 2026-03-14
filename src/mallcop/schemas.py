@@ -26,6 +26,7 @@ class FindingStatus(str, Enum):
     OPEN = "open"
     RESOLVED = "resolved"
     ACKED = "acked"
+    SQUELCHED = "squelched"
 
 
 def _dt_to_str(dt: datetime) -> str:

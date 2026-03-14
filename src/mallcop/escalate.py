@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import random
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -20,6 +21,48 @@ from mallcop.budget import (
 from mallcop.config import load_config
 from mallcop.schemas import Annotation, Finding, FindingStatus
 from mallcop.store import JsonlStore, Store
+
+
+_SPOT_CHECK_RATE = 0.1  # 10% of squelched findings surface for audit
+
+
+def _should_squelch(
+    result: RunResult,
+    squelch: int,
+    _random_override: float | None = None,
+) -> tuple[bool, bool]:
+    """Determine if an escalated finding should be squelched.
+
+    Args:
+        result: The RunResult from actor chain.
+        squelch: 0-10 gate setting (squelch/10 = confidence threshold).
+        _random_override: Override random.random() for testing.
+
+    Returns:
+        (should_squelch, via_spot_check): both False means not squelched normally.
+        via_spot_check=True means finding surfaces despite being below threshold.
+    """
+    # No resolution (error) or non-escalated action → never squelch
+    if result.resolution is None:
+        return False, False
+    if result.resolution.action != ResolutionAction.ESCALATED:
+        return False, False
+    # squelch=0 → threshold=0.0 → nothing ever squelched
+    threshold = squelch / 10.0
+    if threshold <= 0.0:
+        return False, False
+
+    confidence = result.resolution.confidence
+    if confidence >= threshold:
+        return False, False
+
+    # Below threshold — check spot-check override
+    rand = _random_override if _random_override is not None else random.random()
+    if rand < _SPOT_CHECK_RATE:
+        # Spot-check: surface anyway for audit
+        return False, True
+
+    return True, False
 
 
 # Haiku pricing (input + output blended estimate per 1k tokens)
@@ -166,18 +209,39 @@ def run_escalate(
                             ],
                         )
                     elif result.resolution.action == ResolutionAction.ESCALATED:
-                        store.update_finding(
-                            finding.id,
-                            annotations=[
-                                Annotation(
-                                    actor=actor_name,
-                                    timestamp=datetime.now(timezone.utc),
-                                    content=result.resolution.reason,
-                                    action="escalated",
-                                    reason=result.resolution.reason,
-                                )
-                            ],
+                        # Squelch gate: suppress low-confidence escalations
+                        squelched, via_spot_check = _should_squelch(
+                            result, squelch=config.squelch
                         )
+                        base_annotation = Annotation(
+                            actor=actor_name,
+                            timestamp=datetime.now(timezone.utc),
+                            content=result.resolution.reason,
+                            action="escalated",
+                            reason=result.resolution.reason,
+                        )
+                        if squelched:
+                            store.update_finding(
+                                finding.id,
+                                status=FindingStatus.SQUELCHED,
+                                annotations=[base_annotation],
+                            )
+                        else:
+                            extra_annotations = []
+                            if via_spot_check:
+                                extra_annotations.append(
+                                    Annotation(
+                                        actor="mallcop-squelch",
+                                        timestamp=datetime.now(timezone.utc),
+                                        content="Spot-check: surfaced for audit despite low confidence.",
+                                        action="escalated",
+                                        reason="Random 10% spot-check override",
+                                    )
+                                )
+                            store.update_finding(
+                                finding.id,
+                                annotations=[base_annotation] + extra_annotations,
+                            )
 
             # Mark unprocessed findings from this batch as budget-skipped
             unprocessed = batch_findings[len(batch_result.results):]

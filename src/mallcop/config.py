@@ -101,6 +101,7 @@ class MallcopConfig:
     llm: LLMConfig | None = None
     actors: dict[str, dict[str, Any]] = field(default_factory=dict)
     pro: ProConfig | None = None
+    squelch: int = 5  # 0-10: confidence gate; squelch/10 = threshold; 0=off, 10=max
 
 
 def _resolve_value(value: Any, provider: SecretProvider) -> Any:
@@ -285,6 +286,10 @@ def load_config(config_dir: Path) -> MallcopConfig:
     # Pro config
     pro_config = _parse_pro(raw.get("pro"), provider)
 
+    # Squelch: 0-10 integer gate, default 5
+    squelch_raw = raw.get("squelch", 5)
+    squelch = int(squelch_raw) if squelch_raw is not None else 5
+
     return MallcopConfig(
         secrets_backend=backend,
         connectors=connectors,
@@ -295,4 +300,5 @@ def load_config(config_dir: Path) -> MallcopConfig:
         llm=llm_config,
         actors=actors_config,
         pro=pro_config,
+        squelch=squelch,
     )

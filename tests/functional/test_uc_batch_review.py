@@ -58,6 +58,7 @@ def _make_config_yaml(root: Path, budget_overrides: dict[str, Any] | None = None
         },
         "actor_chain": {"triage": {"routes_to": "notify-teams"}},
         "budget": budget,
+        "squelch": 0,  # disabled: this test is not about squelch gating
     }
     with open(root / "mallcop.yaml", "w") as f:
         yaml.dump(config, f, default_flow_style=False, sort_keys=False)

@@ -65,6 +65,7 @@ def _make_config(
             max_tokens_per_run=max_tokens_per_run,
             max_tokens_per_finding=max_tokens_per_finding,
         ),
+        squelch=0,  # disabled: unit tests are not testing squelch gating
     )
 
 

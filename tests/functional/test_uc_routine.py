@@ -71,6 +71,7 @@ def _make_config_yaml(
             "max_tokens_per_run": 50000,
             "max_tokens_per_finding": 5000,
         },
+        "squelch": 0,  # disabled: functional tests are not testing squelch gating
     }
     with open(root / "mallcop.yaml", "w") as f:
         yaml.dump(config, f, default_flow_style=False, sort_keys=False)
