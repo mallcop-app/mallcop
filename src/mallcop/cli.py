@@ -2212,3 +2212,55 @@ def skill_verify(skill_dir: Path, pubkey_path: Path, identity: str | None) -> No
     else:
         click.echo(json.dumps({"status": "error", "verified": False, "error": "Signature verification failed"}))
         raise SystemExit(1)
+
+
+@skill.command("lock")
+@click.option(
+    "--skills-dir",
+    "skills_dir",
+    default=None,
+    type=click.Path(file_okay=False, path_type=Path),
+    help="Directory containing skill subdirectories. Defaults to ~/.mallcop/skills.",
+)
+@click.option(
+    "--output",
+    "output_path",
+    default=None,
+    type=click.Path(path_type=Path),
+    help="Output path for skills.lock. Defaults to skills-dir/skills.lock.",
+)
+def skill_lock(skills_dir: Path | None, output_path: Path | None) -> None:
+    """(Re)generate skills.lock from installed skills.
+
+    Scans the skills directory for all skill subdirectories, computes
+    SHA-256 hashes of each skill's content, and writes skills.lock.
+    """
+    from mallcop.skills._schema import SkillManifest
+    from mallcop.trust import generate_lockfile, write_lockfile
+
+    if skills_dir is None:
+        skills_dir = Path.home() / ".mallcop" / "skills"
+
+    if not skills_dir.exists():
+        click.echo(json.dumps({"status": "error", "error": f"Skills directory not found: {skills_dir}"}))
+        raise SystemExit(1)
+
+    if output_path is None:
+        output_path = skills_dir / "skills.lock"
+
+    skills: dict[str, SkillManifest] = {}
+    for entry in sorted(skills_dir.iterdir()):
+        if not entry.is_dir():
+            continue
+        manifest = SkillManifest.from_skill_dir(entry)
+        if manifest is not None:
+            skills[manifest.name] = manifest
+
+    lockfile = generate_lockfile(skills)
+    write_lockfile(lockfile, output_path)
+
+    click.echo(json.dumps({
+        "status": "ok",
+        "lock_file": str(output_path),
+        "skills_locked": list(skills.keys()),
+    }))
