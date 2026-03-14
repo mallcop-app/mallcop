@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from mallcop.actors._schema import ActorManifest, ActorResolution, ResolutionAction, load_actor_manifest
-from mallcop.llm_types import LLMClient, LLMResponse, ToolCall  # canonical home
+from mallcop.llm_types import LLMAPIError, LLMClient, LLMResponse, ToolCall  # canonical home
 from mallcop.sanitize import sanitize_finding, sanitize_tool_result
 from mallcop.schemas import Finding
 from mallcop.tools import ToolContext, ToolRegistry
@@ -59,6 +59,7 @@ class RunResult:
     iterations: int
     tool_calls: int = field(default=0)
     distinct_tools: int = field(default=0)
+    backend_error: bool = field(default=False)
 
 
 @dataclass
@@ -69,6 +70,10 @@ class BatchResult:
     feedback_records: list[Any] = field(default_factory=list)  # list[FeedbackRecord]
 
 _VALID_ACTIONS = {a.value for a in ResolutionAction}
+
+# Tools whose results are trusted instructions (not attacker-controlled data).
+# These bypass sanitize_tool_result() so their content reaches the LLM unmarked.
+_TRUSTED_TOOLS: frozenset[str] = frozenset({"load-skill"})
 
 
 def validate_resolution(raw: Any) -> ActorResolution | None:
@@ -225,6 +230,38 @@ class ActorRuntime:
                 },
             ])
 
+        # Pre-pack skill catalog if skill_root is configured
+        skill_root = getattr(self._context, "skill_root", None)
+        if skill_root is not None:
+            import json as _json2
+            from pathlib import Path as _Path
+            from mallcop.skills._schema import SkillManifest as _SkillManifest
+
+            skill_root_path = _Path(skill_root)
+            catalog: list[dict[str, Any]] = []
+            if skill_root_path.exists() and skill_root_path.is_dir():
+                for skill_dir in sorted(skill_root_path.iterdir()):
+                    if not skill_dir.is_dir():
+                        continue
+                    manifest = _SkillManifest.from_skill_dir(skill_dir)
+                    if manifest is None:
+                        continue
+                    catalog.append({
+                        "name": manifest.name,
+                        "description": manifest.description,
+                        "parent": manifest.parent,
+                        "has_tools": manifest.tools is not None,
+                    })
+            if catalog:
+                extra_messages.extend([
+                    {"role": "assistant", "content": "Calling tool: list-skills"},
+                    {
+                        "role": "tool",
+                        "name": "list-skills",
+                        "content": _json2.dumps(catalog),
+                    },
+                ])
+
         return extra_messages
 
     def run(
@@ -270,12 +307,19 @@ class ActorRuntime:
                 self._manifest.name, iteration + 1, max_iter,
                 finding.id[:12], len(messages), finding_tokens,
             )
-            response = self._llm.chat(
-                model=self._manifest.model or "haiku",
-                system_prompt=system_prompt,
-                messages=messages,
-                tools=tool_schemas,
-            )
+            try:
+                response = self._llm.chat(
+                    model=self._manifest.model or "haiku",
+                    system_prompt=system_prompt,
+                    messages=messages,
+                    tools=tool_schemas,
+                )
+            except LLMAPIError:
+                _log.error(
+                    "Actor %s: LLM backend error on iter %d for %s",
+                    self._manifest.name, iteration + 1, finding.id[:12],
+                )
+                raise
 
             total_tokens += response.tokens_used
             finding_tokens += response.tokens_used
@@ -287,6 +331,11 @@ class ActorRuntime:
 
             # Check per-finding token budget
             if finding_token_budget is not None and finding_tokens > finding_token_budget:
+                _log.warning(
+                    "Actor %s budget exhausted for %s: %d/%d tokens",
+                    self._manifest.name, finding.id[:12],
+                    finding_tokens, finding_token_budget,
+                )
                 return RunResult(
                     resolution=ActorResolution(
                         finding_id=finding.id,
@@ -335,6 +384,12 @@ class ActorRuntime:
                     )
 
             if resolved is not None:
+                _log.info(
+                    "Actor %s resolved %s: action=%s reason=%s tokens=%d iters=%d",
+                    self._manifest.name, finding.id[:12],
+                    resolved.action.value, resolved.reason[:80],
+                    total_tokens, iteration + 1,
+                )
                 return RunResult(
                     resolution=resolved,
                     tokens_used=total_tokens,
@@ -343,7 +398,14 @@ class ActorRuntime:
 
             # Process tool calls
             if not response.tool_calls:
-                # No tool calls and no resolution — treat as escalation
+                # No tool calls and no resolution on first iteration with 0 tokens
+                # = backend failure, not a legitimate escalation
+                if iteration == 0 and response.tokens_used == 0:
+                    raise LLMAPIError(
+                        f"LLM backend returned empty response for {finding.id} "
+                        f"(0 tokens, no tool calls, no resolution)"
+                    )
+                # Later iterations with actual tokens = legitimate escalation
                 return RunResult(
                     resolution=ActorResolution(
                         finding_id=finding.id,
@@ -375,20 +437,40 @@ class ActorRuntime:
                     )
 
             # Execute tool calls and collect results
+            _log.debug(
+                "Actor %s executing %d tool calls: %s",
+                self._manifest.name, len(response.tool_calls),
+                ", ".join(tc.name for tc in response.tool_calls),
+            )
             for tc in response.tool_calls:
-                if self._context is not None:
-                    # Use registry.execute for context injection + permission check
-                    max_perm = "write" if "write" in self._manifest.permissions else "read"
-                    result = self._registry.execute(
-                        tc.name, self._context, max_permission=max_perm, **tc.arguments
+                try:
+                    if self._context is not None:
+                        # Use registry.execute for context injection + permission check
+                        max_perm = "write" if "write" in self._manifest.permissions else "read"
+                        result = self._registry.execute(
+                            tc.name, self._context, max_permission=max_perm, **tc.arguments
+                        )
+                    else:
+                        # Legacy path: direct call without context
+                        tool_fn = self._registry.get_tool(tc.name)
+                        result = tool_fn(**tc.arguments)
+                except Exception as exc:
+                    _log.warning(
+                        "Actor %s tool '%s' raised %s: %s",
+                        self._manifest.name, tc.name,
+                        type(exc).__name__, exc,
                     )
-                else:
-                    # Legacy path: direct call without context
-                    tool_fn = self._registry.get_tool(tc.name)
-                    result = tool_fn(**tc.arguments)
+                    # Feed the error back to the LLM so it can try a different approach
+                    result = {"error": f"Tool '{tc.name}' failed: {type(exc).__name__}: {exc}"}
                 # Sanitize tool result before it reaches the LLM
                 # (defense layer 2 — all tool results get markers)
-                sanitized_result = sanitize_tool_result(result)
+                # Exception: trusted tools (e.g. load-skill) deliver trusted
+                # instructions — skip sanitization so skill context is not
+                # wrapped in USER_DATA markers.
+                if tc.name in _TRUSTED_TOOLS:
+                    sanitized_result = result
+                else:
+                    sanitized_result = sanitize_tool_result(result)
                 messages.append({
                     "role": "assistant",
                     "content": f"Calling tool: {tc.name}",
@@ -494,7 +576,11 @@ def build_actor_runner(
                 manifests[manifest.name] = (manifest, actor_dir)
             elif manifest.type == "channel":
                 channel_manifests[manifest.name] = (manifest, actor_dir)
-        except ValueError:
+        except Exception as exc:
+            _log.warning(
+                "Failed to load actor manifest from %s: %s: %s",
+                actor_dir, type(exc).__name__, exc,
+            )
             continue
 
     if not manifests and not channel_manifests:
@@ -527,6 +613,7 @@ def build_actor_runner(
         total_tokens = 0
         total_iterations = 0
         finding_token_budget = kwargs.get("finding_token_budget")
+        chain_path: list[str] = []  # track actor chain walk for logging
 
         # Batch-mode deferred channel delivery support
         deferred_channel = kwargs.get("_deferred_channel")
@@ -574,6 +661,12 @@ def build_actor_runner(
 
             manifest, actor_dir = manifests[current_name]
             post_md = load_post_md(actor_dir)
+            chain_path.append(current_name)
+
+            _log.info(
+                "finding=%s actor=%s status=entering chain_position=%d",
+                finding.id[:12], current_name, len(chain_path),
+            )
 
             # Set actor_name on context so tools (e.g. annotate-finding) use it
             context.actor_name = current_name
@@ -604,11 +697,27 @@ def build_actor_runner(
             if batch_context is not None:
                 system_prompt = f"{system_prompt}\n\n{batch_context}"
 
-            result = runtime.run(
-                finding=finding,
-                system_prompt=system_prompt,
-                finding_token_budget=remaining_budget,
-            )
+            try:
+                result = runtime.run(
+                    finding=finding,
+                    system_prompt=system_prompt,
+                    finding_token_budget=remaining_budget,
+                )
+            except LLMAPIError as exc:
+                _log.error(
+                    "LLM backend error in actor '%s' for finding %s: %s",
+                    current_name, finding.id[:12], exc,
+                )
+                return RunResult(
+                    resolution=ActorResolution(
+                        finding_id=finding.id,
+                        action=ResolutionAction.ESCALATED,
+                        reason=f"LLM backend error: {exc}",
+                    ),
+                    tokens_used=total_tokens,
+                    iterations=total_iterations,
+                    backend_error=True,
+                )
 
             total_tokens += result.tokens_used
             total_iterations += result.iterations
@@ -618,6 +727,12 @@ def build_actor_runner(
                 result.resolution is not None
                 and result.resolution.action != ResolutionAction.ESCALATED
             ):
+                _log.info(
+                    "finding=%s action=%s actor=%s tokens=%d iters=%d chain=%s reason=%s",
+                    finding.id[:12], result.resolution.action.value,
+                    current_name, total_tokens, total_iterations,
+                    "→".join(chain_path), result.resolution.reason[:80],
+                )
                 return RunResult(
                     resolution=result.resolution,
                     tokens_used=total_tokens,
@@ -625,9 +740,19 @@ def build_actor_runner(
                 )
 
             # Escalated -- follow routes_to if available
-            current_name = manifest.routes_to
+            next_name = manifest.routes_to
+            _log.info(
+                "finding=%s actor=%s status=escalated next=%s reason=%s",
+                finding.id[:12], current_name,
+                next_name or "(chain end)", result.resolution.reason[:80] if result.resolution else "no resolution",
+            )
+            current_name = next_name
 
         # Chain exhausted (routes_to was None or missing) -- return last escalation
+        _log.warning(
+            "finding=%s status=chain_exhausted tokens=%d chain=%s",
+            finding.id[:12], total_tokens, "→".join(chain_path),
+        )
         return RunResult(
             resolution=ActorResolution(
                 finding_id=finding.id,

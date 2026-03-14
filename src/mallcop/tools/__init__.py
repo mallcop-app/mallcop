@@ -33,6 +33,9 @@ class ToolContext:
     config: Any  # MallcopConfig instance
     actor_name: str = "agent"  # Name of the actor using this context
     reputation: Any = None  # Optional EntityReputation instance
+    skill_root: Any = None  # Path to skill root directory (optional)
+    loaded_skills: dict = field(default_factory=dict)  # name -> LoadedSkill (cache)
+    tool_registry: Any = None  # ToolRegistry for skill tool registration
 
 
 @dataclass
