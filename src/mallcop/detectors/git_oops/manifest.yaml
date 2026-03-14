@@ -1,0 +1,6 @@
+name: git-oops
+description: Scans git repositories for leaked credentials, hardcoded secrets, and security antipatterns
+version: 0.1.0
+sources: "*"
+event_types: "*"
+severity_default: critical

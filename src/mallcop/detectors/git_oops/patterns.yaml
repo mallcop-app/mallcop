@@ -1,0 +1,103 @@
+patterns:
+  # --- Cloud provider keys ---
+  - id: aws-access-key
+    description: AWS Access Key ID
+    file_glob: "**/*"
+    regex: "AKIA[0-9A-Z]{16}"
+    severity: critical
+
+  - id: aws-secret-key
+    description: AWS Secret Access Key (40-char base64 near aws/secret context)
+    file_glob: "**/*"
+    regex: "(?i)(aws_secret_access_key|aws_secret)\\s*[=:]\\s*['\"]?[A-Za-z0-9/+=]{40}['\"]?"
+    severity: critical
+
+  # --- API tokens ---
+  - id: github-pat
+    description: GitHub personal access token
+    file_glob: "**/*"
+    regex: "ghp_[a-zA-Z0-9]{36}"
+    severity: critical
+
+  - id: github-oauth
+    description: GitHub OAuth access token
+    file_glob: "**/*"
+    regex: "gho_[a-zA-Z0-9]{36}"
+    severity: critical
+
+  - id: github-app-token
+    description: GitHub App installation token
+    file_glob: "**/*"
+    regex: "ghs_[a-zA-Z0-9]{36}"
+    severity: critical
+
+  - id: openai-api-key
+    description: OpenAI API key
+    file_glob: "**/*"
+    regex: "sk-[a-zA-Z0-9]{20}T3BlbkFJ[a-zA-Z0-9]{20}"
+    severity: critical
+
+  - id: slack-token
+    description: Slack bot or user token
+    file_glob: "**/*"
+    regex: "xox[bpsa]-[0-9]{10,}-[a-zA-Z0-9]+"
+    severity: critical
+
+  - id: stripe-secret-key
+    description: Stripe secret key
+    file_glob: "**/*"
+    regex: "sk_live_[a-zA-Z0-9]{24,}"
+    severity: critical
+
+  # --- Private keys ---
+  - id: private-key
+    description: Private key committed to repo
+    file_glob: "**/*"
+    regex: "-----BEGIN (RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----"
+    severity: critical
+
+  # --- Committed secrets files ---
+  - id: committed-env
+    description: ".env file containing secrets"
+    file_glob: "**/.env"
+    regex: "(?i)\\b\\w*(PASSWORD|SECRET|API_KEY|TOKEN|PRIVATE_KEY)\\w*\\s*="
+    severity: critical
+
+  - id: committed-env-local
+    description: ".env.local file containing secrets"
+    file_glob: "**/.env.local"
+    regex: "(?i)\\b\\w*(PASSWORD|SECRET|API_KEY|TOKEN|PRIVATE_KEY)\\w*\\s*="
+    severity: critical
+
+  # --- Hardcoded credentials in code ---
+  - id: hardcoded-password
+    description: Hardcoded password assignment
+    file_glob: "**/*.{py,js,ts,rb,go,java,yaml,yml,toml}"
+    regex: "(?i)password\\s*[=:]\\s*['\"][^'\"]{8,}['\"]"
+    severity: warn
+
+  - id: hardcoded-connection-string
+    description: Database connection string with credentials
+    file_glob: "**/*"
+    regex: "(?i)(mysql|postgres|postgresql|mongodb(\\+srv)?)://[^:]+:[^@]+@"
+    severity: critical
+
+  # --- CI/CD secrets ---
+  - id: gha-hardcoded-secret
+    description: GitHub Actions workflow with hardcoded credential
+    file_glob: "**/.github/workflows/*.{yml,yaml}"
+    regex: "(AKIA[0-9A-Z]{16}|ghp_[a-zA-Z0-9]{36}|sk-[a-zA-Z0-9]{20}T3BlbkFJ|xox[bpsa]-)"
+    severity: critical
+
+  - id: dockerfile-embedded-secret
+    description: Dockerfile with embedded credential via ARG/ENV
+    file_glob: "**/Dockerfile*"
+    regex: "(?i)(ARG|ENV)\\s+(PASSWORD|SECRET_KEY|API_KEY|TOKEN|PRIVATE_KEY)\\s*="
+    severity: warn
+
+  # --- Generic high-entropy secrets ---
+  - id: generic-api-key-assignment
+    description: Generic API key assignment in config
+    file_glob: "**/*.{yaml,yml,toml,json,ini,cfg}"
+    regex: "(?i)(api_key|apikey|api-key)\\s*[=:]\\s*['\"]?[a-zA-Z0-9]{20,}['\"]?"
+    severity: warn
