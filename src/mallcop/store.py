@@ -486,6 +486,12 @@ class JsonlStore(Store):
                 f":{evt.timestamp.weekday()}:{_hour_bucket(evt.timestamp.hour)}"
             )
             freq[time_key] = freq.get(time_key, 0) + 1
+            # Action-level key: source:event_type:actor:action:target_prefix
+            # Makes baseline camping more expensive: attacker must pre-seed every
+            # specific action on every specific target, not just actor:event_type.
+            target_prefix = "/".join(evt.target.split("/")[:3])
+            action_key = f"{evt.source}:{evt.event_type}:{evt.actor}:{evt.action}:{target_prefix}"
+            freq[action_key] = freq.get(action_key, 0) + 1
 
         self._baseline = Baseline(
             frequency_tables=freq,

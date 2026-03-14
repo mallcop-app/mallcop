@@ -28,9 +28,12 @@ def check_baseline(
         actors_list = known.get("actors", [])
         is_known = actor in actors_list
 
-        # Gather frequency entries for this actor
+        # Gather frequency entries for this actor.
+        # Matches both 3-part aggregate keys (end with :actor) and action-level keys
+        # (contain :actor: in the middle, format: source:event_type:actor:action:target_prefix).
         actor_freq = {
-            k: v for k, v in freq.items() if k.endswith(f":{actor}")
+            k: v for k, v in freq.items()
+            if k.endswith(f":{actor}") or f":{actor}:" in k
         }
 
         # Gather relationship data for this actor (keys are "actor:target")
