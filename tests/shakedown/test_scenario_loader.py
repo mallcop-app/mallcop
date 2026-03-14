@@ -45,6 +45,8 @@ class TestLoadScenario:
         # Defaults
         assert s.connector_tools == []
         assert s.tags == []
+        # min_investigation_quality defaults to 3 when absent
+        assert s.expected.min_investigation_quality == 3
 
     def test_scenario_finding_type(self):
         """Verify finding is a Finding instance with correct fields."""
@@ -88,6 +90,49 @@ class TestLoadScenario:
         }
         assert s.baseline.frequency_tables == {"azure:login:admin-user": 340}
         assert "admin-user:sub-169efd95/resourceGroups/atom-rg" in s.baseline.relationships
+
+
+class TestMinInvestigationQuality:
+    """Tests for min_investigation_quality field in ExpectedOutcome."""
+
+    def test_default_is_3(self, tmp_path):
+        """YAML without min_investigation_quality defaults to 3."""
+        yaml_text = FIXTURE_FILE.read_text()
+        assert "min_investigation_quality" not in yaml_text
+        s = load_scenario(FIXTURE_FILE)
+        assert s.expected.min_investigation_quality == 3
+
+    def test_explicit_value_3(self, tmp_path):
+        """YAML with min_investigation_quality: 3 loads correctly."""
+        import yaml as _yaml
+        data = _yaml.safe_load(FIXTURE_FILE.read_text())
+        data["expected"]["min_investigation_quality"] = 3
+        p = tmp_path / "s.yaml"
+        p.write_text(_yaml.dump(data))
+        s = load_scenario(p)
+        assert s.expected.min_investigation_quality == 3
+
+    def test_explicit_value_4(self, tmp_path):
+        """YAML with min_investigation_quality: 4 loads correctly."""
+        import yaml as _yaml
+        data = _yaml.safe_load(FIXTURE_FILE.read_text())
+        data["expected"]["min_investigation_quality"] = 4
+        p = tmp_path / "s.yaml"
+        p.write_text(_yaml.dump(data))
+        s = load_scenario(p)
+        assert s.expected.min_investigation_quality == 4
+
+    def test_all_real_scenarios_have_field(self):
+        """All 54 real scenarios have min_investigation_quality set."""
+        scenarios_dir = Path(__file__).parent / "scenarios"
+        scenarios = load_all_scenarios(scenarios_dir)
+        assert len(scenarios) >= 54, f"Expected >= 54 scenarios, got {len(scenarios)}"
+        # Verify each scenario has min_investigation_quality in valid range
+        for s in scenarios:
+            assert s.expected.min_investigation_quality in (3, 4), (
+                f"Scenario {s.id} has min_investigation_quality={s.expected.min_investigation_quality}, "
+                f"expected 3 or 4"
+            )
 
 
 class TestLoadAllScenarios:

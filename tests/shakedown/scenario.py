@@ -40,6 +40,7 @@ class ExpectedOutcome:
     reasoning_must_not_mention: list[str] = field(default_factory=list)
     investigate_must_use_tools: bool = False
     min_investigate_iterations: int = 1
+    min_investigation_quality: int = 3  # Minimum investigation_thoroughness score (1-5)
 
 
 @dataclass
@@ -114,6 +115,7 @@ def _parse_expected(data: dict[str, Any]) -> ExpectedOutcome:
         reasoning_must_not_mention=data.get("reasoning_must_not_mention", []),
         investigate_must_use_tools=data.get("investigate_must_use_tools", False),
         min_investigate_iterations=data.get("min_investigate_iterations", 1),
+        min_investigation_quality=int(data.get("min_investigation_quality", 3)),
     )
 
 
