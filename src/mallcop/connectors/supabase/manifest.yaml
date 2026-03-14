@@ -1,0 +1,32 @@
+name: supabase
+description: Supabase auth audit logs, project config changes, and edge function monitoring
+version: 0.1.0
+
+auth:
+  required:
+    - SUPABASE_PROJECT_URL
+    - SUPABASE_SERVICE_ROLE_KEY
+    - SUPABASE_PROJECT_REF
+  optional:
+    - SUPABASE_ACCESS_TOKEN
+
+event_types:
+  - auth_success
+  - auth_failure
+  - auth_logout
+  - user_created
+  - user_deleted
+  - user_invited
+  - password_recovery
+  - token_refresh
+  - mfa_verified
+  - secret_change
+  - api_key_change
+  - config_change
+
+discovery:
+  probes:
+    - "Supabase PostgREST auth audit table"
+    - "Supabase Management API project info"
+
+tools: []
