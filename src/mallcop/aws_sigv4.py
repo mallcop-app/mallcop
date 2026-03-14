@@ -31,12 +31,16 @@ def sign_v4_request(
     access_key: str,
     secret_key: str,
     timestamp: datetime | None = None,
+    session_token: str = "",
 ) -> dict[str, str]:
     """AWS Signature Version 4 signing.
 
     Returns a **new** headers dict containing all original headers plus
     ``host``, ``x-amz-date``, and ``Authorization``.  The caller's
     *headers* dict is **not** mutated.
+
+    When *session_token* is provided (e.g. from STS / SSO temporary
+    credentials), it is included as ``x-amz-security-token`` and signed.
     """
     if timestamp is None:
         timestamp = datetime.now(timezone.utc)
@@ -63,6 +67,8 @@ def sign_v4_request(
     result_headers = dict(headers)
     result_headers["host"] = host
     result_headers["x-amz-date"] = amz_date
+    if session_token:
+        result_headers["x-amz-security-token"] = session_token
 
     # Canonical headers (lowercase, sorted)
     signed_header_keys = sorted(result_headers.keys())

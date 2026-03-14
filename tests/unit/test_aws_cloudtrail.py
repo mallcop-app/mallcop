@@ -275,6 +275,45 @@ class TestSigV4Signing:
 
         assert h1["Authorization"] == h2["Authorization"]
 
+    def test_sign_v4_session_token_included_in_headers(self) -> None:
+        from mallcop.aws_sigv4 import sign_v4_request
+
+        ts = datetime(2026, 3, 10, 12, 0, 0, tzinfo=timezone.utc)
+        headers = sign_v4_request(
+            method="POST",
+            url="https://bedrock-runtime.us-east-1.amazonaws.com/model/x/converse",
+            headers={"content-type": "application/json"},
+            body=b'{"messages":[]}',
+            region="us-east-1",
+            service="bedrock",
+            access_key="ASIAEXAMPLE",
+            secret_key="secret",
+            timestamp=ts,
+            session_token="FwoGZXIvYXdzEBYaDHtest==",
+        )
+
+        assert headers["x-amz-security-token"] == "FwoGZXIvYXdzEBYaDHtest=="
+        # Token header must be included in signed headers
+        assert "x-amz-security-token" in headers["Authorization"]
+
+    def test_sign_v4_no_session_token_when_empty(self) -> None:
+        from mallcop.aws_sigv4 import sign_v4_request
+
+        ts = datetime(2026, 3, 10, 12, 0, 0, tzinfo=timezone.utc)
+        headers = sign_v4_request(
+            method="POST",
+            url="https://bedrock-runtime.us-east-1.amazonaws.com/model/x/converse",
+            headers={"content-type": "application/json"},
+            body=b'{"messages":[]}',
+            region="us-east-1",
+            service="bedrock",
+            access_key="AKIAEXAMPLE",
+            secret_key="secret",
+            timestamp=ts,
+        )
+
+        assert "x-amz-security-token" not in headers
+
 
 # ─── STS XML parsing ────────────────────────────────────────────────
 

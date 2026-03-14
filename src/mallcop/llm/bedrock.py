@@ -99,11 +99,48 @@ class BedrockClient(LLMClient):
         region: str = "us-east-1",
         access_key: str = "",
         secret_key: str = "",
+        session_token: str = "",
     ) -> None:
         self._model = model
         self._region = region
         self._access_key = access_key
         self._secret_key = secret_key
+        self._session_token = session_token
+
+    @classmethod
+    def from_profile(
+        cls,
+        model: str,
+        region: str = "us-east-1",
+        profile: str | None = None,
+    ) -> "BedrockClient":
+        """Create a BedrockClient using boto3 credential resolution.
+
+        Supports SSO, env vars, instance profiles, config profiles — anything
+        boto3 understands.  Requires ``boto3`` (``pip install mallcop[aws]``).
+        """
+        try:
+            import boto3
+        except ImportError:
+            raise ImportError(
+                "boto3 is required for profile-based credentials. "
+                "Install with: pip install mallcop[aws]"
+            ) from None
+        session = boto3.Session(profile_name=profile, region_name=region)
+        creds = session.get_credentials()
+        if creds is None:
+            raise RuntimeError(
+                f"No AWS credentials found for profile={profile!r}. "
+                "Run 'aws sso login --profile <name>' first."
+            )
+        frozen = creds.get_frozen_credentials()
+        return cls(
+            model=model,
+            region=region,
+            access_key=frozen.access_key,
+            secret_key=frozen.secret_key,
+            session_token=frozen.token or "",
+        )
 
     def chat(
         self,
@@ -138,6 +175,7 @@ class BedrockClient(LLMClient):
         signed_headers = sign_v4_request(
             "POST", url, headers, body_bytes,
             self._region, "bedrock", self._access_key, self._secret_key,
+            session_token=self._session_token,
         )
 
         resp = requests.post(url, headers=signed_headers, data=body_bytes, timeout=120)
