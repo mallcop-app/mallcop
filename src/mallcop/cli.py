@@ -1553,7 +1553,7 @@ def feedback(finding_id: str, action: str, reason: str | None, dir_path: str | N
 
     Example: mallcop feedback fnd_001 override --reason "Baron is US/Eastern"
     """
-    from mallcop.feedback import FeedbackRecord, HumanAction
+    from mallcop.feedback import FeedbackRecord, HumanAction, check_feedback_cadence
     from mallcop.sanitize import sanitize_field
 
     root = Path(dir_path) if dir_path else Path.cwd()
@@ -1614,6 +1614,12 @@ def feedback(finding_id: str, action: str, reason: str | None, dir_path: str | N
     )
 
     store.append_feedback(record)
+
+    # Cadence check: warn if human is rubber-stamping at anomalous speed
+    recent_feedback = store.query_feedback()
+    cadence_warning = check_feedback_cadence(recent_feedback)
+    if cadence_warning:
+        click.echo(cadence_warning)
 
     click.echo(json.dumps({
         "command": "feedback",

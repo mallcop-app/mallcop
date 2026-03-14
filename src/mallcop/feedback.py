@@ -18,7 +18,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from enum import Enum
 from typing import Any
 
@@ -56,7 +56,8 @@ class FeedbackRecord:
     baseline_snapshot: dict[str, Any]
     annotations: list[dict[str, Any]]
     detector: str | None = field(default=None)
-    source: str | None = field(default=None)  # "batch", "cli", etc.
+    source: str | None = field(default=None)  # "batch", "individual", etc.
+    weight: float = field(default=1.0)  # Trust weight: batch=0.3, individual=1.0
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -71,6 +72,7 @@ class FeedbackRecord:
             "annotations": self.annotations,
             "detector": self.detector,
             "source": self.source,
+            "weight": self.weight,
         }
 
     def to_json(self) -> str:
@@ -90,6 +92,7 @@ class FeedbackRecord:
             annotations=data.get("annotations", []),
             detector=data.get("detector"),
             source=data.get("source"),
+            weight=float(data.get("weight", 1.0)),
         )
 
     @classmethod
@@ -217,3 +220,40 @@ def extract_context(record: "FeedbackRecord") -> "ActorProfile | None":
         last_confirmed=record.timestamp,
         source_feedback_ids=[record.finding_id],
     )
+
+
+# ---------------------------------------------------------------------------
+# Cadence anomaly detection
+# ---------------------------------------------------------------------------
+
+_CADENCE_WINDOW_MINUTES: int = 5
+_CADENCE_THRESHOLD: int = 10  # > 10 in window triggers warning
+
+
+def check_feedback_cadence(recent_feedback: list[FeedbackRecord]) -> str | None:
+    """Check whether a human is rubber-stamping findings at an anomalous pace.
+
+    If more than 10 feedback records fall within a 5-minute sliding window,
+    returns a warning string. Advisory only — does not block resolution.
+
+    Args:
+        recent_feedback: All feedback records to check (any time range).
+            The function extracts the most recent 5-minute window internally.
+
+    Returns:
+        Warning string if cadence is anomalous, None otherwise.
+    """
+    if len(recent_feedback) <= _CADENCE_THRESHOLD:
+        return None
+
+    now = datetime.now(timezone.utc)
+    window_start = now - timedelta(minutes=_CADENCE_WINDOW_MINUTES)
+    in_window = [r for r in recent_feedback if r.timestamp >= window_start]
+
+    if len(in_window) > _CADENCE_THRESHOLD:
+        count = len(in_window)
+        return (
+            f"You resolved {count} findings in under {_CADENCE_WINDOW_MINUTES} minutes. "
+            f"Want to review some of these individually?"
+        )
+    return None

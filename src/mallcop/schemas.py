@@ -282,6 +282,7 @@ class ActorProfile:
     type: str
     last_confirmed: datetime
     source_feedback_ids: list[str]
+    confidence: float = field(default=1.0)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -290,6 +291,7 @@ class ActorProfile:
             "type": self.type,
             "last_confirmed": _dt_to_str(self.last_confirmed),
             "source_feedback_ids": self.source_feedback_ids,
+            "confidence": self.confidence,
         }
 
     def to_json(self) -> str:
@@ -303,6 +305,7 @@ class ActorProfile:
             type=data.get("type", "human"),
             last_confirmed=_str_to_dt(data["last_confirmed"]),
             source_feedback_ids=data.get("source_feedback_ids", []),
+            confidence=float(data.get("confidence", 1.0)),
         )
 
     @classmethod

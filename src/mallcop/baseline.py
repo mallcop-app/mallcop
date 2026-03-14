@@ -119,6 +119,8 @@ def update_actor_context(
 
     # Start with a copy of existing context
     ctx: dict[str, ActorProfile] = dict(baseline.actor_context)
+    # Track accumulated weights per actor for simple average confidence
+    confidence_accum: dict[str, list[float]] = {}  # actor -> list of weights
 
     for record in records:
         profile = extract_context(record)
@@ -130,6 +132,8 @@ def update_actor_context(
         if not actor:
             continue
 
+        weight = getattr(record, "weight", 1.0)
+
         if actor in ctx:
             # Merge: update fields present in new profile, accumulate feedback IDs
             existing = ctx[actor]
@@ -137,20 +141,41 @@ def update_actor_context(
             for fid in profile.source_feedback_ids:
                 if fid not in merged_ids:
                     merged_ids.append(fid)
+            weights = confidence_accum.setdefault(actor, [])
+            weights.append(weight)
             ctx[actor] = ActorProfile(
                 location=profile.location if profile.location is not None else existing.location,
                 timezone=profile.timezone if profile.timezone is not None else existing.timezone,
                 type=profile.type if profile.type != "human" or existing.type == "human" else existing.type,
                 last_confirmed=profile.last_confirmed,
                 source_feedback_ids=merged_ids,
+                confidence=existing.confidence,  # updated after loop
             )
         else:
+            weights = confidence_accum.setdefault(actor, [])
+            weights.append(weight)
             ctx[actor] = ActorProfile(
                 location=profile.location,
                 timezone=profile.timezone,
                 type=profile.type,
                 last_confirmed=profile.last_confirmed,
                 source_feedback_ids=list(profile.source_feedback_ids),
+                confidence=weight,  # initial; recalculated below
+            )
+
+    # Compute average confidence for each actor that received updates
+    for actor, weights in confidence_accum.items():
+        if actor in ctx and weights:
+            # Simple average of all feedback weights: 0.3 for all-batch, 1.0 for all-individual
+            avg_confidence = sum(weights) / len(weights)
+            existing = ctx[actor]
+            ctx[actor] = ActorProfile(
+                location=existing.location,
+                timezone=existing.timezone,
+                type=existing.type,
+                last_confirmed=existing.last_confirmed,
+                source_feedback_ids=existing.source_feedback_ids,
+                confidence=avg_confidence,
             )
 
     return Baseline(
