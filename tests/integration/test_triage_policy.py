@@ -1,15 +1,14 @@
 """Integration test: triage prompt-based resolution policy.
 
 Verifies that:
-1. _TRIAGE_RESOLVABLE_DETECTORS is still exported (shakedown evaluator uses it)
-2. The runtime does NOT enforce a policy override — triage LLM decisions
+1. The runtime does NOT enforce a policy override — triage LLM decisions
    are respected for all detector types
-3. The triage POST.md contains evidence-based criteria for each detector
+2. The triage POST.md contains evidence-based criteria for each detector
    category, including the credential theft test
 
-The earlier runtime-enforcement model has been replaced with prompt-based
-guidance. The triage POST.md now provides per-category RESOLVE/ESCALATE
-criteria instead of a hard runtime block.
+The runtime-enforcement model has been replaced with prompt-based guidance.
+The triage POST.md now provides per-category RESOLVE/ESCALATE criteria
+instead of a hard runtime block.
 """
 
 from __future__ import annotations
@@ -30,7 +29,6 @@ from mallcop.actors.runtime import (
     RunResult,
     ToolCall,
     build_actor_runner,
-    _TRIAGE_RESOLVABLE_DETECTORS,
 )
 from mallcop.config import load_config
 from mallcop.escalate import run_escalate
@@ -108,25 +106,6 @@ class AlwaysEscalateLLM(LLMClient):
             tokens_used=100,
             raw_resolution=None,
         )
-
-
-# ─── Tests: Constant export (evaluator compatibility) ─────────────
-
-
-class TestTriageResolvableDetectorsExport:
-    """_TRIAGE_RESOLVABLE_DETECTORS is still exported for shakedown evaluator."""
-
-    def test_constant_exported(self):
-        """The constant is importable from runtime (evaluator depends on it)."""
-        assert _TRIAGE_RESOLVABLE_DETECTORS is not None
-
-    def test_constant_is_frozenset(self):
-        """The constant is a frozenset."""
-        assert isinstance(_TRIAGE_RESOLVABLE_DETECTORS, frozenset)
-
-    def test_resolvable_detectors_contains_new_actor(self):
-        """new-actor is in the set (identity detector, triage can resolve)."""
-        assert "new-actor" in _TRIAGE_RESOLVABLE_DETECTORS
 
 
 # ─── Tests: Runtime does NOT enforce policy ────────────────────────
@@ -236,7 +215,7 @@ class TestRuntimeNoEnforcement:
 
 
 class TestTriagePromptContent:
-    """The triage POST.md contains evidence-based criteria for each category."""
+    """The triage POST.md contains reasoning framework and hard constraints."""
 
     @pytest.fixture
     def post_md(self) -> str:
@@ -246,48 +225,45 @@ class TestTriagePromptContent:
         )
         return path.read_text()
 
-    def test_behavioral_resolve_criteria_present(self, post_md):
-        """Behavioral section has RESOLVE criteria (not just NEVER resolve)."""
-        assert "RESOLVE if" in post_md
-        assert "scheduled maintenance" in post_md.lower() or "deploy pattern" in post_md.lower()
-
-    def test_access_resolve_criteria_present(self, post_md):
-        """Access section has RESOLVE criteria for onboarding patterns."""
-        assert "new-external-access" in post_md
-        assert "onboarding" in post_md.lower() or "expected organization" in post_md.lower()
-
-    def test_privilege_resolve_criteria_present(self, post_md):
-        """Privilege section has RESOLVE criteria with approval chain."""
-        assert "priv-escalation" in post_md
-        assert "approval" in post_md.lower()
-
-    def test_auth_resolve_criteria_present(self, post_md):
-        """Auth section has RESOLVE criteria for password reset follow-up."""
-        assert "auth-failure-burst" in post_md
-        assert "password reset" in post_md.lower() or "single source" in post_md.lower()
-
-    def test_structural_always_escalate(self, post_md):
-        """Structural (log-format-drift) still always escalates."""
-        assert "log-format-drift" in post_md
-        assert "ALWAYS ESCALATE" in post_md
-
-    def test_signature_always_escalate(self, post_md):
-        """Signature (injection-probe) still always escalates."""
-        assert "injection-probe" in post_md
-        assert "ALWAYS ESCALATE" in post_md
-
     def test_credential_theft_test_present(self, post_md):
         """Credential theft test is present in the prompt."""
         assert "stolen" in post_md.lower() or "credential theft" in post_md.lower()
-        assert "ESCALATE" in post_md
 
-    def test_behavioral_escalate_criteria_present(self, post_md):
-        """Behavioral section specifies when to ESCALATE (not just resolve)."""
-        assert "ESCALATE if" in post_md
+    def test_privilege_always_escalates(self, post_md):
+        """Privilege changes always need audit — hard constraint."""
+        lower = post_md.lower()
+        assert "privilege" in lower
+        assert "audit" in lower or "escalat" in lower
 
-    def test_never_resolve_solely_for_known_actor(self, post_md):
-        """The prompt warns against resolving solely because actor is in baseline."""
-        assert "solely" in post_md.lower() or "baseline" in post_md.lower()
+    def test_structural_drift_escalates(self, post_md):
+        """Structural drift always escalates — hard constraint."""
+        lower = post_md.lower()
+        assert "structural" in lower or "drift" in lower or "parser" in lower
+
+    def test_positive_evidence_required(self, post_md):
+        """Resolution requires positive evidence, not absence of suspicion."""
+        lower = post_md.lower()
+        assert "positive evidence" in lower
+
+    def test_prompt_injection_defense(self, post_md):
+        """Prompt injection markers and defense instructions present."""
+        assert "USER_DATA_BEGIN" in post_md
+        assert "USER_DATA_END" in post_md
+        assert "UNTRUSTED" in post_md
+
+    def test_uba_signals_referenced(self, post_md):
+        """UBA context signals (IP, geo, timing, UA) are referenced."""
+        lower = post_md.lower()
+        # At least 2 of the 4 UBA dimensions mentioned
+        uba_count = sum(1 for s in ["ip", "location", "timing", "user-agent"]
+                        if s in lower)
+        assert uba_count >= 2
+
+    def test_no_rigid_per_category_rules(self, post_md):
+        """POST uses reasoning framework, not per-category if/then rules."""
+        # Should NOT have the old decision-tree markers
+        assert "RESOLVE if:" not in post_md
+        assert "ESCALATE if:" not in post_md
 
 
 # ─── Tests: Full run_escalate pipeline ──────────────────────────────

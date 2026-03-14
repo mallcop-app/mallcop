@@ -8,14 +8,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
-# Detectors that triage is historically allowed to resolve at the prompt level.
-# NOTE: This constant is informational only — the runtime does NOT enforce it.
-# Resolution criteria are defined in triage/POST.md. The shakedown evaluator
-# uses this set to classify triage failures (prompt vs. policy fix target).
-_TRIAGE_RESOLVABLE_DETECTORS: frozenset[str] = frozenset({
-    "new-actor",           # Identity: triage can verify onboarding
-})
-
 from mallcop.actors._schema import ActorManifest, ActorResolution, ResolutionAction, load_actor_manifest
 from mallcop.llm_types import LLMClient, LLMResponse, ToolCall  # canonical home
 from mallcop.sanitize import sanitize_finding, sanitize_tool_result
