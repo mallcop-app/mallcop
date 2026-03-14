@@ -36,6 +36,8 @@ class ToolContext:
     skill_root: Any = None  # Path to skill root directory (optional)
     loaded_skills: dict = field(default_factory=dict)  # name -> LoadedSkill (cache)
     tool_registry: Any = None  # ToolRegistry for skill tool registration
+    trust_store: Any = None  # Optional TrustStore for skill signature verification
+    skill_lockfile: Any = None  # Optional dict (from load_lockfile) for hash checks
 
 
 @dataclass
@@ -169,6 +171,8 @@ class ToolRegistry:
         Paths are scanned in order. First path wins on name conflict (precedence).
         Non-existent paths and files with errors are silently skipped.
         """
+        import sys
+
         registry = cls()
         for path in paths:
             if not path.exists() or not path.is_dir():
@@ -176,14 +180,22 @@ class ToolRegistry:
             for py_file in sorted(path.glob("*.py")):
                 if py_file.name.startswith("_"):
                     continue
+                module_name = f"mallcop_tool_discovery.{py_file.stem}"
                 try:
                     spec = importlib.util.spec_from_file_location(
-                        f"mallcop_tool_discovery.{py_file.stem}", py_file
+                        module_name, py_file
                     )
                     if spec is None or spec.loader is None:
                         continue
                     module = importlib.util.module_from_spec(spec)
-                    spec.loader.exec_module(module)  # type: ignore[union-attr]
+                    # Register in sys.modules before exec so @dataclass and other
+                    # decorators that look up cls.__module__ work correctly.
+                    sys.modules[module_name] = module
+                    try:
+                        spec.loader.exec_module(module)  # type: ignore[union-attr]
+                    except Exception:
+                        del sys.modules[module_name]
+                        raise
                 except Exception:
                     _log.debug("Skipping %s: failed to import", py_file)
                     continue

@@ -97,6 +97,10 @@ def _build_full_registry() -> ToolRegistry:
     def search_findings(**kwargs: Any) -> list[dict[str, Any]]:
         return []
 
+    @tool(name="load-skill", description="Load a skill by name", permission="read")
+    def load_skill_stub(context: Any, skill_name: str) -> dict[str, Any]:
+        return {"context": f"Skill context for {skill_name}", "new_tools": [], "verified_by": None, "trust_chain": None}
+
     reg.register(read_events)
     reg.register(check_baseline)
     reg.register(read_finding)
@@ -106,6 +110,7 @@ def _build_full_registry() -> ToolRegistry:
     reg.register(annotate_finding)
     reg.register(resolve_finding)
     reg.register(baseline_stats)
+    reg.register(load_skill_stub)
     return reg
 
 

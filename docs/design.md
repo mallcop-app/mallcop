@@ -4,10 +4,10 @@
 
 Mallcop is a CLI security monitoring tool for small cloud operators. The primary user is an AI agent. The human is the escalation path.
 
-The system has four plugin types — connectors, detectors, actors, and tools — connected by a pipeline:
+The system has five plugin types — connectors, detectors, actors, tools, and skills — connected by a pipeline:
 
 ```
-Connectors → Events → Detectors → Findings → Actors → Resolution or Human
+Connectors → Events → Detectors → Findings → Actors (+ Skills) → Resolution or Human
 ```
 
 All plugins follow a directory-with-manifest pattern optimized for supervised coding agent development: strict base classes, manifest-declared capabilities, auto-generated contract tests, and single-command verification.
@@ -78,6 +78,17 @@ plugins/
     baseline.py             # check-baseline, baseline-stats
     findings.py             # read-finding, list-findings, annotate-finding
     config.py               # read-config (read-only)
+  skills/
+    _schema.py              # SkillManifest, parse_frontmatter
+    aws-iam/
+      SKILL.md              # frontmatter (name, description, author, parent) + body text
+      SKILL.md.sig          # SSH signature over skill content
+      tools.py              # optional skill-specific tools (registered on load)
+      manifest.yaml         # alias — same format as SKILL.md frontmatter
+    privilege-analysis/
+      SKILL.md
+      parent: aws-iam       # inherits parent context
+      ...
 ```
 
 ### Scaffold and Verify
@@ -1155,6 +1166,95 @@ event_types:
   - container_log
   - container_error
   - container_restart
+```
+
+---
+
+## Skills
+
+Skills are the fifth plugin type. They provide domain-specific investigation context and optional tools that actor agents can load on demand during an investigation.
+
+### What Skills Are
+
+A skill is a directory containing a `SKILL.md` file with:
+- **Frontmatter** (YAML between `---` markers): `name`, `description`, `author`, optional `parent`, optional `tools`
+- **Body text**: the domain knowledge — written for an AI agent to read, not a human
+
+When an actor loads a skill, it receives the body text as investigation context. If the skill declares a `tools` file, those tools are registered into the actor's tool registry and become available on the next turn.
+
+Skills are **pre-packed** into actor messages as a catalog (via a `list-skills` tool result) before the first LLM call. The actor can see what is available without making an API call. It then calls `load-skill` to get the full context for a specific skill.
+
+### Composition via Parent Chain
+
+Skills support single inheritance via the `parent` field:
+
+```yaml
+# skills/privilege-analysis/SKILL.md
+---
+name: privilege-analysis
+description: AWS privilege escalation paths and IAM boundary analysis
+author: security@example.com
+parent: aws-iam
+---
+```
+
+When loading `privilege-analysis`, mallcop first loads `aws-iam` and prepends its body text. The actor sees both — foundation context first, specialized context second. This allows a library of skills to share common knowledge without duplication.
+
+### Discovery
+
+Skills are discovered from:
+1. The deployment repo's `skills/` directory (custom, operator-specific)
+2. The installed package's built-in `skills/` directory
+
+A deployment-level skill with the same name as a built-in skill takes precedence.
+
+### Skill Manifest Format
+
+```yaml
+# skills/aws-iam/SKILL.md
+---
+name: aws-iam
+description: AWS IAM concepts, policy evaluation, and common attack patterns
+author: security@mallcop.dev
+version: 1.0.0
+tools: tools.py          # optional — registers skill tools on load
+---
+
+# AWS IAM Investigation Context
+
+AWS IAM evaluation order: SCPs → resource policies → identity policies → permission boundaries...
+[body continues]
+```
+
+### Trust Model
+
+Skills are code that executes in the actor runtime (via `tools.py`). They must be verified before loading. The trust system uses two mechanisms:
+
+**Lockfile hash check** (`skills.lock`): A lockfile records SHA-256 hashes of all skills at a known-good state. When loading a skill, mallcop verifies the current content matches the recorded hash. A mismatch means the skill has been modified since the lockfile was generated — refuse to load.
+
+```bash
+mallcop skill lock           # generate/update skills.lock
+mallcop skill verify         # verify all skills against lockfile
+```
+
+**SSH signature verification**: Skills are signed with an SSH key. The signature covers all skill directory content (deterministic blob). The trust store maps identities to public keys, and endorsements form a web of trust from anchors to skill authors.
+
+**Graceful degradation**: If neither trust infrastructure (lockfile nor trust store) is configured, mallcop logs a warning and loads the skill anyway. Trust infra is optional for development but required for production deployments.
+
+**Verification failure**: If trust IS configured and verification fails (hash mismatch, no trust path, bad signature), `load-skill` returns `{error: "..."}` and refuses to load. The actor cannot use the skill.
+
+**Sanitization bypass rationale**: Skill content (`SKILL.md` body text and `tools.py`) is treated as trusted operator-authored content, not as attacker-controlled data. It is NOT wrapped in `[USER_DATA_BEGIN]/[USER_DATA_END]` markers. The trust verification above (lockfile + signature) is the mechanism that establishes this trust. Unverified skills should never reach the sanitization decision point — they are refused at load time.
+
+This is distinct from event data, finding titles, and metadata fields, which ARE wrapped in USER_DATA markers because they originate from attacker-controlled environments.
+
+### CLI
+
+```bash
+mallcop skill list                    # list available skills with descriptions
+mallcop skill lock [--skills-dir DIR] # generate/update skills.lock
+mallcop skill verify [--skills-dir DIR] # verify skills against lockfile
+mallcop skill trust show              # show trust store state
+mallcop skill trust path --skill NAME --author IDENTITY  # find trust path
 ```
 
 ---

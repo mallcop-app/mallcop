@@ -534,3 +534,186 @@ class TestSkillCatalogPrepacked:
             m for m in messages_captured if m.get("name") == "list-skills"
         ]
         assert len(catalog_messages) == 0
+
+
+# ─── Test: trust verification wiring ──────────────────────────────────
+
+
+class TestLoadSkillTrustWiring:
+    """load-skill calls lockfile hash check and trust verification when configured."""
+
+    def _write_skill_with_author(
+        self, skill_dir: Path, name: str, author: str = "dev@example.com"
+    ) -> Path:
+        """Write a SKILL.md with an author field."""
+        skill_dir.mkdir(parents=True, exist_ok=True)
+        content = (
+            f"---\nname: {name}\ndescription: Test skill\nauthor: {author}\n---\n\n"
+            f"# {name}\nSkill context.\n"
+        )
+        (skill_dir / "SKILL.md").write_text(content)
+        return skill_dir
+
+    def test_no_trust_infra_loads_with_warning(self, tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+        """When no trust infra is configured, skill loads with a warning (graceful degradation)."""
+        import logging
+
+        from mallcop.tools.skills import load_skill
+
+        skill_dir = tmp_path / "simple"
+        _write_skill(skill_dir, name="simple")
+        ctx = _make_tool_context(skill_root=tmp_path)
+        # No trust_store or skill_lockfile on ctx
+
+        with caplog.at_level(logging.WARNING):
+            result = load_skill(ctx, skill_name="simple")
+
+        assert "error" not in result
+        assert result["verified_by"] is None
+        assert result["trust_chain"] is None
+        # Warning should be logged about missing trust infrastructure
+        assert any("trust" in msg.lower() for msg in caplog.messages)
+
+    def test_lockfile_hash_match_allows_load(self, tmp_path: Path) -> None:
+        """When lockfile is configured and hash matches, skill loads successfully."""
+        from mallcop.tools.skills import load_skill
+        from mallcop.trust import _hash_skill, generate_lockfile
+        from mallcop.skills._schema import SkillManifest
+
+        skill_dir = tmp_path / "hashed-skill"
+        _write_skill(skill_dir, name="hashed-skill")
+
+        # Generate a real lockfile for this skill
+        manifest = SkillManifest.from_skill_dir(skill_dir)
+        assert manifest is not None
+        lockfile_data = generate_lockfile({"hashed-skill": manifest})
+        skills_dict = lockfile_data["skills"]
+
+        ctx = _make_tool_context(skill_root=tmp_path)
+        ctx.skill_lockfile = skills_dict  # type: ignore[attr-defined]
+
+        result = load_skill(ctx, skill_name="hashed-skill")
+
+        assert "error" not in result
+        assert "context" in result
+
+    def test_lockfile_hash_mismatch_refuses_load(self, tmp_path: Path) -> None:
+        """When lockfile hash doesn't match, load-skill returns an error."""
+        from mallcop.tools.skills import load_skill
+
+        skill_dir = tmp_path / "tampered-skill"
+        _write_skill(skill_dir, name="tampered-skill")
+
+        # Create a lockfile with a wrong hash
+        stale_lockfile = {
+            "tampered-skill": {
+                "sha256": "deadbeef" * 8,  # 64 hex chars, obviously wrong
+                "author": None,
+                "trust_chain": None,
+                "verified_at": "2026-01-01T00:00:00+00:00",
+                "expires": None,
+                "source": "builtin",
+            }
+        }
+
+        ctx = _make_tool_context(skill_root=tmp_path)
+        ctx.skill_lockfile = stale_lockfile  # type: ignore[attr-defined]
+
+        result = load_skill(ctx, skill_name="tampered-skill")
+
+        assert "error" in result
+        assert "lockfile hash mismatch" in result["error"].lower() or "hash" in result["error"].lower()
+
+    def test_skill_not_in_lockfile_refuses_load(self, tmp_path: Path) -> None:
+        """When skill is present but not in lockfile, load is refused."""
+        from mallcop.tools.skills import load_skill
+
+        skill_dir = tmp_path / "unlisted-skill"
+        _write_skill(skill_dir, name="unlisted-skill")
+
+        # Lockfile exists but doesn't contain this skill
+        empty_lockfile: dict = {}
+
+        ctx = _make_tool_context(skill_root=tmp_path)
+        ctx.skill_lockfile = empty_lockfile  # type: ignore[attr-defined]
+
+        result = load_skill(ctx, skill_name="unlisted-skill")
+
+        assert "error" in result
+
+    def test_trust_store_with_no_path_returns_error(self, tmp_path: Path) -> None:
+        """When trust store has no valid chain for skill author, load is refused."""
+        from mallcop.tools.skills import load_skill
+        from mallcop.trust import TrustStore
+
+        skill_dir = tmp_path / "untrusted-skill"
+        self._write_skill_with_author(skill_dir, name="untrusted-skill", author="unknown@example.com")
+
+        # Trust store with no anchors, no endorsements
+        empty_ts = TrustStore(anchors={}, keyring={}, endorsements={})
+
+        ctx = _make_tool_context(skill_root=tmp_path)
+        ctx.trust_store = empty_ts  # type: ignore[attr-defined]
+
+        result = load_skill(ctx, skill_name="untrusted-skill")
+
+        assert "error" in result
+        assert "trust path" in result["error"].lower() or "no trust" in result["error"].lower()
+
+    def test_trust_store_skill_with_no_author_returns_error(self, tmp_path: Path) -> None:
+        """When trust store is configured but skill has no author, load is refused."""
+        from mallcop.tools.skills import load_skill
+        from mallcop.trust import TrustStore
+
+        # Skill without author field
+        skill_dir = tmp_path / "authorless-skill"
+        _write_skill(skill_dir, name="authorless-skill")  # no author in frontmatter
+
+        ts = TrustStore(
+            anchors={"anchor@example.com": "ssh-ed25519 AAAA..."},
+            keyring={},
+            endorsements={},
+        )
+
+        ctx = _make_tool_context(skill_root=tmp_path)
+        ctx.trust_store = ts  # type: ignore[attr-defined]
+
+        result = load_skill(ctx, skill_name="authorless-skill")
+
+        assert "error" in result
+        assert "author" in result["error"].lower()
+
+    def test_lockfile_only_no_trust_store_populates_no_verified_by(self, tmp_path: Path) -> None:
+        """Lockfile-only verification: hash passes but verified_by remains None (no identity)."""
+        from mallcop.tools.skills import load_skill
+        from mallcop.trust import generate_lockfile
+        from mallcop.skills._schema import SkillManifest
+
+        skill_dir = tmp_path / "lockfile-only"
+        _write_skill(skill_dir, name="lockfile-only")
+
+        manifest = SkillManifest.from_skill_dir(skill_dir)
+        assert manifest is not None
+        lockfile_data = generate_lockfile({"lockfile-only": manifest})
+
+        ctx = _make_tool_context(skill_root=tmp_path)
+        ctx.skill_lockfile = lockfile_data["skills"]  # type: ignore[attr-defined]
+
+        result = load_skill(ctx, skill_name="lockfile-only")
+
+        assert "error" not in result
+        # Lockfile-only: verified_by is None (no identity — just hash match)
+        assert result["verified_by"] is None
+        assert result["trust_chain"] is None
+
+    def test_tool_context_has_trust_store_field(self) -> None:
+        """ToolContext exposes trust_store field (defaults to None)."""
+        ctx = _make_tool_context()
+        assert hasattr(ctx, "trust_store")
+        assert ctx.trust_store is None
+
+    def test_tool_context_has_skill_lockfile_field(self) -> None:
+        """ToolContext exposes skill_lockfile field (defaults to None)."""
+        ctx = _make_tool_context()
+        assert hasattr(ctx, "skill_lockfile")
+        assert ctx.skill_lockfile is None
