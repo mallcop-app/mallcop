@@ -12,6 +12,7 @@ from typing import Any
 import click
 import yaml
 
+from mallcop.baseline import retrospective_analysis
 from mallcop.config import load_config, BudgetConfig
 from mallcop.cost_estimator import estimate_costs
 from mallcop.plugins import discover_plugins, get_search_paths, instantiate_connector, load_plugin_class
@@ -673,6 +674,55 @@ def _run_scan_pipeline(root: Path, store: Store | None = None) -> dict[str, Any]
     }
 
 
+def _run_retrospective_if_transitioning(
+    store: "Store",
+    all_events: list,
+    baseline: Any,
+    sources: set[str],
+    currently_learning: set[str],
+) -> None:
+    """For each connector that just graduated from learning mode, run retrospective.
+
+    A transition occurs when:
+    - The connector was previously in learning mode (checkpoint 'was_active' = "true")
+    - The connector is no longer in learning mode
+    - The retrospective hasn't already been run ('retrospective_done' != "true")
+
+    After running, sets 'retrospective_done' = "true" so it won't re-run.
+    Also persists the current learning mode state for each connector.
+    """
+    from mallcop.schemas import Checkpoint
+    from datetime import datetime, timezone
+
+    for source in sources:
+        is_now_learning = source in currently_learning
+        was_learning_cp = store.get_checkpoint(f"{source}:learning_mode_was_active")
+        was_learning = was_learning_cp is not None and was_learning_cp.value == "true"
+
+        # Update stored learning mode state for next run
+        store.set_checkpoint(Checkpoint(
+            connector=f"{source}:learning_mode_was_active",
+            value="true" if is_now_learning else "false",
+            updated_at=datetime.now(timezone.utc),
+        ))
+
+        # Transition: was learning, now no longer learning
+        if was_learning and not is_now_learning:
+            retro_done_cp = store.get_checkpoint(f"{source}:retrospective_done")
+            if retro_done_cp is not None and retro_done_cp.value == "true":
+                continue  # Already ran retrospective for this connector
+
+            retro_findings = retrospective_analysis(source, all_events, baseline)
+            if retro_findings:
+                store.append_findings(retro_findings)
+
+            store.set_checkpoint(Checkpoint(
+                connector=f"{source}:retrospective_done",
+                value="true",
+                updated_at=datetime.now(timezone.utc),
+            ))
+
+
 def _run_detect_pipeline(root: Path, store: Store | None = None) -> dict[str, Any]:
     """Run the detect step of the pipeline."""
     from mallcop.baseline import is_learning_mode
@@ -714,6 +764,12 @@ def _run_detect_pipeline(root: Path, store: Store | None = None) -> dict[str, An
     # Update baseline AFTER detection so new actors are included for next run
     store.update_baseline(all_events, window_days=window_days)
     updated_baseline = store.get_baseline()
+
+    # Learning mode transition: run retrospective analysis for connectors that
+    # just graduated from learning mode (was_active=true AND no longer learning).
+    _run_retrospective_if_transitioning(
+        store, all_events, updated_baseline, sources, learning
+    )
 
     summary: dict[str, dict[str, int]] = {}
     for f in findings:

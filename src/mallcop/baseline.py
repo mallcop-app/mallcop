@@ -3,8 +3,13 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from typing import TYPE_CHECKING
 
 from mallcop.schemas import ActorProfile, Baseline, Event
+
+# Import run_detect at module level so tests can patch mallcop.baseline.run_detect.
+# detect.py does not import baseline.py, so no circular import risk.
+from mallcop.detect import run_detect  # noqa: E402
 
 # Learning mode window: 14 days from first event per connector
 LEARNING_PERIOD_DAYS = 14
@@ -38,6 +43,55 @@ def is_learning_mode(
     earliest = min(evt.timestamp for evt in connector_events)
     now = datetime.now(timezone.utc)
     return (now - earliest) < timedelta(days=LEARNING_PERIOD_DAYS)
+
+
+def retrospective_analysis(
+    connector: str,
+    all_events: list[Event],
+    baseline: Baseline,
+) -> list:
+    """Re-run detectors on learning-period events using the established baseline.
+
+    Called when a connector transitions from learning mode to normal mode.
+    Any suspicious activity planted during the known 14-day window will now
+    surface as a finding because the baseline is fully established.
+
+    Args:
+        connector: The connector name to analyze retrospectively.
+        all_events: All stored events (will be filtered to connector + window).
+        baseline: The now-established baseline to detect against.
+
+    Returns:
+        list[Finding] with source="retrospective" in metadata.
+    """
+    # Filter to this connector's events only
+    connector_events = [e for e in all_events if e.source == connector]
+    if not connector_events:
+        return []
+
+    # Only events within the learning period window: [earliest, earliest + 14 days]
+    earliest = min(e.timestamp for e in connector_events)
+    cutoff = earliest + timedelta(days=LEARNING_PERIOD_DAYS)
+    learning_period_events = [
+        e for e in connector_events
+        if earliest <= e.timestamp <= cutoff
+    ]
+
+    if not learning_period_events:
+        return []
+
+    # Run detectors with NO learning connectors (we're past learning mode)
+    findings = run_detect(
+        learning_period_events,
+        baseline,
+        learning_connectors=set(),
+    )
+
+    # Tag all retrospective findings
+    for f in findings:
+        f.metadata["source"] = "retrospective"
+
+    return findings
 
 
 def update_actor_context(
