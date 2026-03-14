@@ -2264,3 +2264,241 @@ def skill_lock(skills_dir: Path | None, output_path: Path | None) -> None:
         "lock_file": str(output_path),
         "skills_locked": list(skills.keys()),
     }))
+
+
+# --- Trust web ---
+
+
+@cli.group()
+@click.option(
+    "--trust-dir",
+    "trust_dir",
+    default=None,
+    type=click.Path(path_type=Path),
+    help="Path to trust directory (default: .mallcop/trust in cwd).",
+)
+@click.pass_context
+def trust(ctx: click.Context, trust_dir: Path | None) -> None:
+    """Manage the trust web: anchors, keyring, and endorsements."""
+    if trust_dir is None:
+        trust_dir = Path.cwd() / ".mallcop" / "trust"
+    ctx.ensure_object(dict)
+    ctx.obj["trust_dir"] = trust_dir
+
+
+def _trust_append_key_line(path: Path, identity: str, pubkey_str: str) -> None:
+    """Append 'identity keytype base64' to path, creating parent dirs if needed.
+
+    No-ops if the identity is already present.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    parts = pubkey_str.split()
+    keytype, b64 = parts[0], parts[1]
+    if path.exists():
+        for line in path.read_text().splitlines():
+            if line.strip().startswith(identity + " "):
+                return  # already present
+    with path.open("a") as f:
+        f.write(f"{identity} {keytype} {b64}\n")
+
+
+@trust.command("add-anchor")
+@click.argument("identity")
+@click.argument("pubkey_file", metavar="PUBKEY_FILE", type=click.Path(exists=True, path_type=Path))
+@click.pass_context
+def trust_add_anchor(ctx: click.Context, identity: str, pubkey_file: Path) -> None:
+    """Add IDENTITY as a trust anchor.
+
+    PUBKEY_FILE is the path to an SSH public key file.
+    """
+    trust_dir: Path = ctx.obj["trust_dir"]
+    pubkey_str = pubkey_file.read_text().strip()
+    _trust_append_key_line(trust_dir / "anchors", identity, pubkey_str)
+    click.echo(json.dumps({"status": "ok", "identity": identity,
+                           "file": str(trust_dir / "anchors")}))
+
+
+@trust.command("add-key")
+@click.argument("identity")
+@click.argument("pubkey_file", metavar="PUBKEY_FILE", type=click.Path(exists=True, path_type=Path))
+@click.pass_context
+def trust_add_key(ctx: click.Context, identity: str, pubkey_file: Path) -> None:
+    """Add IDENTITY's public key to the keyring.
+
+    PUBKEY_FILE is the path to an SSH public key file.
+    """
+    trust_dir: Path = ctx.obj["trust_dir"]
+    pubkey_str = pubkey_file.read_text().strip()
+    _trust_append_key_line(trust_dir / "keyring", identity, pubkey_str)
+    click.echo(json.dumps({"status": "ok", "identity": identity,
+                           "file": str(trust_dir / "keyring")}))
+
+
+@trust.command("endorse")
+@click.argument("identity")
+@click.option("--scope", required=True,
+              help="Glob pattern for skill names (e.g. '*', 'aws-*').")
+@click.option("--level", required=True, type=click.Choice(["full", "author"]),
+              help="'full' can re-delegate; 'author' can only sign skills.")
+@click.option("--expires", required=True, help="Expiry date YYYY-MM-DD.")
+@click.option("--reason", default="", help="Reason for this endorsement.")
+@click.option("--key", "key_path", required=True,
+              type=click.Path(exists=True, path_type=Path),
+              help="SSH private key used to sign the endorsement.")
+@click.option("--identity", "endorser_identity", default=None,
+              help="Endorser identity (defaults to key comment in .pub file).")
+@click.pass_context
+def trust_endorse(
+    ctx: click.Context,
+    identity: str,
+    scope: str,
+    level: str,
+    expires: str,
+    reason: str,
+    key_path: Path,
+    endorser_identity: str | None,
+) -> None:
+    """Endorse IDENTITY for SCOPE at trust LEVEL, signed with KEY.
+
+    Produces a signed .endorse + .endorse.sig pair in the endorsements dir.
+    """
+    import shutil as _shutil
+    import subprocess as _sp
+    import tempfile as _tmp
+    from datetime import date as _date, datetime as _dt, timezone as _tz
+
+    import yaml as _yaml
+
+    trust_dir: Path = ctx.obj["trust_dir"]
+
+    # Resolve endorser identity from public key comment if not supplied
+    if endorser_identity is None:
+        for candidate in [key_path.with_suffix(".pub"), Path(str(key_path) + ".pub")]:
+            if candidate.exists():
+                parts = candidate.read_text().strip().split()
+                endorser_identity = parts[2] if len(parts) >= 3 else parts[-1]
+                break
+        if endorser_identity is None:
+            click.echo(json.dumps({"status": "error", "error":
+                "Cannot determine endorser identity. Supply --identity."}))
+            raise SystemExit(1)
+
+    # Parse expiry date
+    try:
+        d = _date.fromisoformat(expires)
+        expires_aware = _dt(d.year, d.month, d.day, tzinfo=_tz.utc)
+    except ValueError as e:
+        click.echo(json.dumps({"status": "error", "error": f"Invalid date: {e}"}))
+        raise SystemExit(1)
+
+    now_iso = _dt.now(_tz.utc).isoformat()
+    data = {
+        "endorser": endorser_identity,
+        "signed_at": now_iso,
+        "endorsements": [
+            {
+                "expires": expires_aware.isoformat(),
+                "identity": identity,
+                "reason": reason,
+                "scope": scope,
+                "trust_level": level,
+            }
+        ],
+    }
+    content = _yaml.dump(data, sort_keys=True, default_flow_style=False)
+
+    endorse_dir = trust_dir / "endorsements"
+    endorse_dir.mkdir(parents=True, exist_ok=True)
+    safe = endorser_identity.replace("@", "_").replace(".", "_")
+    endorse_path = endorse_dir / f"{safe}.endorse"
+    endorse_path.write_text(content)
+
+    ssh_keygen = _shutil.which("ssh-keygen")
+    if ssh_keygen is None:
+        click.echo(json.dumps({"status": "error", "error": "ssh-keygen not found."}))
+        raise SystemExit(1)
+
+    with _tmp.NamedTemporaryFile(delete=False, suffix=".content") as tf:
+        content_file = Path(tf.name)
+        tf.write(content.encode())
+
+    try:
+        _sp.run(
+            [ssh_keygen, "-Y", "sign", "-f", str(key_path),
+             "-n", "mallcop-endorsement", str(content_file)],
+            check=True, capture_output=True,
+        )
+        content_file.with_suffix(".content.sig").rename(
+            endorse_path.with_suffix(".endorse.sig")
+        )
+    except _sp.CalledProcessError as e:
+        click.echo(json.dumps({"status": "error",
+                               "error": f"Signing failed: {e.stderr.decode()}"}))
+        raise SystemExit(1)
+    finally:
+        content_file.unlink(missing_ok=True)
+
+    click.echo(json.dumps({
+        "status": "ok",
+        "endorser": endorser_identity,
+        "identity": identity,
+        "scope": scope,
+        "level": level,
+        "file": str(endorse_path),
+    }))
+
+
+@trust.command("chain")
+@click.argument("identity")
+@click.option("--skill", "skill_name", default="*", show_default=True,
+              help="Skill name to check the trust chain for.")
+@click.pass_context
+def trust_chain(ctx: click.Context, identity: str, skill_name: str) -> None:
+    """Show the trust path from an anchor to IDENTITY for a given skill.
+
+    Exits non-zero if no trust path exists.
+    """
+    from mallcop.trust import find_trust_path, load_trust_store
+
+    trust_dir: Path = ctx.obj["trust_dir"]
+    ts = load_trust_store(trust_dir)
+    path = find_trust_path(ts, identity, skill_name)
+
+    if path is None:
+        click.echo(json.dumps({
+            "status": "error",
+            "error": f"No trust path to {identity!r} for skill {skill_name!r}",
+        }))
+        raise SystemExit(1)
+
+    click.echo(json.dumps({"status": "ok", "path": path, "skill": skill_name}))
+
+
+@trust.command("list")
+@click.pass_context
+def trust_list(ctx: click.Context) -> None:
+    """Show the full trust web: anchors, keyring, and endorsements."""
+    from mallcop.trust import load_trust_store
+
+    trust_dir: Path = ctx.obj["trust_dir"]
+    ts = load_trust_store(trust_dir)
+
+    endorsement_data: dict[str, list[dict]] = {}
+    for endorser, enlist in ts.endorsements.items():
+        endorsement_data[endorser] = [
+            {
+                "identity": e.identity,
+                "trust_level": e.trust_level,
+                "scope": e.scope,
+                "reason": e.reason,
+                "expires": e.expires.isoformat(),
+            }
+            for e in enlist
+        ]
+
+    click.echo(json.dumps({
+        "status": "ok",
+        "anchors": list(ts.anchors.keys()),
+        "keyring": list(ts.keyring.keys()),
+        "endorsements": endorsement_data,
+    }, indent=2))
