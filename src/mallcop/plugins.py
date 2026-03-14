@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib
 import importlib.util
 import inspect
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -12,6 +13,9 @@ from typing import Any
 import yaml
 
 from mallcop.connectors._base import ConnectorBase
+from mallcop.skills._schema import SkillManifest
+
+logger = logging.getLogger(__name__)
 
 _PLUGIN_CATEGORIES = {
     "connectors": "connector",
@@ -29,25 +33,31 @@ class PluginInfo:
 
 def discover_plugins(
     search_paths: list[Path],
-) -> dict[str, dict[str, PluginInfo]]:
+) -> dict[str, dict]:
     """Scan search paths for plugins. Earlier paths take priority (first wins).
 
     Each search path is expected to contain subdirectories named
-    'connectors/', 'detectors/', and/or 'actors/', each containing
-    plugin directories with manifest.yaml files.
+    'connectors/', 'detectors/', 'actors/', and/or 'skills/', each containing
+    plugin directories with manifest.yaml (or SKILL.md for skills).
 
     Resolution order: first occurrence of a plugin name wins.
+
+    Returns a dict with keys: 'connectors', 'detectors', 'actors', 'skills'.
+    Values for connectors/detectors/actors are dict[str, PluginInfo].
+    Values for skills are dict[str, SkillManifest].
     """
-    result: dict[str, dict[str, PluginInfo]] = {
+    result: dict[str, dict] = {
         "connectors": {},
         "detectors": {},
         "actors": {},
+        "skills": {},
     }
 
     for search_path in search_paths:
         if not search_path.exists() or not search_path.is_dir():
             continue
 
+        # Discover connectors, detectors, actors (manifest.yaml-based)
         for category_dir, plugin_type in _PLUGIN_CATEGORIES.items():
             category_path = search_path / category_dir
             if not category_path.exists() or not category_path.is_dir():
@@ -78,6 +88,22 @@ def discover_plugins(
                         plugin_type=plugin_type,
                         path=entry,
                     )
+
+        # Discover skills (SKILL.md frontmatter-based)
+        skills_path = search_path / "skills"
+        if skills_path.exists() and skills_path.is_dir():
+            for entry in sorted(skills_path.iterdir()):
+                # Skip non-directories and private files/dirs (starting with _)
+                if not entry.is_dir() or entry.name.startswith("_"):
+                    continue
+
+                manifest = SkillManifest.from_skill_dir(entry)
+                if manifest is None:
+                    continue
+
+                # First wins: skip if already discovered
+                if manifest.name not in result["skills"]:
+                    result["skills"][manifest.name] = manifest
 
     return result
 

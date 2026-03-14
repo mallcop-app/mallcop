@@ -1441,7 +1441,9 @@ def verify(plugin_path: str | None, verify_all: bool) -> None:
             "actors": "actor",
         }
         for category, plugins in discovered.items():
-            ptype = type_map[category]
+            ptype = type_map.get(category)
+            if ptype is None:
+                continue  # e.g. skills — not verified via manifest.yaml contract
             for pinfo in plugins.values():
                 results.append(_verify(pinfo.path, ptype))
 
@@ -1911,6 +1913,133 @@ def exam_run(tag: str | None, scenario_id: str | None, model: str | None, human:
         }))
 
 
+@exam.command("bakeoff")
+@click.option("--pricing", "pricing_path", required=True, type=click.Path(exists=True),
+              help="Path to pricing.yaml (model catalog).")
+@click.option("--models", "model_filter", default=None,
+              help="Comma-separated model aliases to test (default: all auto-routable).")
+@click.option("--profile", default=None, help="AWS SSO profile name (e.g. 3dl).")
+@click.option("--region", default="us-east-1", help="AWS region for Bedrock.")
+@click.option("--judge-backend", default=None,
+              help="Backend for the judge LLM (default: same as SHAKEDOWN_BACKEND).")
+@click.option("--output", "output_path", default=None, type=click.Path(),
+              help="Write summary JSON to this path (default: stdout).")
+@click.option("--human", is_flag=True, help="Human-readable progress output.")
+def exam_bakeoff(
+    pricing_path: str,
+    model_filter: str | None,
+    profile: str | None,
+    region: str,
+    judge_backend: str | None,
+    output_path: str | None,
+    human: bool,
+) -> None:
+    """Run Academy Exam against all Bedrock commodity models.
+
+    Reads models from pricing.yaml, runs scenarios against each via Bedrock,
+    grades with LLM-as-judge, and produces a diffable summary JSON with
+    routing recommendations.
+
+    Requires AWS SSO credentials: run 'aws sso login --profile <name>' first.
+    Requires boto3: pip install mallcop[aws]
+    """
+    import os
+    from pathlib import Path as _Path
+
+    scenarios_dir = _Path(__file__).resolve().parents[2] / "tests" / "shakedown" / "scenarios"
+    if not scenarios_dir.exists():
+        _emit_error("Scenario directory not found. Run from mallcop source checkout.", human)
+        raise SystemExit(1)
+
+    try:
+        from tests.shakedown.bakeoff import (
+            build_summary,
+            load_models_from_pricing,
+            run_bakeoff,
+        )
+        from tests.shakedown.evaluator import JudgeEvaluator
+        from tests.shakedown.runs import RunRecorder
+        from tests.shakedown.scenario import load_all_scenarios
+        from tests.shakedown.conftest import _build_llm_client
+    except ImportError as e:
+        _emit_error(f"Shakedown module not available: {e}. Run from mallcop source checkout.", human)
+        raise SystemExit(1)
+
+    # Load models from pricing.yaml
+    models = load_models_from_pricing(_Path(pricing_path))
+    if model_filter:
+        keep = {m.strip() for m in model_filter.split(",")}
+        models = [m for m in models if m.alias in keep]
+        missing = keep - {m.alias for m in models}
+        if missing:
+            _emit_error(f"Models not found in pricing.yaml: {', '.join(sorted(missing))}", human)
+            raise SystemExit(1)
+
+    if not models:
+        _emit_error("No models to test.", human)
+        raise SystemExit(1)
+
+    # Load scenarios
+    scenarios = load_all_scenarios(scenarios_dir)
+    if not scenarios:
+        _emit_error("No scenarios found.", human)
+        raise SystemExit(1)
+
+    # Build judge LLM (always sonnet, separate from the model under test)
+    backend = judge_backend or os.environ.get("SHAKEDOWN_BACKEND", "api")
+    try:
+        judge_llm = _build_llm_client(backend=backend, model="sonnet")
+    except Exception as e:
+        _emit_error(f"Failed to build judge LLM: {e}", human)
+        raise SystemExit(1)
+
+    judge = JudgeEvaluator(judge_llm=judge_llm, judge_model="sonnet")
+    recorder = RunRecorder()
+
+    if human:
+        click.echo(f"Bakeoff: {len(models)} models x {len(scenarios)} scenarios")
+        click.echo(f"Models: {', '.join(m.alias for m in models)}")
+        click.echo(f"Judge: sonnet via {backend}")
+        click.echo(f"Run ID: {recorder.run_id}")
+        click.echo()
+
+    def _progress(model_alias: str, scenario_id: str, grade: Any) -> None:
+        if human:
+            v = grade.verdict.value.upper()
+            click.echo(f"  {model_alias:20s} {scenario_id:40s} {v}")
+
+    # Run bakeoff
+    model_results = run_bakeoff(
+        models=models,
+        scenarios=scenarios,
+        judge=judge,
+        region=region,
+        profile=profile,
+        recorder=recorder,
+        on_scenario_done=_progress if human else None,
+    )
+
+    # Build summary
+    summary = build_summary(model_results, scenarios_total=len(scenarios))
+    summary_json = json.dumps(summary, indent=2, sort_keys=False)
+
+    if output_path:
+        _Path(output_path).write_text(summary_json + "\n")
+        if human:
+            click.echo(f"\nSummary written to {output_path}")
+    else:
+        click.echo(summary_json)
+
+    # Print routing recommendation in human mode
+    if human and "routing_recommendation" in summary:
+        click.echo("\nRouting Recommendation:")
+        for lane, sovs in summary["routing_recommendation"].items():
+            for sov, model_alias in sovs.items():
+                click.echo(f"  {lane:12s} {sov:10s} → {model_alias or 'NONE (no model meets threshold)'}")
+
+        click.echo(f"\nPer-model JSONL: runs/{recorder.run_id}.jsonl")
+
+
 @cli.command()
 @click.option("--from-exam", "exam_file", default=None,
               help="Path to exam results JSON file (from mallcop exam run).")
@@ -2013,3 +2142,73 @@ def _build_improve_suggestions(
         })
 
     return suggestions if suggestions else [{"message": "No actionable suggestions found."}]
+
+
+# --- Skill signing ---
+
+
+@cli.group()
+def skill() -> None:
+    """Skill signing and verification commands."""
+
+
+@skill.command("sign")
+@click.argument("skill_dir", metavar="DIR", type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option("--key", "key_path", required=True, type=click.Path(exists=True, path_type=Path),
+              help="Path to SSH private key for signing.")
+def skill_sign(skill_dir: Path, key_path: Path) -> None:
+    """Sign a skill directory.
+
+    Produces SKILL.md.sig in the skill directory. Any subsequent change
+    to any file in the directory will invalidate the signature.
+    """
+    from mallcop.trust import sign_skill
+
+    try:
+        sig_path = sign_skill(skill_dir, key_path)
+        click.echo(json.dumps({"status": "ok", "sig": str(sig_path)}))
+    except RuntimeError as e:
+        click.echo(json.dumps({"status": "error", "error": str(e)}))
+        raise SystemExit(1)
+    except Exception as e:
+        click.echo(json.dumps({"status": "error", "error": f"Signing failed: {e}"}))
+        raise SystemExit(1)
+
+
+@skill.command("verify")
+@click.argument("skill_dir", metavar="DIR", type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option("--pubkey", "pubkey_path", required=True, type=click.Path(exists=True, path_type=Path),
+              help="Path to SSH public key file for verification.")
+@click.option("--identity", default=None,
+              help="Identity (email) to verify against. Defaults to the comment field in the pubkey.")
+def skill_verify(skill_dir: Path, pubkey_path: Path, identity: str | None) -> None:
+    """Verify a skill directory's signature.
+
+    Exits 0 if the signature is valid, non-zero otherwise.
+    """
+    from mallcop.trust import verify_skill_signature
+
+    pubkey_str = pubkey_path.read_text().strip()
+
+    # Default identity: last field of pubkey (comment)
+    if identity is None:
+        parts = pubkey_str.split()
+        if len(parts) >= 3:
+            identity = parts[2]
+        elif len(parts) == 2:
+            identity = parts[1]
+        else:
+            click.echo(json.dumps({"status": "error", "error": "Cannot determine identity from pubkey. Use --identity."}))
+            raise SystemExit(1)
+
+    try:
+        valid = verify_skill_signature(skill_dir, pubkey_str, identity)
+    except RuntimeError as e:
+        click.echo(json.dumps({"status": "error", "error": str(e)}))
+        raise SystemExit(1)
+
+    if valid:
+        click.echo(json.dumps({"status": "ok", "verified": True}))
+    else:
+        click.echo(json.dumps({"status": "error", "verified": False, "error": "Signature verification failed"}))
+        raise SystemExit(1)
