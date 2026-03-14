@@ -1640,3 +1640,376 @@ def feedback(finding_id: str, action: str, reason: str | None, dir_path: str | N
         "finding_id": finding_id,
         "human_action": action.lower(),
     }))
+
+
+@cli.command()
+@click.option("--auto", is_flag=True, help="Apply proposed patches automatically.")
+@click.option("--dry-run", is_flag=True, help="Show what would change without applying.")
+@click.option("--dir", "dir_path", default=None, help="Deployment repo directory.", hidden=True)
+@click.option("--human", is_flag=True, default=False, help="Human-readable output.")
+def heal(auto: bool, dry_run: bool, dir_path: str | None, human: bool) -> None:
+    """Review and apply parser patches proposed by the heal actor.
+
+    Without flags: shows all pending patch proposals from heal actor annotations.
+    --dry-run: shows what patches would be applied.
+    --auto: applies all proposed patches to parser.yaml files automatically.
+
+    Example: mallcop heal --dry-run
+    """
+    import yaml as _yaml
+
+    from mallcop.actors.heal import ParserPatch, analyze_drift
+
+    root = Path(dir_path) if dir_path else Path.cwd()
+    store = JsonlStore(root)
+
+    # Find all log_format_drift findings with heal actor annotations
+    findings = store.query_findings()
+    drift_findings = [f for f in findings if f.detector == "log-format-drift"]
+
+    patches: list[dict[str, Any]] = []
+    for fnd in drift_findings:
+        # Check for heal actor annotations with patch proposals
+        heal_anns = [a for a in fnd.annotations if a.actor == "heal" and a.action == "proposed_patch"]
+        if heal_anns:
+            for ann in heal_anns:
+                try:
+                    patch_dict = json.loads(ann.content)
+                    patches.append({
+                        "finding_id": fnd.id,
+                        "finding_title": fnd.title,
+                        "patch": patch_dict,
+                        "proposed_at": ann.timestamp.isoformat(),
+                    })
+                except (json.JSONDecodeError, ValueError):
+                    continue
+        else:
+            # No heal annotation yet — run analyze_drift inline
+            patch = analyze_drift(fnd)
+            if patch is not None:
+                patches.append({
+                    "finding_id": fnd.id,
+                    "finding_title": fnd.title,
+                    "patch": patch.to_dict(),
+                    "proposed_at": None,
+                })
+
+    if not patches:
+        if human:
+            click.echo("No parser patch proposals found.")
+        else:
+            click.echo(json.dumps({"command": "heal", "status": "ok", "patches": []}))
+        return
+
+    if dry_run or (not auto):
+        # Show proposals without applying
+        if human:
+            click.echo(f"Found {len(patches)} patch proposal(s):\n")
+            for entry in patches:
+                patch = entry["patch"]
+                click.echo(f"  Finding: {entry['finding_id']} — {entry['finding_title']}")
+                click.echo(f"  Scenario: {patch.get('scenario', 'unknown')}")
+                click.echo(f"  App: {patch.get('app_name', 'unknown')}")
+                click.echo(f"  Confidence: {patch.get('confidence', 0.0):.0%}")
+                click.echo(f"  Reason: {patch.get('reason', '')}")
+                if patch.get("before"):
+                    click.echo(f"  Before: {json.dumps(patch['before'], indent=4)}")
+                click.echo(f"  After: {json.dumps(patch['after'], indent=4)}")
+                click.echo("")
+            if dry_run:
+                click.echo("(Dry run — no changes applied. Use --auto to apply.)")
+        else:
+            click.echo(json.dumps({
+                "command": "heal",
+                "status": "ok",
+                "dry_run": dry_run,
+                "patches": patches,
+            }))
+        return
+
+    # --auto: apply patches to parser.yaml files
+    applied: list[dict[str, Any]] = []
+    errors: list[str] = []
+
+    for entry in patches:
+        patch = entry["patch"]
+        app_name = patch.get("app_name", "")
+        after = patch.get("after", {})
+        if not app_name or not after:
+            continue
+
+        # Look for parser.yaml in common locations
+        parser_candidates = [
+            root / "plugins" / app_name / "parser.yaml",
+            root / app_name / "parser.yaml",
+            root / "parsers" / f"{app_name}.yaml",
+        ]
+
+        parser_path: Path | None = None
+        for candidate in parser_candidates:
+            if candidate.exists():
+                parser_path = candidate
+                break
+
+        if parser_path is None:
+            errors.append(
+                f"parser.yaml not found for app '{app_name}' "
+                f"(searched {[str(c) for c in parser_candidates]})"
+            )
+            continue
+
+        try:
+            with open(parser_path) as f:
+                parser_data = _yaml.safe_load(f) or {}
+
+            templates: list[dict[str, Any]] = parser_data.get("templates", [])
+            scenario = patch.get("scenario", "new_field")
+            before = patch.get("before")
+
+            if scenario == "new_field" or before is None:
+                # Append new template
+                templates.append(after)
+            else:
+                # Find matching template by pattern and replace
+                old_pattern = (before or {}).get("pattern")
+                replaced = False
+                for i, t in enumerate(templates):
+                    if old_pattern and t.get("pattern") == old_pattern:
+                        templates[i] = after
+                        replaced = True
+                        break
+                if not replaced:
+                    templates.append(after)
+
+            parser_data["templates"] = templates
+            with open(parser_path, "w") as f:
+                _yaml.dump(parser_data, f, default_flow_style=False)
+
+            applied.append({
+                "finding_id": entry["finding_id"],
+                "app_name": app_name,
+                "scenario": scenario,
+                "parser_path": str(parser_path),
+            })
+        except Exception as e:
+            errors.append(f"Failed to apply patch for '{app_name}': {e}")
+
+    if human:
+        if applied:
+            click.echo(f"Applied {len(applied)} patch(es):")
+            for a in applied:
+                click.echo(f"  {a['app_name']} ({a['scenario']}) → {a['parser_path']}")
+        if errors:
+            click.echo(f"\n{len(errors)} error(s):")
+            for e in errors:
+                click.echo(f"  ERROR: {e}", err=True)
+    else:
+        click.echo(json.dumps({
+            "command": "heal",
+            "status": "ok" if not errors else "partial",
+            "applied": applied,
+            "errors": errors,
+        }))
+
+
+# --- Academy Exam ---
+
+
+@cli.group()
+def exam() -> None:
+    """Academy Exam: validate mallcop's AI reasoning with canned scenarios."""
+
+
+@exam.command("run")
+@click.option("--tag", default=None, help="Filter scenarios by failure_mode tag (e.g. KA, AE, CS).")
+@click.option("--scenario", "scenario_id", default=None, help="Run a single scenario by ID.")
+@click.option("--model", default=None, help="LLM model to use (e.g. haiku, sonnet).")
+@click.option("--human", is_flag=True, help="Human-readable output (default is JSON).")
+@click.option("--backend", default=None,
+              help="LLM backend: anthropic, claude-code, bedrock, openai-compat, managed.")
+def exam_run(tag: str | None, scenario_id: str | None, model: str | None, human: bool, backend: str | None) -> None:
+    """Run Academy Exam scenarios and output grades."""
+    import os
+    from pathlib import Path as _Path
+
+    # Locate scenario directory — relative to this package
+    scenarios_dir = _Path(__file__).resolve().parents[2] / "tests" / "shakedown" / "scenarios"
+    if not scenarios_dir.exists():
+        # Fallback for installed packages (no tests/ directory)
+        _emit_error("Scenario directory not found. Run from mallcop source checkout.", human)
+        raise SystemExit(1)
+
+    # Set env vars so _build_llm_client picks them up
+    if backend:
+        os.environ["SHAKEDOWN_BACKEND"] = backend
+    if model:
+        os.environ["SHAKEDOWN_MODEL"] = model
+
+    # Import after env setup
+    try:
+        from tests.shakedown.harness import ShakedownHarness
+        from tests.shakedown.scenario import load_all_scenarios, load_scenarios_tagged
+        from tests.shakedown.conftest import _build_llm_client
+    except ImportError as e:
+        _emit_error(f"Shakedown module not available: {e}. Run from mallcop source checkout.", human)
+        raise SystemExit(1)
+
+    try:
+        llm = _build_llm_client(backend=backend, model=model)
+    except SystemExit:
+        _emit_error(
+            "No LLM credentials found. Set ANTHROPIC_API_KEY, or use --backend claude-code.",
+            human,
+        )
+        raise SystemExit(1)
+    except Exception as e:
+        _emit_error(f"Failed to build LLM client: {e}", human)
+        raise SystemExit(1)
+
+    harness = ShakedownHarness(llm=llm, scenario_dir=scenarios_dir)
+
+    # Load scenarios
+    if scenario_id:
+        all_s = load_all_scenarios(scenarios_dir)
+        scenarios = [s for s in all_s if s.id == scenario_id]
+        if not scenarios:
+            _emit_error(f"Scenario '{scenario_id}' not found.", human)
+            raise SystemExit(1)
+    elif tag:
+        scenarios = load_scenarios_tagged(scenarios_dir, failure_mode=tag)
+    else:
+        scenarios = load_all_scenarios(scenarios_dir)
+
+    if not scenarios:
+        _emit_error("No scenarios matched the filter.", human)
+        raise SystemExit(1)
+
+    results = harness.run_scenarios(scenarios)
+
+    grades_out: list[dict[str, Any]] = []
+    for r in results:
+        grades_out.append({
+            "scenario_id": r.scenario_id,
+            "chain_action": r.chain_action,
+            "triage_action": r.triage_action,
+            "total_tokens": r.total_tokens,
+            "llm_calls": len(r.llm_calls),
+        })
+
+    if human:
+        click.echo(f"Academy Exam — {len(results)} scenario(s) run\n")
+        for g in grades_out:
+            click.echo(
+                f"  {g['scenario_id']:20s}  action={g['chain_action']:10s}"
+                f"  triage={g['triage_action']:10s}  tokens={g['total_tokens']}"
+            )
+    else:
+        click.echo(json.dumps({
+            "command": "exam",
+            "scenarios_run": len(results),
+            "results": grades_out,
+        }))
+
+
+@cli.command()
+@click.option("--from-exam", "exam_file", default=None,
+              help="Path to exam results JSON file (from mallcop exam run).")
+@click.option("--refresh-patterns", is_flag=True,
+              help="Refresh antipatterns from web (not yet implemented).")
+@click.option("--human", is_flag=True, help="Human-readable output (default is JSON).")
+def improve(exam_file: str | None, refresh_patterns: bool, human: bool) -> None:
+    """Analyze exam results and propose detector/prompt improvements."""
+    if refresh_patterns:
+        msg = "refresh-patterns not yet implemented"
+        if human:
+            click.echo(msg)
+        else:
+            click.echo(json.dumps({"command": "improve", "status": "not_implemented", "message": msg}))
+        return
+
+    # Load grades
+    if exam_file:
+        import pathlib
+        p = pathlib.Path(exam_file)
+        if not p.exists():
+            _emit_error(f"Exam file not found: {exam_file}", human)
+            raise SystemExit(1)
+        try:
+            raw = json.loads(p.read_text())
+            results_data = raw.get("results", [])
+        except Exception as e:
+            _emit_error(f"Failed to parse exam file: {e}", human)
+            raise SystemExit(1)
+
+        # Re-import Grade/FixTarget to reconstruct graded results
+        try:
+            from tests.shakedown.evaluator import FixTarget
+        except ImportError:
+            _emit_error("Shakedown evaluator not available. Run from mallcop source checkout.", human)
+            raise SystemExit(1)
+
+        # exam run output doesn't include Grade objects (no judge step) —
+        # group by chain_action as a proxy for failures
+        failures = [r for r in results_data if r.get("chain_action") == "unknown"]
+        suggestions = _build_improve_suggestions(results_data, failures)
+    else:
+        suggestions = [
+            {
+                "message": "No exam results provided. Run 'mallcop exam run' first, "
+                           "then pass the output file with --from-exam results.json",
+            }
+        ]
+
+    if human:
+        click.echo("Mallcop Improvement Suggestions\n")
+        for s in suggestions:
+            if "message" in s:
+                click.echo(s["message"])
+            else:
+                click.echo(f"Fix target : {s.get('fix_target', 'unknown')}")
+                click.echo(f"Scenario(s): {', '.join(s.get('scenario_ids', []))}")
+                click.echo(f"Pattern    : {s.get('failure_pattern', '')}")
+                click.echo(f"Direction  : {s.get('fix_direction', '')}")
+                click.echo("")
+    else:
+        click.echo(json.dumps({
+            "command": "improve",
+            "status": "ok",
+            "suggestions": suggestions,
+        }))
+
+
+def _build_improve_suggestions(
+    results_data: list[dict[str, Any]],
+    failures: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Build improvement suggestions from exam result dicts."""
+    if not results_data:
+        return [{"message": "No results to analyze."}]
+
+    # Group by failure pattern — chain_action == "unknown" means actor chain failed
+    unknown_ids = [r["scenario_id"] for r in failures]
+
+    suggestions: list[dict[str, Any]] = []
+
+    if unknown_ids:
+        suggestions.append({
+            "fix_target": "actor_chain",
+            "scenario_ids": unknown_ids,
+            "failure_pattern": "Actor chain returned unknown action — likely no resolution produced",
+            "fix_direction": (
+                "Check triage/POST.md and investigate/POST.md for resolution instructions. "
+                "Ensure the actor chain is configured correctly in mallcop.yaml."
+            ),
+        })
+
+    # Summarise non-failures
+    ok_count = len(results_data) - len(failures)
+    if ok_count > 0 and not failures:
+        suggestions.append({
+            "message": f"All {ok_count} scenario(s) produced a chain action. "
+                       "Re-run with a judge evaluator for quality grades: "
+                       "set ANTHROPIC_API_KEY and run 'pytest -m shakedown'."
+        })
+
+    return suggestions if suggestions else [{"message": "No actionable suggestions found."}]

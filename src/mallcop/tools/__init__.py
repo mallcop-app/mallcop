@@ -32,6 +32,7 @@ class ToolContext:
     connectors: dict[str, Any]  # connector name -> authenticated ConnectorBase
     config: Any  # MallcopConfig instance
     actor_name: str = "agent"  # Name of the actor using this context
+    reputation: Any = None  # Optional EntityReputation instance
 
 
 @dataclass

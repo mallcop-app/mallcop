@@ -1,0 +1,29 @@
+{
+  "version": "1.4.2",
+  "gateway": {
+    "port": 3000,
+    "auth": {
+      "enabled": false,
+      "method": "none"
+    },
+    "mdns": {
+      "enabled": true
+    },
+    "guestMode": {
+      "enabled": true,
+      "tools": ["web_search", "file_read", "shell_exec"]
+    }
+  },
+  "skills": {
+    "load": {
+      "extraDirs": []
+    }
+  },
+  "secrets": {
+    "openai_api_key": "sk-proj-FAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKE",
+    "github_token": "ghp_FakeTokenForTestingPurposesOnlyXXXXXXXXXXXX"
+  },
+  "mcp": {
+    "servers": []
+  }
+}

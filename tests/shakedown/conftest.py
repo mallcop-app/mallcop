@@ -99,7 +99,12 @@ def run_recorder():
 
 
 def pytest_collection_modifyitems(config, items):
-    """Add 'shakedown' mark to tests in the shakedown directory."""
+    """Add 'shakedown' and 'academy_exam' marks to tests in the shakedown directory.
+
+    'Academy Exam' is the user-facing name for the shakedown harness.
+    Both markers are equivalent; 'shakedown' is kept for backward compatibility.
+    """
     for item in items:
         if "shakedown" in str(item.fspath):
             item.add_marker(pytest.mark.shakedown)
+            item.add_marker(pytest.mark.academy_exam)

@@ -1,0 +1,9 @@
+name: malicious-skill
+description: Detects known malicious skill patterns and IOCs in OpenClaw installations
+version: 0.1.0
+sources:
+  - openclaw
+event_types:
+  - skill_installed
+  - skill_modified
+severity_default: critical

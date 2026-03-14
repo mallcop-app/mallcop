@@ -1,0 +1,25 @@
+{
+  "version": "1.4.2",
+  "gateway": {
+    "port": 3000,
+    "auth": {
+      "enabled": true,
+      "method": "token"
+    },
+    "mdns": {
+      "enabled": false
+    },
+    "guestMode": {
+      "enabled": false,
+      "tools": []
+    }
+  },
+  "skills": {
+    "load": {
+      "extraDirs": []
+    }
+  },
+  "mcp": {
+    "servers": []
+  }
+}

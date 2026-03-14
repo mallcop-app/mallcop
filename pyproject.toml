@@ -33,5 +33,6 @@ addopts = "-m 'not live'"
 markers = [
     "live: requires real API credentials (ANTHROPIC_API_KEY, AZURE_*)",
     "shakedown: shakedown scenario tests (requires LLM access)",
+    "academy_exam: Academy Exam scenario tests — alias for shakedown (requires LLM access)",
     "stability: stability tests — run 3x per scenario (set SHAKEDOWN_STABILITY=1)",
 ]

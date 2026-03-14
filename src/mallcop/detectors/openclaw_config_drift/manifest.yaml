@@ -1,0 +1,8 @@
+name: openclaw-config-drift
+description: Detects insecure OpenClaw gateway configuration
+version: 0.1.0
+sources:
+  - openclaw
+event_types:
+  - config_changed
+severity_default: warn

@@ -28,6 +28,7 @@ def run_detect(
     *,
     root: Path | None = None,
     config_connectors: dict[str, dict[str, Any]] | None = None,
+    reputation: Any | None = None,
 ) -> list[Finding]:
     """Run all detectors against events, applying learning mode.
 
@@ -37,6 +38,7 @@ def run_detect(
         learning_connectors: Set of connector names still in learning mode.
         root: Deployment root directory (for loading app detectors).
         config_connectors: Connector config dict (for extracting app names).
+        reputation: Optional EntityReputation instance for enriching findings.
 
     Returns:
         List of findings from all detectors.
@@ -73,5 +75,9 @@ def run_detect(
                 finding.severity = Severity.INFO
 
         all_findings.extend(findings)
+
+    # Enrich findings with reputation context if available
+    if reputation is not None:
+        all_findings = [reputation.enrich_finding(f) for f in all_findings]
 
     return all_findings

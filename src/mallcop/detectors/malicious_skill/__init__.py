@@ -1,0 +1,1 @@
+"""Malicious-skill detector plugin."""

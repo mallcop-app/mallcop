@@ -1,0 +1,14 @@
+name: heal
+type: agent
+description: Auto-heal actor that proposes parser fixes for log format drift
+version: "0.1.0"
+
+model: sonnet
+tools:
+  - read-finding
+  - annotate-finding
+  - resolve-finding
+permissions:
+  - read
+  - write
+max_iterations: 5

@@ -1,0 +1,45 @@
+name: openclaw
+description: OpenClaw AI agent — skill integrity, behavior monitoring, gateway security
+version: 0.1.0
+
+auth:
+  required: []
+  optional: []
+
+config:
+  openclaw_home: "~/.openclaw"
+  workspace_dirs: []
+  watch_gateway_logs: true
+  watch_skills: true
+
+event_types:
+  - skill_installed
+  - skill_modified
+  - skill_removed
+  - config_changed
+  - gateway_connection
+  - tool_invocation
+  - mcp_call
+  - auth_attempt
+  - secret_access
+
+discovery:
+  probes:
+    - "OpenClaw home directory (~/.openclaw)"
+    - "Installed skills enumeration"
+    - "Gateway process detection"
+    - "MCP server configuration"
+
+tools:
+  - name: openclaw.list-skills
+    description: List all installed skills with metadata
+    permission: read
+  - name: openclaw.read-skill
+    description: Read a specific skill's SKILL.md content
+    permission: read
+  - name: openclaw.check-config
+    description: Read OpenClaw gateway configuration (secrets redacted)
+    permission: read
+  - name: openclaw.gateway-status
+    description: Check gateway process, ports, active connections
+    permission: read
