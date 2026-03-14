@@ -96,6 +96,20 @@ the current finding before moving on. Apply consistent rigor — finding
 
 ## Output
 
+The `reason` field is shown directly in the dashboard to humans who may
+not be security experts. Write it as **two short sentences**:
+1. **What happened** — state the event plainly.
+2. **Why it matters** — explain the risk or why it's safe, in terms a
+   non-technical founder would understand.
+
+Good: "A new service principal was granted Contributor access to the
+production subscription. This means it can create, modify, or delete any
+resource — worth verifying who requested it."
+
+Bad: "Unknown actor granted role assignment on subscription scope.
+Baseline shows no prior RBAC mutations from this principal. Credential
+theft test: indeterminate."
+
 Call resolve-finding with action="resolved" and a specific reason citing
 evidence for benign findings.
 Call resolve-finding with action="escalated" and what you checked and why
