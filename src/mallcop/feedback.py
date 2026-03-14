@@ -56,6 +56,7 @@ class FeedbackRecord:
     baseline_snapshot: dict[str, Any]
     annotations: list[dict[str, Any]]
     detector: str | None = field(default=None)
+    source: str | None = field(default=None)  # "batch", "cli", etc.
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -69,6 +70,7 @@ class FeedbackRecord:
             "baseline_snapshot": self.baseline_snapshot,
             "annotations": self.annotations,
             "detector": self.detector,
+            "source": self.source,
         }
 
     def to_json(self) -> str:
@@ -87,6 +89,7 @@ class FeedbackRecord:
             baseline_snapshot=data.get("baseline_snapshot", {}),
             annotations=data.get("annotations", []),
             detector=data.get("detector"),
+            source=data.get("source"),
         )
 
     @classmethod

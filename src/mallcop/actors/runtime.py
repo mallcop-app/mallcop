@@ -66,6 +66,7 @@ class BatchResult:
     """Aggregated result from processing a batch of findings."""
     results: list[RunResult]
     total_tokens: int
+    feedback_records: list[Any] = field(default_factory=list)  # list[FeedbackRecord]
 
 _VALID_ACTIONS = {a.value for a in ResolutionAction}
 

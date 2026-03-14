@@ -179,15 +179,29 @@ def run_escalate(
                         )
                     continue
 
+            # Load baseline for cold start detection (best-effort: None if unavailable)
+            try:
+                baseline = store.get_baseline()
+            except Exception:
+                baseline = None
+
             batch_result = run_batch(
                 actor_runner,
                 batch_findings,
                 actor_name=actor_name,
                 finding_token_budget=budget_config.max_tokens_per_finding,
                 max_tokens=remaining_tokens,
+                baseline=baseline,
             )
 
             tracker.add_tokens(batch_result.total_tokens)
+
+            # Persist feedback records from batch (resolved findings → learning flywheel)
+            for fb_record in batch_result.feedback_records:
+                try:
+                    store.append_feedback(fb_record)
+                except Exception:
+                    pass  # Best-effort: feedback loss is non-fatal
 
             # Apply resolutions from batch results
             for i, result in enumerate(batch_result.results):
