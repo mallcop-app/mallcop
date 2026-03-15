@@ -419,82 +419,10 @@ def scan() -> None:
 @click.option("--dir", "dir_path", default=None, help="Deployment repo directory.", hidden=True)
 def detect(dir_path: str | None) -> None:
     """Run detectors against new events."""
-    from mallcop.baseline import is_learning_mode
-    from mallcop.detect import run_detect
-    from mallcop.store import JsonlStore
-
     root = Path(dir_path) if dir_path else Path.cwd()
-    store = JsonlStore(root)
-
-    # Get all events (no arbitrary limit) and baseline
-    all_events = store.query_events(limit=100_000)
-    baseline = store.get_baseline()
-
-    # Determine which connectors are in learning mode
-    sources = {evt.source for evt in all_events}
-    learning: set[str] = set()
-    for source in sources:
-        source_events = [e for e in all_events if e.source == source]
-        if is_learning_mode(source, source_events):
-            learning.add(source)
-
-    # Load config for app detector integration
-    try:
-        detect_config = load_config(root)
-        config_connectors = detect_config.connectors
-    except ConfigError:
-        config_connectors = None
-
-    # Run detectors
-    findings = run_detect(
-        all_events, baseline, learning_connectors=learning,
-        root=root, config_connectors=config_connectors,
-    )
-
-    # Persist findings
-    if findings:
-        store.append_findings(findings)
-
-    # Update baseline AFTER detection so new actors are included for next run
-    try:
-        detect_config_full = load_config(root)
-        window_days: int | None = detect_config_full.baseline.window_days
-    except ConfigError:
-        from mallcop.config import BaselineConfig
-        window_days = BaselineConfig().window_days
-    store.update_baseline(all_events, window_days=window_days)
-
-    # Update actor context from accumulated feedback
-    try:
-        from mallcop.baseline import update_actor_context
-        feedback_records = store.query_feedback()
-        if feedback_records:
-            updated_baseline = update_actor_context(store.get_baseline(), feedback_records)
-            # Persist the updated baseline with actor_context
-            import json as _json
-            bl_path = root / ".mallcop" / "baseline.json"
-            bl_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(bl_path, "w") as _f:
-                _json.dump(updated_baseline.to_dict(), _f)
-    except Exception:
-        pass  # Actor context update is non-critical; never block detect
-
-    # Output summary
-    summary: dict[str, dict[str, int]] = {}
-    for f in findings:
-        det = f.detector
-        sev = f.severity.value
-        if det not in summary:
-            summary[det] = {}
-        summary[det][sev] = summary[det].get(sev, 0) + 1
-
-    click.echo(json.dumps({
-        "command": "detect",
-        "status": "ok",
-        "findings_count": len(findings),
-        "summary": summary,
-        "learning_connectors": sorted(learning),
-    }))
+    result = _run_detect_pipeline(root)
+    result["command"] = "detect"
+    click.echo(json.dumps(result))
 
 
 @cli.command()
@@ -806,6 +734,19 @@ def _run_detect_pipeline(root: Path, store: Store | None = None) -> dict[str, An
     _run_retrospective_if_transitioning(
         store, all_events, updated_baseline, sources, learning
     )
+
+    # Update actor context from accumulated feedback
+    try:
+        from mallcop.baseline import update_actor_context
+        feedback_records = store.query_feedback()
+        if feedback_records:
+            actor_baseline = update_actor_context(store.get_baseline(), feedback_records)
+            bl_path = root / ".mallcop" / "baseline.json"
+            bl_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(bl_path, "w") as f:
+                json.dump(actor_baseline.to_dict(), f)
+    except Exception:
+        pass  # Actor context update is non-critical
 
     summary: dict[str, dict[str, int]] = {}
     for f in findings:
