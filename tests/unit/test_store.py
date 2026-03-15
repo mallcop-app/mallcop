@@ -945,3 +945,68 @@ class TestAtomicWrites:
         # No temp files left behind
         temps = list(tmp_path.glob("*.tmp"))
         assert temps == []
+
+
+# ─── Corruption / edge-case tests ────────────────────────────────────
+
+
+class TestCorruptJsonlRecovery:
+    """Tests for store behavior with corrupt/truncated JSONL files."""
+
+    def test_corrupt_findings_line_crashes_on_load(self, tmp_path: Path) -> None:
+        """A corrupt line in findings.jsonl raises on reload.
+
+        Documents current behavior: _load_from_disk() has no error handling
+        for malformed JSON lines, so a corrupt file crashes initialization.
+        """
+        store = JsonlStore(tmp_path)
+        store.append_findings([_make_finding(id="fnd_ok")])
+
+        with open(store._findings_path, "a") as f:
+            f.write('{"id": "fnd_bad", TRUNCATED\n')
+
+        with pytest.raises((json.JSONDecodeError, Exception)):
+            JsonlStore(tmp_path)
+
+    def test_reload_after_truncated_findings(self, tmp_path: Path) -> None:
+        """A truncated findings.jsonl (missing newline, partial JSON) crashes on reload."""
+        store = JsonlStore(tmp_path)
+        store.append_findings([_make_finding(id="fnd_ok")])
+
+        with open(store._findings_path, "a") as f:
+            f.write('{"id": "fnd_partial"')  # no closing brace, no newline
+
+        with pytest.raises((json.JSONDecodeError, Exception)):
+            JsonlStore(tmp_path)
+
+
+class TestUpdateFindingNonexistent:
+    def test_update_nonexistent_finding_is_noop(self, tmp_path: Path) -> None:
+        """update_finding on a missing ID does not crash or corrupt JSONL."""
+        store = JsonlStore(tmp_path)
+        store.append_findings([_make_finding(id="fnd_real")])
+
+        # Update a finding that does not exist
+        store.update_finding("fnd_ghost", status=FindingStatus.RESOLVED)
+
+        # JSONL file should still have exactly one valid finding
+        findings = store.query_findings()
+        assert len(findings) == 1
+        assert findings[0].id == "fnd_real"
+        assert findings[0].status == FindingStatus.OPEN  # unchanged
+
+        # Reload from disk to verify file integrity
+        store2 = JsonlStore(tmp_path)
+        findings2 = store2.query_findings()
+        assert len(findings2) == 1
+        assert findings2[0].id == "fnd_real"
+
+
+class TestQueryEventsLimitZero:
+    def test_limit_zero_returns_empty(self, tmp_path: Path) -> None:
+        """query_events with limit=0 returns an empty list."""
+        store = JsonlStore(tmp_path)
+        store.append_events([_make_event(id="evt_1")])
+
+        result = store.query_events(limit=0)
+        assert result == []
