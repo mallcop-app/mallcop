@@ -280,9 +280,8 @@ class ActorRuntime:
             {
                 "role": "user",
                 "content": "A new finding has been loaded for investigation. "
-                "Use the finding context provided below. "
-                "Events and baseline data have been pre-loaded — "
-                "resolve directly if the evidence is sufficient.",
+                "Finding context, events, and baseline data are provided below. "
+                "Review them, then use your tools to investigate before resolving.",
             },
             {
                 "role": "assistant",
@@ -295,7 +294,7 @@ class ActorRuntime:
             },
         ]
 
-        # Pre-pack events + baseline so the LLM can resolve in one shot
+        # Pre-pack events + baseline as starting context for investigation
         messages.extend(self._prepack_context(finding))
 
         total_tokens = 0

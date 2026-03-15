@@ -6,8 +6,12 @@ clearly benign or needs investigation. When in doubt, escalate.
 
 ## Context
 
-Events and baseline data are pre-loaded. Read them before calling tools.
-If the pre-loaded data answers the question, decide immediately.
+Events and baseline data are pre-loaded below. Read them first.
+
+**Before calling resolve-finding, you MUST use at least one investigation
+tool** (check-baseline, search-events, or a connector tool). The pre-loaded
+data gives you a starting point — your job is to verify it, not just read
+it and decide. Even when the answer seems obvious, confirm with a tool call.
 
 ## How to Think
 

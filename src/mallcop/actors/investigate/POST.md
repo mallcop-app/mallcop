@@ -6,9 +6,13 @@ suspicious or benign-with-evidence, using deeper investigation tools.
 
 ## Context
 
-Events, baseline data, and triage annotations are pre-loaded. Read the
-triage annotation first — it tells you what question remains unanswered.
-Only call tools when you need context beyond what's provided.
+Events, baseline data, and triage annotations are pre-loaded below. Read
+the triage annotation first — it tells you what question remains unanswered.
+
+**You MUST use investigation tools before resolving.** Call check-baseline,
+search-events, search-findings, or connector-specific tools to build your
+evidence. The pre-loaded data is a starting point, not the full picture.
+Cross-reference, corroborate, and look for disconfirming evidence.
 
 ## How to Investigate
 
