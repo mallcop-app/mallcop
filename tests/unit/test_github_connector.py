@@ -688,3 +688,92 @@ class TestGitHubConnectorErrorPaths:
         with patch("requests.get", return_value=fake_resp):
             with pytest.raises(TypeError, match="Expected JSON array"):
                 connector._get_paginated("https://api.github.com/test")
+
+
+class TestPaginationMultiPage:
+    def _make_connector(self) -> Any:
+        from mallcop.connectors.github.connector import GitHubConnector
+
+        connector = GitHubConnector()
+        connector._token = "ghp_fake"
+        connector._org = "acme-corp"
+        return connector
+
+    def test_paginated_follows_link_header(self) -> None:
+        """Multi-page: first response has Link next, second has none."""
+        connector = self._make_connector()
+
+        page1 = MagicMock()
+        page1.raise_for_status = MagicMock()
+        page1.json.return_value = [{"id": 1}, {"id": 2}]
+        page1.headers = {
+            "Link": '<https://api.github.com/test?page=2&after=cursor1>; rel="next"'
+        }
+
+        page2 = MagicMock()
+        page2.raise_for_status = MagicMock()
+        page2.json.return_value = [{"id": 3}]
+        page2.headers = {}
+
+        with patch("requests.get", side_effect=[page1, page2]):
+            results, cursor = connector._get_paginated("https://api.github.com/test")
+
+        assert len(results) == 3
+        assert results[0]["id"] == 1
+        assert results[2]["id"] == 3
+        assert cursor == "cursor1"
+
+    def test_paginated_dict_with_value_key(self) -> None:
+        """Response is {"value": [...]} dict, not a list."""
+        connector = self._make_connector()
+
+        resp = MagicMock()
+        resp.raise_for_status = MagicMock()
+        resp.json.return_value = {"value": [{"id": 10}, {"id": 11}]}
+        resp.headers = {}
+
+        with patch("requests.get", return_value=resp):
+            results, cursor = connector._get_paginated("https://api.github.com/test")
+
+        assert len(results) == 2
+        assert results[0]["id"] == 10
+        assert cursor is None
+
+
+class TestFetchAuditLogParams:
+    def _make_connector(self) -> Any:
+        from mallcop.connectors.github.connector import GitHubConnector
+
+        connector = GitHubConnector()
+        connector._token = "ghp_fake"
+        connector._org = "acme-corp"
+        return connector
+
+    def test_sends_after_param_with_checkpoint(self) -> None:
+        connector = self._make_connector()
+        cp = Checkpoint(connector="github", value="cursor_abc", updated_at=datetime.now(timezone.utc))
+
+        with patch.object(connector, "_get_paginated", return_value=([], None)) as mock_pg:
+            connector._fetch_audit_log(cp)
+
+        _, kwargs = mock_pg.call_args
+        assert kwargs["params"]["after"] == "cursor_abc"
+
+    def test_no_after_when_empty_checkpoint(self) -> None:
+        connector = self._make_connector()
+        cp = Checkpoint(connector="github", value="", updated_at=datetime.now(timezone.utc))
+
+        with patch.object(connector, "_get_paginated", return_value=([], None)) as mock_pg:
+            connector._fetch_audit_log(cp)
+
+        _, kwargs = mock_pg.call_args
+        assert "after" not in kwargs["params"]
+
+    def test_no_after_when_no_checkpoint(self) -> None:
+        connector = self._make_connector()
+
+        with patch.object(connector, "_get_paginated", return_value=([], None)) as mock_pg:
+            connector._fetch_audit_log(None)
+
+        _, kwargs = mock_pg.call_args
+        assert "after" not in kwargs["params"]
