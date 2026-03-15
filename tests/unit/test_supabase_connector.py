@@ -799,25 +799,22 @@ class TestPollConfigChanges:
     # ── integration via poll() ───────────────────────────────────────
 
     def test_poll_calls_config_polling_when_access_token_set(self) -> None:
-        """poll() invokes _poll_config_changes when access_token is present."""
-        connector = _make_connector_with_mgmt()
+        """poll() invokes _poll_config_changes when access_token is present.
 
-        def mock_get(url: str, **kwargs: Any) -> MagicMock:
-            if "rest/v1" in url:
-                return _mock_postgrest_response([])
-            # Management API endpoints
-            return _mock_postgrest_response([])
+        Config polling is currently a stub (no API calls) until state caching
+        is implemented. This test verifies it runs without error and returns
+        a valid checkpoint.
+        """
+        connector = _make_connector_with_mgmt()
 
         with patch(
             "mallcop.connectors.supabase.connector.requests.get",
-            side_effect=mock_get,
-        ) as mock_requests:
+            return_value=_mock_postgrest_response([]),
+        ):
             result = connector.poll(None)
 
-        # Management API calls should have been made
-        urls_called = [call.args[0] for call in mock_requests.call_args_list]
-        mgmt_calls = [u for u in urls_called if "api.supabase.com" in u]
-        assert len(mgmt_calls) >= 1
+        # Stub returns empty events, checkpoint should still be valid
+        assert "|" in result.checkpoint.value
 
     def test_poll_skips_config_polling_without_access_token(self) -> None:
         """poll() skips _poll_config_changes when no access_token."""

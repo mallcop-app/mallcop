@@ -281,22 +281,12 @@ class M365Connector(ConnectorBase):
         if self._cached_token is not None and time.monotonic() < self._token_expires_at:
             return self._cached_token
 
-        url = f"https://login.microsoftonline.com/{self._tenant_id}/oauth2/v2.0/token"
-        resp = requests.post(url, data={
-            "client_id": self._client_id,
-            "client_secret": self._client_secret,
-            "grant_type": "client_credentials",
-            "scope": "https://manage.office.com/.default",
-        })
-
-        if resp.status_code != 200:
-            raise ConfigError(
-                f"M365 authentication failed (HTTP {resp.status_code}): {resp.text}"
-            )
-
-        data = resp.json()
-        self._cached_token = data["access_token"]
-        self._token_expires_at = time.monotonic() + data.get("expires_in", 3600) - DEFAULT_TOKEN_EXPIRY_MARGIN
+        from mallcop.connectors._util import fetch_microsoft_oauth_token
+        self._cached_token, self._token_expires_at = fetch_microsoft_oauth_token(
+            self._tenant_id, self._client_id, self._client_secret,
+            scope="https://manage.office.com/.default",
+            service_name="M365",
+        )
         return self._cached_token
 
     def _auth_headers(self) -> dict[str, str]:

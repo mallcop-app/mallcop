@@ -3,8 +3,13 @@
 from __future__ import annotations
 
 import hashlib
+import time
 from datetime import datetime, timedelta
 from urllib.parse import urlparse
+
+import requests
+
+from mallcop.secrets import ConfigError
 
 
 # How far back to look on first poll when no checkpoint exists
@@ -46,6 +51,34 @@ def validate_next_link(url: str, api: str) -> None:
             f"Refusing to follow pagination URL to unexpected host "
             f"{parsed.hostname!r} (allowed: {allowed})"
         )
+
+
+def fetch_microsoft_oauth_token(
+    tenant_id: str,
+    client_id: str,
+    client_secret: str,
+    scope: str,
+    *,
+    service_name: str = "Microsoft",
+) -> tuple[str, float]:
+    """Fetch an OAuth2 client_credentials token from Azure AD.
+
+    Returns (access_token, expires_at_monotonic).
+    """
+    url = f"https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token"
+    resp = requests.post(url, data={
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "grant_type": "client_credentials",
+        "scope": scope,
+    })
+    if resp.status_code != 200:
+        raise ConfigError(
+            f"{service_name} authentication failed (HTTP {resp.status_code}): {resp.text}"
+        )
+    data = resp.json()
+    expires_at = time.monotonic() + data.get("expires_in", 3600) - DEFAULT_TOKEN_EXPIRY_MARGIN
+    return data["access_token"], expires_at
 
 
 def make_event_id(source_id: str) -> str:
