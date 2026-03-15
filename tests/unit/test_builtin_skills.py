@@ -169,3 +169,47 @@ class TestAnchorsFile:
         anchors = _MALLCOP_PKG / "trust" / "anchors"
         content = anchors.read_text()
         assert "ssh-ed25519" in content
+
+
+class TestAzureSecuritySkill:
+    """azure-security skill is discoverable, has correct metadata, and verifies against the mallcop anchor."""
+
+    def test_azure_security_discovered(self, builtin_skills: dict) -> None:
+        assert "azure-security" in builtin_skills
+
+    def test_azure_security_parent_is_privilege_analysis(self, builtin_skills: dict) -> None:
+        m = builtin_skills["azure-security"]
+        assert m.parent == "privilege-analysis"
+
+    def test_azure_security_metadata(self, builtin_skills: dict) -> None:
+        m = builtin_skills["azure-security"]
+        assert m.version == "1.0"
+        assert m.author == "mallcop@mallcop.app"
+        assert m.description
+
+    def test_azure_security_frontmatter_fields(self, builtin_skills: dict) -> None:
+        from mallcop.skills._schema import parse_frontmatter
+
+        skill_md = builtin_skills["azure-security"].path / "SKILL.md"
+        fm, body = parse_frontmatter(skill_md)
+        assert fm.get("name") == "azure-security"
+        assert fm.get("parent") == "privilege-analysis"
+        assert fm.get("version") == "1.0"
+        assert fm.get("author") == "mallcop@mallcop.app"
+        assert body.strip()
+
+    def test_azure_security_parent_exists(self, builtin_skills: dict) -> None:
+        parent_name = builtin_skills["azure-security"].parent
+        assert parent_name in builtin_skills, (
+            f"Parent skill '{parent_name}' not found in discovered skills"
+        )
+
+    def test_azure_security_sig_file_exists(self, builtin_skills: dict) -> None:
+        sig_path = builtin_skills["azure-security"].path / "SKILL.md.sig"
+        assert sig_path.exists(), "SKILL.md.sig missing for azure-security"
+
+    def test_azure_security_signature_valid(self, builtin_skills: dict) -> None:
+        skill_dir = builtin_skills["azure-security"].path
+        assert verify_skill_signature(skill_dir, _MALLCOP_PUBKEY, _MALLCOP_IDENTITY), (
+            "azure-security signature verification failed"
+        )

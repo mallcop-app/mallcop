@@ -1,0 +1,65 @@
+skills:
+  aws-iam:
+    author: mallcop@mallcop.app
+    expires: null
+    sha256: ea538d1d0cb27327d321fbb5b7946da9775aafa616d8f53ad36631996145894a
+    source: builtin
+    trust_chain: null
+    verified_at: '2026-03-15T04:09:44.000458+00:00'
+  azure-security:
+    author: mallcop@mallcop.app
+    expires: null
+    sha256: 4ca7d30652599a34779590756fcf3cb39e88f092fa3799193796c17af8ca4f4a
+    source: builtin
+    trust_chain: null
+    verified_at: '2026-03-15T04:09:44.000458+00:00'
+  container-logs-security:
+    author: mallcop@mallcop.app
+    expires: null
+    sha256: f8d7e561bb4f81cc69276408e63ed57cf77496613a180aa1ea3c9cd1e9e85332
+    source: builtin
+    trust_chain: null
+    verified_at: '2026-03-15T04:09:44.000458+00:00'
+  github-security:
+    author: mallcop@mallcop.app
+    expires: null
+    sha256: 87e99d7ee2eb1dae955505a614869a6d5e2eadd1060c10c79dde8c68849129f3
+    source: builtin
+    trust_chain: null
+    verified_at: '2026-03-15T04:09:44.000458+00:00'
+  m365-security:
+    author: mallcop@mallcop.app
+    expires: null
+    sha256: a35fcfa9dadc87a2b3b8e645952273f59efc730c4729138474c069744b176e59
+    source: builtin
+    trust_chain: null
+    verified_at: '2026-03-15T04:09:44.000458+00:00'
+  openclaw-security:
+    author: mallcop@mallcop.app
+    expires: null
+    sha256: a671bd065af6cf9ab7607183f5c12ac59aadc891ccb53eec57acca012fffab4d
+    source: builtin
+    trust_chain: null
+    verified_at: '2026-03-15T04:09:44.000458+00:00'
+  privilege-analysis:
+    author: mallcop@mallcop.app
+    expires: null
+    sha256: 8da0ce0297acb7956829f4db27fd45d0ed532e5b40546e1f7d6474c15085370e
+    source: builtin
+    trust_chain: null
+    verified_at: '2026-03-15T04:09:44.000458+00:00'
+  supabase-security:
+    author: mallcop@mallcop.app
+    expires: null
+    sha256: 69b8013c77f86d810788eda16c7b169e66988902f31c2c3971cb40700f644379
+    source: builtin
+    trust_chain: null
+    verified_at: '2026-03-15T04:09:44.000458+00:00'
+  vercel-security:
+    author: mallcop@mallcop.app
+    expires: null
+    sha256: c168b4bd6af1fec8c5f3737cc7cc432a96ee610e1392404eeeb1694fcb5dfd10
+    source: builtin
+    trust_chain: null
+    verified_at: '2026-03-15T04:09:44.000458+00:00'
+version: 1

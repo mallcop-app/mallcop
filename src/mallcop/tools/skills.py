@@ -162,6 +162,20 @@ def _load_skill_tools(manifest: SkillManifest, context: ToolContext) -> list[str
     return new_tools
 
 
+def _resolve_skill_dir(name: str, skill_root: Path) -> Path:
+    """Resolve a skill directory path, falling back to underscore form.
+
+    Skill names in frontmatter use hyphens (e.g. "azure-security") but the
+    package directories use underscores (e.g. "azure_security").  Try the
+    exact name first, then the underscore-normalized form.
+    """
+    exact = skill_root / name
+    if exact.exists():
+        return exact
+    normalized = skill_root / name.replace("-", "_")
+    return normalized
+
+
 def _load_one_skill(name: str, skill_root: Path, context: ToolContext) -> LoadedSkill | None:
     """Load a single skill (no parent chain) and cache in context.loaded_skills.
 
@@ -174,7 +188,7 @@ def _load_one_skill(name: str, skill_root: Path, context: ToolContext) -> Loaded
     if name in context.loaded_skills:
         return context.loaded_skills[name]
 
-    skill_dir = skill_root / name
+    skill_dir = _resolve_skill_dir(name, skill_root)
     manifest = SkillManifest.from_skill_dir(skill_dir)
     if manifest is None:
         return None
@@ -205,7 +219,7 @@ def _load_with_parents(name: str, skill_root: Path, context: ToolContext) -> Loa
     if name in context.loaded_skills:
         return context.loaded_skills[name]
 
-    skill_dir = skill_root / name
+    skill_dir = _resolve_skill_dir(name, skill_root)
     manifest = SkillManifest.from_skill_dir(skill_dir)
     if manifest is None:
         return None
