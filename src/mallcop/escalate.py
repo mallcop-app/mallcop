@@ -136,9 +136,11 @@ def run_escalate(
     # When circuit breaker triggered, skip gated findings entirely.
     ordered = [] if circuit_breaker_triggered else order_by_severity(gated_findings)
 
-    # --- Auto-resolution: apply declarative rules BEFORE LLM routing ---
+    # --- Hard constraints: deterministic escalation BEFORE anything else ---
     from mallcop.resolution_rules import (
+        auto_escalate_finding,
         auto_resolve_finding,
+        check_hard_constraints,
         count_patterns,
         evaluate_rules,
         generate_rules,
@@ -170,8 +172,19 @@ def run_escalate(
         rules = []
         baseline_for_rules = None
 
+    hard_escalated = 0
     remaining: list[Finding] = []
     for finding in ordered:
+        # Hard constraints first — deterministic, no LLM
+        constraint_reason = check_hard_constraints(finding)
+        if constraint_reason is not None:
+            auto_escalate_finding(finding, constraint_reason)
+            store.update_finding(finding.id, annotations=finding.annotations)
+            hard_escalated += 1
+            _log.info("Hard-escalated %s: %s", finding.id, finding.detector)
+            continue
+
+        # Resolution rules — deterministic, no LLM
         if rules:
             match = evaluate_rules(finding, rules, baseline=baseline_for_rules)
             if match is not None:
@@ -182,6 +195,8 @@ def run_escalate(
                 continue
         remaining.append(finding)
 
+    if hard_escalated:
+        _log.info("Hard-escalated %d findings (deterministic)", hard_escalated)
     if auto_resolved:
         _log.info("Auto-resolved %d/%d findings via rules", auto_resolved, len(ordered))
     ordered = remaining

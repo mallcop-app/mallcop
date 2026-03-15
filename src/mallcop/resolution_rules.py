@@ -39,6 +39,52 @@ _NEVER_AUTO_RESOLVE = frozenset({
     "log-format-drift",
 })
 
+# Detectors that are ALWAYS escalated deterministically — no LLM involved.
+# These are hard security constraints that models fail to enforce reliably.
+# Moving them to code guarantees 100% compliance.
+ALWAYS_ESCALATE_DETECTORS = frozenset({
+    "priv-escalation",      # Privilege changes always need audit
+    "log-format-drift",     # Structural drift = security blind spot
+    "injection-probe",      # Prompt injection attempts
+    "boundary-violation",   # Access boundary violations
+})
+
+
+def check_hard_constraints(finding: Finding) -> str | None:
+    """Check if a finding matches a hard constraint that requires deterministic escalation.
+
+    Returns an escalation reason string if the finding MUST escalate,
+    or None if it should proceed to normal processing.
+
+    This runs BEFORE resolution rules and BEFORE LLM routing.
+    No model involvement — pure code enforcement.
+    """
+    if finding.detector in ALWAYS_ESCALATE_DETECTORS:
+        return (
+            f"Hard constraint: {finding.detector} findings always require "
+            f"human review (deterministic escalation, no LLM involved)"
+        )
+    return None
+
+
+def auto_escalate_finding(finding: Finding, reason: str) -> Finding:
+    """Apply deterministic escalation to a finding.
+
+    Sets status to OPEN (stays open for human) and adds annotation.
+    """
+    from mallcop.schemas import Annotation
+
+    annotation = Annotation(
+        actor="hard-constraint",
+        timestamp=datetime.now(timezone.utc),
+        content=f"Deterministic escalation: {finding.detector}",
+        action="escalated",
+        reason=reason,
+    )
+    finding.annotations.append(annotation)
+    # Status stays OPEN — human must review
+    return finding
+
 
 # --- Pattern counting ---
 

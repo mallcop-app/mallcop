@@ -21,6 +21,7 @@ from mallcop.feedback import FeedbackRecord, HumanAction
 from mallcop.llm_types import LLMClient
 from mallcop.resolution_rules import (
     ResolutionRule,
+    check_hard_constraints,
     count_patterns,
     evaluate_rules,
     generate_rules,
@@ -161,6 +162,21 @@ def _run_one(
     """Run one scenario through the pipeline."""
     expected_action = scenario.expected.chain_action
 
+    # Step 0: Hard constraints — deterministic escalation, no LLM
+    constraint_reason = check_hard_constraints(scenario.finding)
+    if constraint_reason is not None:
+        # Hard constraint forces escalation to human
+        action_correct = expected_action == "escalated"
+        return PipelineResult(
+            scenario_id=scenario.id,
+            resolved_by="hard-constraint",
+            system_verdict=PipelineVerdict.PASS,  # escalation to human is always correct
+            action_taken="escalated",
+            action_correct=action_correct,
+            tokens=0,
+            llm_calls=0,
+        )
+
     # Step 1: Check resolution rules
     rule_match = evaluate_rules(scenario.finding, rules)
     if rule_match is not None:
@@ -269,7 +285,7 @@ def pipeline_summary(results: list[PipelineResult]) -> dict[str, Any]:
     system_pass = sum(1 for r in results if r.system_verdict == PipelineVerdict.PASS)
     system_fail = sum(1 for r in results if r.system_verdict == PipelineVerdict.FAIL)
 
-    by_resolver = {"rule": 0, "triage": 0, "investigate": 0, "human": 0}
+    by_resolver = {"hard-constraint": 0, "rule": 0, "triage": 0, "investigate": 0, "human": 0}
     for r in results:
         by_resolver[r.resolved_by] = by_resolver.get(r.resolved_by, 0) + 1
 
