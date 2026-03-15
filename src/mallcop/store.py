@@ -46,8 +46,15 @@ class Store(ABC):
         since: datetime | None = None,
         actor: str | None = None,
         limit: int = 1000,
+        event_ids: list[str] | None = None,
     ) -> list[Event]:
         """Query events with optional filters."""
+
+    def query_events_by_ids(self, event_ids: list[str]) -> list[Event]:
+        """Query events by their IDs directly, bypassing limit constraints."""
+        if not event_ids:
+            return []
+        return self.query_events(event_ids=event_ids, limit=len(event_ids))
 
     @abstractmethod
     def append_findings(self, findings: list[Finding]) -> None:
@@ -245,10 +252,15 @@ class JsonlStore(Store):
         since: datetime | None = None,
         actor: str | None = None,
         limit: int = 1000,
+        event_ids: list[str] | None = None,
     ) -> list[Event]:
         query = "SELECT * FROM events WHERE 1=1"
         params: list[Any] = []
 
+        if event_ids is not None:
+            placeholders = ",".join("?" for _ in event_ids)
+            query += f" AND id IN ({placeholders})"
+            params.extend(event_ids)
         if source is not None:
             query += " AND source = ?"
             params.append(source)
@@ -317,10 +329,13 @@ class JsonlStore(Store):
                     (json.dumps(existing), finding_id),
                 )
 
-        self._db.commit()
-
-        # Rewrite findings.jsonl from cache
+        # Rewrite findings.jsonl from cache before committing.
+        # _rewrite_findings reads uncommitted changes from the same connection,
+        # so the file is updated atomically first.  If we crash after the file
+        # write but before the commit, the next startup reloads the correct
+        # state from disk (SQLite is in-memory and lost on restart anyway).
         self._rewrite_findings()
+        self._db.commit()
 
     def _rewrite_findings(self) -> None:
         cur = self._db.execute("SELECT * FROM findings ORDER BY timestamp ASC")

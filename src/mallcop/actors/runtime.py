@@ -172,20 +172,18 @@ class ActorRuntime:
         store = self._context.store
 
         # Pre-fetch events referenced by this finding
-        if finding.event_ids:
-            all_events = store.query_events(limit=500)
-            target_ids = set(finding.event_ids)
-            matched = [e.to_dict() for e in all_events if e.id in target_ids]
-            if matched:
-                sanitized_events = sanitize_tool_result(matched)
-                extra_messages.extend([
-                    {"role": "assistant", "content": "Calling tool: read-events"},
-                    {
-                        "role": "tool",
-                        "name": "read-events",
-                        "content": str(sanitized_events),
-                    },
-                ])
+        matched_events = store.query_events_by_ids(finding.event_ids) if finding.event_ids else []
+        if matched_events:
+            matched = [e.to_dict() for e in matched_events]
+            sanitized_events = sanitize_tool_result(matched)
+            extra_messages.extend([
+                {"role": "assistant", "content": "Calling tool: read-events"},
+                {
+                    "role": "tool",
+                    "name": "read-events",
+                    "content": str(sanitized_events),
+                },
+            ])
 
         # Pre-fetch baseline check for the finding's actor(s)
         baseline = store.get_baseline()
@@ -196,10 +194,9 @@ class ActorRuntime:
         if actor:
             actors_checked.add(actor)
         # Also check the finding's event actors if we have events
-        if finding.event_ids:
-            for evt in (all_events if finding.event_ids else []):
-                if evt.id in target_ids and evt.actor:
-                    actors_checked.add(evt.actor)
+        for evt in matched_events:
+            if evt.actor:
+                actors_checked.add(evt.actor)
 
         for actor_name in actors_checked:
             known_actors = baseline.known_entities.get("actors", [])

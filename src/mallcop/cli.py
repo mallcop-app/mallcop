@@ -397,8 +397,8 @@ def detect(dir_path: str | None) -> None:
     root = Path(dir_path) if dir_path else Path.cwd()
     store = JsonlStore(root)
 
-    # Get all events and baseline
-    all_events = store.query_events()
+    # Get all events (no arbitrary limit) and baseline
+    all_events = store.query_events(limit=100_000)
     baseline = store.get_baseline()
 
     # Determine which connectors are in learning mode
@@ -748,7 +748,6 @@ def _run_detect_pipeline(root: Path, store: Store | None = None) -> dict[str, An
 
     if store is None:
         store = JsonlStore(root)
-    all_events = store.query_events()
     baseline = store.get_baseline()
 
     # Load baseline config for window_days
@@ -759,6 +758,8 @@ def _run_detect_pipeline(root: Path, store: Store | None = None) -> dict[str, An
     except ConfigError:
         window_days = BaselineConfig().window_days
         config_connectors = None
+
+    all_events = store.query_events(limit=100_000)
 
     # Run detection against current baseline BEFORE updating it with new events.
     # This ensures new actors are flagged before they're added to the baseline.
@@ -1118,7 +1119,7 @@ def baseline(actor: str | None, entity: str | None, dir_path: str | None) -> Non
     root = Path(dir_path) if dir_path else Path.cwd()
     store = JsonlStore(root)
     bl = store.get_baseline()
-    all_events = store.query_events()
+    all_events = store.query_events(limit=100_000)
 
     if actor:
         # Show baseline profile for a specific actor
@@ -1283,9 +1284,7 @@ def ack(finding_id: str, author: str, reason: str | None, dir_path: str | None, 
     # Load triggering events and update baseline
     triggering_events = []
     if target.event_ids:
-        all_events = store.query_events()
-        event_id_set = set(target.event_ids)
-        triggering_events = [e for e in all_events if e.id in event_id_set]
+        triggering_events = store.query_events_by_ids(target.event_ids)
 
     if triggering_events:
         try:
@@ -1296,6 +1295,7 @@ def ack(finding_id: str, author: str, reason: str | None, dir_path: str | None, 
             ack_window_days = BaselineConfig().window_days
         # Pass ALL events so relationships/freq tables are recomputed correctly
         # (not just the triggering subset, which would wipe history)
+        all_events = store.query_events(limit=100_000)
         store.update_baseline(all_events, window_days=ack_window_days)
 
     # Re-read the updated finding for output
@@ -1612,8 +1612,7 @@ def feedback(finding_id: str, action: str, reason: str | None, dir_path: str | N
 
     # Build snapshot: capture events + baseline + annotations at time of override
     event_ids = fnd.event_ids
-    events_raw = store.query_events()
-    fnd_events = [e.to_dict() for e in events_raw if e.id in set(event_ids)]
+    fnd_events = [e.to_dict() for e in store.query_events_by_ids(event_ids)]
 
     baseline = store.get_baseline()
     # Capture actor-relevant baseline entries

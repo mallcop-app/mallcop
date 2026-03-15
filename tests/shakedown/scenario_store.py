@@ -56,8 +56,12 @@ class ScenarioStore(Store):
         since: datetime | None = None,
         actor: str | None = None,
         limit: int = 1000,
+        event_ids: list[str] | None = None,
     ) -> list[Event]:
         result = self._events
+        if event_ids is not None:
+            id_set = set(event_ids)
+            result = [e for e in result if e.id in id_set]
         if source:
             result = [e for e in result if e.source == source]
         if actor:

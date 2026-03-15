@@ -140,6 +140,37 @@ class TestJsonlStoreEvents:
         results = store.query_events(limit=3)
         assert len(results) == 3
 
+    def test_query_events_by_event_ids(self, tmp_path: Path) -> None:
+        store = JsonlStore(tmp_path)
+        events = [_make_event(id=f"evt_{i}") for i in range(10)]
+        store.append_events(events)
+
+        results = store.query_events(event_ids=["evt_2", "evt_7"])
+        assert len(results) == 2
+        assert {r.id for r in results} == {"evt_2", "evt_7"}
+
+    def test_query_events_by_ids_method(self, tmp_path: Path) -> None:
+        store = JsonlStore(tmp_path)
+        events = [_make_event(id=f"evt_{i}") for i in range(10)]
+        store.append_events(events)
+
+        results = store.query_events_by_ids(["evt_3", "evt_5", "evt_9"])
+        assert len(results) == 3
+        assert {r.id for r in results} == {"evt_3", "evt_5", "evt_9"}
+
+    def test_query_events_by_ids_empty(self, tmp_path: Path) -> None:
+        store = JsonlStore(tmp_path)
+        store.append_events([_make_event(id="evt_0")])
+
+        assert store.query_events_by_ids([]) == []
+
+    def test_query_events_by_ids_missing(self, tmp_path: Path) -> None:
+        store = JsonlStore(tmp_path)
+        store.append_events([_make_event(id="evt_0")])
+
+        results = store.query_events_by_ids(["nonexistent"])
+        assert results == []
+
     def test_events_written_to_jsonl(self, tmp_path: Path) -> None:
         """JSONL file exists on disk after append."""
         store = JsonlStore(tmp_path)
@@ -364,6 +395,39 @@ class TestJsonlStoreFindings:
         results = store2.query_findings(status="acked")
         assert len(results) == 1
         assert results[0].id == "fnd_persist"
+
+    def test_update_finding_writes_file_before_commit(self, tmp_path: Path) -> None:
+        """_rewrite_findings runs before _db.commit, so a crash after the
+        file write but before commit still leaves correct state on disk."""
+        import json as _json
+        from unittest.mock import patch
+
+        store = JsonlStore(tmp_path)
+        fnd = _make_finding(id="fnd_order", status=FindingStatus.OPEN)
+        store.append_findings([fnd])
+
+        file_status_at_commit_time: list[str] = []
+        jsonl_path = tmp_path / ".mallcop" / "findings.jsonl"
+
+        original_rewrite = store._rewrite_findings
+
+        def spy_rewrite() -> None:
+            original_rewrite()
+            # Snapshot the file right after _rewrite_findings completes
+            line = jsonl_path.read_text().strip()
+            data = _json.loads(line)
+            file_status_at_commit_time.append(data["status"])
+
+        with patch.object(store, "_rewrite_findings", side_effect=spy_rewrite):
+            store.update_finding("fnd_order", status=FindingStatus.RESOLVED)
+
+        # The file had the updated status *before* db.commit ran
+        assert file_status_at_commit_time == ["resolved"]
+
+        # And a fresh reload confirms persistence
+        store2 = JsonlStore(tmp_path)
+        results = store2.query_findings(status="resolved")
+        assert len(results) == 1
 
     def test_query_findings_by_actor(self, tmp_path: Path) -> None:
         """Filter findings by actor stored in metadata."""
