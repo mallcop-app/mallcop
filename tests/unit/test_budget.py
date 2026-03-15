@@ -190,6 +190,22 @@ class TestCostLogging:
         assert entry2.events == entry.events
         assert entry2.donuts_used == entry.donuts_used
 
+    def test_append_cost_log_creates_parent_dir(self, tmp_path: Path) -> None:
+        costs_file = tmp_path / "subdir" / "nested" / "costs.jsonl"
+        entry = CostEntry(
+            timestamp=datetime(2026, 3, 6, 18, 0, 0, tzinfo=timezone.utc),
+            events=50,
+            findings=2,
+            actors_invoked=False,
+            donuts_used=5000,
+            estimated_cost_usd=0.001,
+            budget_remaining_pct=90.0,
+        )
+        append_cost_log(costs_file, entry)
+        assert costs_file.exists()
+        data = json.loads(costs_file.read_text().strip())
+        assert data["events"] == 50
+
     def test_append_cost_log(self, tmp_path: Path) -> None:
         costs_file = tmp_path / "costs.jsonl"
         entry = CostEntry(
