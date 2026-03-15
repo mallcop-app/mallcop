@@ -762,7 +762,7 @@ class TestManagedClientErrorSanitization:
         """ManagedClient error must not contain resp.text."""
         from mallcop.llm import ManagedClient
 
-        client = ManagedClient(endpoint="https://api.mallcop.dev", service_token="tok")
+        client = ManagedClient(endpoint="https://api.mallcop.app", service_token="tok")
         mock_resp = MagicMock()
         mock_resp.status_code = 502
         mock_resp.text = "SENSITIVE_MANAGED_ERROR_BODY_456"

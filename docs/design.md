@@ -1268,7 +1268,7 @@ Mallcop Pro provides a managed inference endpoint so operators don't need their 
 ```yaml
 # mallcop.yaml
 pro:
-  service_url: https://api.mallcop.dev
+  service_url: https://api.mallcop.app
   service_token: ${MALLCOP_SERVICE_TOKEN}
 ```
 

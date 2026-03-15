@@ -244,7 +244,7 @@ class TestWatchProUsageReporting:
         pro_config = ProConfig(
             account_id="acct-123",
             service_token="tok-abc",
-            account_url="https://api.mallcop.dev",
+            account_url="https://api.mallcop.app",
             inference_url="",
         )
         mock_scan, mock_detect, mock_escalate = self._make_fns(tokens_used=1500)
@@ -263,7 +263,7 @@ class TestWatchProUsageReporting:
             )
 
         assert result["status"] == "ok"
-        MockProClient.assert_called_once_with("https://api.mallcop.dev")
+        MockProClient.assert_called_once_with("https://api.mallcop.app")
         mock_client.record_usage.assert_called_once_with(
             account_id="acct-123",
             model="managed",
@@ -298,7 +298,7 @@ class TestWatchProUsageReporting:
         pro_config = ProConfig(
             account_id="acct-123",
             service_token="tok-abc",
-            account_url="https://api.mallcop.dev",
+            account_url="https://api.mallcop.app",
             inference_url="",
         )
         mock_scan, mock_detect, mock_escalate = self._make_fns(tokens_used=800)
@@ -326,7 +326,7 @@ class TestWatchProUsageReporting:
         pro_config = ProConfig(
             account_id="acct-123",
             service_token="tok-abc",
-            account_url="https://api.mallcop.dev",
+            account_url="https://api.mallcop.app",
             inference_url="",
         )
         mock_scan, mock_detect, mock_escalate = self._make_fns(tokens_used=0)
@@ -354,7 +354,7 @@ class TestWatchProUsageReporting:
         pro_config = ProConfig(
             account_id="acct-123",
             service_token="tok-abc",
-            account_url="https://api.mallcop.dev",
+            account_url="https://api.mallcop.app",
             inference_url="",
         )
         mock_scan, mock_detect, mock_escalate = self._make_fns(tokens_used=1000)

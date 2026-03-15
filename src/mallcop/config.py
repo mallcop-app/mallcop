@@ -96,7 +96,7 @@ def _parse_routing(raw: dict[str, Any] | None) -> dict[str, RouteConfig | None]:
 class ProConfig:
     account_id: str = ""
     service_token: str = ""
-    account_url: str = "https://api.mallcop.dev"
+    account_url: str = "https://api.mallcop.app"
     inference_url: str = ""
 
 
@@ -261,9 +261,9 @@ def _parse_pro(raw: dict[str, Any] | None, provider: SecretProvider) -> ProConfi
     except ConfigError:
         service_token = ""
     # Resolve URL fields through SecretProvider (may reference env vars)
-    account_url_raw = raw.get("account_url", "https://api.mallcop.dev")
+    account_url_raw = raw.get("account_url", "https://api.mallcop.app")
     try:
-        account_url = _resolve_value(account_url_raw, provider) if account_url_raw else "https://api.mallcop.dev"
+        account_url = _resolve_value(account_url_raw, provider) if account_url_raw else "https://api.mallcop.app"
     except ConfigError:
         account_url = account_url_raw  # Fall back to literal if env var missing
 

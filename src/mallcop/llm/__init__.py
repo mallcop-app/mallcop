@@ -106,7 +106,7 @@ def _build_managed(llm_config: LLMConfig) -> LLMClient | None:
     if not llm_config.api_key:
         _log.warning("Managed provider requires api_key (service_token)")
         return None
-    endpoint = llm_config.endpoint or "https://api.mallcop.dev"
+    endpoint = llm_config.endpoint or "https://api.mallcop.app"
     return ManagedClient(
         endpoint=endpoint,
         service_token=llm_config.api_key,
@@ -152,7 +152,7 @@ def build_llm_client(
         if service_token and (
             llm_config is None or llm_config.provider == "anthropic"
         ):
-            inference_url = getattr(pro_config, "inference_url", None) or "https://api.mallcop.dev"
+            inference_url = getattr(pro_config, "inference_url", None) or "https://api.mallcop.app"
             return ManagedClient(
                 endpoint=inference_url,
                 service_token=service_token,

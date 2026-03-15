@@ -142,7 +142,7 @@ def _setup_pro(config_data: dict[str, Any]) -> dict[str, Any] | None:
         )
         return None
 
-    account_url = "https://api.mallcop.dev"
+    account_url = "https://api.mallcop.app"
     client = ProClient(account_url)
 
     # Create account (server uses anti-enumeration: duplicate emails return 200 silently)
@@ -187,7 +187,7 @@ def _setup_pro(config_data: dict[str, Any]) -> dict[str, Any] | None:
         "account_id": account_id,
         "service_token": service_token,
         "account_url": account_url,
-        "inference_url": "https://api.mallcop.dev",
+        "inference_url": "https://api.mallcop.app",
     }
     if "llm" in config_data:
         del config_data["llm"]

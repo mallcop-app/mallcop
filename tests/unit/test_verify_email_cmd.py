@@ -15,7 +15,7 @@ def _make_config(has_pro: bool = True):
     if has_pro:
         config.pro.account_id = "acc_123"
         config.pro.service_token = "tok_abc"
-        config.pro.account_url = "https://api.mallcop.dev"
+        config.pro.account_url = "https://api.mallcop.app"
     else:
         config.pro = None
     return config

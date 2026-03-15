@@ -9,7 +9,7 @@ import requests
 
 _log = logging.getLogger(__name__)
 
-_DEFAULT_ACCOUNT_URL = "https://api.mallcop.dev"
+_DEFAULT_ACCOUNT_URL = "https://api.mallcop.app"
 
 
 @dataclass

@@ -29,8 +29,8 @@ def tmp_patrol_repo(tmp_path):
         "pro": {
             "account_id": "acct-001",
             "service_token": "tok-abc123",
-            "account_url": "https://api.mallcop.dev",
-            "inference_url": "https://api.mallcop.dev",
+            "account_url": "https://api.mallcop.app",
+            "inference_url": "https://api.mallcop.app",
         },
     }
     (tmp_path / "mallcop.yaml").write_text(yaml.dump(config))

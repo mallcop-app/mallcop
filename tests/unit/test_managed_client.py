@@ -23,21 +23,21 @@ class TestManagedClientType:
         from mallcop.llm import ManagedClient
 
         client = ManagedClient(
-            endpoint="https://api.mallcop.dev",
+            endpoint="https://api.mallcop.app",
             service_token="tok-123",
             default_model="haiku",
         )
-        assert client._endpoint == "https://api.mallcop.dev"
+        assert client._endpoint == "https://api.mallcop.app"
         assert client._service_token == "tok-123"
 
     def test_endpoint_trailing_slash_stripped(self) -> None:
         from mallcop.llm import ManagedClient
 
         client = ManagedClient(
-            endpoint="https://api.mallcop.dev/",
+            endpoint="https://api.mallcop.app/",
             service_token="tok-123",
         )
-        assert client._endpoint == "https://api.mallcop.dev"
+        assert client._endpoint == "https://api.mallcop.app"
 
 
 class TestManagedClientChat:
@@ -47,7 +47,7 @@ class TestManagedClientChat:
         from mallcop.llm import ManagedClient
 
         return ManagedClient(
-            endpoint="https://api.mallcop.dev",
+            endpoint="https://api.mallcop.app",
             service_token="tok-test",
         )
 
@@ -79,7 +79,7 @@ class TestManagedClientChat:
             )
 
         call_kwargs = mock_post.call_args
-        assert call_kwargs[0][0] == "https://api.mallcop.dev/v1/messages"
+        assert call_kwargs[0][0] == "https://api.mallcop.app/v1/messages"
         headers = call_kwargs[1]["headers"]
         assert headers["Authorization"] == "Bearer tok-test"
         assert "x-api-key" not in headers
@@ -228,7 +228,7 @@ class TestBuildLLMClientManaged:
 
         client = build_llm_client(llm_config, pro_config=pro)
         assert isinstance(client, ManagedClient)
-        assert client._endpoint == "https://api.mallcop.dev"
+        assert client._endpoint == "https://api.mallcop.app"
 
     def test_pro_config_without_service_token_falls_through(self) -> None:
         from mallcop.config import LLMConfig
