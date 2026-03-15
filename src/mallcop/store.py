@@ -501,12 +501,14 @@ class JsonlStore(Store):
             actor: sorted(roles) for actor, roles in actor_roles_raw.items()
         }
 
-        # Frequency tables: recompute from events within window
+        # Frequency tables: recompute from ALL stored events within window,
+        # not just the events passed as argument. This ensures freq tables
+        # are complete even if the caller passes a subset.
         if window_days is not None:
             cutoff = datetime.now(tz.utc) - timedelta(days=window_days)
-            freq_events = [evt for evt in events if evt.timestamp > cutoff]
+            freq_events = self.query_events(since=cutoff, limit=100_000)
         else:
-            freq_events = events
+            freq_events = self.query_events(limit=100_000)
 
         from mallcop.baseline import hour_bucket as _hour_bucket
 

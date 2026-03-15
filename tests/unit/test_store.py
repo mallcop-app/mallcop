@@ -586,6 +586,7 @@ class TestJsonlStoreBaseline:
 
     def test_update_baseline_with_window_excludes_old_freq(self, tmp_path: Path) -> None:
         """With window_days, old events are excluded from frequency tables."""
+        from mallcop.sanitize import sanitize_field
         store = JsonlStore(tmp_path)
         now = _utcnow()
         old_event = _make_event(
@@ -601,9 +602,11 @@ class TestJsonlStoreBaseline:
         store.update_baseline(events, window_days=30)
         bl = store.get_baseline()
 
-        # Frequency tables should only count new event
-        assert "azure:role_assignment:new@ex.com" in bl.frequency_tables
-        assert "azure:role_assignment:old@ex.com" not in bl.frequency_tables
+        # Frequency tables should only count new event (actors are sanitized in store)
+        new_key = f"azure:role_assignment:{sanitize_field('new@ex.com')}"
+        old_key = f"azure:role_assignment:{sanitize_field('old@ex.com')}"
+        assert new_key in bl.frequency_tables
+        assert old_key not in bl.frequency_tables
 
     def test_update_baseline_with_window_keeps_all_known_entities(self, tmp_path: Path) -> None:
         """With window_days, known entities still include all-time actors."""
@@ -728,6 +731,7 @@ class TestJsonlStoreBaseline:
 
     def test_update_baseline_without_window_includes_all_freq(self, tmp_path: Path) -> None:
         """Without window_days, all events are counted in frequency tables."""
+        from mallcop.sanitize import sanitize_field
         store = JsonlStore(tmp_path)
         now = _utcnow()
         old_event = _make_event(
@@ -743,9 +747,11 @@ class TestJsonlStoreBaseline:
         store.update_baseline(events)
         bl = store.get_baseline()
 
-        # Both events should be in frequency tables
-        assert "azure:role_assignment:old@ex.com" in bl.frequency_tables
-        assert "azure:role_assignment:new@ex.com" in bl.frequency_tables
+        # Both events should be in frequency tables (actors are sanitized in store)
+        old_key = f"azure:role_assignment:{sanitize_field('old@ex.com')}"
+        new_key = f"azure:role_assignment:{sanitize_field('new@ex.com')}"
+        assert old_key in bl.frequency_tables
+        assert new_key in bl.frequency_tables
 
 
 class TestBaselineRelationships:
