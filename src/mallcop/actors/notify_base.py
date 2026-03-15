@@ -32,11 +32,13 @@ _BLOCKED_NETWORKS = [
 _BLOCKED_HOSTNAMES = {"localhost"}
 
 
-def validate_webhook_url(url: str) -> None:
+def validate_webhook_url(url: str, *, resolve_dns: bool = True) -> None:
     """Validate webhook URL to prevent SSRF attacks.
 
-    Checks scheme (HTTPS only), blocked hostnames, IP-literal addresses,
-    and performs DNS resolution to catch rebinding attacks.
+    Checks scheme (HTTPS only), blocked hostnames, and IP-literal addresses.
+    When resolve_dns=True (default), also resolves hostnames via DNS to catch
+    rebinding attacks. Use resolve_dns=False for config-time validation where
+    the hostname may not be resolvable yet.
 
     Raises:
         ValueError: If the URL fails any validation check.
@@ -53,7 +55,10 @@ def validate_webhook_url(url: str) -> None:
     try:
         addr = ipaddress.ip_address(hostname)
     except ValueError:
-        # Not an IP literal — resolve via DNS and check all results
+        # Not an IP literal
+        if not resolve_dns:
+            return
+        # Resolve via DNS and check all results
         try:
             addrinfo = socket.getaddrinfo(hostname, None)
         except socket.gaierror as e:

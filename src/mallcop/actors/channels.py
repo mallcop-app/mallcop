@@ -4,53 +4,18 @@ from __future__ import annotations
 
 import importlib
 import importlib.util
-import ipaddress
 import logging
 import os
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
 
 from mallcop.actors._schema import ActorManifest, ActorResolution, ResolutionAction
+from mallcop.actors.notify_base import validate_webhook_url
+# Re-export for backward compat (runtime.py re-exports this name)
+_validate_webhook_url = validate_webhook_url
 from mallcop.schemas import Finding
 
 _log = logging.getLogger(__name__)
-
-
-_BLOCKED_NETWORKS = [
-    ipaddress.ip_network("127.0.0.0/8"),
-    ipaddress.ip_network("10.0.0.0/8"),
-    ipaddress.ip_network("172.16.0.0/12"),
-    ipaddress.ip_network("192.168.0.0/16"),
-    ipaddress.ip_network("169.254.0.0/16"),
-    ipaddress.ip_network("::1/128"),
-]
-
-_BLOCKED_HOSTNAMES = {"localhost"}
-
-
-def _validate_webhook_url(url: str) -> None:
-    """Validate webhook URL: must be HTTPS, must not target private/reserved IPs."""
-    parsed = urlparse(url)
-    if parsed.scheme != "https":
-        raise ValueError(f"HTTPS required for webhook URL, got {parsed.scheme!r}")
-
-    hostname = parsed.hostname or ""
-
-    if hostname.lower() in _BLOCKED_HOSTNAMES:
-        raise ValueError(f"Webhook URL points to private/reserved address: {hostname}")
-
-    try:
-        addr = ipaddress.ip_address(hostname)
-    except ValueError:
-        # Not an IP literal — hostname is allowed (DNS resolution checked at delivery time)
-        return
-
-    for network in _BLOCKED_NETWORKS:
-        if addr in network:
-            raise ValueError(
-                f"Webhook URL points to private/reserved address: {hostname}"
-            )
 
 
 def _resolve_channel_config(
@@ -82,9 +47,9 @@ def _resolve_channel_config(
                 raise ValueError(f"Environment variable {var_name} is not set")
             resolved[key] = env_val
 
-    # Validate webhook_url after resolution
+    # Validate webhook_url after resolution (config-time: skip DNS resolution)
     if "webhook_url" in resolved and isinstance(resolved["webhook_url"], str):
-        _validate_webhook_url(resolved["webhook_url"])
+        validate_webhook_url(resolved["webhook_url"], resolve_dns=False)
 
     return resolved
 
