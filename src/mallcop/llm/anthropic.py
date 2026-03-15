@@ -14,7 +14,7 @@ _log = logging.getLogger(__name__)
 
 _ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
 _ANTHROPIC_VERSION = "2023-06-01"
-_MAX_TOKENS_DEFAULT = 4096
+from mallcop.llm.converters import DEFAULT_MAX_TOKENS as _MAX_TOKENS_DEFAULT
 
 
 def _convert_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:

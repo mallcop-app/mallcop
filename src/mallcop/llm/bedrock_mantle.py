@@ -27,7 +27,7 @@ from mallcop.llm.converters import _extract_resolution
 
 _log = logging.getLogger(__name__)
 
-_MAX_TOKENS_DEFAULT = 4096
+from mallcop.llm.converters import DEFAULT_MAX_TOKENS as _MAX_TOKENS_DEFAULT
 
 
 def _parse_tool_arguments(raw: str) -> dict[str, Any]:

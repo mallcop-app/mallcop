@@ -5,6 +5,9 @@ from __future__ import annotations
 import json
 from typing import Any
 
+# Single source of truth for the default max_tokens across all LLM providers.
+DEFAULT_MAX_TOKENS: int = 4096
+
 
 def _python_type_to_json(ptype: str) -> str:
     """Map Python type names to JSON Schema type strings."""
