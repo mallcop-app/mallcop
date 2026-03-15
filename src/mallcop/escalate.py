@@ -104,9 +104,14 @@ def run_escalate(
 
     # Check circuit breaker using only gated findings (boundary violations don't count)
     cb_finding = check_circuit_breaker(gated_findings, budget_config)
-    if cb_finding is not None:
-        # Circuit breaker triggered — skip all actors
+    circuit_breaker_triggered = cb_finding is not None
+    if circuit_breaker_triggered:
+        # Circuit breaker triggered — skip all gated actors, but still process
+        # boundary-violation findings (they are exempt from the circuit breaker).
         store.append_findings([cb_finding])
+
+    if circuit_breaker_triggered and not boundary_findings:
+        # No boundary findings to process — early exit
         cost_entry = CostEntry(
             timestamp=datetime.now(timezone.utc),
             events=0,
@@ -128,7 +133,58 @@ def run_escalate(
         }
 
     # Order by severity: CRITICAL first (gated findings only; boundary handled separately)
-    ordered = order_by_severity(gated_findings)
+    # When circuit breaker triggered, skip gated findings entirely.
+    ordered = [] if circuit_breaker_triggered else order_by_severity(gated_findings)
+
+    # --- Auto-resolution: apply declarative rules BEFORE LLM routing ---
+    from mallcop.resolution_rules import (
+        auto_resolve_finding,
+        count_patterns,
+        evaluate_rules,
+        generate_rules,
+        load_rules,
+        save_rules,
+    )
+
+    rules_path = root / ".mallcop" / "resolution_rules.yaml"
+    auto_resolved = 0
+
+    # Update rules from accumulated feedback (cheap — just counting)
+    try:
+        feedback_records = store.query_feedback()
+        candidates = count_patterns(feedback_records)
+        new_rules = generate_rules(candidates)
+        if new_rules:
+            existing = load_rules(rules_path)
+            merged_ids = {nr.id for nr in new_rules}
+            merged = [r for r in existing if r.id not in merged_ids] + new_rules
+            save_rules(merged, rules_path)
+    except Exception:
+        _log.debug("Rule update failed (non-fatal)", exc_info=True)
+
+    # Evaluate rules against open findings
+    try:
+        rules = load_rules(rules_path)
+        baseline_for_rules = store.get_baseline() if rules else None
+    except Exception:
+        rules = []
+        baseline_for_rules = None
+
+    remaining: list[Finding] = []
+    for finding in ordered:
+        if rules:
+            match = evaluate_rules(finding, rules, baseline=baseline_for_rules)
+            if match is not None:
+                auto_resolve_finding(finding, match)
+                store.update_finding(finding.id, status="resolved", annotations=finding.annotations)
+                auto_resolved += 1
+                _log.info("Auto-resolved %s via rule %s", finding.id, match.id)
+                continue
+        remaining.append(finding)
+
+    if auto_resolved:
+        _log.info("Auto-resolved %d/%d findings via rules", auto_resolved, len(ordered))
+    ordered = remaining
 
     # Group findings by entry actor (routing by severity)
     tracker = BudgetTracker(budget_config)
@@ -146,6 +202,19 @@ def run_escalate(
         if entry_actor is None:
             continue
         routable.append((finding, entry_actor))
+
+    # Boundary-violation findings always flow through the actor chain, exempt from budget.
+    # They are routed via CRITICAL routing (they are always CRITICAL severity).
+    # If no CRITICAL route exists, they are still flagged (annotated) but not actor-processed.
+    boundary_routable: list[tuple[Finding, str]] = []
+    for finding in boundary_findings:
+        route = config.routing.get(finding.severity.value)
+        if route is None:
+            continue
+        entry_actor = route.chain[0] if route.chain else None
+        if entry_actor is None:
+            continue
+        boundary_routable.append((finding, entry_actor))
 
     if actor_runner is not None and routable:
         # Group by entry actor to enable batch processing
@@ -284,6 +353,67 @@ def run_escalate(
                         ],
                     )
 
+    # Process boundary-violation findings through the actor chain, exempt from budget.
+    # These always flow regardless of circuit breaker or budget exhaustion.
+    # Tokens consumed by boundary findings do NOT count against the run budget.
+    if actor_runner is not None and boundary_routable:
+        # Group by entry actor
+        bv_batches: dict[str, list[Finding]] = {}
+        bv_order: list[str] = []
+        for finding, entry_actor in boundary_routable:
+            if entry_actor not in bv_batches:
+                bv_batches[entry_actor] = []
+                bv_order.append(entry_actor)
+            bv_batches[entry_actor].append(finding)
+
+        for actor_name in bv_order:
+            bv_batch_findings = bv_batches[actor_name]
+
+            # Load baseline (best-effort)
+            try:
+                baseline = store.get_baseline()
+            except Exception:
+                baseline = None
+
+            # No budget limit for boundary findings — they always get processed.
+            bv_result = run_batch(
+                actor_runner,
+                bv_batch_findings,
+                actor_name=actor_name,
+                finding_token_budget=None,
+                max_tokens=None,
+                baseline=baseline,
+            )
+
+            # Boundary tokens are NOT added to tracker — they don't count against budget.
+
+            # Apply resolutions — boundary findings cannot be RESOLVED by actors.
+            # Any RESOLVED action is overridden to ESCALATED here as a second enforcement
+            # layer (the resolve-finding tool also enforces this).
+            for i, result in enumerate(bv_result.results):
+                processed += 1
+                finding = bv_batch_findings[i]
+                if result.resolution is not None:
+                    reason = result.resolution.reason
+                    if result.resolution.action == ResolutionAction.RESOLVED:
+                        reason = (
+                            f"[boundary-violation: actor resolution overridden to escalated — "
+                            f"original reason: {reason}]"
+                        )
+                    # Never squelch — always annotate boundary findings as escalated
+                    store.update_finding(
+                        finding.id,
+                        annotations=[
+                            Annotation(
+                                actor=actor_name,
+                                timestamp=datetime.now(timezone.utc),
+                                content=reason,
+                                action="escalated",
+                                reason=reason,
+                            )
+                        ],
+                    )
+
     # Log cost entry
     total_donuts = tracker.donuts_used
     estimated_cost = (total_donuts / 1000) * _COST_PER_1K_TOKENS_USD
@@ -302,7 +432,8 @@ def run_escalate(
         "status": "ok",
         "findings_processed": processed,
         "findings_skipped": skipped,
-        "circuit_breaker_triggered": False,
+        "auto_resolved": auto_resolved,
+        "circuit_breaker_triggered": circuit_breaker_triggered,
         "budget_exhausted": budget_exhausted,
         "donuts_used": total_donuts,
         "skipped": False,
