@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import random
 from datetime import datetime, timezone
 from pathlib import Path
@@ -22,6 +23,7 @@ from mallcop.config import load_config
 from mallcop.schemas import Annotation, Finding, FindingStatus
 from mallcop.store import JsonlStore, Store
 
+_log = logging.getLogger(__name__)
 
 _SPOT_CHECK_RATE = 0.1  # 10% of squelched findings surface for audit
 

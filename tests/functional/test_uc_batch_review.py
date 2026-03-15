@@ -247,13 +247,13 @@ class TestBatchBudgetTracking:
         result = run_escalate(root, actor_runner=mock_runner)
 
         # 4 routable findings x 750 tokens = 3000 total
-        assert result["tokens_used"] == 3000
+        assert result["donuts_used"] == 3000
         assert call_count == 4  # INFO not routed
 
         costs_path = root / ".mallcop" / "costs.jsonl"
         assert costs_path.exists()
         cost_data = json.loads(costs_path.read_text().strip().split("\n")[-1])
-        assert cost_data["tokens_used"] == 3000
+        assert cost_data["donuts_used"] == 3000
         assert cost_data["actors_invoked"] is True
         assert cost_data["findings"] == 4  # 4 routable findings processed
 
@@ -286,14 +286,14 @@ class TestBatchZeroFindings:
 
         assert result["status"] == "ok"
         assert result["findings_processed"] == 0
-        assert result["tokens_used"] == 0
+        assert result["donuts_used"] == 0
         assert runner_called is False
 
         # costs.jsonl written but with zero tokens
         costs_path = root / ".mallcop" / "costs.jsonl"
         assert costs_path.exists()
         cost_data = json.loads(costs_path.read_text().strip().split("\n")[-1])
-        assert cost_data["tokens_used"] == 0
+        assert cost_data["donuts_used"] == 0
         assert cost_data["actors_invoked"] is False
 
 
@@ -325,7 +325,7 @@ class TestBatchSingleFinding:
 
         assert result["status"] == "ok"
         assert result["findings_processed"] == 1
-        assert result["tokens_used"] == 1200
+        assert result["donuts_used"] == 1200
 
         # Verify annotation applied (fresh store to read updated JSONL)
         fresh_store = JsonlStore(root)
@@ -338,4 +338,4 @@ class TestBatchSingleFinding:
         # Costs tracked
         costs_path = root / ".mallcop" / "costs.jsonl"
         cost_data = json.loads(costs_path.read_text().strip().split("\n")[-1])
-        assert cost_data["tokens_used"] == 1200
+        assert cost_data["donuts_used"] == 1200

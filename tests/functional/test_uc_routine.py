@@ -449,7 +449,7 @@ class TestCostTracking:
         assert len(lines) >= 1
 
         cost_data = json.loads(lines[-1])
-        assert cost_data["tokens_used"] == 1500
+        assert cost_data["donuts_used"] == 1500
         assert cost_data["actors_invoked"] is True
         assert cost_data["findings"] == 1
         assert cost_data["estimated_cost_usd"] > 0
@@ -577,7 +577,7 @@ class TestBudgetControls:
         # after 2 findings (1000 tokens), budget is exhausted
         assert call_count < 5, f"Should have stopped early, but processed {call_count}"
         assert result["budget_exhausted"] is True
-        assert result["tokens_used"] > 0
+        assert result["donuts_used"] > 0
 
         # Verify skipped findings are annotated
         store2 = JsonlStore(root)
@@ -642,7 +642,7 @@ class TestBudgetControls:
 
         assert not actor_called, "Actors should not be invoked when circuit breaker fires"
         assert result["circuit_breaker_triggered"] is True
-        assert result["tokens_used"] == 0
+        assert result["donuts_used"] == 0
 
         # costs.jsonl should still be written
         costs_path = root / ".mallcop" / "costs.jsonl"
@@ -702,7 +702,7 @@ class TestEndToEndWatchWithEscalation:
                 "findings_skipped": 0,
                 "circuit_breaker_triggered": False,
                 "budget_exhausted": False,
-                "tokens_used": 800,
+                "donuts_used": 800,
                 "skipped": False,
                 "reason": None,
             }
@@ -776,7 +776,7 @@ class TestEndToEndWatchWithEscalation:
 
         assert result["status"] == "ok"
         assert result["findings_processed"] == 3
-        assert result["tokens_used"] == 500 + 500 + 800  # 1800
+        assert result["donuts_used"] == 500 + 500 + 800  # 1800
 
         # Verify final state
         store2 = JsonlStore(root)
@@ -793,7 +793,7 @@ class TestEndToEndWatchWithEscalation:
         costs_path = root / ".mallcop" / "costs.jsonl"
         assert costs_path.exists()
         cost_data = json.loads(costs_path.read_text().strip().split("\n")[-1])
-        assert cost_data["tokens_used"] == 1800
+        assert cost_data["donuts_used"] == 1800
         assert cost_data["actors_invoked"] is True
 
     def test_watch_with_no_findings_still_succeeds(self, tmp_path: Path) -> None:

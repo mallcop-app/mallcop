@@ -372,7 +372,11 @@ class TestTriagePolicyFullPipeline:
         )
         result = run_escalate(tmp_path, actor_runner=runner, store=store)
 
-        assert result["findings_processed"] == len(detectors)
+        # 2 detectors (priv-escalation, injection-probe) are hard-escalated
+        # deterministically and skip the actor chain. The remaining 5 go through actors.
+        hard_escalated = 2
+        actor_processed = len(detectors) - hard_escalated
+        assert result["findings_processed"] == actor_processed
 
-        # Every finding: triage escalates → investigate escalates → 2 LLM calls each
-        assert llm._call_count == len(detectors) * 2
+        # Only actor-processed findings get LLM calls (triage + investigate = 2 each)
+        assert llm._call_count == actor_processed * 2

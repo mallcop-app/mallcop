@@ -24,6 +24,8 @@ LLM response formats (the agent must follow these conventions):
 
 from __future__ import annotations
 
+import ast
+import logging
 import re
 import textwrap
 from dataclasses import dataclass, field
@@ -32,6 +34,8 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+
+_log = logging.getLogger(__name__)
 
 from mallcop.intel_manifest import IntelEntry, filter_new, save_entry
 from mallcop.llm_types import LLMClient
@@ -156,10 +160,47 @@ def write_detector_yaml(detectors_dir: Path, name: str, detector_data: dict[str,
     return manifest_path
 
 
-def _write_detector_python(detectors_dir: Path, name: str, python_code: str) -> Path:
-    """Write a Python detector file.
+_BLOCKED_MODULES = frozenset({
+    "os", "subprocess", "socket", "shutil", "ctypes",
+    "multiprocessing", "signal", "webbrowser", "http",
+    "ftplib", "smtplib", "telnetlib", "xmlrpc",
+    "importlib", "code", "codeop", "compile", "compileall",
+})
 
-    Creates <detectors_dir>/<slug>/detector.py.
+
+def check_python_safety(python_code: str) -> list[str]:
+    """AST-check LLM-generated Python for blocked imports and unsafe calls.
+
+    Returns a list of violation descriptions. Empty list means the code passed.
+    """
+    try:
+        tree = ast.parse(python_code)
+    except SyntaxError as e:
+        return [f"SyntaxError: {e}"]
+
+    violations: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                top = alias.name.split(".")[0]
+                if top in _BLOCKED_MODULES:
+                    violations.append(f"blocked import: {alias.name}")
+        elif isinstance(node, ast.ImportFrom):
+            if node.module:
+                top = node.module.split(".")[0]
+                if top in _BLOCKED_MODULES:
+                    violations.append(f"blocked import from: {node.module}")
+        elif isinstance(node, ast.Call):
+            if isinstance(node.func, ast.Name) and node.func.id in ("exec", "eval", "__import__"):
+                violations.append(f"blocked builtin call: {node.func.id}()")
+    return violations
+
+
+def _write_detector_python(detectors_dir: Path, name: str, python_code: str) -> Path:
+    """Write a Python detector file after safety checks.
+
+    Creates <detectors_dir>/<slug>/detector.py. The code is AST-checked
+    for blocked imports and unsafe calls before writing.
 
     Args:
         detectors_dir: Root directory for detectors.
@@ -168,12 +209,25 @@ def _write_detector_python(detectors_dir: Path, name: str, python_code: str) -> 
 
     Returns:
         Path to the written detector.py.
+
+    Raises:
+        ValueError: If the code fails safety checks.
     """
+    violations = check_python_safety(python_code)
+    if violations:
+        raise ValueError(
+            f"LLM-generated Python detector failed safety check: "
+            f"{'; '.join(violations)}"
+        )
     slug = _slugify(name)
     detector_dir = detectors_dir / slug
     detector_dir.mkdir(parents=True, exist_ok=True)
     py_path = detector_dir / "detector.py"
     py_path.write_text(python_code)
+    _log.warning(
+        "Wrote LLM-generated Python detector to %s. "
+        "Review before deployment.", py_path
+    )
     return py_path
 
 
@@ -360,14 +414,14 @@ def run_research(
                     detector=slug,
                 ))
                 detectors_generated += 1
-            except ValueError:
-                # Python rejected — record as skipped
+            except ValueError as e:
+                # Python rejected (allow_python=False or safety check failed)
                 save_entry(manifest_path, IntelEntry(
                     id=advisory.id,
                     source=advisory.source,
                     researched_at=datetime.now(timezone.utc),
                     detector=None,
-                    reason="Python detector rejected: allow_python is False",
+                    reason=f"Python detector rejected: {e}",
                 ))
                 detectors_skipped += 1
 

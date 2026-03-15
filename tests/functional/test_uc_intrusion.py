@@ -343,7 +343,7 @@ class TestAutonomousDetection:
         costs_path = root / ".mallcop" / "costs.jsonl"
         assert costs_path.exists()
         cost_data = json.loads(costs_path.read_text().strip().split("\n")[-1])
-        assert cost_data["tokens_used"] == 2000  # 2 findings x 1000 tokens
+        assert cost_data["donuts_used"] == 2000  # 2 findings x 1000 tokens
         assert cost_data["actors_invoked"] is True
 
 

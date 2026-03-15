@@ -70,7 +70,7 @@ def run_watch(
 
         # Step 4: report usage to Pro account service (graceful on failure)
         if pro_config is not None and pro_config.account_id and pro_config.service_token:
-            tokens_used = result.get("escalate", {}).get("tokens_used", 0)
+            tokens_used = result.get("escalate", {}).get("donuts_used", 0)
             try:
                 client = ProClient(pro_config.account_url)
                 client.record_usage(

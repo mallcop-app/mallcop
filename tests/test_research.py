@@ -588,3 +588,91 @@ def test_config_research_defaults_when_missing(tmp_path):
     else:
         # If None, that's also acceptable — CLI treats None as defaults
         pass
+
+
+# ---------------------------------------------------------------------------
+# check_python_safety — AST-based safety checks for LLM-generated Python
+# ---------------------------------------------------------------------------
+
+
+def test_check_python_safety_safe_code():
+    """Safe detector code passes the check."""
+    from mallcop.research import check_python_safety
+
+    code = "def detect(events):\n    return [e for e in events if e.get('severity') == 'HIGH']"
+    assert check_python_safety(code) == []
+
+
+def test_check_python_safety_blocks_os_import():
+    """Import of os module is blocked."""
+    from mallcop.research import check_python_safety
+
+    violations = check_python_safety("import os\nos.system('rm -rf /')")
+    assert any("os" in v for v in violations)
+
+
+def test_check_python_safety_blocks_subprocess():
+    """Import of subprocess module is blocked."""
+    from mallcop.research import check_python_safety
+
+    violations = check_python_safety("import subprocess\nsubprocess.run(['ls'])")
+    assert any("subprocess" in v for v in violations)
+
+
+def test_check_python_safety_blocks_from_import():
+    """from os.path import ... is blocked (top-level module is os)."""
+    from mallcop.research import check_python_safety
+
+    violations = check_python_safety("from os.path import join")
+    assert any("os" in v for v in violations)
+
+
+def test_check_python_safety_blocks_exec():
+    """exec() call is blocked."""
+    from mallcop.research import check_python_safety
+
+    violations = check_python_safety("exec('print(1)')")
+    assert any("exec" in v for v in violations)
+
+
+def test_check_python_safety_blocks_eval():
+    """eval() call is blocked."""
+    from mallcop.research import check_python_safety
+
+    violations = check_python_safety("x = eval('1+1')")
+    assert any("eval" in v for v in violations)
+
+
+def test_check_python_safety_blocks_dunder_import():
+    """__import__() call is blocked."""
+    from mallcop.research import check_python_safety
+
+    violations = check_python_safety("m = __import__('os')")
+    assert any("__import__" in v for v in violations)
+
+
+def test_check_python_safety_syntax_error():
+    """Invalid Python returns a syntax error violation."""
+    from mallcop.research import check_python_safety
+
+    violations = check_python_safety("def (broken")
+    assert any("SyntaxError" in v for v in violations)
+
+
+def test_check_python_safety_blocks_socket():
+    """socket import is blocked (network access)."""
+    from mallcop.research import check_python_safety
+
+    violations = check_python_safety("import socket")
+    assert any("socket" in v for v in violations)
+
+
+def test_write_detector_python_rejects_unsafe_code(tmp_path):
+    """_write_detector_python raises ValueError for unsafe code."""
+    from mallcop.research import _write_detector_python
+
+    with pytest.raises(ValueError, match="safety check"):
+        _write_detector_python(tmp_path, "bad-detector", "import os\nos.system('rm -rf /')")
+
+    # Verify no file was written
+    assert not list(tmp_path.glob("**/*.py"))

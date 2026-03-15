@@ -440,7 +440,7 @@ class TestTriageEscalatesBruteForce:
         cost_lines = costs_path.read_text().strip().split("\n")
         last_cost = json.loads(cost_lines[-1])
         assert last_cost["actors_invoked"] is True
-        assert last_cost["tokens_used"] > 0
+        assert last_cost["donuts_used"] > 0
 
 
 class TestReviewShowsBurstFinding:
@@ -605,7 +605,7 @@ class TestFullM365SigninAnomalyWorkflow:
         cost_lines = costs_path.read_text().strip().split("\n")
         last_cost = json.loads(cost_lines[-1])
         assert last_cost["actors_invoked"] is True
-        assert last_cost["tokens_used"] > 0
+        assert last_cost["donuts_used"] > 0
 
         # Step 8: Annotate finding with investigation conclusion
         result = runner.invoke(

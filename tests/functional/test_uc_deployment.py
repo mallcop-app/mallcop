@@ -233,7 +233,7 @@ class TestDeploymentInitWatchFlow:
         assert "estimated_cost_per_month_usd" in cost
         assert "worst_case_cost_per_run_usd" in cost
         assert "worst_case_cost_per_month_usd" in cost
-        assert "budget_max_tokens_per_run" in cost
+        assert "budget_max_donuts_per_run" in cost
 
         # Monthly cost range should be parseable and plausible
         monthly = cost["estimated_cost_per_month_usd"]
@@ -784,7 +784,7 @@ class TestStatePersistenceAcrossRuns:
         cost_entry_1 = {
             "timestamp": "2026-03-05T10:00:00+00:00",
             "findings_processed": 2,
-            "tokens_used": 1500,
+            "donuts_used": 1500,
             "circuit_breaker_triggered": False,
             "budget_exhausted": False,
         }
@@ -801,7 +801,7 @@ class TestStatePersistenceAcrossRuns:
         cost_entry_2 = {
             "timestamp": "2026-03-06T10:00:00+00:00",
             "findings_processed": 3,
-            "tokens_used": 2500,
+            "donuts_used": 2500,
             "circuit_breaker_triggered": False,
             "budget_exhausted": False,
         }

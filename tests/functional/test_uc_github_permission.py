@@ -513,7 +513,7 @@ class TestTriageEscalation:
         costs_path = root / ".mallcop" / "costs.jsonl"
         assert costs_path.exists()
         cost_data = json.loads(costs_path.read_text().strip().split("\n")[-1])
-        assert cost_data["tokens_used"] == 800
+        assert cost_data["donuts_used"] == 800
         assert cost_data["actors_invoked"] is True
 
 

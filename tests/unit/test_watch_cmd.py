@@ -59,7 +59,7 @@ class TestWatchPipeline:
                 "findings_processed": 0,
                 "circuit_breaker_triggered": False,
                 "budget_exhausted": False,
-                "tokens_used": 0,
+                "donuts_used": 0,
             }
 
         result = run_watch(
@@ -94,7 +94,7 @@ class TestWatchPipeline:
                 "findings_processed": 2,
                 "circuit_breaker_triggered": False,
                 "budget_exhausted": False,
-                "tokens_used": 0,
+                "donuts_used": 0,
             }
 
         result = run_watch(
@@ -131,7 +131,7 @@ class TestWatchPipeline:
                 "findings_processed": 0,
                 "circuit_breaker_triggered": False,
                 "budget_exhausted": False,
-                "tokens_used": 0,
+                "donuts_used": 0,
             }
 
         result = run_watch(
@@ -166,7 +166,7 @@ class TestWatchPipeline:
                 "findings_processed": 0,
                 "circuit_breaker_triggered": False,
                 "budget_exhausted": False,
-                "tokens_used": 0,
+                "donuts_used": 0,
             }
 
         result = run_watch(
@@ -196,7 +196,7 @@ class TestWatchPipeline:
                 "findings_processed": 3,
                 "circuit_breaker_triggered": False,
                 "budget_exhausted": False,
-                "tokens_used": 1500,
+                "donuts_used": 1500,
             }
 
         result = run_watch(
@@ -232,7 +232,7 @@ class TestWatchProUsageReporting:
                 "findings_processed": 2,
                 "circuit_breaker_triggered": False,
                 "budget_exhausted": False,
-                "tokens_used": tokens_used,
+                "donuts_used": tokens_used,
             }
 
         return mock_scan, mock_detect, mock_escalate

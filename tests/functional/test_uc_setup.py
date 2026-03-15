@@ -183,10 +183,10 @@ class TestUCSetupInitDiscoversEnvironment:
         assert "connectors_active" in cost
         assert "estimated_events_per_run" in cost
         assert "estimated_findings_per_run" in cost
-        assert "estimated_tokens_per_run" in cost
+        assert "estimated_donuts_per_run" in cost
         assert "estimated_cost_per_run_usd" in cost
         assert "estimated_cost_per_month_usd" in cost
-        assert "budget_max_tokens_per_run" in cost
+        assert "budget_max_donuts_per_run" in cost
         assert "worst_case_cost_per_run_usd" in cost
         assert "worst_case_cost_per_month_usd" in cost
 
@@ -327,7 +327,7 @@ class TestUCSetupEndToEnd:
             # Step 4: Verify cost estimate is reasonable
             cost = init_data["cost_estimate"]
             assert cost["connectors_active"] == 1
-            assert cost["budget_max_tokens_per_run"] == 50000
+            assert cost["budget_max_donuts_per_run"] == 50000
 
             # Step 5: Verify the directory is in a committable state
             # (mallcop.yaml exists, no other unexpected files)
