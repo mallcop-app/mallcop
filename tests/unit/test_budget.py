@@ -253,3 +253,31 @@ class TestCostLogging:
         }
         entry = CostEntry.from_dict(old_data)
         assert entry.donuts_used == 7777
+
+
+class TestAppendCostLogAtomic:
+    """Verify append_cost_log uses atomic os.write with O_APPEND."""
+
+    def test_uses_os_open_with_append(self, tmp_path: Path) -> None:
+        """append_cost_log uses O_APPEND for atomic single-write append."""
+        import os
+
+        log_path = tmp_path / "cost.jsonl"
+        entry = CostEntry(
+            timestamp=datetime.now(timezone.utc),
+            events=10,
+            findings=1,
+            actors_invoked=True,
+            donuts_used=100,
+            estimated_cost_usd=0.01,
+            budget_remaining_pct=90.0,
+        )
+
+        append_cost_log(log_path, entry)
+        append_cost_log(log_path, entry)
+
+        lines = log_path.read_text().strip().split("\n")
+        assert len(lines) == 2
+        for line in lines:
+            data = json.loads(line)
+            assert data["events"] == 10

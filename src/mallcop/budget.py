@@ -138,5 +138,12 @@ class CostEntry:
 
 
 def append_cost_log(path: Path, entry: CostEntry) -> None:
-    with open(path, "a") as f:
-        f.write(json.dumps(entry.to_dict()) + "\n")
+    import os
+
+    line = json.dumps(entry.to_dict()) + "\n"
+    # Single os.write with O_APPEND is atomic on POSIX for writes < PIPE_BUF
+    fd = os.open(str(path), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
+    try:
+        os.write(fd, line.encode())
+    finally:
+        os.close(fd)
