@@ -66,7 +66,7 @@ class TestWindowDaysWiring:
         with patch("mallcop.detect.run_detect", return_value=[]), \
              patch.object(store, "update_baseline", side_effect=spy_update_baseline):
             # Also patch JsonlStore constructor to return our store
-            with patch("mallcop.cli.JsonlStore", return_value=store):
+            with patch("mallcop.cli_pipeline.JsonlStore", return_value=store):
                 _run_detect_pipeline(tmp_path)
 
         assert captured_kwargs.get("window_days") == 7
@@ -90,7 +90,7 @@ class TestWindowDaysWiring:
 
         with patch("mallcop.detect.run_detect", return_value=[]), \
              patch.object(store, "update_baseline", side_effect=spy_update_baseline):
-            with patch("mallcop.cli.JsonlStore", return_value=store):
+            with patch("mallcop.cli_pipeline.JsonlStore", return_value=store):
                 _run_detect_pipeline(tmp_path)
 
         default_window = BaselineConfig().window_days

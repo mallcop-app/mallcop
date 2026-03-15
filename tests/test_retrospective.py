@@ -191,7 +191,7 @@ class TestLearningModeTransition:
             "budget": {"max_findings_for_actors": 25, "max_tokens_per_run": 50000, "max_tokens_per_finding": 5000},
         }))
 
-        with patch("mallcop.cli.retrospective_analysis") as mock_retro:
+        with patch("mallcop.cli_pipeline.retrospective_analysis") as mock_retro:
             mock_retro.return_value = []
             with patch("mallcop.baseline.run_detect", return_value=[]):
                 _run_detect_pipeline(tmp_path, store=store)
@@ -229,7 +229,7 @@ class TestLearningModeTransition:
 
         retrospective_called = []
 
-        with patch("mallcop.cli.retrospective_analysis") as mock_retro:
+        with patch("mallcop.cli_pipeline.retrospective_analysis") as mock_retro:
             mock_retro.return_value = []
             with patch("mallcop.baseline.run_detect", return_value=[]):
                 _run_detect_pipeline(tmp_path, store=store)
@@ -272,7 +272,7 @@ class TestLearningModeTransition:
             "budget": {"max_findings_for_actors": 25, "max_tokens_per_run": 50000, "max_tokens_per_finding": 5000},
         }))
 
-        with patch("mallcop.cli.retrospective_analysis") as mock_retro:
+        with patch("mallcop.cli_pipeline.retrospective_analysis") as mock_retro:
             mock_retro.return_value = []
             with patch("mallcop.baseline.run_detect", return_value=[]):
                 _run_detect_pipeline(tmp_path, store=store)

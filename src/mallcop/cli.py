@@ -12,8 +12,9 @@ from typing import Any
 import click
 import yaml
 
-from mallcop.baseline import retrospective_analysis
 from mallcop.config import load_config, BudgetConfig
+from mallcop.cli_format import print_review_human, print_investigate_human, print_finding_human
+from mallcop.cli_pipeline import run_scan_pipeline, run_detect_pipeline, run_retrospective_if_transitioning
 from mallcop.cost_estimator import estimate_costs
 from mallcop.patrol_cli import patrol
 from mallcop.plugins import discover_plugins, get_search_paths, instantiate_connector, load_plugin_class
@@ -508,203 +509,10 @@ def watch(dry_run: bool, dir_path: str | None, human: bool, backend: str) -> Non
         click.echo(json.dumps(result))
 
 
-def _run_scan_pipeline(root: Path, store: Store | None = None) -> dict[str, Any]:
-    """Run the scan step of the pipeline."""
-    from mallcop.app_integration import apply_parsers, get_configured_app_names
-
-    try:
-        config = load_config(root)
-    except ConfigError as e:
-        raise RuntimeError(str(e))
-
-    if store is None:
-        store = JsonlStore(root)
-    connector_summaries: dict[str, Any] = {}
-    total_events = 0
-    app_names = get_configured_app_names(config.connectors)
-
-    for name, connector_config in config.connectors.items():
-        connector = instantiate_connector(name)
-        if connector is None:
-            connector_summaries[name] = {
-                "status": "error",
-                "error": f"Unknown connector: {name}",
-                "events_ingested": 0,
-            }
-            continue
-
-        try:
-            provider = EnvSecretProvider()
-            connector.authenticate(provider)
-
-            connector.configure(connector_config)
-
-            checkpoint = store.get_checkpoint(name)
-            poll_result = connector.poll(checkpoint)
-
-            # Apply parser transforms for container-logs apps with parser.yaml
-            events = poll_result.events
-            if name == "container-logs" and app_names:
-                events = apply_parsers(events, root, app_names)
-
-            if events:
-                store.append_events(events)
-
-            store.set_checkpoint(poll_result.checkpoint)
-
-            event_count = len(events)
-            total_events += event_count
-
-            connector_summaries[name] = {
-                "status": "ok",
-                "events_ingested": event_count,
-                "checkpoint": poll_result.checkpoint.value,
-            }
-
-        except Exception as e:
-            connector_summaries[name] = {
-                "status": "error",
-                "error": str(e),
-                "events_ingested": 0,
-            }
-
-    return {
-        "status": "ok",
-        "total_events_ingested": total_events,
-        "connectors": connector_summaries,
-    }
-
-
-def _run_retrospective_if_transitioning(
-    store: "Store",
-    all_events: list,
-    baseline: Any,
-    sources: set[str],
-    currently_learning: set[str],
-) -> None:
-    """For each connector that just graduated from learning mode, run retrospective.
-
-    A transition occurs when:
-    - The connector was previously in learning mode (checkpoint 'was_active' = "true")
-    - The connector is no longer in learning mode
-    - The retrospective hasn't already been run ('retrospective_done' != "true")
-
-    After running, sets 'retrospective_done' = "true" so it won't re-run.
-    Also persists the current learning mode state for each connector.
-    """
-    from mallcop.schemas import Checkpoint
-    from datetime import datetime, timezone
-
-    for source in sources:
-        is_now_learning = source in currently_learning
-        was_learning_cp = store.get_checkpoint(f"{source}:learning_mode_was_active")
-        was_learning = was_learning_cp is not None and was_learning_cp.value == "true"
-
-        # Update stored learning mode state for next run
-        store.set_checkpoint(Checkpoint(
-            connector=f"{source}:learning_mode_was_active",
-            value="true" if is_now_learning else "false",
-            updated_at=datetime.now(timezone.utc),
-        ))
-
-        # Transition: was learning, now no longer learning
-        if was_learning and not is_now_learning:
-            retro_done_cp = store.get_checkpoint(f"{source}:retrospective_done")
-            if retro_done_cp is not None and retro_done_cp.value == "true":
-                continue  # Already ran retrospective for this connector
-
-            retro_findings = retrospective_analysis(source, all_events, baseline)
-            if retro_findings:
-                store.append_findings(retro_findings)
-
-            store.set_checkpoint(Checkpoint(
-                connector=f"{source}:retrospective_done",
-                value="true",
-                updated_at=datetime.now(timezone.utc),
-            ))
-
-
-def _run_detect_pipeline(root: Path, store: Store | None = None) -> dict[str, Any]:
-    """Run the detect step of the pipeline."""
-    from mallcop.baseline import is_learning_mode
-    from mallcop.config import BaselineConfig
-    from mallcop.detect import run_detect
-
-    if store is None:
-        store = JsonlStore(root)
-    baseline = store.get_baseline()
-
-    # Load baseline config for window_days
-    try:
-        config = load_config(root)
-        window_days: int | None = config.baseline.window_days
-        config_connectors: dict[str, Any] | None = config.connectors
-    except ConfigError:
-        window_days = BaselineConfig().window_days
-        config_connectors = None
-
-    all_events = store.query_events(limit=100_000)
-
-    # Run detection against current baseline BEFORE updating it with new events.
-    # This ensures new actors are flagged before they're added to the baseline.
-
-    sources = {evt.source for evt in all_events}
-    learning: set[str] = set()
-    for source in sources:
-        source_events = [e for e in all_events if e.source == source]
-        if is_learning_mode(source, source_events):
-            learning.add(source)
-
-    findings = run_detect(
-        all_events, baseline, learning_connectors=learning,
-        root=root, config_connectors=config_connectors,
-    )
-
-    if findings:
-        store.append_findings(findings)
-
-    # Update baseline AFTER detection so new actors are included for next run
-    store.update_baseline(all_events, window_days=window_days)
-    updated_baseline = store.get_baseline()
-
-    # Learning mode transition: run retrospective analysis for connectors that
-    # just graduated from learning mode (was_active=true AND no longer learning).
-    _run_retrospective_if_transitioning(
-        store, all_events, updated_baseline, sources, learning
-    )
-
-    # Update actor context from accumulated feedback
-    try:
-        from mallcop.baseline import update_actor_context
-        feedback_records = store.query_feedback()
-        if feedback_records:
-            actor_baseline = update_actor_context(store.get_baseline(), feedback_records)
-            bl_path = root / ".mallcop" / "baseline.json"
-            bl_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(bl_path, "w") as f:
-                json.dump(actor_baseline.to_dict(), f)
-    except Exception:
-        pass  # Actor context update is non-critical
-
-    summary: dict[str, dict[str, int]] = {}
-    for f in findings:
-        det = f.detector
-        sev = f.severity.value
-        if det not in summary:
-            summary[det] = {}
-        summary[det][sev] = summary[det].get(sev, 0) + 1
-
-    return {
-        "status": "ok",
-        "findings_count": len(findings),
-        "summary": summary,
-        "learning_connectors": sorted(learning),
-        "baseline": {
-            "known_actor_count": len(updated_baseline.known_entities.get("actors", [])),
-            "frequency_table_entries": len(updated_baseline.frequency_tables),
-            "known_sources": updated_baseline.known_entities.get("sources", []),
-        },
-    }
+# Backward-compat aliases for internal callers
+_run_scan_pipeline = run_scan_pipeline
+_run_detect_pipeline = run_detect_pipeline
+_run_retrospective_if_transitioning = run_retrospective_if_transitioning
 
 
 # --- Investigation (interactive mode) ---
@@ -721,42 +529,9 @@ def review(dir_path: str | None, human: bool) -> None:
     result = run_review(root)
 
     if human:
-        _print_review_human(result)
+        print_review_human(result)
     else:
         click.echo(json.dumps(result))
-
-
-def _print_review_human(result: dict[str, Any]) -> None:
-    """Print review output in human-readable format."""
-    click.echo("== MALLCOP SECURITY REVIEW ==")
-    click.echo()
-
-    if result.get("post_md"):
-        click.echo(f"POST: {result['post_md_source']}")
-        click.echo("---")
-        click.echo(result["post_md"])
-        click.echo("---")
-        click.echo()
-
-    findings_by_severity = result.get("findings_by_severity", {})
-    if not findings_by_severity:
-        click.echo("No open findings.")
-        return
-
-    for severity, findings in findings_by_severity.items():
-        count = len(findings)
-        click.echo(f"{severity.upper()} ({count} finding{'s' if count != 1 else ''}):")
-        for f in findings:
-            click.echo(f"  {f['id']}: {f['title']}")
-            for ann in f.get("annotations", []):
-                click.echo(f"    {ann['actor']}: \"{ann['content']}\"")
-        click.echo()
-
-    cmds = result.get("suggested_commands", [])
-    if cmds:
-        click.echo("COMMANDS:")
-        for cmd in cmds:
-            click.echo(f"  {cmd}")
 
 
 @cli.command()
@@ -775,56 +550,9 @@ def investigate(finding_id: str, dir_path: str | None, human: bool) -> None:
         raise SystemExit(1)
 
     if human:
-        _print_investigate_human(result)
+        print_investigate_human(result)
     else:
         click.echo(json.dumps(result))
-
-
-def _print_investigate_human(result: dict[str, Any]) -> None:
-    """Print investigate output in human-readable format."""
-    finding = result.get("finding", {})
-    click.echo(f"== INVESTIGATE: {finding.get('id')} ==")
-    click.echo(f"Title: {finding.get('title')}")
-    click.echo(f"Severity: {finding.get('severity', '').upper()}")
-    click.echo(f"Status: {finding.get('status')}")
-    click.echo(f"Detector: {finding.get('detector')}")
-    click.echo()
-
-    if result.get("post_md"):
-        click.echo(f"POST: {result['post_md_source']}")
-        click.echo("---")
-        click.echo(result["post_md"])
-        click.echo("---")
-        click.echo()
-
-    events = result.get("events", [])
-    if events:
-        click.echo(f"Triggering Events ({len(events)}):")
-        for e in events:
-            click.echo(f"  {e['id']}: {e['actor']} {e['action']} {e['target']} @ {e['timestamp']}")
-        click.echo()
-
-    annotations = finding.get("annotations", [])
-    if annotations:
-        click.echo(f"Annotations ({len(annotations)}):")
-        for ann in annotations:
-            click.echo(f"  [{ann['actor']}] {ann['content']}")
-        click.echo()
-
-    actor_history = result.get("actor_history", {})
-    if actor_history:
-        click.echo("Actor History:")
-        for actor, events_list in actor_history.items():
-            click.echo(f"  {actor}: {len(events_list)} events")
-        click.echo()
-
-    baseline = result.get("baseline", {})
-    actors = baseline.get("actors", {})
-    if actors:
-        click.echo("Baseline:")
-        for actor, profile in actors.items():
-            known_str = "KNOWN" if profile.get("known") else "UNKNOWN"
-            click.echo(f"  {actor}: {known_str}")
 
 
 @cli.command()
@@ -903,27 +631,9 @@ def finding(finding_id: str, dir_path: str | None, human: bool) -> None:
     }
 
     if human:
-        _print_finding_human(fnd)
+        print_finding_human(fnd)
     else:
         click.echo(json.dumps(result))
-
-
-def _print_finding_human(fnd: Finding) -> None:
-    """Print finding detail in human-readable format."""
-    click.echo(f"== FINDING: {fnd.id} ==")
-    click.echo(f"Title: {fnd.title}")
-    click.echo(f"Severity: {fnd.severity.value.upper()}")
-    click.echo(f"Status: {fnd.status.value}")
-    click.echo(f"Detector: {fnd.detector}")
-    click.echo(f"Timestamp: {fnd.timestamp.isoformat()}")
-    click.echo(f"Event IDs: {', '.join(fnd.event_ids)}")
-    if fnd.metadata:
-        click.echo(f"Metadata: {json.dumps(fnd.metadata)}")
-    click.echo()
-    if fnd.annotations:
-        click.echo(f"Annotations ({len(fnd.annotations)}):")
-        for ann in fnd.annotations:
-            click.echo(f"  [{ann.timestamp.isoformat()}] {ann.actor}: {ann.content}")
 
 
 @cli.command()

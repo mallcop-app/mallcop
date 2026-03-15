@@ -175,7 +175,7 @@ class TestScanPipelineWithParsers:
             _setup_deployment_repo(Path(td))
 
             with patch(
-                "mallcop.cli.instantiate_connector"
+                "mallcop.cli_pipeline.instantiate_connector"
             ) as mock_connector_fn:
                 mock_connector = MagicMock()
                 mock_connector.poll.return_value = poll_result
@@ -215,7 +215,7 @@ class TestScanPipelineWithParsers:
                 yaml.dump(_MALLCOP_YAML, f)
 
             with patch(
-                "mallcop.cli.instantiate_connector"
+                "mallcop.cli_pipeline.instantiate_connector"
             ) as mock_connector_fn:
                 mock_connector = MagicMock()
                 mock_connector.poll.return_value = poll_result
