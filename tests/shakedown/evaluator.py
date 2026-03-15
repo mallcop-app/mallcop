@@ -109,10 +109,14 @@ Expected correct action: {scenario.expected.chain_action}
 ## Grading Criteria
 
 ### reasoning_quality (1-5)
-1: No reasoning — guessed or gave generic response
-2: Superficial reasoning — mentioned the finding but didn't analyze evidence
-3: Adequate — referenced some evidence, reached a defensible conclusion
-4: Good — cited specific events/baseline entries, considered alternatives
+Score based on whether the conclusion is SUPPORTED BY EVIDENCE, not on
+prose style or narration length. Different models express reasoning
+differently — a terse conclusion citing the right evidence scores the
+same as a verbose step-by-step walkthrough.
+1: No reasoning — guessed or gave generic response with no evidence
+2: Conclusion stated but not supported — no specific events, timestamps, or baseline data cited
+3: Adequate — conclusion references specific evidence (event IDs, actor names, baseline entries)
+4: Good — conclusion cites specific evidence AND considers alternative explanations
 5: Excellent — thorough evidence chain, addressed the trap/deceptive element, expressed appropriate confidence
 
 ### investigation_thoroughness (1-5)
