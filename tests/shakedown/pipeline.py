@@ -28,6 +28,9 @@ from mallcop.resolution_rules import (
 )
 from mallcop.schemas import Baseline, Finding
 
+from mallcop.actors._schema import ResolutionAction
+from mallcop.consensus import needs_consensus, run_consensus
+
 from tests.shakedown.evaluator import Grade, JudgeEvaluator, Verdict
 from tests.shakedown.harness import ShakedownHarness, ShakedownResult
 from tests.shakedown.scenario import Scenario
@@ -211,9 +214,37 @@ def _run_one(
         )
 
     chain_action = harness_result.chain_action
+    total_tokens = harness_result.total_tokens
+    total_llm_calls = len(harness_result.llm_calls)
+
+    # Step 3: Consensus — if LLM resolved, verify with independent runs
+    if chain_action == "resolved" and needs_consensus(harness_result.chain_result):
+        consensus_result = run_consensus(
+            scenario.finding,
+            lambda f, **kw: harness.run_scenario(scenario).chain_result,
+            harness_result.chain_result,
+            n_runs=3,
+        )
+        total_tokens += consensus_result.tokens_used
+        if consensus_result.resolution.action == ResolutionAction.ESCALATED:
+            chain_action = "escalated"
+            total_tokens = consensus_result.tokens_used
+            _log.info("Consensus overrode resolve → escalate for %s", scenario.id)
+            # Return immediately as consensus-escalated
+            return PipelineResult(
+                scenario_id=scenario.id,
+                resolved_by="consensus-escalated",
+                system_verdict=PipelineVerdict.PASS,
+                action_taken="escalated",
+                action_correct=expected_action == "escalated",
+                actor_grade=grade,
+                tokens=total_tokens,
+                llm_calls=total_llm_calls,
+            )
+
     action_correct = chain_action == expected_action
 
-    # Step 3: Score the system outcome
+    # Step 4: Score the system outcome
     if chain_action == "escalated":
         # Escalated to human — this is ALWAYS a system pass.
         # The human will make the right call. False escalation costs
@@ -285,7 +316,7 @@ def pipeline_summary(results: list[PipelineResult]) -> dict[str, Any]:
     system_pass = sum(1 for r in results if r.system_verdict == PipelineVerdict.PASS)
     system_fail = sum(1 for r in results if r.system_verdict == PipelineVerdict.FAIL)
 
-    by_resolver = {"hard-constraint": 0, "rule": 0, "triage": 0, "investigate": 0, "human": 0}
+    by_resolver = {"hard-constraint": 0, "rule": 0, "triage": 0, "investigate": 0, "consensus-escalated": 0, "human": 0}
     for r in results:
         by_resolver[r.resolved_by] = by_resolver.get(r.resolved_by, 0) + 1
 

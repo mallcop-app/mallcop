@@ -68,12 +68,13 @@ def search_findings(
     return [f.to_dict() for f in findings[:limit]]
 
 
-@tool(name="resolve-finding", description="Resolve or escalate a finding with a reason. action must be 'resolved' or 'escalated'.", permission="read")
+@tool(name="resolve-finding", description="Resolve or escalate a finding with a reason. action must be 'resolved' or 'escalated'. confidence is 1-5 (1=guessing, 5=certain).", permission="read")
 def resolve_finding(
     context: ToolContext,
     finding_id: str,
     action: str,
     reason: str,
+    confidence: int = 3,
 ) -> dict[str, Any]:
     """Submit a resolution decision for a finding.
 
@@ -97,7 +98,7 @@ def resolve_finding(
             f"[boundary-violation findings cannot be resolved by actors — "
             f"original reason: {reason}]"
         )
-    return {"finding_id": finding_id, "action": action, "reason": reason}
+    return {"finding_id": finding_id, "action": action, "reason": reason, "confidence": max(1, min(5, confidence))}
 
 
 @tool(name="annotate-finding", description="Add annotation to a finding", permission="write")

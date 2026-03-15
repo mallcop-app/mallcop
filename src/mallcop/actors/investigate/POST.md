@@ -161,3 +161,14 @@ threshold.
 Call annotate-finding to document your investigation steps and reasoning.
 Then call resolve-finding with your conclusion and specific evidence.
 Every resolution must reference specific evidence, not general impressions.
+
+## Confidence
+
+When calling resolve-finding, include a confidence score (1-5):
+- 5: Certain — clear evidence, no ambiguity
+- 4: High — strong evidence, minor uncertainties
+- 3: Moderate — evidence supports conclusion but alternatives exist
+- 2: Low — weak evidence, significant uncertainty
+- 1: Guessing — insufficient evidence to decide
+
+If your confidence is 1-2, escalate instead of resolving.

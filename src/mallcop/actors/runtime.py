@@ -420,6 +420,7 @@ class ActorRuntime:
                 if tc.name == "resolve-finding":
                     action_str = tc.arguments.get("action", "escalated")
                     reason = tc.arguments.get("reason", "No reason provided")
+                    confidence = int(tc.arguments.get("confidence", 3))
                     action_enum = (
                         ResolutionAction.RESOLVED
                         if action_str == "resolved"
@@ -430,6 +431,7 @@ class ActorRuntime:
                             finding_id=tc.arguments.get("finding_id", finding.id),
                             action=action_enum,
                             reason=reason,
+                            confidence=float(confidence),
                         ),
                         tokens_used=total_tokens,
                         iterations=iteration + 1,
