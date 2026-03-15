@@ -571,3 +571,299 @@ class TestEventIdDeterminism:
         e2 = connector._normalize_auth_entry(entry, now)
         assert e1.id == e2.id
         assert e1.id.startswith("evt_")
+
+
+# ─── _poll_config_changes() ─────────────────────────────────────────
+
+
+def _make_connector_with_mgmt() -> Any:
+    """Return a connector wired up with a management access token."""
+    from mallcop.connectors.supabase.connector import SupabaseConnector
+
+    c = SupabaseConnector()
+    c._project_url = "https://xyzcompany.supabase.co"
+    c._service_role_key = "eyJ_fake"
+    c._project_ref = "xyzcompany"
+    c._access_token = "sbp_fake_access_token"
+    return c
+
+
+_NOW = datetime(2026, 3, 14, 12, 0, 0, tzinfo=timezone.utc)
+
+
+def _mgmt_side_effect(
+    secrets: Any = None,
+    api_keys: Any = None,
+    auth_config: Any = None,
+) -> Any:
+    """Build a requests.get side_effect that routes Management API calls."""
+    _secrets = secrets if secrets is not None else []
+    _api_keys = api_keys if api_keys is not None else []
+    _auth_cfg = auth_config if auth_config is not None else {}
+
+    def _side_effect(url: str, **kwargs: Any) -> MagicMock:
+        if "/secrets" in url:
+            return _mock_postgrest_response(_secrets)
+        if "/api-keys" in url:
+            return _mock_postgrest_response(_api_keys)
+        if "/config/auth" in url:
+            return _mock_postgrest_response(_auth_cfg)
+        return _mock_postgrest_response({})
+
+    return _side_effect
+
+
+class TestPollConfigChanges:
+    """Unit tests for SupabaseConnector._poll_config_changes()."""
+
+    # ── baseline establishment (first poll) ─────────────────────────
+
+    def test_first_poll_returns_no_events(self) -> None:
+        """On first poll (since_ts=None) no events are emitted — baseline only."""
+        connector = _make_connector_with_mgmt()
+        secrets_data = [{"name": "DATABASE_URL"}, {"name": "JWT_SECRET"}]
+
+        with patch(
+            "mallcop.connectors.supabase.connector.requests.get",
+            side_effect=_mgmt_side_effect(secrets=secrets_data),
+        ):
+            events, ts = connector._poll_config_changes(None, _NOW)
+
+        assert events == []
+
+    def test_first_poll_returns_now_as_timestamp(self) -> None:
+        """On first poll the returned timestamp is now.isoformat()."""
+        connector = _make_connector_with_mgmt()
+
+        with patch(
+            "mallcop.connectors.supabase.connector.requests.get",
+            side_effect=_mgmt_side_effect(),
+        ):
+            events, ts = connector._poll_config_changes(None, _NOW)
+
+        assert ts == _NOW.isoformat()
+
+    def test_first_poll_with_empty_secrets_returns_no_events(self) -> None:
+        """Empty secret list on first poll still produces no events."""
+        connector = _make_connector_with_mgmt()
+
+        with patch(
+            "mallcop.connectors.supabase.connector.requests.get",
+            side_effect=_mgmt_side_effect(secrets=[]),
+        ):
+            events, ts = connector._poll_config_changes(None, _NOW)
+
+        assert events == []
+        assert ts == _NOW.isoformat()
+
+    # ── subsequent polls ─────────────────────────────────────────────
+
+    def test_subsequent_poll_returns_no_events_simplified(self) -> None:
+        """Subsequent poll (since_ts set) emits no events in simplified implementation."""
+        connector = _make_connector_with_mgmt()
+        since_ts = "2026-03-14T10:00:00+00:00"
+
+        with patch(
+            "mallcop.connectors.supabase.connector.requests.get",
+            side_effect=_mgmt_side_effect(),
+        ):
+            events, ts = connector._poll_config_changes(since_ts, _NOW)
+
+        assert events == []
+
+    def test_subsequent_poll_returns_now_as_timestamp(self) -> None:
+        """Subsequent poll always updates the config checkpoint to now."""
+        connector = _make_connector_with_mgmt()
+        since_ts = "2026-03-14T10:00:00+00:00"
+
+        with patch(
+            "mallcop.connectors.supabase.connector.requests.get",
+            side_effect=_mgmt_side_effect(),
+        ):
+            events, ts = connector._poll_config_changes(since_ts, _NOW)
+
+        assert ts == _NOW.isoformat()
+
+    # ── API error handling ───────────────────────────────────────────
+
+    def test_secrets_api_error_does_not_raise(self) -> None:
+        """Secrets endpoint failure is caught — poll continues."""
+        connector = _make_connector_with_mgmt()
+
+        def failing_secrets(url: str, **kwargs: Any) -> MagicMock:
+            if "/secrets" in url:
+                raise Exception("Connection timeout")
+            if "/api-keys" in url:
+                return _mock_postgrest_response([])
+            if "/config/auth" in url:
+                return _mock_postgrest_response({})
+            return _mock_postgrest_response({})
+
+        with patch(
+            "mallcop.connectors.supabase.connector.requests.get",
+            side_effect=failing_secrets,
+        ):
+            events, ts = connector._poll_config_changes(None, _NOW)
+
+        assert events == []
+        assert ts == _NOW.isoformat()
+
+    def test_api_keys_error_does_not_raise(self) -> None:
+        """api-keys endpoint failure is caught — poll continues."""
+        connector = _make_connector_with_mgmt()
+
+        def failing_api_keys(url: str, **kwargs: Any) -> MagicMock:
+            if "/secrets" in url:
+                return _mock_postgrest_response([{"name": "MY_SECRET"}])
+            if "/api-keys" in url:
+                raise Exception("HTTP 503")
+            if "/config/auth" in url:
+                return _mock_postgrest_response({})
+            return _mock_postgrest_response({})
+
+        with patch(
+            "mallcop.connectors.supabase.connector.requests.get",
+            side_effect=failing_api_keys,
+        ):
+            events, ts = connector._poll_config_changes(None, _NOW)
+
+        assert events == []
+
+    def test_auth_config_error_does_not_raise(self) -> None:
+        """auth config endpoint failure is caught — poll continues."""
+        connector = _make_connector_with_mgmt()
+
+        def failing_auth_cfg(url: str, **kwargs: Any) -> MagicMock:
+            if "/secrets" in url:
+                return _mock_postgrest_response([])
+            if "/api-keys" in url:
+                return _mock_postgrest_response([])
+            if "/config/auth" in url:
+                raise Exception("403 Forbidden")
+            return _mock_postgrest_response({})
+
+        with patch(
+            "mallcop.connectors.supabase.connector.requests.get",
+            side_effect=failing_auth_cfg,
+        ):
+            events, ts = connector._poll_config_changes(None, _NOW)
+
+        assert events == []
+        assert ts == _NOW.isoformat()
+
+    def test_all_endpoints_failing_still_returns_valid_result(self) -> None:
+        """All three Management API endpoints failing returns ([], now.isoformat())."""
+        connector = _make_connector_with_mgmt()
+
+        with patch(
+            "mallcop.connectors.supabase.connector.requests.get",
+            side_effect=Exception("Network unreachable"),
+        ):
+            events, ts = connector._poll_config_changes(None, _NOW)
+
+        assert events == []
+        assert ts == _NOW.isoformat()
+
+    # ── return type contract ─────────────────────────────────────────
+
+    def test_return_type_is_tuple_list_str(self) -> None:
+        """_poll_config_changes always returns (list, str)."""
+        connector = _make_connector_with_mgmt()
+
+        with patch(
+            "mallcop.connectors.supabase.connector.requests.get",
+            side_effect=_mgmt_side_effect(),
+        ):
+            result = connector._poll_config_changes(None, _NOW)
+
+        assert isinstance(result, tuple)
+        assert len(result) == 2
+        events, ts = result
+        assert isinstance(events, list)
+        assert isinstance(ts, str)
+
+    def test_api_keys_non_list_response_handled(self) -> None:
+        """If api-keys returns a non-list (e.g. dict), key_names defaults to []."""
+        connector = _make_connector_with_mgmt()
+
+        # api-keys returns a dict instead of a list — should not raise
+        with patch(
+            "mallcop.connectors.supabase.connector.requests.get",
+            side_effect=_mgmt_side_effect(api_keys={"error": "unexpected"}),
+        ):
+            events, ts = connector._poll_config_changes(None, _NOW)
+
+        assert events == []
+        assert ts == _NOW.isoformat()
+
+    # ── integration via poll() ───────────────────────────────────────
+
+    def test_poll_calls_config_polling_when_access_token_set(self) -> None:
+        """poll() invokes _poll_config_changes when access_token is present."""
+        connector = _make_connector_with_mgmt()
+
+        def mock_get(url: str, **kwargs: Any) -> MagicMock:
+            if "rest/v1" in url:
+                return _mock_postgrest_response([])
+            # Management API endpoints
+            return _mock_postgrest_response([])
+
+        with patch(
+            "mallcop.connectors.supabase.connector.requests.get",
+            side_effect=mock_get,
+        ) as mock_requests:
+            result = connector.poll(None)
+
+        # Management API calls should have been made
+        urls_called = [call.args[0] for call in mock_requests.call_args_list]
+        mgmt_calls = [u for u in urls_called if "api.supabase.com" in u]
+        assert len(mgmt_calls) >= 1
+
+    def test_poll_skips_config_polling_without_access_token(self) -> None:
+        """poll() skips _poll_config_changes when no access_token."""
+        from mallcop.connectors.supabase.connector import SupabaseConnector
+
+        connector = SupabaseConnector()
+        connector._project_url = "https://xyzcompany.supabase.co"
+        connector._service_role_key = "eyJ_fake"
+        connector._project_ref = "xyzcompany"
+        connector._access_token = None  # No token
+
+        with patch(
+            "mallcop.connectors.supabase.connector.requests.get",
+            return_value=_mock_postgrest_response([]),
+        ) as mock_requests:
+            result = connector.poll(None)
+
+        # Only PostgREST call — no Management API calls
+        urls_called = [call.args[0] for call in mock_requests.call_args_list]
+        mgmt_calls = [u for u in urls_called if "api.supabase.com" in u]
+        assert mgmt_calls == []
+        # Checkpoint still valid
+        assert "|" in result.checkpoint.value
+
+    def test_poll_config_checkpoint_embedded_in_composite(self) -> None:
+        """Config timestamp from _poll_config_changes ends up in composite checkpoint."""
+        connector = _make_connector_with_mgmt()
+
+        def mock_get(url: str, **kwargs: Any) -> MagicMock:
+            if "rest/v1" in url:
+                return _mock_postgrest_response([])
+            return _mock_postgrest_response([])
+
+        with patch(
+            "mallcop.connectors.supabase.connector.requests.get",
+            side_effect=mock_get,
+        ):
+            result = connector.poll(None)
+
+        # Checkpoint must be composite with pipe separator
+        parts = result.checkpoint.value.split("|")
+        assert len(parts) == 2
+        # Config part must be a non-empty ISO timestamp
+        config_ts = parts[1]
+        assert len(config_ts) > 0
+        # Should parse as a valid ISO datetime
+        from datetime import datetime
+        parsed = datetime.fromisoformat(config_ts)
+        assert parsed.tzinfo is not None
