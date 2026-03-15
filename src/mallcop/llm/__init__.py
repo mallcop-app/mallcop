@@ -25,6 +25,7 @@ from mallcop.llm.openai_compat import (  # noqa: F401
     _convert_messages_openai,
     _convert_tools_openai,
 )
+from mallcop.llm.bedrock_mantle import BedrockMantleClient  # noqa: F401
 from mallcop.llm.claude_code import ClaudeCodeClient  # noqa: F401
 from mallcop.llm.converters import (  # noqa: F401
     _extract_resolution,
@@ -42,6 +43,7 @@ __all__ = [
     "ToolCall",
     "AnthropicClient",
     "BedrockClient",
+    "BedrockMantleClient",
     "ManagedClient",
     "OpenAICompatClient",
     "ClaudeCodeClient",
@@ -121,6 +123,16 @@ def _build_bedrock(llm_config: LLMConfig) -> LLMClient | None:
         region=llm_config.endpoint or "us-east-1",
         access_key=llm_config.api_key,
         secret_key=llm_config.secret_key,
+    )
+
+
+@register_provider("bedrock-mantle")
+def _build_bedrock_mantle(llm_config: LLMConfig) -> LLMClient | None:
+    return BedrockMantleClient(
+        model=llm_config.default_model,
+        region=llm_config.endpoint or "us-east-1",
+        access_key=llm_config.api_key or "",
+        secret_key=llm_config.secret_key or "",
     )
 
 

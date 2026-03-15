@@ -18,7 +18,7 @@ from mallcop.llm import AnthropicClient, ClaudeCodeClient, LLMAPIError, _PROVIDE
 class TestProviderRegistry:
     """Verify that all expected providers self-register via @register_provider."""
 
-    EXPECTED_PROVIDERS = {"anthropic", "managed", "bedrock", "openai-compat"}
+    EXPECTED_PROVIDERS = {"anthropic", "managed", "bedrock", "bedrock-mantle", "openai-compat"}
 
     def test_all_expected_providers_registered(self) -> None:
         assert set(_PROVIDERS.keys()) == self.EXPECTED_PROVIDERS
