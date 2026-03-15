@@ -345,74 +345,12 @@ def init(pro: bool) -> None:
 @cli.command()
 def scan() -> None:
     """Poll all connectors, store events."""
-    from mallcop.app_integration import apply_parsers, get_configured_app_names
-
-    cwd = Path.cwd()
-
     try:
-        config = load_config(cwd)
-    except ConfigError as e:
+        result = _run_scan_pipeline(Path.cwd())
+    except RuntimeError as e:
         click.echo(json.dumps({"status": "error", "error": str(e)}))
         raise SystemExit(1)
-
-    store = JsonlStore(cwd)
-    connector_summaries: dict[str, Any] = {}
-    total_events = 0
-    app_names = get_configured_app_names(config.connectors)
-
-    for name, connector_config in config.connectors.items():
-        connector = instantiate_connector(name)
-        if connector is None:
-            connector_summaries[name] = {
-                "status": "error",
-                "error": f"Unknown connector: {name}",
-                "events_ingested": 0,
-            }
-            continue
-
-        try:
-            provider = EnvSecretProvider()
-            connector.authenticate(provider)
-
-            # Apply connector-specific config
-            connector.configure(connector_config)
-
-            checkpoint = store.get_checkpoint(name)
-            poll_result = connector.poll(checkpoint)
-
-            # Apply parser transforms for container-logs apps with parser.yaml
-            events = poll_result.events
-            if name == "container-logs" and app_names:
-                events = apply_parsers(events, cwd, app_names)
-
-            if events:
-                store.append_events(events)
-
-            store.set_checkpoint(poll_result.checkpoint)
-
-            event_count = len(events)
-            total_events += event_count
-
-            connector_summaries[name] = {
-                "status": "ok",
-                "events_ingested": event_count,
-                "checkpoint": poll_result.checkpoint.value,
-            }
-
-        except Exception as e:
-            connector_summaries[name] = {
-                "status": "error",
-                "error": str(e),
-                "events_ingested": 0,
-            }
-
-    output: dict[str, Any] = {
-        "status": "ok",
-        "total_events_ingested": total_events,
-        "connectors": connector_summaries,
-    }
-
-    click.echo(json.dumps(output))
+    click.echo(json.dumps(result))
 
 
 @cli.command()
