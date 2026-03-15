@@ -2237,6 +2237,57 @@ def research(dir_path: str | None, human: bool) -> None:
         }))
 
 
+# --- Email verification ---
+
+
+@cli.command("verify-email")
+@click.option("--dir", "dir_path", default=None, help="Deployment repo directory.", hidden=True)
+def verify_email(dir_path: str | None) -> None:
+    """Verify your account email for escalation alerts."""
+    from mallcop.pro import ProClient
+
+    root = Path(dir_path) if dir_path else Path.cwd()
+
+    # Load config
+    try:
+        config = load_config(root)
+    except Exception as e:
+        click.echo(f"Error loading config: {e}", err=True)
+        raise SystemExit(1)
+
+    # Pro-only gate
+    if config.pro is None or not config.pro.account_id or not config.pro.service_token:
+        click.echo(
+            "Email verification requires a Pro account. Run mallcop init --pro first.",
+            err=True,
+        )
+        raise SystemExit(1)
+
+    client = ProClient(config.pro.account_url)
+
+    # Step 1: Request OTP
+    try:
+        client.verify_email_request(config.pro.account_id, config.pro.service_token)
+    except (RuntimeError, OSError) as e:
+        click.echo(f"Failed to request verification: {e}", err=True)
+        raise SystemExit(1)
+
+    click.echo("Check your inbox — enter the 6-digit code:")
+    otp = click.prompt("Code", hide_input=False)
+
+    # Step 2: Confirm OTP
+    try:
+        client.verify_email_confirm(config.pro.account_id, otp.strip(), config.pro.service_token)
+    except (RuntimeError, OSError):
+        click.echo(
+            "Invalid or expired code. Run mallcop verify-email again.",
+            err=True,
+        )
+        raise SystemExit(1)
+
+    click.echo("Email verified. Escalation alerts are now active.")
+
+
 # --- Skill signing ---
 
 
