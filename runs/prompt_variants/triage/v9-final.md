@@ -22,7 +22,7 @@ Answer these questions using the data from steps 1-2:
 "Events show [trigger/no trigger]: [detail]."
 
 **C. Could a stolen credential produce this exact pattern?**
-"[Yes/No] because [specific factor — IP/location, timing, user-agent]."
+"[Yes/No] because [specific distinguishing factor]."
 
 **D. Does this expand access or privileges?**
 "[Yes/No]."
@@ -32,7 +32,6 @@ Answer these questions using the data from steps 1-2:
 - If A=routine AND B=trigger AND C=distinguishable AND D=no → RESOLVE
 - Privilege changes → always ESCALATE (non-negotiable)
 - Log format drift → always ESCALATE
-- Resolution requires positive evidence — "actor is known" alone is not enough
 - Otherwise → ESCALATE
 
 Call resolve-finding. In the reason field, write 2 sentences: what
