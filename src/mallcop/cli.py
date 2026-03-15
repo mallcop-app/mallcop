@@ -559,7 +559,8 @@ def watch(dry_run: bool, dir_path: str | None, human: bool, backend: str) -> Non
     root = Path(dir_path) if dir_path else Path.cwd()
     result: dict[str, Any] = {"command": "watch", "dry_run": dry_run}
 
-    # Step 0: Validate escalation paths before running pipeline
+    # Step 0: Build and validate actor runner once (reused in Step 3)
+    watch_runner = None
     if not dry_run:
         from mallcop.actors.runtime import EscalationPathError, build_actor_runner
         from mallcop.llm import build_llm_client
@@ -569,7 +570,7 @@ def watch(dry_run: bool, dir_path: str | None, human: bool, backend: str) -> Non
             watch_llm = build_llm_client(watch_config.llm, backend=backend, pro_config=watch_config.pro)
             if watch_llm is None:
                 raise ValueError("No LLM client configured")
-            _watch_runner = build_actor_runner(
+            watch_runner = build_actor_runner(
                 root=root, store=watch_store, config=watch_config, llm=watch_llm,
                 validate_paths=True,
             )
@@ -615,18 +616,6 @@ def watch(dry_run: bool, dir_path: str | None, human: bool, backend: str) -> Non
         result["escalate"] = {"skipped": True, "reason": escalate_reason}
     else:
         try:
-            from mallcop.actors.runtime import build_actor_runner
-            from mallcop.llm import build_llm_client
-
-            watch_config = load_config(root)
-            watch_store = JsonlStore(root)
-            watch_llm = build_llm_client(watch_config.llm, backend=backend, pro_config=watch_config.pro)
-            watch_runner = build_actor_runner(
-                root=root,
-                store=watch_store,
-                config=watch_config,
-                llm=watch_llm,
-            )
             escalate_result = run_escalate(root, actor_runner=watch_runner)
             result["escalate"] = escalate_result
         except Exception as e:
