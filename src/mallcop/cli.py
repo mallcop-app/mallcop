@@ -1240,6 +1240,20 @@ def ack(finding_id: str, author: str, reason: str | None, dir_path: str | None, 
         }))
         raise SystemExit(1)
 
+    # Reject ack on boundary-violation findings: these are non-ackable.
+    # Only fixing the underlying boundary (file ownership, cross-write access, sudo
+    # membership) resolves them — human acknowledgement cannot suppress them.
+    if target.detector == "boundary-violation":
+        click.echo(json.dumps({
+            "command": "ack",
+            "status": "error",
+            "error": (
+                f"Finding {finding_id} is a boundary-violation and cannot be acked. "
+                "Fix the underlying boundary violation to resolve it."
+            ),
+        }))
+        raise SystemExit(1)
+
     # Reject double-ack
     if target.status == FindingStatus.ACKED:
         click.echo(json.dumps({
@@ -2142,6 +2156,80 @@ def _build_improve_suggestions(
         })
 
     return suggestions if suggestions else [{"message": "No actionable suggestions found."}]
+
+
+# --- OSINT Research ---
+
+
+@cli.command()
+@click.option("--dir", "dir_path", default=None, help="Deployment repo directory.", hidden=True)
+@click.option("--human", is_flag=True, help="Human-readable output (default is JSON).")
+def research(dir_path: str | None, human: bool) -> None:
+    """Research OSINT advisories and generate detector rules (Pro only)."""
+    from mallcop.research import Advisory, run_research
+
+    root = Path(dir_path) if dir_path else Path.cwd()
+
+    # Load config
+    try:
+        config = load_config(root)
+    except Exception as e:
+        _emit_error(str(e), human)
+        raise SystemExit(1)
+
+    # Pro-only gate: requires service_token
+    if config.pro is None or not config.pro.service_token:
+        _emit_error(
+            "mallcop research requires a Pro subscription. "
+            "Run 'mallcop init --pro' to set up your account. "
+            "Requires pro.service_token in mallcop.yaml.",
+            human,
+        )
+        raise SystemExit(1)
+
+    # Manifest path and detectors dir (co-located with the deployment repo)
+    manifest_path = root / ".mallcop" / "intel-manifest.jsonl"
+    detectors_dir = root / "plugins" / "detectors"
+
+    # Build LLM client (use pro managed inference if configured)
+    from mallcop.llm import build_llm_client
+    llm_client = build_llm_client(config.llm, backend="anthropic", pro_config=config.pro)
+    if llm_client is None:
+        _emit_error(
+            "No LLM client available. Check your pro.service_token or llm.api_key config.",
+            human,
+        )
+        raise SystemExit(1)
+
+    # For now, advisories list is empty — the LLM agent feeds this in production.
+    # Callers (patrol agents, cron jobs) populate this list by querying OSINT sources.
+    # The CLI stub runs with an empty list, demonstrating the pipeline is wired up.
+    advisories: list[Advisory] = []
+
+    result = run_research(
+        advisories=advisories,
+        manifest_path=manifest_path,
+        detectors_dir=detectors_dir,
+        llm_client=llm_client,
+        config=config.research,
+        connector_names=list(config.connectors.keys()),
+    )
+
+    if human:
+        click.echo(f"Research complete:")
+        click.echo(f"  Advisories checked  : {result.advisories_checked}")
+        click.echo(f"  New advisories      : {result.advisories_new}")
+        click.echo(f"  Detectors generated : {result.detectors_generated}")
+        click.echo(f"  Advisories skipped  : {result.detectors_skipped}")
+    else:
+        click.echo(json.dumps({
+            "command": "research",
+            "status": "ok",
+            "advisories_checked": result.advisories_checked,
+            "advisories_new": result.advisories_new,
+            "detectors_generated": result.detectors_generated,
+            "detectors_skipped": result.detectors_skipped,
+        }))
 
 
 # --- Skill signing ---

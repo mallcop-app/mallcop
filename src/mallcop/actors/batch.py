@@ -13,8 +13,10 @@ from mallcop.actors.channels import _deliver_channel_batch
 
 _log = logging.getLogger(__name__)
 
-# Detectors that require individual review regardless of batch size
-_NON_BULK_DETECTORS = frozenset({"priv-escalation", "new-external-access"})
+# Detectors that require individual review regardless of batch size.
+# boundary-violation is included: these findings are exempt from bulk operations
+# (non-squelchable, non-resolvable, non-bulk) and must always be presented individually.
+_NON_BULK_DETECTORS = frozenset({"priv-escalation", "new-external-access", "boundary-violation"})
 
 # Action keywords that make a finding non-bulk-resolvable
 _NON_BULK_ACTION_KEYWORDS = ("export", "dump", "backup")

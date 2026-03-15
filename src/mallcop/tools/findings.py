@@ -80,7 +80,23 @@ def resolve_finding(
     This tool signals the runtime to stop processing and apply the resolution.
     action must be 'resolved' (benign/known) or 'escalated' (needs deeper investigation).
     The runtime intercepts this tool call — the return value is not used.
+
+    Boundary-violation findings cannot be resolved by actors — only fixing the
+    underlying boundary violation resolves them. If action='resolved' is attempted
+    on a boundary-violation finding, the action is overridden to 'escalated'.
     """
+    # Boundary-violation findings are non-resolvable: actors cannot mark them resolved.
+    # Only fixing the actual boundary (file ownership, cross-write access, sudo membership)
+    # resolves them. Override any 'resolved' action to 'escalated'.
+    store = context.store
+    findings = store.query_findings()
+    target = next((f for f in findings if f.id == finding_id), None)
+    if target is not None and target.detector == "boundary-violation" and action == "resolved":
+        action = "escalated"
+        reason = (
+            f"[boundary-violation findings cannot be resolved by actors — "
+            f"original reason: {reason}]"
+        )
     return {"finding_id": finding_id, "action": action, "reason": reason}
 
 
