@@ -721,7 +721,7 @@ class TestScenario4_FullPipelineCycle:
         costs_text = costs_path.read_text().strip()
         assert len(costs_text) > 0
         cost_entry = json.loads(costs_text.split("\n")[-1])
-        assert "tokens_used" in cost_entry
+        assert "donuts_used" in cost_entry
         assert "estimated_cost_usd" in cost_entry
 
     def test_sanitization_persists_through_full_cycle(self, tmp_path: Path) -> None:

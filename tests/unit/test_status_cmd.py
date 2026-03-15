@@ -26,8 +26,8 @@ def _write_config(root: Path) -> None:
         "actor_chain": {},
         "budget": {
             "max_findings_for_actors": 25,
-            "max_tokens_per_run": 50000,
-            "max_tokens_per_finding": 5000,
+            "max_donuts_per_run": 50000,
+            "max_donuts_per_finding": 5000,
         },
     }
     with open(root / "mallcop.yaml", "w") as f:
@@ -167,7 +167,7 @@ class TestStatusCosts:
                 events=100 + i * 10,
                 findings=3 + i,
                 actors_invoked=True,
-                tokens_used=10000 + i * 1000,
+                donuts_used=10000 + i * 1000,
                 estimated_cost_usd=0.002 + i * 0.001,
                 budget_remaining_pct=80.0 - i * 5,
             )
@@ -179,8 +179,8 @@ class TestStatusCosts:
         costs = result["costs"]
         assert "total_runs" in costs
         assert costs["total_runs"] == 3
-        assert "avg_tokens_per_run" in costs
-        assert "total_tokens" in costs
+        assert "avg_donuts_per_run" in costs
+        assert "total_donuts" in costs
         assert "estimated_total_usd" in costs
 
     def test_costs_without_cost_file(self, tmp_path: Path) -> None:
@@ -206,19 +206,19 @@ class TestStatusCosts:
             CostEntry(
                 timestamp=datetime(2026, 3, 6, 6, 0, 0, tzinfo=timezone.utc),
                 events=50, findings=3, actors_invoked=True,
-                tokens_used=5000, estimated_cost_usd=0.001,
+                donuts_used=5000, estimated_cost_usd=0.001,
                 budget_remaining_pct=90.0,
             ),
             CostEntry(
                 timestamp=datetime(2026, 3, 6, 12, 0, 0, tzinfo=timezone.utc),
                 events=500, findings=100, actors_invoked=False,
-                tokens_used=0, estimated_cost_usd=0.0,
+                donuts_used=0, estimated_cost_usd=0.0,
                 budget_remaining_pct=100.0,
             ),
             CostEntry(
                 timestamp=datetime(2026, 3, 6, 18, 0, 0, tzinfo=timezone.utc),
                 events=60, findings=4, actors_invoked=True,
-                tokens_used=8000, estimated_cost_usd=0.002,
+                donuts_used=8000, estimated_cost_usd=0.002,
                 budget_remaining_pct=84.0,
             ),
         ]

@@ -66,8 +66,8 @@ def run_status(root: Path, costs: bool = False) -> dict[str, Any]:
         total_runs = len(entries)
 
         if total_runs > 0:
-            total_tokens = sum(e.tokens_used for e in entries)
-            avg_tokens = total_tokens / total_runs
+            total_donuts = sum(e.donuts_used for e in entries)
+            avg_donuts = total_donuts / total_runs
             total_cost = sum(e.estimated_cost_usd for e in entries)
             circuit_breaker_count = sum(
                 1 for e in entries if not e.actors_invoked
@@ -83,8 +83,8 @@ def run_status(root: Path, costs: bool = False) -> dict[str, Any]:
                 "total_runs": total_runs,
                 "avg_events_per_run": round(avg_events, 1),
                 "avg_findings_per_run": round(avg_findings, 1),
-                "avg_tokens_per_run": round(avg_tokens, 1),
-                "total_tokens": total_tokens,
+                "avg_donuts_per_run": round(avg_donuts, 1),
+                "total_donuts": total_donuts,
                 "estimated_total_usd": round(total_cost, 6),
                 "circuit_breaker_triggered": circuit_breaker_count,
                 "budget_exhausted": budget_exhausted_count,
@@ -94,8 +94,8 @@ def run_status(root: Path, costs: bool = False) -> dict[str, Any]:
                 "total_runs": 0,
                 "avg_events_per_run": 0,
                 "avg_findings_per_run": 0,
-                "avg_tokens_per_run": 0,
-                "total_tokens": 0,
+                "avg_donuts_per_run": 0,
+                "total_donuts": 0,
                 "estimated_total_usd": 0,
                 "circuit_breaker_triggered": 0,
                 "budget_exhausted": 0,

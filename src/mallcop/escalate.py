@@ -91,15 +91,19 @@ def run_escalate(
         store = JsonlStore(root)
     budget_config = BudgetConfig(
         max_findings_for_actors=config.budget.max_findings_for_actors,
-        max_tokens_per_run=config.budget.max_tokens_per_run,
-        max_tokens_per_finding=config.budget.max_tokens_per_finding,
+        max_donuts_per_run=config.budget.max_donuts_per_run,
+        max_donuts_per_finding=config.budget.max_donuts_per_finding,
     )
 
     # Load open findings only
     all_findings = store.query_findings(status="open")
 
-    # Check circuit breaker
-    cb_finding = check_circuit_breaker(all_findings, budget_config)
+    # Partition findings: boundary-violation findings are exempt from all gates
+    boundary_findings = [f for f in all_findings if f.detector == "boundary-violation"]
+    gated_findings = [f for f in all_findings if f.detector != "boundary-violation"]
+
+    # Check circuit breaker using only gated findings (boundary violations don't count)
+    cb_finding = check_circuit_breaker(gated_findings, budget_config)
     if cb_finding is not None:
         # Circuit breaker triggered — skip all actors
         store.append_findings([cb_finding])
@@ -108,7 +112,7 @@ def run_escalate(
             events=0,
             findings=len(all_findings),
             actors_invoked=False,
-            tokens_used=0,
+            donuts_used=0,
             estimated_cost_usd=0.0,
             budget_remaining_pct=100.0,
         )
@@ -118,13 +122,13 @@ def run_escalate(
             "findings_processed": 0,
             "circuit_breaker_triggered": True,
             "budget_exhausted": False,
-            "tokens_used": 0,
+            "donuts_used": 0,
             "skipped": False,
             "reason": None,
         }
 
-    # Order by severity: CRITICAL first
-    ordered = order_by_severity(all_findings)
+    # Order by severity: CRITICAL first (gated findings only; boundary handled separately)
+    ordered = order_by_severity(gated_findings)
 
     # Group findings by entry actor (routing by severity)
     tracker = BudgetTracker(budget_config)
@@ -156,10 +160,10 @@ def run_escalate(
         for actor_name in batch_order:
             batch_findings = actor_batches[actor_name]
 
-            # Compute remaining token budget for this batch
+            # Compute remaining donut budget for this batch
             remaining_tokens: int | None = None
-            if budget_config.max_tokens_per_run > 0:
-                remaining_tokens = budget_config.max_tokens_per_run - tracker.tokens_used
+            if budget_config.max_donuts_per_run > 0:
+                remaining_tokens = budget_config.max_donuts_per_run - tracker.donuts_used
                 if remaining_tokens <= 0:
                     # Budget exhausted before this batch
                     budget_exhausted = True
@@ -173,7 +177,7 @@ def run_escalate(
                                     timestamp=datetime.now(timezone.utc),
                                     content="Budget exhausted. Finding uninvestigated.",
                                     action="escalated",
-                                    reason="Per-run token budget exhausted",
+                                    reason="Per-run donut budget exhausted",
                                 )
                             ],
                         )
@@ -189,12 +193,12 @@ def run_escalate(
                 actor_runner,
                 batch_findings,
                 actor_name=actor_name,
-                finding_token_budget=budget_config.max_tokens_per_finding,
+                finding_token_budget=budget_config.max_donuts_per_finding,
                 max_tokens=remaining_tokens,
                 baseline=baseline,
             )
 
-            tracker.add_tokens(batch_result.total_tokens)
+            tracker.add_donuts(batch_result.total_tokens)
 
             # Persist feedback records from batch (resolved findings → learning flywheel)
             for fb_record in batch_result.feedback_records:
@@ -224,9 +228,13 @@ def run_escalate(
                         )
                     elif result.resolution.action == ResolutionAction.ESCALATED:
                         # Squelch gate: suppress low-confidence escalations
-                        squelched, via_spot_check = _should_squelch(
-                            result, squelch=config.squelch
-                        )
+                        # boundary-violation findings are always escalated — never squelched
+                        if finding.detector == "boundary-violation":
+                            squelched, via_spot_check = False, False
+                        else:
+                            squelched, via_spot_check = _should_squelch(
+                                result, squelch=config.squelch
+                            )
                         base_annotation = Annotation(
                             actor=actor_name,
                             timestamp=datetime.now(timezone.utc),
@@ -271,20 +279,20 @@ def run_escalate(
                                 timestamp=datetime.now(timezone.utc),
                                 content="Budget exhausted. Finding uninvestigated.",
                                 action="escalated",
-                                reason="Per-run token budget exhausted",
+                                reason="Per-run donut budget exhausted",
                             )
                         ],
                     )
 
     # Log cost entry
-    total_tokens = tracker.tokens_used
-    estimated_cost = (total_tokens / 1000) * _COST_PER_1K_TOKENS_USD
+    total_donuts = tracker.donuts_used
+    estimated_cost = (total_donuts / 1000) * _COST_PER_1K_TOKENS_USD
     cost_entry = CostEntry(
         timestamp=datetime.now(timezone.utc),
         events=0,
         findings=processed,
         actors_invoked=processed > 0,
-        tokens_used=total_tokens,
+        donuts_used=total_donuts,
         estimated_cost_usd=estimated_cost,
         budget_remaining_pct=tracker.budget_remaining_pct(),
     )
@@ -296,7 +304,7 @@ def run_escalate(
         "findings_skipped": skipped,
         "circuit_breaker_triggered": False,
         "budget_exhausted": budget_exhausted,
-        "tokens_used": total_tokens,
+        "donuts_used": total_donuts,
         "skipped": False,
         "reason": None,
     }

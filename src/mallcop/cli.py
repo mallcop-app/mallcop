@@ -1359,8 +1359,8 @@ def status(costs: bool, dir_path: str | None, human: bool) -> None:
         if costs and "costs" in result:
             c = result["costs"]
             click.echo(f"Cost summary ({c['total_runs']} runs):")
-            click.echo(f"  Avg donuts/run: {c['avg_tokens_per_run']}")
-            click.echo(f"  Total donuts: {c['total_tokens']}")
+            click.echo(f"  Avg donuts/run: {c['avg_donuts_per_run']}")
+            click.echo(f"  Total donuts: {c['total_donuts']}")
             click.echo(f"  Estimated total: ${c['estimated_total_usd']}")
             click.echo(f"  Circuit breaker: triggered {c['circuit_breaker_triggered']} times")
         esc = result.get("escalation_health", {})

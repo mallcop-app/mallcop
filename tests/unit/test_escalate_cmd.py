@@ -290,7 +290,7 @@ class TestEscalateTokenBudget:
         lines = costs_file.read_text().strip().split("\n")
         assert len(lines) == 1
         data = json.loads(lines[0])
-        assert data["tokens_used"] == 500
+        assert data["donuts_used"] == 500
         assert data["actors_invoked"] is True
 
     def test_writes_resolution_back_to_findings(self, tmp_path: Path) -> None:
@@ -436,8 +436,8 @@ class TestEscalateBatch:
         # All 3 findings should be processed
         assert result["findings_processed"] == 3
         assert len(processed_ids) == 3
-        # Total tokens should reflect batch sum
-        assert result["tokens_used"] == 300
+        # Total donuts should reflect batch sum
+        assert result["donuts_used"] == 300
 
     def test_escalate_batch_budget_limits_findings(self, tmp_path: Path) -> None:
         """run_escalate enforces per-run token budget across the batch."""

@@ -52,9 +52,16 @@ def _route(actor: str) -> RouteConfig:
 def _make_config(
     routing: dict[str, RouteConfig | None] | None = None,
     max_findings_for_actors: int = 25,
-    max_tokens_per_run: int = 50000,
-    max_tokens_per_finding: int = 5000,
+    max_donuts_per_run: int = 50000,
+    max_donuts_per_finding: int = 5000,
+    # Backward-compat aliases accepted in tests
+    max_tokens_per_run: int | None = None,
+    max_tokens_per_finding: int | None = None,
 ) -> MallcopConfig:
+    if max_tokens_per_run is not None:
+        max_donuts_per_run = max_tokens_per_run
+    if max_tokens_per_finding is not None:
+        max_donuts_per_finding = max_tokens_per_finding
     return MallcopConfig(
         secrets_backend="env",
         connectors={},
@@ -62,8 +69,8 @@ def _make_config(
         actor_chain={},
         budget=ConfigBudgetConfig(
             max_findings_for_actors=max_findings_for_actors,
-            max_tokens_per_run=max_tokens_per_run,
-            max_tokens_per_finding=max_tokens_per_finding,
+            max_donuts_per_run=max_donuts_per_run,
+            max_donuts_per_finding=max_donuts_per_finding,
         ),
         squelch=0,  # disabled: unit tests are not testing squelch gating
     )
@@ -152,7 +159,7 @@ class TestEmptyFindings:
 
         actor_runner.assert_not_called()
         assert result["findings_processed"] == 0
-        assert result["tokens_used"] == 0
+        assert result["donuts_used"] == 0
         assert result["status"] == "ok"
 
     @patch("mallcop.escalate.append_cost_log")
@@ -174,7 +181,7 @@ class TestEmptyFindings:
         mock_cost_log.assert_called_once()
         cost_entry = mock_cost_log.call_args[0][1]
         assert isinstance(cost_entry, CostEntry)
-        assert cost_entry.tokens_used == 0
+        assert cost_entry.donuts_used == 0
         assert cost_entry.actors_invoked is False
 
 
@@ -231,7 +238,7 @@ class TestCircuitBreaker:
         actor_runner.assert_not_called()
         assert result["circuit_breaker_triggered"] is True
         assert result["findings_processed"] == 0
-        assert result["tokens_used"] == 0
+        assert result["donuts_used"] == 0
         # Circuit breaker finding should be appended to store
         mock_store.append_findings.assert_called_once()
         cb_findings = mock_store.append_findings.call_args[0][0]
@@ -451,7 +458,7 @@ class TestCostLogging:
 
         mock_cost_log.assert_called_once()
         cost_entry = mock_cost_log.call_args[0][1]
-        assert cost_entry.tokens_used == 1200
+        assert cost_entry.donuts_used == 1200
         assert cost_entry.actors_invoked is True
         assert cost_entry.findings == 1
         # Cost = (1200 / 1000) * 0.00025 = 0.0003
@@ -570,7 +577,7 @@ class TestNoActorRunner:
             result = run_escalate(tmp_path, actor_runner=None)
 
         assert result["findings_processed"] == 0
-        assert result["tokens_used"] == 0
+        assert result["donuts_used"] == 0
         assert result["status"] == "ok"
 
 
@@ -579,39 +586,39 @@ class TestNoActorRunner:
 # ---------------------------------------------------------------------------
 
 class TestBudgetTracker:
-    """BudgetTracker tracks token usage and budget percentage."""
+    """BudgetTracker tracks donut usage and budget percentage."""
 
-    def test_initial_tokens_zero(self) -> None:
-        tracker = BudgetTracker(BudgetConfig(max_tokens_per_run=10000))
-        assert tracker.tokens_used == 0
+    def test_initial_donuts_zero(self) -> None:
+        tracker = BudgetTracker(BudgetConfig(max_donuts_per_run=10000))
+        assert tracker.donuts_used == 0
 
-    def test_add_tokens(self) -> None:
-        tracker = BudgetTracker(BudgetConfig(max_tokens_per_run=10000))
-        tracker.add_tokens(3000)
-        assert tracker.tokens_used == 3000
+    def test_add_donuts(self) -> None:
+        tracker = BudgetTracker(BudgetConfig(max_donuts_per_run=10000))
+        tracker.add_donuts(3000)
+        assert tracker.donuts_used == 3000
 
     def test_run_budget_exhausted(self) -> None:
-        tracker = BudgetTracker(BudgetConfig(max_tokens_per_run=1000))
-        tracker.add_tokens(1001)
+        tracker = BudgetTracker(BudgetConfig(max_donuts_per_run=1000))
+        tracker.add_donuts(1001)
         assert tracker.run_budget_exhausted() is True
 
     def test_run_budget_not_exhausted_at_exact_limit(self) -> None:
-        tracker = BudgetTracker(BudgetConfig(max_tokens_per_run=1000))
-        tracker.add_tokens(1000)
+        tracker = BudgetTracker(BudgetConfig(max_donuts_per_run=1000))
+        tracker.add_donuts(1000)
         assert tracker.run_budget_exhausted() is False
 
     def test_budget_remaining_pct(self) -> None:
-        tracker = BudgetTracker(BudgetConfig(max_tokens_per_run=10000))
-        tracker.add_tokens(2500)
+        tracker = BudgetTracker(BudgetConfig(max_donuts_per_run=10000))
+        tracker.add_donuts(2500)
         assert tracker.budget_remaining_pct() == 75.0
 
     def test_budget_remaining_pct_zero_max(self) -> None:
-        tracker = BudgetTracker(BudgetConfig(max_tokens_per_run=0))
+        tracker = BudgetTracker(BudgetConfig(max_donuts_per_run=0))
         assert tracker.budget_remaining_pct() == 0.0
 
     def test_run_budget_remaining_clamps_to_zero(self) -> None:
-        tracker = BudgetTracker(BudgetConfig(max_tokens_per_run=100))
-        tracker.add_tokens(200)
+        tracker = BudgetTracker(BudgetConfig(max_donuts_per_run=100))
+        tracker.add_donuts(200)
         assert tracker.run_budget_remaining() == 0
 
 

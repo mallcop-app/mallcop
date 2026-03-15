@@ -1,4 +1,4 @@
-"""Tests for budget controls: circuit breaker, token tracking, severity ordering, cost logging."""
+"""Tests for budget controls: circuit breaker, donut tracking, severity ordering, cost logging."""
 
 from __future__ import annotations
 
@@ -76,42 +76,42 @@ class TestCircuitBreaker:
         assert "severity_breakdown" in result.metadata
 
 
-# ─── Per-run token budget ───────────────────────────────────────────
+# ─── Per-run donut budget ───────────────────────────────────────────
 
 
 class TestBudgetTracker:
     def test_within_budget(self) -> None:
-        config = BudgetConfig(max_tokens_per_run=50000, max_tokens_per_finding=5000)
+        config = BudgetConfig(max_donuts_per_run=50000, max_donuts_per_finding=5000)
         tracker = BudgetTracker(config)
-        tracker.add_tokens(1000)
+        tracker.add_donuts(1000)
         assert not tracker.run_budget_exhausted()
-        assert tracker.tokens_used == 1000
+        assert tracker.donuts_used == 1000
 
     def test_run_budget_exhaustion(self) -> None:
-        config = BudgetConfig(max_tokens_per_run=1000, max_tokens_per_finding=5000)
+        config = BudgetConfig(max_donuts_per_run=1000, max_donuts_per_finding=5000)
         tracker = BudgetTracker(config)
-        tracker.add_tokens(500)
+        tracker.add_donuts(500)
         assert not tracker.run_budget_exhausted()
-        tracker.add_tokens(501)
+        tracker.add_donuts(501)
         assert tracker.run_budget_exhausted()
 
     def test_per_finding_budget_exhaustion(self) -> None:
-        config = BudgetConfig(max_tokens_per_run=50000, max_tokens_per_finding=500)
+        config = BudgetConfig(max_donuts_per_run=50000, max_donuts_per_finding=500)
         tracker = BudgetTracker(config)
         assert not tracker.finding_budget_exhausted(400)
         assert tracker.finding_budget_exhausted(501)
 
     def test_remaining_budget(self) -> None:
-        config = BudgetConfig(max_tokens_per_run=10000, max_tokens_per_finding=5000)
+        config = BudgetConfig(max_donuts_per_run=10000, max_donuts_per_finding=5000)
         tracker = BudgetTracker(config)
-        tracker.add_tokens(3000)
+        tracker.add_donuts(3000)
         assert tracker.run_budget_remaining() == 7000
         assert tracker.budget_remaining_pct() == 70.0
 
     def test_zero_budget_immediately_exhausted(self) -> None:
-        config = BudgetConfig(max_tokens_per_run=0, max_tokens_per_finding=0)
+        config = BudgetConfig(max_donuts_per_run=0, max_donuts_per_finding=0)
         tracker = BudgetTracker(config)
-        tracker.add_tokens(1)
+        tracker.add_donuts(1)
         assert tracker.run_budget_exhausted()
         assert tracker.finding_budget_exhausted(1)
 
@@ -166,13 +166,13 @@ class TestCostLogging:
             events=127,
             findings=4,
             actors_invoked=True,
-            tokens_used=18432,
+            donuts_used=18432,
             estimated_cost_usd=0.0014,
             budget_remaining_pct=63.0,
         )
         d = entry.to_dict()
         assert d["events"] == 127
-        assert d["tokens_used"] == 18432
+        assert d["donuts_used"] == 18432
         assert d["actors_invoked"] is True
 
     def test_cost_entry_roundtrip(self) -> None:
@@ -181,14 +181,14 @@ class TestCostLogging:
             events=50,
             findings=3,
             actors_invoked=True,
-            tokens_used=5000,
+            donuts_used=5000,
             estimated_cost_usd=0.001,
             budget_remaining_pct=90.0,
         )
         d = entry.to_dict()
         entry2 = CostEntry.from_dict(d)
         assert entry2.events == entry.events
-        assert entry2.tokens_used == entry.tokens_used
+        assert entry2.donuts_used == entry.donuts_used
 
     def test_append_cost_log(self, tmp_path: Path) -> None:
         costs_file = tmp_path / "costs.jsonl"
@@ -197,7 +197,7 @@ class TestCostLogging:
             events=100,
             findings=5,
             actors_invoked=True,
-            tokens_used=10000,
+            donuts_used=10000,
             estimated_cost_usd=0.002,
             budget_remaining_pct=80.0,
         )
@@ -208,7 +208,7 @@ class TestCostLogging:
         assert len(lines) == 1
         data = json.loads(lines[0])
         assert data["events"] == 100
-        assert data["tokens_used"] == 10000
+        assert data["donuts_used"] == 10000
 
     def test_append_multiple_entries(self, tmp_path: Path) -> None:
         costs_file = tmp_path / "costs.jsonl"
@@ -218,7 +218,7 @@ class TestCostLogging:
                 events=100 + i,
                 findings=i,
                 actors_invoked=True,
-                tokens_used=1000 * (i + 1),
+                donuts_used=1000 * (i + 1),
                 estimated_cost_usd=0.001 * (i + 1),
                 budget_remaining_pct=90.0 - i * 10,
             )
@@ -233,9 +233,23 @@ class TestCostLogging:
             events=100,
             findings=5,
             actors_invoked=False,
-            tokens_used=0,
+            donuts_used=0,
             estimated_cost_usd=0.0,
             budget_remaining_pct=100.0,
         )
         assert entry.actors_invoked is False
-        assert entry.tokens_used == 0
+        assert entry.donuts_used == 0
+
+    def test_cost_entry_backward_compat_from_dict(self) -> None:
+        """Old costs.jsonl files with 'tokens_used' field are still readable."""
+        old_data = {
+            "timestamp": "2026-03-06T18:00:00+00:00",
+            "events": 50,
+            "findings": 3,
+            "actors_invoked": True,
+            "tokens_used": 7777,   # old field name
+            "estimated_cost_usd": 0.001,
+            "budget_remaining_pct": 85.0,
+        }
+        entry = CostEntry.from_dict(old_data)
+        assert entry.donuts_used == 7777

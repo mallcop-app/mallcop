@@ -19,12 +19,12 @@ class TestEstimateCostsBasic:
             "connectors_active",
             "estimated_events_per_run",
             "estimated_findings_per_run",
-            "estimated_tokens_per_run",
+            "estimated_donuts_per_run",
             "estimated_cost_per_run_usd",
             "estimated_cost_per_month_usd",
-            "budget_max_tokens_per_run",
+            "budget_max_donuts_per_run",
             "budget_max_findings_for_actors",
-            "budget_max_tokens_per_finding",
+            "budget_max_donuts_per_finding",
             "worst_case_cost_per_run_usd",
             "worst_case_cost_per_month_usd",
         ]
@@ -39,17 +39,17 @@ class TestEstimateCostsBasic:
     def test_budget_fields_reflect_config(self) -> None:
         budget = BudgetConfig(
             max_findings_for_actors=10,
-            max_tokens_per_run=20000,
-            max_tokens_per_finding=2000,
+            max_donuts_per_run=20000,
+            max_donuts_per_finding=2000,
         )
         result = _estimate_costs(num_connectors=1, sample_event_count=50, budget=budget)
-        assert result["budget_max_tokens_per_run"] == 20000
+        assert result["budget_max_donuts_per_run"] == 20000
         assert result["budget_max_findings_for_actors"] == 10
-        assert result["budget_max_tokens_per_finding"] == 2000
+        assert result["budget_max_donuts_per_finding"] == 2000
 
 
 class TestEstimateCostsRanges:
-    """Event/finding/token ranges are sensible."""
+    """Event/finding/donut ranges are sensible."""
 
     def test_events_range_format(self) -> None:
         budget = BudgetConfig()
@@ -93,14 +93,14 @@ class TestEstimateCostsRanges:
 class TestEstimateCostsWorstCase:
     """Worst-case calculations use budget ceilings."""
 
-    def test_worst_case_per_run_uses_max_tokens(self) -> None:
-        budget = BudgetConfig(max_tokens_per_run=50000)
+    def test_worst_case_per_run_uses_max_donuts(self) -> None:
+        budget = BudgetConfig(max_donuts_per_run=50000)
         result = _estimate_costs(num_connectors=1, sample_event_count=50, budget=budget)
         expected = (50000 / 1000) * _COST_PER_1K_TOKENS_USD
         assert result["worst_case_cost_per_run_usd"] == f"{expected:.4f}"
 
     def test_worst_case_per_month_is_4_runs_per_day(self) -> None:
-        budget = BudgetConfig(max_tokens_per_run=50000)
+        budget = BudgetConfig(max_donuts_per_run=50000)
         result = _estimate_costs(num_connectors=1, sample_event_count=50, budget=budget)
         worst_run = (50000 / 1000) * _COST_PER_1K_TOKENS_USD
         expected_month = worst_run * 4 * 30
@@ -125,13 +125,13 @@ class TestEstimateCostsEdgeCases:
         assert result["connectors_active"] == 0
 
     def test_large_sample_capped_by_budget(self) -> None:
-        budget = BudgetConfig(max_tokens_per_run=10000, max_findings_for_actors=5)
+        budget = BudgetConfig(max_donuts_per_run=10000, max_findings_for_actors=5)
         result = _estimate_costs(num_connectors=1, sample_event_count=1000, budget=budget)
-        # Token high estimate should be capped at budget max
-        tokens = result["estimated_tokens_per_run"]
-        parts = tokens.split("-")
+        # Donut high estimate should be capped at budget max
+        donuts = result["estimated_donuts_per_run"]
+        parts = donuts.split("-")
         high = int(parts[1])
-        assert high <= budget.max_tokens_per_run
+        assert high <= budget.max_donuts_per_run
 
 
 class TestEstimateCostsInitOutput:

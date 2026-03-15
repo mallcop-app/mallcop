@@ -1,4 +1,4 @@
-"""Budget controls: circuit breaker, token tracking, severity ordering, cost logging."""
+"""Budget controls: circuit breaker, donut tracking, severity ordering, cost logging."""
 
 from __future__ import annotations
 
@@ -14,35 +14,53 @@ from mallcop.schemas import Finding, Severity, FindingStatus, SEVERITY_ORDER
 @dataclass
 class BudgetConfig:
     max_findings_for_actors: int = 25
-    max_tokens_per_run: int = 50000
-    max_tokens_per_finding: int = 5000
+    max_donuts_per_run: int = 50000
+    max_donuts_per_finding: int = 5000
+
+    # Backward-compat aliases: old field names still work programmatically.
+    @property
+    def max_tokens_per_run(self) -> int:
+        return self.max_donuts_per_run
+
+    @property
+    def max_tokens_per_finding(self) -> int:
+        return self.max_donuts_per_finding
 
 
 class BudgetTracker:
     def __init__(self, config: BudgetConfig) -> None:
         self._config = config
-        self._tokens_used: int = 0
+        self._donuts_used: int = 0
 
     @property
-    def tokens_used(self) -> int:
-        return self._tokens_used
+    def donuts_used(self) -> int:
+        return self._donuts_used
 
+    # Backward-compat alias
+    @property
+    def tokens_used(self) -> int:
+        return self._donuts_used
+
+    def add_donuts(self, count: int) -> None:
+        self._donuts_used += count
+
+    # Backward-compat alias
     def add_tokens(self, count: int) -> None:
-        self._tokens_used += count
+        self.add_donuts(count)
 
     def run_budget_exhausted(self) -> bool:
-        return self._tokens_used > self._config.max_tokens_per_run
+        return self._donuts_used > self._config.max_donuts_per_run
 
     def run_budget_remaining(self) -> int:
-        return max(0, self._config.max_tokens_per_run - self._tokens_used)
+        return max(0, self._config.max_donuts_per_run - self._donuts_used)
 
     def budget_remaining_pct(self) -> float:
-        if self._config.max_tokens_per_run == 0:
+        if self._config.max_donuts_per_run == 0:
             return 0.0
-        return (self.run_budget_remaining() / self._config.max_tokens_per_run) * 100.0
+        return (self.run_budget_remaining() / self._config.max_donuts_per_run) * 100.0
 
-    def finding_budget_exhausted(self, finding_tokens: int) -> bool:
-        return finding_tokens > self._config.max_tokens_per_finding
+    def finding_budget_exhausted(self, finding_donuts: int) -> bool:
+        return finding_donuts > self._config.max_donuts_per_finding
 
 
 def check_circuit_breaker(
@@ -84,9 +102,14 @@ class CostEntry:
     events: int
     findings: int
     actors_invoked: bool
-    tokens_used: int
+    donuts_used: int
     estimated_cost_usd: float
     budget_remaining_pct: float
+
+    # Backward-compat alias for old code reading costs.jsonl files
+    @property
+    def tokens_used(self) -> int:
+        return self.donuts_used
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -94,19 +117,21 @@ class CostEntry:
             "events": self.events,
             "findings": self.findings,
             "actors_invoked": self.actors_invoked,
-            "tokens_used": self.tokens_used,
+            "donuts_used": self.donuts_used,
             "estimated_cost_usd": self.estimated_cost_usd,
             "budget_remaining_pct": self.budget_remaining_pct,
         }
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> CostEntry:
+    def from_dict(cls, data: dict[str, Any]) -> "CostEntry":
+        # Accept both new "donuts_used" and old "tokens_used" for backward compat
+        donuts_used = data.get("donuts_used", data.get("tokens_used", 0))
         return cls(
             timestamp=datetime.fromisoformat(data["timestamp"]),
             events=data["events"],
             findings=data["findings"],
             actors_invoked=data["actors_invoked"],
-            tokens_used=data["tokens_used"],
+            donuts_used=donuts_used,
             estimated_cost_usd=data["estimated_cost_usd"],
             budget_remaining_pct=data["budget_remaining_pct"],
         )

@@ -224,7 +224,7 @@ class TestStatusJsonOutput:
                 "timestamp": (datetime.now(timezone.utc) - timedelta(hours=12)).isoformat(),
                 "events": 10,
                 "findings": 2,
-                "tokens_used": 5000,
+                "donuts_used": 5000,
                 "estimated_cost_usd": 0.00125,
                 "actors_invoked": True,
                 "budget_remaining_pct": 90.0,
@@ -233,7 +233,7 @@ class TestStatusJsonOutput:
                 "timestamp": (datetime.now(timezone.utc) - timedelta(hours=6)).isoformat(),
                 "events": 15,
                 "findings": 3,
-                "tokens_used": 8000,
+                "donuts_used": 8000,
                 "estimated_cost_usd": 0.002,
                 "actors_invoked": True,
                 "budget_remaining_pct": 84.0,
@@ -248,8 +248,8 @@ class TestStatusJsonOutput:
         assert "costs" in data
         costs = data["costs"]
         assert costs["total_runs"] == 2
-        assert costs["total_tokens"] == 13000
-        assert costs["avg_tokens_per_run"] == 6500.0
+        assert costs["total_donuts"] == 13000
+        assert costs["avg_donuts_per_run"] == 6500.0
         assert costs["estimated_total_usd"] > 0
         assert "circuit_breaker_triggered" in costs
         assert "budget_exhausted" in costs

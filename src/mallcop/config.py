@@ -11,7 +11,7 @@ import yaml
 
 from mallcop.secrets import ConfigError, SecretProvider, EnvSecretProvider
 
-__all__ = ["load_config", "MallcopConfig", "BudgetConfig", "BaselineConfig", "LLMConfig", "RouteConfig", "ProConfig", "ConfigError", "_parse_routing"]
+__all__ = ["load_config", "MallcopConfig", "BudgetConfig", "BaselineConfig", "LLMConfig", "RouteConfig", "ProConfig", "GitHubConfig", "ConfigError", "_parse_routing"]
 
 # Re-export ConfigError so tests can import from mallcop.config
 ConfigError = ConfigError
@@ -21,8 +21,8 @@ _DEFAULT_BASELINE_WINDOW_DAYS = 30
 
 # Default budget values from design doc
 _DEFAULT_MAX_FINDINGS_FOR_ACTORS = 25
-_DEFAULT_MAX_TOKENS_PER_RUN = 50000
-_DEFAULT_MAX_TOKENS_PER_FINDING = 5000
+_DEFAULT_MAX_DONUTS_PER_RUN = 50000
+_DEFAULT_MAX_DONUTS_PER_FINDING = 5000
 
 # Pattern for ${VAR_NAME} references
 _SECRET_REF_PATTERN = re.compile(r"^\$\{([^}]+)\}$")
@@ -45,8 +45,17 @@ class BaselineConfig:
 @dataclass
 class BudgetConfig:
     max_findings_for_actors: int = _DEFAULT_MAX_FINDINGS_FOR_ACTORS
-    max_tokens_per_run: int = _DEFAULT_MAX_TOKENS_PER_RUN
-    max_tokens_per_finding: int = _DEFAULT_MAX_TOKENS_PER_FINDING
+    max_donuts_per_run: int = _DEFAULT_MAX_DONUTS_PER_RUN
+    max_donuts_per_finding: int = _DEFAULT_MAX_DONUTS_PER_FINDING
+
+    # Backward-compat aliases so old code referencing max_tokens_* still works.
+    @property
+    def max_tokens_per_run(self) -> int:
+        return self.max_donuts_per_run
+
+    @property
+    def max_tokens_per_finding(self) -> int:
+        return self.max_donuts_per_finding
 
 
 @dataclass
@@ -91,6 +100,13 @@ class ProConfig:
 
 
 @dataclass
+class GitHubConfig:
+    repo: str = ""              # "user/mallcop-findings"
+    credentials_path: str = ""  # "/opt/mallcop/.credentials"
+    client_id: str = ""         # GitHub OAuth App client ID
+
+
+@dataclass
 class MallcopConfig:
     secrets_backend: str
     connectors: dict[str, dict[str, Any]]
@@ -101,6 +117,7 @@ class MallcopConfig:
     llm: LLMConfig | None = None
     actors: dict[str, dict[str, Any]] = field(default_factory=dict)
     pro: ProConfig | None = None
+    github: GitHubConfig | None = None
     squelch: int = 5  # 0-10: confidence gate; squelch/10 = threshold; 0=off, 10=max
 
 
@@ -132,19 +149,29 @@ def _get_secret_provider(backend: str) -> SecretProvider:
 
 
 def _parse_budget(raw: dict[str, Any] | None) -> BudgetConfig:
-    """Parse budget section, using defaults for missing values."""
+    """Parse budget section, using defaults for missing values.
+
+    Accepts both new donut field names and old token field names for backward compat.
+    New names take precedence when both are present.
+    """
     if raw is None:
         return BudgetConfig()
+    # max_donuts_per_run: new name wins; fall back to old max_tokens_per_run
+    max_donuts_per_run = raw.get(
+        "max_donuts_per_run",
+        raw.get("max_tokens_per_run", _DEFAULT_MAX_DONUTS_PER_RUN),
+    )
+    # max_donuts_per_finding: new name wins; fall back to old max_tokens_per_finding
+    max_donuts_per_finding = raw.get(
+        "max_donuts_per_finding",
+        raw.get("max_tokens_per_finding", _DEFAULT_MAX_DONUTS_PER_FINDING),
+    )
     return BudgetConfig(
         max_findings_for_actors=raw.get(
             "max_findings_for_actors", _DEFAULT_MAX_FINDINGS_FOR_ACTORS
         ),
-        max_tokens_per_run=raw.get(
-            "max_tokens_per_run", _DEFAULT_MAX_TOKENS_PER_RUN
-        ),
-        max_tokens_per_finding=raw.get(
-            "max_tokens_per_finding", _DEFAULT_MAX_TOKENS_PER_FINDING
-        ),
+        max_donuts_per_run=max_donuts_per_run,
+        max_donuts_per_finding=max_donuts_per_finding,
     )
 
 
@@ -231,6 +258,17 @@ def _parse_pro(raw: dict[str, Any] | None, provider: SecretProvider) -> ProConfi
     )
 
 
+def _parse_github(raw: dict[str, Any] | None) -> GitHubConfig | None:
+    """Parse github section. Returns None if section missing."""
+    if raw is None or not isinstance(raw, dict):
+        return None
+    return GitHubConfig(
+        repo=raw.get("repo", ""),
+        credentials_path=raw.get("credentials_path", ""),
+        client_id=raw.get("client_id", ""),
+    )
+
+
 def load_config(config_dir: Path) -> MallcopConfig:
     """Load and parse mallcop.yaml from the given directory.
 
@@ -285,6 +323,7 @@ def load_config(config_dir: Path) -> MallcopConfig:
 
     # Pro config
     pro_config = _parse_pro(raw.get("pro"), provider)
+    github_config = _parse_github(raw.get("github"))
 
     # Squelch: 0-10 integer gate, default 5
     squelch_raw = raw.get("squelch", 5)
@@ -300,5 +339,6 @@ def load_config(config_dir: Path) -> MallcopConfig:
         llm=llm_config,
         actors=actors_config,
         pro=pro_config,
+        github=github_config,
         squelch=squelch,
     )

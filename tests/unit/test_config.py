@@ -178,8 +178,8 @@ class TestLoadConfig:
         config = load_config(tmp_path)
 
         assert config.budget.max_findings_for_actors == 25
-        assert config.budget.max_tokens_per_run == 50000
-        assert config.budget.max_tokens_per_finding == 5000
+        assert config.budget.max_donuts_per_run == 50000
+        assert config.budget.max_donuts_per_finding == 5000
 
     def test_default_budget_when_not_specified(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("GITHUB_TOKEN", "g")
@@ -189,8 +189,8 @@ class TestLoadConfig:
 
         # Defaults from design doc
         assert config.budget.max_findings_for_actors == 25
-        assert config.budget.max_tokens_per_run == 50000
-        assert config.budget.max_tokens_per_finding == 5000
+        assert config.budget.max_donuts_per_run == 50000
+        assert config.budget.max_donuts_per_finding == 5000
 
     def test_missing_secret_raises_clear_error(self, tmp_path: Path) -> None:
         self._write_config(tmp_path, MINIMAL_CONFIG_YAML)
@@ -248,8 +248,8 @@ class TestLoadConfig:
         config = load_config(tmp_path)
 
         assert config.budget.max_findings_for_actors == 10
-        assert config.budget.max_tokens_per_run == 50000
-        assert config.budget.max_tokens_per_finding == 5000
+        assert config.budget.max_donuts_per_run == 50000
+        assert config.budget.max_donuts_per_finding == 5000
 
     def test_nested_secret_references_in_connectors(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -280,6 +280,59 @@ class TestLoadConfig:
 
         assert config.connectors["custom"]["api_key"] == "mykey123"
         assert config.connectors["custom"]["endpoint"] == "https://example.com"
+
+    def test_budget_old_token_field_names_backward_compat(
+        self, tmp_path: Path
+    ) -> None:
+        """Old max_tokens_per_run / max_tokens_per_finding YAML keys map to donuts fields."""
+        yaml_content = textwrap.dedent("""\
+            secrets:
+              backend: env
+
+            connectors:
+              github:
+                token: literal
+
+            routing: {}
+            actor_chain: {}
+
+            budget:
+              max_findings_for_actors: 20
+              max_tokens_per_run: 30000
+              max_tokens_per_finding: 3000
+        """)
+        self._write_config(tmp_path, yaml_content)
+        config = load_config(tmp_path)
+        # Old YAML field names are mapped to new donut fields
+        assert config.budget.max_findings_for_actors == 20
+        assert config.budget.max_donuts_per_run == 30000
+        assert config.budget.max_donuts_per_finding == 3000
+
+    def test_budget_new_donut_field_names(
+        self, tmp_path: Path
+    ) -> None:
+        """New max_donuts_per_run / max_donuts_per_finding YAML keys are parsed correctly."""
+        yaml_content = textwrap.dedent("""\
+            secrets:
+              backend: env
+
+            connectors:
+              github:
+                token: literal
+
+            routing: {}
+            actor_chain: {}
+
+            budget:
+              max_findings_for_actors: 15
+              max_donuts_per_run: 25000
+              max_donuts_per_finding: 2500
+        """)
+        self._write_config(tmp_path, yaml_content)
+        config = load_config(tmp_path)
+        assert config.budget.max_findings_for_actors == 15
+        assert config.budget.max_donuts_per_run == 25000
+        assert config.budget.max_donuts_per_finding == 2500
 
 
 # --- Baseline config ---

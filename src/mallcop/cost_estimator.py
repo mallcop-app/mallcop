@@ -25,14 +25,14 @@ def estimate_costs(
     est_findings_low = max(1, est_events_low // 20)
     est_findings_high = min(budget.max_findings_for_actors, est_events_high // 10)
 
-    est_tokens_low = est_findings_low * 1000
-    est_tokens_high = min(budget.max_tokens_per_run, est_findings_high * 3000)
+    est_donuts_low = est_findings_low * 1000
+    est_donuts_high = min(budget.max_donuts_per_run, est_findings_high * 3000)
 
-    cost_per_run_low = (est_tokens_low / 1000) * COST_PER_1K_TOKENS_USD
-    cost_per_run_high = (est_tokens_high / 1000) * COST_PER_1K_TOKENS_USD
+    cost_per_run_low = (est_donuts_low / 1000) * COST_PER_1K_TOKENS_USD
+    cost_per_run_high = (est_donuts_high / 1000) * COST_PER_1K_TOKENS_USD
 
-    worst_case_tokens = budget.max_tokens_per_run
-    worst_case_cost = (worst_case_tokens / 1000) * COST_PER_1K_TOKENS_USD
+    worst_case_donuts = budget.max_donuts_per_run
+    worst_case_cost = (worst_case_donuts / 1000) * COST_PER_1K_TOKENS_USD
 
     runs_per_day = 4
     cost_per_month_low = cost_per_run_low * runs_per_day * 30
@@ -43,12 +43,12 @@ def estimate_costs(
         "connectors_active": num_connectors,
         "estimated_events_per_run": f"{est_events_low}-{est_events_high}",
         "estimated_findings_per_run": f"{est_findings_low}-{est_findings_high}",
-        "estimated_tokens_per_run": f"{est_tokens_low}-{est_tokens_high}",
+        "estimated_donuts_per_run": f"{est_donuts_low}-{est_donuts_high}",
         "estimated_cost_per_run_usd": f"{cost_per_run_low:.4f}-{cost_per_run_high:.4f}",
         "estimated_cost_per_month_usd": f"{cost_per_month_low:.3f}-{cost_per_month_high:.3f}",
-        "budget_max_tokens_per_run": budget.max_tokens_per_run,
+        "budget_max_donuts_per_run": budget.max_donuts_per_run,
         "budget_max_findings_for_actors": budget.max_findings_for_actors,
-        "budget_max_tokens_per_finding": budget.max_tokens_per_finding,
+        "budget_max_donuts_per_finding": budget.max_donuts_per_finding,
         "worst_case_cost_per_run_usd": f"{worst_case_cost:.4f}",
         "worst_case_cost_per_month_usd": f"{worst_case_month:.3f}",
     }
