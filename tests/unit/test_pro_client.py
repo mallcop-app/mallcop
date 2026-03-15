@@ -1,11 +1,12 @@
-"""Tests for ProClient.verify_email_request, verify_email_confirm, and notify."""
+"""Tests for ProClient public API — all HTTP mocked, no live calls."""
 from __future__ import annotations
 
 from unittest.mock import patch, MagicMock
 
 import pytest
+import requests
 
-from mallcop.pro import ProClient
+from mallcop.pro import AccountInfo, ProClient
 
 
 @pytest.fixture
@@ -116,3 +117,175 @@ def test_notify_server_error(mock_post, client):
             "acct-1", "tok-1",
             subject="Alert", findings=[], trigger="manual",
         )
+
+
+# --- create_account ---
+
+
+@patch("mallcop.pro.requests.post")
+def test_create_account_success(mock_post, client):
+    mock_post.return_value = _mock_response(200, {"account_id": "acc-1", "service_token": "tok-1"})
+    aid, tok = client.create_account("user@example.com")
+    assert aid == "acc-1"
+    assert tok == "tok-1"
+
+
+@patch("mallcop.pro.requests.post")
+def test_create_account_http_error(mock_post, client):
+    mock_post.return_value = _mock_response(500)
+    with pytest.raises(RuntimeError, match="HTTP 500"):
+        client.create_account("user@example.com")
+
+
+# --- get_account ---
+
+
+@patch("mallcop.pro.requests.get")
+def test_get_account_success(mock_get, client):
+    mock_get.return_value = _mock_response(200, {
+        "account_id": "acc-1", "email": "u@x.com",
+        "plan_tier": "pro", "status": "active",
+    })
+    info = client.get_account("acc-1", "tok-1")
+    assert isinstance(info, AccountInfo)
+    assert info.plan_tier == "pro"
+    assert info.account_id == "acc-1"
+
+
+@patch("mallcop.pro.requests.get")
+def test_get_account_401(mock_get, client):
+    mock_get.return_value = _mock_response(401)
+    with pytest.raises(RuntimeError, match="HTTP 401"):
+        client.get_account("acc-1", "bad-tok")
+
+
+# --- validate_token ---
+
+
+@patch("mallcop.pro.requests.get")
+def test_validate_token_valid(mock_get, client):
+    mock_get.return_value = _mock_response(200, {
+        "account_id": "acc-1", "email": "u@x.com",
+        "plan_tier": "pro", "status": "active",
+    })
+    info = client.validate_token("tok-1")
+    assert info is not None
+    assert info.account_id == "acc-1"
+
+
+@patch("mallcop.pro.requests.get")
+def test_validate_token_invalid(mock_get, client):
+    mock_get.return_value = _mock_response(401)
+    assert client.validate_token("bad-tok") is None
+
+
+@patch("mallcop.pro.requests.get")
+def test_validate_token_request_exception(mock_get, client):
+    mock_get.side_effect = requests.ConnectionError("down")
+    assert client.validate_token("tok-1") is None
+
+
+@patch("mallcop.pro.requests.get")
+def test_validate_token_malformed_json(mock_get, client):
+    mock_get.return_value = _mock_response(200, {"unexpected": "shape"})
+    assert client.validate_token("tok-1") is None
+
+
+# --- record_usage ---
+
+
+@patch("mallcop.pro.requests.post")
+def test_record_usage_success(mock_post, client):
+    mock_post.return_value = _mock_response(200, {"status": "ok"})
+    result = client.record_usage("acc-1", "claude-3", 100, 50, "tok-1")
+    assert result == {"status": "ok"}
+
+
+@patch("mallcop.pro.requests.post")
+def test_record_usage_http_error(mock_post, client):
+    mock_post.return_value = _mock_response(429)
+    with pytest.raises(RuntimeError, match="HTTP 429"):
+        client.record_usage("acc-1", "claude-3", 100, 50, "tok-1")
+
+
+# --- subscribe ---
+
+
+@patch("mallcop.pro.requests.post")
+def test_subscribe_returns_checkout_url(mock_post, client):
+    mock_post.return_value = _mock_response(200, {"checkout_url": "https://checkout.example.com/xyz"})
+    url = client.subscribe("acc-1", "pro", "tok-1")
+    assert url == "https://checkout.example.com/xyz"
+
+
+@patch("mallcop.pro.requests.post")
+def test_subscribe_http_error(mock_post, client):
+    mock_post.return_value = _mock_response(500)
+    with pytest.raises(RuntimeError, match="HTTP 500"):
+        client.subscribe("acc-1", "pro", "tok-1")
+
+
+# --- check_subscription ---
+
+
+@patch("mallcop.pro.requests.get")
+def test_check_subscription_extracts_fields(mock_get, client):
+    mock_get.return_value = _mock_response(200, {
+        "account_id": "acc-1", "email": "u@x.com",
+        "plan_tier": "sentinel", "status": "active",
+    })
+    result = client.check_subscription("acc-1", "tok-1")
+    assert result == {"plan_tier": "sentinel", "status": "active"}
+
+
+# --- get_usage ---
+
+
+@patch("mallcop.pro.requests.get")
+def test_get_usage_returns_raw(mock_get, client):
+    usage_data = {"total_tokens": 5000, "records": []}
+    mock_get.return_value = _mock_response(200, usage_data)
+    result = client.get_usage("acc-1", "tok-1")
+    assert result == usage_data
+
+
+# --- recommend_plan ---
+
+
+@patch("mallcop.pro.requests.post")
+def test_recommend_plan_success(mock_post, client):
+    plan_data = {"recommended_tier": "pro", "estimated_donuts": 1000}
+    mock_post.return_value = _mock_response(200, plan_data)
+    result = client.recommend_plan(["github"])
+    assert result == plan_data
+
+
+@patch("mallcop.pro.requests.post")
+def test_recommend_plan_network_error(mock_post, client):
+    mock_post.side_effect = requests.ConnectionError("unreachable")
+    with pytest.raises(RuntimeError, match="Could not reach mallcop.app"):
+        client.recommend_plan(["github"])
+
+
+@patch("mallcop.pro.requests.post")
+def test_recommend_plan_non_200(mock_post, client):
+    mock_post.return_value = _mock_response(503)
+    with pytest.raises(RuntimeError, match="Could not reach mallcop.app"):
+        client.recommend_plan(["github"])
+
+
+# --- _api_call error prefix ---
+
+
+@patch("mallcop.pro.requests.get")
+def test_api_call_error_includes_caller_name(mock_get, client):
+    mock_get.return_value = _mock_response(500)
+    with pytest.raises(RuntimeError, match=r"ProClient\.get_account"):
+        client.get_account("acc-1", "tok-1")
+
+
+@patch("mallcop.pro.requests.post")
+def test_api_call_error_prefix_record_usage(mock_post, client):
+    mock_post.return_value = _mock_response(500)
+    with pytest.raises(RuntimeError, match=r"ProClient\.record_usage"):
+        client.record_usage("acc-1", "m", 0, 0, "tok-1")
