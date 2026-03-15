@@ -81,6 +81,32 @@ def fetch_microsoft_oauth_token(
     return data["access_token"], expires_at
 
 
+def build_checkpoint(
+    connector: str,
+    latest_value: str | None,
+    old_checkpoint: Any | None,
+    now: datetime,
+    *,
+    default_value: str | None = None,
+) -> "Checkpoint":
+    """Build a Checkpoint using the standard 3-way fallback.
+
+    1. If latest_value is set, use it (new data arrived).
+    2. Elif old_checkpoint exists, reuse its value (no new data).
+    3. Else use default_value if provided, otherwise now.isoformat().
+    """
+    from mallcop.schemas import Checkpoint
+
+    if latest_value is not None:
+        value = latest_value
+    elif old_checkpoint is not None:
+        value = old_checkpoint.value
+    else:
+        value = default_value if default_value is not None else now.isoformat()
+
+    return Checkpoint(connector=connector, value=value, updated_at=now)
+
+
 def make_event_id(source_id: str) -> str:
     """Deterministic event ID from a source identifier.
 

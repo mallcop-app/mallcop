@@ -100,6 +100,7 @@ def _classify_severity(event_name: str, error_code: str | None) -> Severity:
 from mallcop.aws_sigv4 import sign_v4_request
 from mallcop.connectors._util import (
     DEFAULT_FIRST_POLL_LOOKBACK,
+    build_checkpoint,
     make_event_id as _make_event_id,
     parse_iso_timestamp,
 )
@@ -257,24 +258,7 @@ class AwsCloudTrailConnector(ConnectorBase):
                 latest_ts = event_ts
 
         # Build checkpoint
-        if latest_ts is not None:
-            new_checkpoint = Checkpoint(
-                connector="aws-cloudtrail",
-                value=latest_ts.isoformat(),
-                updated_at=now,
-            )
-        elif checkpoint is not None:
-            new_checkpoint = Checkpoint(
-                connector="aws-cloudtrail",
-                value=checkpoint.value,
-                updated_at=now,
-            )
-        else:
-            new_checkpoint = Checkpoint(
-                connector="aws-cloudtrail",
-                value=now.isoformat(),
-                updated_at=now,
-            )
+        new_checkpoint = build_checkpoint("aws-cloudtrail", latest_ts.isoformat() if latest_ts else None, checkpoint, now)
 
         return PollResult(events=events, checkpoint=new_checkpoint)
 

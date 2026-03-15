@@ -12,6 +12,7 @@ from mallcop.connectors._base import ConnectorBase
 from mallcop.connectors._util import (
     DEFAULT_FIRST_POLL_LOOKBACK,
     DEFAULT_TOKEN_EXPIRY_MARGIN,
+    build_checkpoint,
     make_event_id,
     validate_next_link,
 )
@@ -242,24 +243,7 @@ class M365Connector(ConnectorBase):
             if latest_ts is None or record_ts > latest_ts:
                 latest_ts = record_ts
 
-        if latest_ts is not None:
-            new_checkpoint = Checkpoint(
-                connector="m365",
-                value=latest_ts.isoformat(),
-                updated_at=now,
-            )
-        elif checkpoint is not None:
-            new_checkpoint = Checkpoint(
-                connector="m365",
-                value=checkpoint.value,
-                updated_at=now,
-            )
-        else:
-            new_checkpoint = Checkpoint(
-                connector="m365",
-                value=now.isoformat(),
-                updated_at=now,
-            )
+        new_checkpoint = build_checkpoint("m365", latest_ts.isoformat() if latest_ts else None, checkpoint, now)
 
         return PollResult(events=events, checkpoint=new_checkpoint)
 

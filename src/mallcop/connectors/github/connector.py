@@ -9,7 +9,7 @@ from urllib.parse import parse_qs, urlparse
 import requests
 
 from mallcop.connectors._base import ConnectorBase
-from mallcop.connectors._util import make_event_id, validate_next_link
+from mallcop.connectors._util import build_checkpoint, make_event_id, validate_next_link
 from mallcop.schemas import Checkpoint, DiscoveryResult, Event, PollResult, Severity
 from mallcop.secrets import ConfigError, SecretProvider
 
@@ -139,24 +139,7 @@ class GitHubConnector(ConnectorBase):
         cursor_value = pagination_cursor or last_doc_id
 
         # Build checkpoint from cursor
-        if cursor_value is not None:
-            new_checkpoint = Checkpoint(
-                connector="github",
-                value=cursor_value,
-                updated_at=now,
-            )
-        elif checkpoint is not None:
-            new_checkpoint = Checkpoint(
-                connector="github",
-                value=checkpoint.value,
-                updated_at=now,
-            )
-        else:
-            new_checkpoint = Checkpoint(
-                connector="github",
-                value="",
-                updated_at=now,
-            )
+        new_checkpoint = build_checkpoint("github", cursor_value, checkpoint, now, default_value="")
 
         return PollResult(events=events, checkpoint=new_checkpoint)
 

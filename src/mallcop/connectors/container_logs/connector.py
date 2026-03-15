@@ -36,7 +36,7 @@ def _parse_log_line(line: str) -> tuple[datetime | None, str]:
     return None, line
 
 from mallcop.connectors._base import ConnectorBase
-from mallcop.connectors._util import DEFAULT_TOKEN_EXPIRY_MARGIN, make_event_id, validate_next_link
+from mallcop.connectors._util import DEFAULT_TOKEN_EXPIRY_MARGIN, build_checkpoint, make_event_id, validate_next_link
 from mallcop.schemas import Checkpoint, DiscoveryResult, Event, PollResult, Severity
 from mallcop.secrets import ConfigError, SecretProvider
 
@@ -200,24 +200,7 @@ class ContainerLogsConnector(ConnectorBase):
             )
 
         # Build checkpoint
-        if latest_ts is not None:
-            new_checkpoint = Checkpoint(
-                connector="container-logs",
-                value=latest_ts.isoformat(),
-                updated_at=now,
-            )
-        elif checkpoint is not None:
-            new_checkpoint = Checkpoint(
-                connector="container-logs",
-                value=checkpoint.value,
-                updated_at=now,
-            )
-        else:
-            new_checkpoint = Checkpoint(
-                connector="container-logs",
-                value=now.isoformat(),
-                updated_at=now,
-            )
+        new_checkpoint = build_checkpoint("container-logs", latest_ts.isoformat() if latest_ts else None, checkpoint, now)
 
         return PollResult(events=all_events, checkpoint=new_checkpoint)
 

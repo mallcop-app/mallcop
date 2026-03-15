@@ -12,6 +12,7 @@ from mallcop.connectors._base import ConnectorBase
 from mallcop.connectors._util import (
     DEFAULT_FIRST_POLL_LOOKBACK,
     DEFAULT_TOKEN_EXPIRY_MARGIN,
+    build_checkpoint,
     make_event_id,
     parse_iso_timestamp,
     validate_next_link,
@@ -161,24 +162,7 @@ class AzureConnector(ConnectorBase):
                 latest_ts = event_ts
 
         # Build checkpoint
-        if latest_ts is not None:
-            new_checkpoint = Checkpoint(
-                connector="azure",
-                value=latest_ts.isoformat(),
-                updated_at=now,
-            )
-        elif checkpoint is not None:
-            new_checkpoint = Checkpoint(
-                connector="azure",
-                value=checkpoint.value,
-                updated_at=now,
-            )
-        else:
-            new_checkpoint = Checkpoint(
-                connector="azure",
-                value=now.isoformat(),
-                updated_at=now,
-            )
+        new_checkpoint = build_checkpoint("azure", latest_ts.isoformat() if latest_ts else None, checkpoint, now)
 
         return PollResult(events=events, checkpoint=new_checkpoint)
 
