@@ -347,42 +347,8 @@ class SupabaseConnector(ConnectorBase):
     ) -> tuple[list[Event], str]:
         """Poll Management API for config changes. Returns synthetic events.
 
-        Compares current state against cached state (stored in checkpoint metadata).
-        On first poll, establishes baseline — no findings emitted.
+        Stub: config change detection requires caching previous state in the
+        checkpoint. Until that is implemented, skip the API calls to avoid
+        wasting rate limit quota for zero functional benefit.
         """
-        events: list[Event] = []
-        ref = self._project_ref
-
-        # Poll secrets count (we can't see values, but can detect additions/removals)
-        try:
-            secrets = self._mgmt_get(f"/projects/{ref}/secrets")
-            secret_names = sorted(s.get("name", "") for s in secrets)
-        except Exception:
-            secret_names = []
-
-        # Poll API keys
-        try:
-            api_keys = self._mgmt_get(f"/projects/{ref}/api-keys")
-            if isinstance(api_keys, list):
-                key_names = sorted(k.get("name", "") for k in api_keys)
-            else:
-                key_names = []
-        except Exception:
-            key_names = []
-
-        # Poll auth config
-        try:
-            auth_config = self._mgmt_get(f"/projects/{ref}/config/auth")
-        except Exception:
-            auth_config = {}
-
-        # On first poll, just record baseline — no events
-        if since_ts is None:
-            return events, now.isoformat()
-
-        # Detect changes by comparing counts/keys
-        # (Full diff requires caching previous state — simplified for now:
-        #  we emit a config_change event each poll if we detect the endpoint is accessible)
-        # In production, this would compare against cached state in the checkpoint.
-
-        return events, now.isoformat()
+        return [], now.isoformat()
