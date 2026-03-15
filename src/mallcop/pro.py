@@ -141,6 +141,76 @@ class ProClient:
         """Get usage summary."""
         return self._api_call("get", f"/accounts/{account_id}/usage", token=service_token)
 
+    def verify_email_request(self, account_id: str, service_token: str) -> None:
+        """Request email verification OTP for an account.
+
+        Sends a POST to /accounts/{account_id}/email/verify-request.
+        The server emails an OTP to the account's address.
+
+        Raises:
+            RuntimeError: On non-200 response.
+        """
+        self._api_call(
+            "post",
+            f"/accounts/{account_id}/email/verify-request",
+            token=service_token,
+        )
+
+    def verify_email_confirm(self, account_id: str, otp: str, service_token: str) -> None:
+        """Confirm email verification with OTP.
+
+        Sends a POST to /accounts/{account_id}/email/verify-confirm.
+
+        Raises:
+            RuntimeError: On non-200 response.
+        """
+        self._api_call(
+            "post",
+            f"/accounts/{account_id}/email/verify-confirm",
+            token=service_token,
+            json={"otp": otp},
+        )
+
+    def notify(
+        self,
+        account_id: str,
+        service_token: str,
+        *,
+        subject: str,
+        findings: list[dict],
+        trigger: str,
+    ) -> dict:
+        """Send an operator notification email.
+
+        Sends a POST to /accounts/{account_id}/notify with finding summaries.
+
+        Returns:
+            Response dict with status ("sent" or "deduped").
+
+        Raises:
+            RuntimeError: On failure. Message contains typed prefixes for
+                specific errors so callers can distinguish:
+                - "ProClient.notify: email_not_verified" for 403
+                - "ProClient.notify: rate_limited:<seconds>" for 429
+                - "ProClient.notify: HTTP <code>" for other errors
+        """
+        url = f"{self._url}/accounts/{account_id}/notify"
+        resp = requests.post(
+            url,
+            headers={"Authorization": f"Bearer {service_token}"},
+            json={"subject": subject, "findings": findings, "trigger": trigger},
+            timeout=30,
+        )
+        if resp.status_code == 200:
+            return resp.json()
+        if resp.status_code == 403:
+            raise RuntimeError("ProClient.notify: email_not_verified")
+        if resp.status_code == 429:
+            retry_after = resp.json().get("retry_after", 600)
+            raise RuntimeError(f"ProClient.notify: rate_limited:{retry_after}")
+        _log.debug("notify failed: HTTP %d: %s", resp.status_code, resp.text)
+        raise RuntimeError(f"ProClient.notify: HTTP {resp.status_code}")
+
     def recommend_plan(self, connectors: list[str]) -> dict:
         """Get plan recommendation from service API.
 
