@@ -10,8 +10,9 @@ from typing import Any
 import yaml
 
 from mallcop.secrets import ConfigError, SecretProvider, EnvSecretProvider
+from mallcop.patrol import PatrolConfig, parse_patrols
 
-__all__ = ["load_config", "MallcopConfig", "BudgetConfig", "BaselineConfig", "LLMConfig", "RouteConfig", "ProConfig", "GitHubConfig", "ConfigError", "_parse_routing"]
+__all__ = ["load_config", "MallcopConfig", "BudgetConfig", "BaselineConfig", "LLMConfig", "RouteConfig", "ProConfig", "GitHubConfig", "ResearchConfig", "ConfigError", "_parse_routing", "PatrolConfig"]
 
 # Re-export ConfigError so tests can import from mallcop.config
 ConfigError = ConfigError
@@ -107,6 +108,12 @@ class GitHubConfig:
 
 
 @dataclass
+class ResearchConfig:
+    """Configuration for the OSINT research pipeline."""
+    allow_python: bool = False
+
+
+@dataclass
 class MallcopConfig:
     secrets_backend: str
     connectors: dict[str, dict[str, Any]]
@@ -119,6 +126,8 @@ class MallcopConfig:
     pro: ProConfig | None = None
     github: GitHubConfig | None = None
     squelch: int = 5  # 0-10: confidence gate; squelch/10 = threshold; 0=off, 10=max
+    patrols: list[PatrolConfig] = field(default_factory=list)
+    research: ResearchConfig = field(default_factory=ResearchConfig)
 
 
 def _resolve_value(value: Any, provider: SecretProvider) -> Any:
@@ -269,6 +278,15 @@ def _parse_github(raw: dict[str, Any] | None) -> GitHubConfig | None:
     )
 
 
+def _parse_research(raw: dict[str, Any] | None) -> ResearchConfig:
+    """Parse research section. Returns defaults if section missing."""
+    if raw is None or not isinstance(raw, dict):
+        return ResearchConfig()
+    return ResearchConfig(
+        allow_python=bool(raw.get("allow_python", False)),
+    )
+
+
 def load_config(config_dir: Path) -> MallcopConfig:
     """Load and parse mallcop.yaml from the given directory.
 
@@ -329,6 +347,12 @@ def load_config(config_dir: Path) -> MallcopConfig:
     squelch_raw = raw.get("squelch", 5)
     squelch = int(squelch_raw) if squelch_raw is not None else 5
 
+    # Patrols — optional, defaults to empty list
+    patrols_config = parse_patrols(raw, max_donuts_per_run=budget.max_donuts_per_run)
+
+    # Research config
+    research_config = _parse_research(raw.get("research"))
+
     return MallcopConfig(
         secrets_backend=backend,
         connectors=connectors,
@@ -341,4 +365,6 @@ def load_config(config_dir: Path) -> MallcopConfig:
         pro=pro_config,
         github=github_config,
         squelch=squelch,
+        patrols=patrols_config,
+        research=research_config,
     )
