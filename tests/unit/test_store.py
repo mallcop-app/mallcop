@@ -684,6 +684,58 @@ class TestJsonlStoreBaseline:
         assert "azure:role_assignment:new@ex.com" in bl.frequency_tables
 
 
+class TestBaselineRelationships:
+    """Relationships must be recomputed from all passed events each call."""
+
+    def test_relationships_from_all_events(self, tmp_path: Path) -> None:
+        """When all events are passed, relationships reflect full history."""
+        store = JsonlStore(tmp_path)
+        events = [
+            _make_event(id="evt_1", actor="alice@ex.com", target="/repo/A"),
+            _make_event(id="evt_2", actor="bob@ex.com", target="/repo/B"),
+        ]
+        store.append_events(events)
+        store.update_baseline(events)
+
+        bl = store.get_baseline()
+        assert "alice@ex.com:/repo/A" in bl.relationships
+        assert "bob@ex.com:/repo/B" in bl.relationships
+        assert bl.relationships["alice@ex.com:/repo/A"]["count"] == 1
+
+    def test_relationships_count_multiple_events(self, tmp_path: Path) -> None:
+        """Multiple events for same actor:target should sum counts."""
+        store = JsonlStore(tmp_path)
+        events = [
+            _make_event(id="evt_1", actor="alice@ex.com", target="/repo/A"),
+            _make_event(id="evt_2", actor="alice@ex.com", target="/repo/A"),
+        ]
+        store.append_events(events)
+        store.update_baseline(events)
+
+        bl = store.get_baseline()
+        assert bl.relationships["alice@ex.com:/repo/A"]["count"] == 2
+
+    def test_subset_events_lose_history(self, tmp_path: Path) -> None:
+        """Passing a subset of events recomputes only from that subset.
+
+        This documents the design: callers must pass ALL events to preserve
+        relationship history. The ack command was fixed to do this.
+        """
+        store = JsonlStore(tmp_path)
+        all_events = [
+            _make_event(id="evt_1", actor="alice@ex.com", target="/repo/A"),
+            _make_event(id="evt_2", actor="bob@ex.com", target="/repo/B"),
+        ]
+        store.append_events(all_events)
+        store.update_baseline(all_events)
+
+        # Passing only a subset wipes relationships not in that subset
+        store.update_baseline([all_events[1]])
+        bl = store.get_baseline()
+        assert "bob@ex.com:/repo/B" in bl.relationships
+        assert "alice@ex.com:/repo/A" not in bl.relationships
+
+
 class TestPathTraversal:
     """Path traversal guard in _event_file_path."""
 

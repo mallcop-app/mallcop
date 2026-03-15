@@ -1294,7 +1294,9 @@ def ack(finding_id: str, author: str, reason: str | None, dir_path: str | None, 
         except ConfigError:
             from mallcop.config import BaselineConfig
             ack_window_days = BaselineConfig().window_days
-        store.update_baseline(triggering_events, window_days=ack_window_days)
+        # Pass ALL events so relationships/freq tables are recomputed correctly
+        # (not just the triggering subset, which would wipe history)
+        store.update_baseline(all_events, window_days=ack_window_days)
 
     # Re-read the updated finding for output
     updated_findings = store.query_findings()
