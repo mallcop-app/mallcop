@@ -401,9 +401,10 @@ def run_escalate(
                     pass  # Best-effort: feedback loss is non-fatal
 
             # Apply resolutions from batch results
-            for i, result in enumerate(batch_result.results):
+            # Use zip to pair results with findings — avoids index mismatch if
+            # run_batch ever returns fewer results than input findings.
+            for finding, result in zip(batch_findings, batch_result.results):
                 processed += 1
-                finding = batch_findings[i]
                 if result.resolution is not None:
                     if result.resolution.action == ResolutionAction.RESOLVED:
                         store.update_finding(
@@ -514,9 +515,8 @@ def run_escalate(
             # Apply resolutions — boundary findings cannot be RESOLVED by actors.
             # Any RESOLVED action is overridden to ESCALATED here as a second enforcement
             # layer (the resolve-finding tool also enforces this).
-            for i, result in enumerate(bv_result.results):
+            for finding, result in zip(bv_batch_findings, bv_result.results):
                 processed += 1
-                finding = bv_batch_findings[i]
                 if result.resolution is not None:
                     reason = result.resolution.reason
                     if result.resolution.action == ResolutionAction.RESOLVED:
