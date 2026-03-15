@@ -12,7 +12,7 @@ import yaml
 from mallcop.secrets import ConfigError, SecretProvider, EnvSecretProvider
 from mallcop.patrol import PatrolConfig, parse_patrols
 
-__all__ = ["load_config", "MallcopConfig", "BudgetConfig", "BaselineConfig", "LLMConfig", "RouteConfig", "ProConfig", "GitHubConfig", "ResearchConfig", "ConfigError", "_parse_routing", "PatrolConfig"]
+__all__ = ["load_config", "MallcopConfig", "BudgetConfig", "BaselineConfig", "LLMConfig", "RouteConfig", "ProConfig", "GitHubConfig", "ResearchConfig", "NotifyConfig", "ConfigError", "_parse_routing", "PatrolConfig"]
 
 # Re-export ConfigError so tests can import from mallcop.config
 ConfigError = ConfigError
@@ -108,6 +108,19 @@ class GitHubConfig:
 
 
 @dataclass
+class NotifyConfig:
+    """Configuration for operator email notifications."""
+    email: bool = False
+    min_severity: str = "warn"
+    triggers: dict[str, bool] = field(default_factory=lambda: {
+        "hard_escalated": True,
+        "heal_failed": True,
+        "circuit_breaker": True,
+        "budget_exhausted": True,
+    })
+
+
+@dataclass
 class ResearchConfig:
     """Configuration for the OSINT research pipeline."""
     allow_python: bool = False
@@ -127,6 +140,7 @@ class MallcopConfig:
     github: GitHubConfig | None = None
     squelch: int = 5  # 0-10: confidence gate; squelch/10 = threshold; 0=off, 10=max
     patrols: list[PatrolConfig] = field(default_factory=list)
+    notify: NotifyConfig = field(default_factory=NotifyConfig)
     research: ResearchConfig = field(default_factory=ResearchConfig)
 
 
@@ -278,6 +292,28 @@ def _parse_github(raw: dict[str, Any] | None) -> GitHubConfig | None:
     )
 
 
+def _parse_notify(raw: dict[str, Any] | None) -> NotifyConfig:
+    """Parse notify section. Returns defaults (email disabled) if section missing."""
+    if raw is None or not isinstance(raw, dict):
+        return NotifyConfig()
+    default_triggers = {
+        "hard_escalated": True,
+        "heal_failed": True,
+        "circuit_breaker": True,
+        "budget_exhausted": True,
+    }
+    raw_triggers = raw.get("triggers")
+    if isinstance(raw_triggers, dict):
+        triggers = {k: bool(raw_triggers.get(k, v)) for k, v in default_triggers.items()}
+    else:
+        triggers = dict(default_triggers)
+    return NotifyConfig(
+        email=bool(raw.get("email", False)),
+        min_severity=raw.get("min_severity", "warn"),
+        triggers=triggers,
+    )
+
+
 def _parse_research(raw: dict[str, Any] | None) -> ResearchConfig:
     """Parse research section. Returns defaults if section missing."""
     if raw is None or not isinstance(raw, dict):
@@ -350,6 +386,9 @@ def load_config(config_dir: Path) -> MallcopConfig:
     # Patrols — optional, defaults to empty list
     patrols_config = parse_patrols(raw, max_donuts_per_run=budget.max_donuts_per_run)
 
+    # Notify config
+    notify_config = _parse_notify(raw.get("notify"))
+
     # Research config
     research_config = _parse_research(raw.get("research"))
 
@@ -365,6 +404,7 @@ def load_config(config_dir: Path) -> MallcopConfig:
         pro=pro_config,
         github=github_config,
         squelch=squelch,
+        notify=notify_config,
         patrols=patrols_config,
         research=research_config,
     )

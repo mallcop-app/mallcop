@@ -67,6 +67,113 @@ def _should_squelch(
     return True, False
 
 
+_SEVERITY_RANK = {"critical": 0, "warn": 1, "info": 2}
+
+
+def _maybe_notify(
+    *,
+    config: Any,
+    hard_escalated: int,
+    circuit_breaker_triggered: bool,
+    budget_exhausted: bool,
+    skipped: int,
+    all_findings: list,
+) -> None:
+    """Fire email notification if conditions are met. Never raises."""
+    # Pro config required
+    if config.pro is None or not config.pro.account_id or not config.pro.service_token:
+        return
+    # Notify must be enabled
+    if not config.notify.email:
+        return
+
+    triggers = config.notify.triggers
+
+    # Determine which trigger fired and collect relevant findings
+    trigger_name: str | None = None
+    notify_findings: list = []
+
+    if hard_escalated > 0 and triggers.get("hard_escalated", True):
+        trigger_name = "hard_escalated"
+        # Hard-escalated findings have an annotation with action="escalated"
+        # from the hard constraint check. Collect all findings with that marker.
+        for f in all_findings:
+            for ann in getattr(f, "annotations", []):
+                if getattr(ann, "action", None) == "escalated" and "hard-escalat" in getattr(ann, "reason", "").lower():
+                    notify_findings.append(f)
+                    break
+    elif circuit_breaker_triggered and triggers.get("circuit_breaker", True):
+        trigger_name = "circuit_breaker"
+        notify_findings = list(all_findings)
+    elif budget_exhausted and skipped > 0 and triggers.get("budget_exhausted", True):
+        trigger_name = "budget_exhausted"
+        # Budget-skipped findings
+        for f in all_findings:
+            for ann in getattr(f, "annotations", []):
+                if getattr(ann, "actor", None) == "mallcop-budget":
+                    notify_findings.append(f)
+                    break
+
+    # Also check for heal_failed: actor returned ESCALATED (not RESOLVED)
+    if trigger_name is None and triggers.get("heal_failed", True):
+        for f in all_findings:
+            for ann in getattr(f, "annotations", []):
+                if getattr(ann, "action", None) == "escalated" and getattr(ann, "actor", "") not in ("mallcop-budget", "mallcop-squelch"):
+                    # Check it's not a hard-escalation (those have specific reason patterns)
+                    reason = getattr(ann, "reason", "")
+                    if "hard constraint" not in reason.lower():
+                        notify_findings.append(f)
+                        break
+        if notify_findings:
+            trigger_name = "heal_failed"
+
+    if trigger_name is None or not notify_findings:
+        return
+
+    # Apply min_severity filter
+    min_sev = config.notify.min_severity
+    min_rank = _SEVERITY_RANK.get(min_sev, 1)
+    filtered = [f for f in notify_findings if _SEVERITY_RANK.get(f.severity.value, 2) <= min_rank]
+    if not filtered:
+        return
+
+    # Build finding summaries
+    summaries = []
+    for f in filtered:
+        summaries.append({
+            "id": f.id,
+            "title": f.title,
+            "severity": f.severity.value,
+            "detector": f.detector,
+            "reason": f.annotations[-1].reason if f.annotations else "",
+        })
+
+    # Send notification
+    from mallcop.pro import ProClient
+
+    try:
+        client = ProClient(account_url=config.pro.account_url)
+        client.notify(
+            config.pro.account_id,
+            config.pro.service_token,
+            subject=f"mallcop: {trigger_name} — {len(summaries)} finding(s)",
+            findings=summaries,
+            trigger=trigger_name,
+        )
+    except RuntimeError as exc:
+        msg = str(exc)
+        if "email_not_verified" in msg:
+            _log.warning("Email notify skipped: email not verified for account %s", config.pro.account_id)
+        elif "rate_limited" in msg:
+            parts = msg.split(":")
+            seconds = parts[-1] if len(parts) > 2 else "?"
+            _log.info("Email notify rate-limited, retry in %s seconds", seconds)
+        else:
+            _log.warning("Email notify failed: %s", msg)
+    except Exception:
+        _log.warning("Email notify failed (unexpected)", exc_info=True)
+
+
 # Haiku pricing (input + output blended estimate per 1k tokens)
 _COST_PER_1K_TOKENS_USD = 0.00025
 
@@ -430,6 +537,18 @@ def run_escalate(
                             )
                         ],
                     )
+
+    # --- Email notification ---
+    # Re-query findings so we see annotations added by actors/hard-constraints
+    post_findings = store.query_findings()
+    _maybe_notify(
+        config=config,
+        hard_escalated=hard_escalated,
+        circuit_breaker_triggered=circuit_breaker_triggered,
+        budget_exhausted=budget_exhausted,
+        skipped=skipped,
+        all_findings=post_findings,
+    )
 
     # Log cost entry
     total_donuts = tracker.donuts_used
