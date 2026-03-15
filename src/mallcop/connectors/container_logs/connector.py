@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 import re
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import requests
+
+_log = logging.getLogger(__name__)
 
 # ISO 8601 timestamp at start of line: 2026-03-05T14:30:00.000Z or 2026-03-05T14:30:00Z
 _TS_PATTERN = re.compile(r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z?)\s+(.*)$")
@@ -137,6 +140,7 @@ class ContainerLogsConnector(ConnectorBase):
 
         all_events: list[Event] = []
         latest_ts: datetime | None = None
+        app_errors: dict[str, str] = {}
 
         for app_cfg in self._apps:
             app_name = app_cfg["name"]
@@ -144,7 +148,9 @@ class ContainerLogsConnector(ConnectorBase):
 
             try:
                 rows = self._fetch_logs_for_app(app_name, resource_group, since)
-            except Exception:
+            except Exception as e:
+                app_errors[app_name] = str(e)
+                _log.warning("container-logs: failed to fetch %s: %s", app_name, e)
                 continue
 
             for row in rows:
@@ -185,6 +191,13 @@ class ContainerLogsConnector(ConnectorBase):
 
                 if latest_ts is None or event_ts > latest_ts:
                     latest_ts = event_ts
+
+        # If every app failed, raise so the scan pipeline sees the failure
+        if app_errors and len(app_errors) == len(self._apps):
+            raise RuntimeError(
+                f"container-logs: all {len(self._apps)} apps failed to fetch: "
+                + "; ".join(f"{k}: {v}" for k, v in app_errors.items())
+            )
 
         # Build checkpoint
         if latest_ts is not None:

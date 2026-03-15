@@ -493,8 +493,8 @@ class TestContainerLogsErrorPaths:
             with pytest.raises(ConfigError, match="No environment found"):
                 connector._get_workspace_id("opensign", "acme-rg")
 
-    def test_poll_gracefully_skips_app_on_network_error(self) -> None:
-        """poll() catches exceptions from _fetch_logs_for_app and continues."""
+    def test_poll_raises_when_all_apps_fail(self) -> None:
+        """poll() raises RuntimeError when every app fails to fetch."""
         from requests.exceptions import ConnectionError as ReqConnectionError
 
         connector = self._make_connector()
@@ -503,10 +503,35 @@ class TestContainerLogsErrorPaths:
             connector, "_fetch_logs_for_app",
             side_effect=ReqConnectionError("Connection timed out"),
         ):
+            with pytest.raises(RuntimeError, match="all 1 apps failed"):
+                connector.poll(checkpoint=None)
+
+    def test_poll_partial_failure_returns_successful_events(self) -> None:
+        """poll() returns events from successful apps when some fail."""
+        from mallcop.connectors.container_logs.connector import ContainerLogsConnector
+        from requests.exceptions import ConnectionError as ReqConnectionError
+
+        connector = ContainerLogsConnector(
+            subscription_id="sub-001",
+            resource_group="acme-rg",
+            apps=[
+                {"name": "app-ok", "container": "c1"},
+                {"name": "app-fail", "container": "c2"},
+            ],
+        )
+        connector._tenant_id = "tenant-001"
+        connector._client_id = "client-001"
+        connector._client_secret = "secret-001"
+
+        def fetch_side_effect(app_name, rg, since):
+            if app_name == "app-fail":
+                raise ReqConnectionError("Connection timed out")
+            return [{"TimeGenerated": "2026-03-15T00:00:00Z", "Log_s": "ok", "ContainerName_s": "c1", "Stream_s": "stdout"}]
+
+        with patch.object(connector, "_fetch_logs_for_app", side_effect=fetch_side_effect):
             result = connector.poll(checkpoint=None)
 
-        # Should return empty events, not raise
-        assert len(result.events) == 0
+        assert len(result.events) == 1
         assert isinstance(result.checkpoint, Checkpoint)
 
 
