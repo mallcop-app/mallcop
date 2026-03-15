@@ -357,6 +357,394 @@ class TestSkillParser:
         assert info.metadata["tags"] == ["foo", "bar"]
 
 
+# ─── poll() helpers ──────────────────────────────────────────────────
+
+
+class TestDecodeCheckpoint:
+    def test_decode_none_returns_empty_dict(self) -> None:
+        from mallcop.connectors.openclaw.connector import _decode_checkpoint
+
+        assert _decode_checkpoint(None) == {}
+
+    def test_decode_empty_value_returns_empty_dict(self) -> None:
+        from mallcop.connectors.openclaw.connector import _decode_checkpoint
+
+        cp = Checkpoint(connector="openclaw", value="", updated_at=datetime.now(timezone.utc))
+        assert _decode_checkpoint(cp) == {}
+
+    def test_decode_valid_json_returns_dict(self) -> None:
+        from mallcop.connectors.openclaw.connector import _decode_checkpoint
+
+        state = {"skill_hashes": {"foo": "abc123"}, "config_hash": "xyz"}
+        cp = Checkpoint(
+            connector="openclaw",
+            value=json.dumps(state),
+            updated_at=datetime.now(timezone.utc),
+        )
+        result = _decode_checkpoint(cp)
+        assert result["skill_hashes"] == {"foo": "abc123"}
+        assert result["config_hash"] == "xyz"
+
+    def test_decode_invalid_json_returns_empty_dict(self) -> None:
+        from mallcop.connectors.openclaw.connector import _decode_checkpoint
+
+        cp = Checkpoint(
+            connector="openclaw",
+            value="not-valid-json{{{",
+            updated_at=datetime.now(timezone.utc),
+        )
+        assert _decode_checkpoint(cp) == {}
+
+    def test_decode_non_string_value_returns_empty_dict(self) -> None:
+        from mallcop.connectors.openclaw.connector import _decode_checkpoint
+
+        cp = Checkpoint(connector="openclaw", value=None, updated_at=datetime.now(timezone.utc))  # type: ignore[arg-type]
+        assert _decode_checkpoint(cp) == {}
+
+
+class TestSkillInfoToDict:
+    def test_converts_all_fields(self, tmp_path: Path) -> None:
+        from mallcop.connectors.openclaw.connector import _skill_info_to_dict
+        from mallcop.connectors.openclaw.skills import SkillInfo
+
+        skill_path = tmp_path / "SKILL.md"
+        skill_path.write_text("content")
+        info = SkillInfo(
+            name="my-skill",
+            description="does stuff",
+            version="2.0.0",
+            author="alice",
+            path=skill_path,
+            content="content",
+        )
+        result = _skill_info_to_dict(info)
+
+        assert result["skill_name"] == "my-skill"
+        assert result["skill_description"] == "does stuff"
+        assert result["skill_version"] == "2.0.0"
+        assert result["skill_author"] == "alice"
+        assert result["skill_content"] == "content"
+        assert result["skill_path"] == str(skill_path)
+
+    def test_path_is_string(self, tmp_path: Path) -> None:
+        from mallcop.connectors.openclaw.connector import _skill_info_to_dict
+        from mallcop.connectors.openclaw.skills import SkillInfo
+
+        skill_path = tmp_path / "SKILL.md"
+        skill_path.write_text("x")
+        info = SkillInfo(name="x", description="", version="0", author="", path=skill_path, content="x")
+        result = _skill_info_to_dict(info)
+
+        assert isinstance(result["skill_path"], str)
+
+
+class TestMakeSkillEvent:
+    def test_event_fields(self, tmp_path: Path) -> None:
+        from mallcop.connectors.openclaw.connector import _make_skill_event
+
+        now = datetime.now(timezone.utc)
+        evt = _make_skill_event(
+            event_type="skill_installed",
+            skill_name="my-skill",
+            skill_info_dict={"skill_name": "my-skill", "skill_content": "body"},
+            timestamp=now,
+            openclaw_home=tmp_path,
+        )
+
+        assert evt.source == "openclaw"
+        assert evt.event_type == "skill_installed"
+        assert evt.actor == "filesystem"
+        assert evt.action == "skill_installed"
+        assert evt.target == "my-skill"
+        assert evt.timestamp == now
+        assert evt.metadata["skill_name"] == "my-skill"
+        assert evt.metadata["openclaw_home"] == str(tmp_path)
+
+    def test_event_raw_contains_skill_name(self, tmp_path: Path) -> None:
+        from mallcop.connectors.openclaw.connector import _make_skill_event
+
+        now = datetime.now(timezone.utc)
+        evt = _make_skill_event(
+            event_type="skill_removed",
+            skill_name="gone-skill",
+            skill_info_dict={"skill_name": "gone-skill"},
+            timestamp=now,
+            openclaw_home=tmp_path,
+        )
+
+        assert evt.raw["skill_name"] == "gone-skill"
+        assert evt.raw["event_type"] == "skill_removed"
+
+    def test_event_id_is_deterministic_for_same_inputs(self, tmp_path: Path) -> None:
+        from mallcop.connectors.openclaw.connector import _make_skill_event
+
+        now = datetime.now(timezone.utc)
+        evt1 = _make_skill_event(
+            event_type="skill_installed",
+            skill_name="foo",
+            skill_info_dict={},
+            timestamp=now,
+            openclaw_home=tmp_path,
+        )
+        evt2 = _make_skill_event(
+            event_type="skill_installed",
+            skill_name="foo",
+            skill_info_dict={},
+            timestamp=now,
+            openclaw_home=tmp_path,
+        )
+        assert evt1.id == evt2.id
+
+    def test_event_id_differs_for_different_skill_names(self, tmp_path: Path) -> None:
+        from mallcop.connectors.openclaw.connector import _make_skill_event
+
+        now = datetime.now(timezone.utc)
+        evt1 = _make_skill_event(
+            event_type="skill_installed",
+            skill_name="foo",
+            skill_info_dict={},
+            timestamp=now,
+            openclaw_home=tmp_path,
+        )
+        evt2 = _make_skill_event(
+            event_type="skill_installed",
+            skill_name="bar",
+            skill_info_dict={},
+            timestamp=now,
+            openclaw_home=tmp_path,
+        )
+        assert evt1.id != evt2.id
+
+
+# ─── poll() edge cases ────────────────────────────────────────────────
+
+
+class TestOpenClawPollEdgeCases:
+    def test_poll_empty_skills_dir_no_events_no_checkpoint(self, tmp_path: Path) -> None:
+        """No skills, no config → checkpoint with empty hashes, zero events."""
+        from mallcop.connectors.openclaw.connector import OpenClawConnector
+
+        (tmp_path / "skills").mkdir()
+        connector = OpenClawConnector()
+        connector.configure({"openclaw_home": str(tmp_path)})
+
+        result = connector.poll(checkpoint=None)
+
+        assert result.events == []
+        state = json.loads(result.checkpoint.value)
+        assert state["skill_hashes"] == {}
+        assert state["config_hash"] == ""
+
+    def test_poll_no_skills_dir_no_events(self, tmp_path: Path) -> None:
+        """Skills dir missing entirely → no skill events."""
+        from mallcop.connectors.openclaw.connector import OpenClawConnector
+
+        # No skills/ subdir at all
+        connector = OpenClawConnector()
+        connector.configure({"openclaw_home": str(tmp_path)})
+
+        result = connector.poll(checkpoint=None)
+
+        skill_events = [e for e in result.events if e.event_type.startswith("skill_")]
+        assert skill_events == []
+
+    def test_poll_config_invalid_json_still_emits_event(self, tmp_path: Path) -> None:
+        """Config file with invalid JSON triggers config_changed with empty config dict."""
+        from mallcop.connectors.openclaw.connector import OpenClawConnector
+
+        (tmp_path / "skills").mkdir()
+        config_path = tmp_path / "openclaw.json"
+        config_path.write_text("{invalid json!!!")
+
+        connector = OpenClawConnector()
+        connector.configure({"openclaw_home": str(tmp_path)})
+
+        result = connector.poll(checkpoint=None)
+
+        config_events = [e for e in result.events if e.event_type == "config_changed"]
+        assert len(config_events) == 1
+        assert config_events[0].metadata["config"] == {}
+
+    def test_poll_multiple_skills_all_appear_on_first_scan(self, tmp_path: Path) -> None:
+        """All skills on disk appear as skill_installed on first (None) checkpoint."""
+        from mallcop.connectors.openclaw.connector import OpenClawConnector
+
+        skills_dir = tmp_path / "skills"
+        skills_dir.mkdir()
+        for skill_name in ("alpha", "beta", "gamma"):
+            skill_dir = skills_dir / skill_name
+            skill_dir.mkdir()
+            (skill_dir / "SKILL.md").write_text(f"---\nname: {skill_name}\n---\n")
+
+        connector = OpenClawConnector()
+        connector.configure({"openclaw_home": str(tmp_path)})
+
+        result = connector.poll(checkpoint=None)
+
+        installed = [e for e in result.events if e.event_type == "skill_installed"]
+        assert len(installed) == 3
+        assert {e.target for e in installed} == {"alpha", "beta", "gamma"}
+
+    def test_poll_with_stale_checkpoint_detects_all_skills_as_installed(self, tmp_path: Path) -> None:
+        """Checkpoint listing skills that no longer exist + new skills on disk → removed + installed."""
+        from mallcop.connectors.openclaw.connector import OpenClawConnector
+
+        skills_dir = tmp_path / "skills"
+        skills_dir.mkdir()
+        (skills_dir / "new-skill").mkdir()
+        (skills_dir / "new-skill" / "SKILL.md").write_text("---\nname: new-skill\n---\n")
+
+        cp = _make_checkpoint(
+            skill_hashes={"old-skill": "deadbeef"},
+            config_hash="",
+        )
+        connector = OpenClawConnector()
+        connector.configure({"openclaw_home": str(tmp_path)})
+
+        result = connector.poll(checkpoint=cp)
+
+        installed = [e for e in result.events if e.event_type == "skill_installed"]
+        removed = [e for e in result.events if e.event_type == "skill_removed"]
+        assert len(installed) == 1
+        assert installed[0].target == "new-skill"
+        assert len(removed) == 1
+        assert removed[0].target == "old-skill"
+
+    def test_poll_removed_skill_event_has_skill_name_in_metadata(self, tmp_path: Path) -> None:
+        """Removed skill event carries skill_name in metadata even without a SKILL.md."""
+        from mallcop.connectors.openclaw.connector import OpenClawConnector
+
+        (tmp_path / "skills").mkdir()
+        cp = _make_checkpoint(skill_hashes={"vanished": "abc"}, config_hash="")
+
+        connector = OpenClawConnector()
+        connector.configure({"openclaw_home": str(tmp_path)})
+
+        result = connector.poll(checkpoint=cp)
+
+        removed = [e for e in result.events if e.event_type == "skill_removed"]
+        assert len(removed) == 1
+        assert removed[0].metadata["skill_name"] == "vanished"
+
+    def test_poll_checkpoint_updated_at_is_recent(self, tmp_path: Path) -> None:
+        """The new checkpoint's updated_at is within the last few seconds."""
+        from mallcop.connectors.openclaw.connector import OpenClawConnector
+
+        (tmp_path / "skills").mkdir()
+        connector = OpenClawConnector()
+        connector.configure({"openclaw_home": str(tmp_path)})
+
+        before = datetime.now(timezone.utc)
+        result = connector.poll(checkpoint=None)
+        after = datetime.now(timezone.utc)
+
+        assert before <= result.checkpoint.updated_at <= after
+
+    def test_poll_checkpoint_connector_name_is_openclaw(self, tmp_path: Path) -> None:
+        from mallcop.connectors.openclaw.connector import OpenClawConnector
+
+        (tmp_path / "skills").mkdir()
+        connector = OpenClawConnector()
+        connector.configure({"openclaw_home": str(tmp_path)})
+
+        result = connector.poll(checkpoint=None)
+
+        assert result.checkpoint.connector == "openclaw"
+
+    def test_poll_unicode_skill_directory_name(self, tmp_path: Path) -> None:
+        """Skills with unicode directory names are tracked correctly."""
+        from mallcop.connectors.openclaw.connector import OpenClawConnector
+
+        skills_dir = tmp_path / "skills"
+        skills_dir.mkdir()
+        skill_name = "résumé-skill"
+        skill_dir = skills_dir / skill_name
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text("---\nname: résumé-skill\n---\n")
+
+        connector = OpenClawConnector()
+        connector.configure({"openclaw_home": str(tmp_path)})
+
+        result = connector.poll(checkpoint=None)
+
+        installed = [e for e in result.events if e.event_type == "skill_installed"]
+        assert len(installed) == 1
+        assert installed[0].target == skill_name
+
+    def test_poll_skill_dir_without_skill_md_ignored(self, tmp_path: Path) -> None:
+        """Directories lacking SKILL.md are not treated as skills."""
+        from mallcop.connectors.openclaw.connector import OpenClawConnector
+
+        skills_dir = tmp_path / "skills"
+        skills_dir.mkdir()
+        # A directory without SKILL.md
+        (skills_dir / "not-a-skill").mkdir()
+        (skills_dir / "not-a-skill" / "README.md").write_text("no skill here")
+        # A valid skill
+        (skills_dir / "real-skill").mkdir()
+        (skills_dir / "real-skill" / "SKILL.md").write_text("---\nname: real-skill\n---\n")
+
+        connector = OpenClawConnector()
+        connector.configure({"openclaw_home": str(tmp_path)})
+
+        result = connector.poll(checkpoint=None)
+
+        installed = [e for e in result.events if e.event_type == "skill_installed"]
+        assert len(installed) == 1
+        assert installed[0].target == "real-skill"
+
+    def test_poll_config_unchanged_no_config_event(self, tmp_path: Path) -> None:
+        """When config hash matches checkpoint, no config_changed event is emitted."""
+        from mallcop.connectors.openclaw.connector import OpenClawConnector
+
+        (tmp_path / "skills").mkdir()
+        config_path = tmp_path / "openclaw.json"
+        config_path.write_text('{"key": "value"}')
+
+        connector = OpenClawConnector()
+        connector.configure({"openclaw_home": str(tmp_path)})
+
+        first = connector.poll(checkpoint=None)
+        second = connector.poll(checkpoint=first.checkpoint)
+
+        config_events = [e for e in second.events if e.event_type == "config_changed"]
+        assert config_events == []
+
+    def test_poll_config_event_target_is_config_path(self, tmp_path: Path) -> None:
+        """config_changed event target is the absolute path to openclaw.json."""
+        from mallcop.connectors.openclaw.connector import OpenClawConnector
+
+        (tmp_path / "skills").mkdir()
+        config_path = tmp_path / "openclaw.json"
+        config_path.write_text('{"x": 1}')
+
+        connector = OpenClawConnector()
+        connector.configure({"openclaw_home": str(tmp_path)})
+
+        result = connector.poll(checkpoint=None)
+
+        config_events = [e for e in result.events if e.event_type == "config_changed"]
+        assert len(config_events) == 1
+        assert config_events[0].target == str(config_path)
+
+    def test_poll_config_hash_in_new_checkpoint(self, tmp_path: Path) -> None:
+        """After seeing a config file, checkpoint stores its hash."""
+        from mallcop.connectors.openclaw.connector import OpenClawConnector
+        from mallcop.connectors.openclaw.skills import hash_file
+
+        (tmp_path / "skills").mkdir()
+        config_path = tmp_path / "openclaw.json"
+        config_path.write_text('{"a": 1}')
+
+        connector = OpenClawConnector()
+        connector.configure({"openclaw_home": str(tmp_path)})
+
+        result = connector.poll(checkpoint=None)
+
+        state = json.loads(result.checkpoint.value)
+        assert state["config_hash"] == hash_file(config_path)
+
+
 # ─── manifest ────────────────────────────────────────────────────────
 
 
