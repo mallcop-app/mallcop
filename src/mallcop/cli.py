@@ -15,6 +15,7 @@ import yaml
 from mallcop.baseline import retrospective_analysis
 from mallcop.config import load_config, BudgetConfig
 from mallcop.cost_estimator import estimate_costs
+from mallcop.patrol_cli import patrol
 from mallcop.plugins import discover_plugins, get_search_paths, instantiate_connector, load_plugin_class
 from mallcop.schemas import Finding, Severity
 from mallcop.secrets import ConfigError, EnvSecretProvider
@@ -77,6 +78,9 @@ def _parse_since(since: str) -> datetime:
 def cli() -> None:
     """Mallcop: Security monitoring for small cloud operators."""
 
+
+# Register sub-groups imported from other modules
+cli.add_command(patrol)
 
 # --- Core pipeline ---
 
