@@ -33,7 +33,7 @@ def _parse_log_line(line: str) -> tuple[datetime | None, str]:
     return None, line
 
 from mallcop.connectors._base import ConnectorBase
-from mallcop.connectors._util import DEFAULT_TOKEN_EXPIRY_MARGIN, make_event_id
+from mallcop.connectors._util import DEFAULT_TOKEN_EXPIRY_MARGIN, make_event_id, validate_next_link
 from mallcop.schemas import Checkpoint, DiscoveryResult, Event, PollResult, Severity
 from mallcop.secrets import ConfigError, SecretProvider
 
@@ -284,6 +284,7 @@ class ContainerLogsConnector(ConnectorBase):
         results.extend(data.get("value", []))
 
         while "nextLink" in data:
+            validate_next_link(data["nextLink"], "azure")
             resp = requests.get(data["nextLink"], headers=headers)
             resp.raise_for_status()
             data = resp.json()

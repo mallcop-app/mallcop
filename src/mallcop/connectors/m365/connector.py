@@ -13,6 +13,7 @@ from mallcop.connectors._util import (
     DEFAULT_FIRST_POLL_LOOKBACK,
     DEFAULT_TOKEN_EXPIRY_MARGIN,
     make_event_id,
+    validate_next_link,
 )
 from mallcop.schemas import Checkpoint, DiscoveryResult, Event, PollResult, Severity
 from mallcop.secrets import ConfigError, SecretProvider
@@ -352,6 +353,7 @@ class M365Connector(ConnectorBase):
         # M365 uses NextPageUri header for pagination
         while "NextPageUri" in resp.headers:
             next_url = resp.headers["NextPageUri"]
+            validate_next_link(next_url, "m365")
             resp = requests.get(next_url, headers=headers)
             resp.raise_for_status()
             blobs.extend(resp.json())
@@ -360,6 +362,7 @@ class M365Connector(ConnectorBase):
 
     def _fetch_audit_records(self, content_uri: str) -> list[dict[str, Any]]:
         """Fetch audit records from a content blob URI."""
+        validate_next_link(content_uri, "m365")
         headers = self._auth_headers()
         resp = requests.get(content_uri, headers=headers)
         resp.raise_for_status()

@@ -193,7 +193,7 @@ class TestAzureConnectorGetPaginated:
         page1_resp.raise_for_status = MagicMock()
         page1_resp.json.return_value = {
             "value": [{"id": "1"}],
-            "nextLink": "https://example.com/api?page=2",
+            "nextLink": "https://management.azure.com/subscriptions/sub-001?page=2",
         }
 
         page2_resp = MagicMock()
@@ -204,7 +204,7 @@ class TestAzureConnectorGetPaginated:
 
         with patch.object(connector, "_auth_headers", return_value={"Authorization": "Bearer fake"}), \
              patch("requests.get", side_effect=[page1_resp, page2_resp]):
-            results = connector._get_paginated("https://example.com/api")
+            results = connector._get_paginated("https://management.azure.com/subscriptions/sub-001")
 
         assert results == [{"id": "1"}, {"id": "2"}]
 

@@ -701,6 +701,32 @@ class TestPathTraversal:
         with pytest.raises(ValueError, match="Invalid source name"):
             store.append_events([event])
 
+    def test_url_encoded_traversal_raises(self, tmp_path: Path) -> None:
+        """URL-encoded path separators must be rejected."""
+        store = JsonlStore(tmp_path)
+        event = _make_event(source="azure%2F..%2F..%2F")
+        with pytest.raises(ValueError, match="Invalid source name"):
+            store.append_events([event])
+
+    def test_unicode_separator_raises(self, tmp_path: Path) -> None:
+        """Unicode path-like characters must be rejected."""
+        store = JsonlStore(tmp_path)
+        event = _make_event(source="azure\u2044dotdot")
+        with pytest.raises(ValueError, match="Invalid source name"):
+            store.append_events([event])
+
+    def test_empty_source_raises(self, tmp_path: Path) -> None:
+        store = JsonlStore(tmp_path)
+        event = _make_event(source="")
+        with pytest.raises(ValueError, match="Invalid source name"):
+            store.append_events([event])
+
+    def test_source_with_spaces_raises(self, tmp_path: Path) -> None:
+        store = JsonlStore(tmp_path)
+        event = _make_event(source="my source")
+        with pytest.raises(ValueError, match="Invalid source name"):
+            store.append_events([event])
+
     def test_normal_source_works(self, tmp_path: Path) -> None:
         """A normal source name works without error."""
         store = JsonlStore(tmp_path)
@@ -709,3 +735,91 @@ class TestPathTraversal:
         events = store.query_events(source="azure")
         assert len(events) == 1
         assert events[0].source == "azure"
+
+    def test_source_with_hyphens_dots_works(self, tmp_path: Path) -> None:
+        """Sources like container-logs and m365.audit should work."""
+        store = JsonlStore(tmp_path)
+        for source in ["container-logs", "m365.audit", "azure_activity"]:
+            event = _make_event(source=source)
+            store.append_events([event])
+
+
+class TestAtomicWrites:
+    """Verify that store writes use atomic temp-file-then-replace pattern."""
+
+    def test_rewrite_findings_atomic(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """_rewrite_findings uses os.replace, not direct open('w')."""
+        import os as _os
+
+        store = JsonlStore(tmp_path)
+        store.append_findings([_make_finding()])
+
+        replaced = []
+        original_replace = _os.replace
+
+        def mock_replace(src, dst):
+            replaced.append((src, str(dst)))
+            return original_replace(src, dst)
+
+        monkeypatch.setattr("os.replace", mock_replace)
+        store._rewrite_findings()
+
+        assert len(replaced) == 1
+        assert replaced[0][1] == str(store._findings_path)
+
+    def test_write_checkpoints_atomic(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """_write_checkpoints uses os.replace."""
+        import os as _os
+
+        store = JsonlStore(tmp_path)
+        cp = Checkpoint(connector="test", value="v1", updated_at=_utcnow())
+        store.set_checkpoint(cp)
+
+        replaced = []
+        original_replace = _os.replace
+
+        def mock_replace(src, dst):
+            replaced.append((src, str(dst)))
+            return original_replace(src, dst)
+
+        monkeypatch.setattr("os.replace", mock_replace)
+        store._write_checkpoints()
+
+        assert len(replaced) == 1
+        assert replaced[0][1] == str(store._checkpoints_path)
+
+    def test_update_baseline_atomic(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """update_baseline uses os.replace."""
+        import os as _os
+
+        store = JsonlStore(tmp_path)
+
+        replaced = []
+        original_replace = _os.replace
+
+        def mock_replace(src, dst):
+            replaced.append((src, str(dst)))
+            return original_replace(src, dst)
+
+        monkeypatch.setattr("os.replace", mock_replace)
+        store.update_baseline([_make_event()])
+
+        assert len(replaced) == 1
+        assert replaced[0][1] == str(store._baseline_path)
+
+    def test_rewrite_findings_cleans_up_on_error(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """If writing fails, temp file is cleaned up."""
+        store = JsonlStore(tmp_path)
+        store.append_findings([_make_finding()])
+
+        def boom(src, dst):
+            raise IOError("disk full")
+
+        monkeypatch.setattr("os.replace", boom)
+
+        with pytest.raises(IOError, match="disk full"):
+            store._rewrite_findings()
+
+        # No temp files left behind
+        temps = list(tmp_path.glob("*.tmp"))
+        assert temps == []

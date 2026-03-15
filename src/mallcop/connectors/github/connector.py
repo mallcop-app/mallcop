@@ -9,7 +9,7 @@ from urllib.parse import parse_qs, urlparse
 import requests
 
 from mallcop.connectors._base import ConnectorBase
-from mallcop.connectors._util import make_event_id
+from mallcop.connectors._util import make_event_id, validate_next_link
 from mallcop.schemas import Checkpoint, DiscoveryResult, Event, PollResult, Severity
 from mallcop.secrets import ConfigError, SecretProvider
 
@@ -230,6 +230,7 @@ class GitHubConnector(ConnectorBase):
             next_url = self._parse_next_link(resp.headers.get("Link", ""))
             if not next_url:
                 break
+            validate_next_link(next_url, "github")
             resp = requests.get(next_url, headers=headers)
             resp.raise_for_status()
             data = resp.json()

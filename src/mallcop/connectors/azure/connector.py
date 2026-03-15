@@ -14,6 +14,7 @@ from mallcop.connectors._util import (
     DEFAULT_TOKEN_EXPIRY_MARGIN,
     make_event_id,
     parse_iso_timestamp,
+    validate_next_link,
 )
 from mallcop.schemas import Checkpoint, DiscoveryResult, Event, PollResult, Severity
 from mallcop.secrets import ConfigError, SecretProvider
@@ -232,6 +233,7 @@ class AzureConnector(ConnectorBase):
         results.extend(data.get("value", []))
 
         while "nextLink" in data:
+            validate_next_link(data["nextLink"], "azure")
             resp = requests.get(data["nextLink"], headers=headers)
             resp.raise_for_status()
             data = resp.json()

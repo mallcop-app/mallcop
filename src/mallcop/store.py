@@ -6,12 +6,18 @@ JsonlStore persists to JSONL files and uses in-memory SQLite for queries.
 
 from __future__ import annotations
 
+import contextlib
 import json
+import os
+import re
 import sqlite3
+import tempfile
 from abc import ABC, abstractmethod
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+_SAFE_SOURCE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,62}$")
 
 import yaml
 
@@ -216,12 +222,12 @@ class JsonlStore(Store):
         self._db.commit()
 
     def _event_file_path(self, source: str, timestamp: datetime) -> Path:
-        if "/" in source or "\\" in source:
-            raise ValueError(f"Invalid source name: {source}")
+        if not _SAFE_SOURCE.match(source):
+            raise ValueError(f"Invalid source name: {source!r}")
         month_str = timestamp.strftime("%Y-%m")
         path = self._events_dir / f"{source}-{month_str}.jsonl"
         if not path.resolve().is_relative_to(self._events_dir.resolve()):
-            raise ValueError(f"Invalid source name: {source}")
+            raise ValueError(f"Invalid source name: {source!r}")
         return path
 
     def append_events(self, events: list[Event]) -> None:
@@ -318,20 +324,27 @@ class JsonlStore(Store):
 
     def _rewrite_findings(self) -> None:
         cur = self._db.execute("SELECT * FROM findings ORDER BY timestamp ASC")
-        with open(self._findings_path, "w") as f:
-            for row in cur.fetchall():
-                fnd = Finding(
-                    id=row[0],
-                    timestamp=datetime.fromisoformat(row[1]),
-                    detector=row[2],
-                    event_ids=json.loads(row[3]),
-                    title=row[4],
-                    severity=Severity(row[5]),
-                    status=FindingStatus(row[6]),
-                    annotations=[Annotation.from_dict(a) for a in json.loads(row[7])],
-                    metadata=json.loads(row[8]),
-                )
-                f.write(fnd.to_json() + "\n")
+        fd, tmp = tempfile.mkstemp(dir=self._findings_path.parent, suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w") as f:
+                for row in cur.fetchall():
+                    fnd = Finding(
+                        id=row[0],
+                        timestamp=datetime.fromisoformat(row[1]),
+                        detector=row[2],
+                        event_ids=json.loads(row[3]),
+                        title=row[4],
+                        severity=Severity(row[5]),
+                        status=FindingStatus(row[6]),
+                        annotations=[Annotation.from_dict(a) for a in json.loads(row[7])],
+                        metadata=json.loads(row[8]),
+                    )
+                    f.write(fnd.to_json() + "\n")
+            os.replace(tmp, self._findings_path)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                os.unlink(tmp)
+            raise
 
     def query_findings(
         self,
@@ -392,8 +405,15 @@ class JsonlStore(Store):
                 "value": cp.value,
                 "updated_at": cp.updated_at.isoformat(),
             }
-        with open(self._checkpoints_path, "w") as f:
-            yaml.dump(data, f, default_flow_style=False)
+        fd, tmp = tempfile.mkstemp(dir=self._checkpoints_path.parent, suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w") as f:
+                yaml.dump(data, f, default_flow_style=False)
+            os.replace(tmp, self._checkpoints_path)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                os.unlink(tmp)
+            raise
 
     def get_baseline(self) -> Baseline:
         if self._baseline is not None:
@@ -499,9 +519,16 @@ class JsonlStore(Store):
             relationships=rels,
         )
 
-        # Persist
-        with open(self._baseline_path, "w") as f:
-            json.dump(self._baseline.to_dict(), f)
+        # Persist atomically
+        fd, tmp = tempfile.mkstemp(dir=self._baseline_path.parent, suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w") as f:
+                json.dump(self._baseline.to_dict(), f)
+            os.replace(tmp, self._baseline_path)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                os.unlink(tmp)
+            raise
 
     def append_feedback(self, record: FeedbackRecord) -> None:
         """Persist a feedback record to .mallcop/feedback.jsonl."""
