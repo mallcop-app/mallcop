@@ -16,12 +16,91 @@ Think of it as the security guard at your mall. Not a SWAT team. Just someone wh
 
 ## What does it monitor?
 
-- **Azure** -- activity log, container apps, Cosmos DB, Defender findings
-- **AWS CloudTrail** -- IAM changes, security group modifications, console logins, S3 policy changes
-- **GitHub** -- repo changes, permission changes, security alerts, Actions
-- **Microsoft 365** -- sign-ins, admin actions, email events
-- **Vercel** -- deployments, audit log, team membership changes
-- **Container Logs** -- container app stdout/stderr via Log Analytics
+8 connectors, 12 detectors, 9 domain skills, 6 actors, 56 Academy Exam scenarios. 2664 tests.
+
+### Connectors
+
+| Connector | What it watches |
+|-----------|----------------|
+| **Azure** | Activity log, container apps, resource modifications, Defender alerts |
+| **AWS CloudTrail** | IAM changes, security group modifications, console logins, S3 policy changes |
+| **GitHub** | Repo changes, permission changes, security alerts, Actions |
+| **Microsoft 365** | Sign-ins, admin actions, email events |
+| **Vercel** | Deployments, audit log, team membership changes |
+| **Container Logs** | Container app stdout/stderr via Log Analytics |
+| **Supabase** | Auth audit logs, Management API config monitoring |
+| **OpenClaw** | Skill integrity, config drift, gateway security (via ClawCop) |
+
+### Detectors
+
+| Detector | What it catches |
+|----------|----------------|
+| **priv-escalation** | Role grants, permission changes, self-elevation |
+| **unusual-timing** | Activity outside established patterns |
+| **auth-failure-burst** | Brute force and credential stuffing |
+| **volume-anomaly** | Unusual event volume spikes |
+| **new-actor** | Previously unseen identities |
+| **new-external-access** | External access from new sources |
+| **unusual-resource-access** | Known actors touching new resources |
+| **injection-probe** | Prompt injection attempts in event data |
+| **log-format-drift** | Container log format changes (parser degradation) |
+| **git-oops** | Leaked credentials in git repos |
+| **malicious-skill** | Encoded payloads, quarantine bypass, known-bad authors in OpenClaw skills |
+| **openclaw-config-drift** | Auth disabled, plaintext secrets, mDNS broadcasting |
+
+### Domain Skills
+
+9 SSH-signed investigation skills with a PKI trust web. Skills provide domain-specific reasoning that investigation actors load on demand.
+
+| Skill | Domain |
+|-------|--------|
+| **privilege-analysis** | General privilege escalation reasoning (parent skill) |
+| **aws-iam** | IAM trust policies, AssumeRole chains, SCPs |
+| **azure-security** | Azure RBAC, Activity Log, Container Apps, Defender |
+| **github-security** | Repository permissions, Actions, deploy keys |
+| **supabase-security** | Auth policies, RLS, Management API |
+| **container-logs-security** | Log analysis, crash patterns, log injection |
+| **openclaw-security** | Malicious skill detection, ClawHavoc IOCs |
+| **m365-security** | Sign-in analysis, admin operations |
+| **vercel-security** | Deployment security, team access |
+
+Skills are signed with SSH keys and verified against a trust web (anchors, endorsements, BFS trust chain). `skills.lock` pins content hashes. Unsigned or tampered skills are refused.
+
+### Actors
+
+| Actor | Role |
+|-------|------|
+| **triage** | Level-1: quick severity assessment, resolve or escalate |
+| **investigate** | Level-2: deep investigation with tools, skills, and baseline cross-reference |
+| **heal** | Auto-remediation for parser drift and config issues |
+| **notify-teams** | Microsoft Teams webhook notifications |
+| **notify-slack** | Slack Block Kit notifications |
+| **notify-email** | HTML digest email via SMTP |
+
+### ClawCop — OpenClaw Security Monitor
+
+Mallcop watches your cloud. ClawCop watches your AI agent.
+
+ClawCop is mallcop's built-in OpenClaw security capability. Add the `openclaw` connector to your `mallcop.yaml` and it works through the standard scan/detect/escalate pipeline.
+
+It catches malicious skills, config drift, and skill lifecycle changes. No API credentials required -- reads directly from `~/.openclaw/`. See [docs/clawcop.md](docs/clawcop.md) for details.
+
+### Academy Exam
+
+56 adversarial scenarios that test mallcop's investigation quality. Each scenario presents a security finding with a trap -- a deceptive element designed to exploit common reasoning failures (admin exemption, known-actor bias, context switching).
+
+```bash
+mallcop exam run                    # run all scenarios
+mallcop exam run --tag AE           # run admin-exemption scenarios only
+mallcop exam run --scenario PE-01   # run one specific scenario
+mallcop improve --from-exam results.json  # analyze failures, suggest fixes
+```
+
+Graded by an LLM judge on reasoning quality, investigation thoroughness, and actionability. Not pass/fail on the action -- pass/fail on whether the investigation was rigorous.
+
+### Entity Reputation
+
+Tracks per-entity trust scores across all connectors. Findings decrement scores by severity. Baseline matches reward scores. Scores decay toward neutral with a 30-day half-life.
 
 ## Install
 
@@ -32,8 +111,6 @@ pip install mallcop
 ## Quickstart
 
 ### 1. Initialize
-
-Create a new git repo (or use an existing one) as your deployment repo, then run init:
 
 ```bash
 mkdir my-security && cd my-security
@@ -60,21 +137,14 @@ During the first 14 days (the baseline learning period), detectors log findings 
 
 ### 3. Automated monitoring
 
-For ongoing monitoring, use `mallcop watch` which runs scan + detect + escalate in one command:
-
 ```bash
-mallcop watch
-```
-
-Or with `--dry-run` to skip actor escalation:
-
-```bash
-mallcop watch --dry-run
+mallcop watch              # scan + detect + escalate
+mallcop watch --dry-run    # skip actor escalation
 ```
 
 ### 4. Set up scheduled runs
 
-The recommended setup is a GitHub Actions workflow that runs every 6 hours. An example workflow is included in the package at `mallcop/templates/github-actions-example.yml`:
+The recommended setup is a GitHub Actions workflow that runs every 6 hours:
 
 ```yaml
 name: mallcop-watch
@@ -105,32 +175,69 @@ jobs:
           git push
 ```
 
-Configure the required secrets in your GitHub repo settings. You can also use cron or any other scheduler -- mallcop is just a CLI tool.
-
 ### 5. Investigation
 
-When findings need attention, use the investigation commands in a Claude Code session (or any AI agent):
-
 ```bash
-# Orient: see all open findings with context
-mallcop review
-
-# Drill down into a specific finding
-mallcop investigate <finding-id>
-
-# Query events and baseline
-mallcop events --finding <id>
-mallcop baseline --actor <actor>
-
-# Report on findings
+mallcop review                      # orient: all open findings + context
+mallcop investigate <finding-id>    # deep investigation with tools + skills
+mallcop events --finding <id>       # query events
+mallcop baseline --actor <actor>    # check baseline for an actor
 mallcop report --status open --severity warn,critical
 ```
 
-`mallcop review` loads all open findings, groups by severity, and outputs everything an agent needs to start investigating -- including POST.md playbooks and suggested commands.
+### 6. Skill and trust management
+
+```bash
+mallcop skill list                  # show installed skills
+mallcop skill sign <dir> --key <keyfile>   # sign a skill directory
+mallcop skill verify <dir>          # verify skill signature
+mallcop skill lock                  # regenerate skills.lock
+mallcop trust add-anchor <id> <pubkey>     # add trust anchor
+mallcop trust endorse <id> --scope "aws-*" --level author --key <keyfile>
+mallcop trust chain <identity>      # show trust path
+mallcop trust list                  # show trust web
+```
+
+## CLI commands
+
+```
+# Core pipeline
+mallcop init                        # discover environment, write config
+mallcop scan                        # poll all connectors, store events
+mallcop detect                      # run detectors against events
+mallcop escalate                    # invoke actor chain on open findings
+mallcop watch [--dry-run]           # scan + detect + escalate
+
+# Investigation
+mallcop review                      # POST.md + all open findings + commands
+mallcop investigate <finding-id>    # deep context for one finding
+mallcop finding <finding-id>        # finding detail + annotation trail
+mallcop events [--finding] [--actor] [--source] [--hours] [--type]
+mallcop report [--status] [--severity] [--since]
+mallcop baseline [--actor] [--entity]
+mallcop status [--costs]            # operational status and cost trends
+
+# Finding management
+mallcop annotate <finding-id> <text>
+mallcop ack <finding-id> [--reason]
+
+# Skills and trust
+mallcop skill list | sign | verify | lock
+mallcop trust add-anchor | add-key | endorse | chain | list
+
+# Quality
+mallcop exam run [--tag] [--scenario] [--model]
+mallcop improve [--from-exam <file>] [--refresh-patterns]
+
+# Development
+mallcop scaffold <type> <name>
+mallcop verify [--all]
+mallcop discover-app <app-name>
+```
+
+All commands output JSON by default. Use `--human` for readable output.
 
 ## Deployment repo structure
-
-After init and a few watch runs, your deployment repo looks like this:
 
 ```
 my-security/
@@ -141,57 +248,17 @@ my-security/
     github-2026-03.jsonl
   findings.jsonl            # detector output
   costs.jsonl               # per-run token usage and cost tracking
-  baseline.json             # computed baseline state (known actors, frequencies)
-  actors/                   # actor instructions (POST.md playbooks)
-    triage/
-      POST.md
+  baseline.json             # known actors, frequency tables, relationships
+  reputation.jsonl          # per-entity trust scores
+  skills.lock               # skill content hash pins
 ```
-
-- **events/** -- raw events from each connector, partitioned by source and month
-- **findings.jsonl** -- detector output: what looks unusual
-- **baseline.json** -- what "normal" looks like: known actors, frequency tables, entity relationships
-- **costs.jsonl** -- token usage and cost per escalation run
-- **mallcop.yaml** -- configuration: which connectors, routing rules, budget limits
 
 Everything is git-tracked. `git log events/` shows when events were ingested. `git diff findings.jsonl` shows what changed between runs.
 
-## CLI commands
-
-```
-# Core pipeline
-mallcop init                        # discover environment, write config, estimate costs
-mallcop scan                        # poll all connectors, store events
-mallcop detect                      # run detectors against events
-mallcop escalate                    # invoke actor chain on open findings
-mallcop watch [--dry-run]           # scan + detect + escalate (cron-friendly)
-
-# Investigation (interactive mode)
-mallcop review                      # orient: POST.md + all open findings + commands
-mallcop investigate <finding-id>    # drill down: deep context for one finding
-mallcop finding <finding-id>        # full finding detail + annotation trail
-mallcop events [--finding] [--actor] [--source] [--hours] [--type]
-mallcop report [--status] [--severity] [--since]
-mallcop baseline [--actor] [--entity]
-mallcop status [--costs]            # operational status and cost trends
-
-# Finding management
-mallcop annotate <finding-id> <text>  # add investigation note to a finding
-mallcop ack <finding-id> [--reason]   # resolve finding, update baseline
-
-# App integration
-mallcop discover-app <app-name>     # sample container logs, output structured context
-
-# Development
-mallcop scaffold <type> <name>      # generate plugin directory with stubs
-mallcop verify [--all]              # validate plugins against contracts
-```
-
-All commands output JSON by default. Use `--human` for readable output.
-
 ## Cost
 
-Near-$0. Mallcop is free and open source. The platform APIs it monitors are free tier. The only cost is LLM inference for the triage actor during escalation, controlled by configurable budget limits (default: 50k tokens/run). `mallcop init` estimates your steady-state costs based on discovered resources.
+Near-$0. Mallcop is free and open source. The platform APIs it monitors are free tier. The only cost is LLM inference for the triage/investigate actors during escalation, controlled by configurable budget limits (default: 50k tokens/run). `mallcop init` estimates your steady-state costs based on discovered resources.
 
 ## License
 
-MIT
+Apache 2.0
