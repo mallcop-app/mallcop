@@ -73,7 +73,36 @@ def _parse_since(since: str) -> datetime:
     return datetime.now(timezone.utc) - delta
 
 
-@click.group()
+class _InstrumentedGroup(click.Group):
+    """Click group that auto-instruments commands with telemetry logging."""
+
+    def invoke(self, ctx: click.Context) -> Any:
+        from mallcop.telemetry import is_enabled, _log_invocation
+        import time as _time
+
+        if not is_enabled():
+            return super().invoke(ctx)
+
+        sub = ctx.invoked_subcommand or ctx.info_name
+        params = ctx.params or {}
+        flags = [k for k, v in params.items() if v is not None and v is not False]
+
+        t0 = _time.monotonic()
+        exit_code = 0
+        try:
+            return super().invoke(ctx)
+        except SystemExit as e:
+            exit_code = e.code if isinstance(e.code, int) else 1
+            raise
+        except Exception:
+            exit_code = 1
+            raise
+        finally:
+            wall_ms = (_time.monotonic() - t0) * 1000
+            _log_invocation(sub, flags, exit_code, wall_ms)
+
+
+@click.group(cls=_InstrumentedGroup)
 @click.version_option(package_name="mallcop")
 def cli() -> None:
     """Mallcop: Security monitoring for small cloud operators."""
