@@ -71,10 +71,10 @@ class BatchResult:
 
 _VALID_ACTIONS = {a.value for a in ResolutionAction}
 
-# All tool results are sanitized (defense in depth). Skills are verified at
-# load time via trust infrastructure, but their content still gets USER_DATA
-# markers to prevent injection if a skill is compromised.
-_TRUSTED_TOOLS: frozenset[str] = frozenset()
+# Tools whose results carry their own USER_DATA markers (applied at source).
+# These bypass sanitize_tool_result() to avoid double-wrapping and truncation.
+# Skill body is sanitized in tools/skills.py with a generous length limit.
+_TRUSTED_TOOLS: frozenset[str] = frozenset({"load-skill"})
 
 
 def validate_resolution(raw: Any) -> ActorResolution | None:

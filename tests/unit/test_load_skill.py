@@ -267,7 +267,7 @@ class TestLoadSkillIdempotent:
 # ─── Test: sanitization bypass ───────────────────────────────────────
 
 
-class TestSkillContextNotSanitized:
+class TestSkillContextSanitizedAtSource:
     """load-skill results are NOT wrapped in USER_DATA markers."""
 
     def _make_mock_llm_with_tool_call(self, tool_name: str, args: dict) -> MagicMock:
@@ -302,8 +302,8 @@ class TestSkillContextNotSanitized:
         mock_llm.chat.side_effect = chat_side_effect
         return mock_llm
 
-    def test_load_skill_result_not_wrapped_in_user_data_markers(self, tmp_path: Path) -> None:
-        """Verify load-skill tool result is not sanitized with USER_DATA markers."""
+    def test_load_skill_result_wrapped_in_user_data_markers(self, tmp_path: Path) -> None:
+        """Verify load-skill tool result IS sanitized with USER_DATA markers (defense in depth)."""
         from mallcop.tools.skills import load_skill
 
         skill_dir = tmp_path / "test-skill"
@@ -312,10 +312,10 @@ class TestSkillContextNotSanitized:
         ctx = _make_tool_context(skill_root=tmp_path)
         result = load_skill(ctx, skill_name="test-skill")
 
-        # The context field should NOT contain USER_DATA markers
+        # The context field should contain USER_DATA markers
         context_text = result.get("context", "")
-        assert "[USER_DATA_BEGIN]" not in context_text
-        assert "[USER_DATA_END]" not in context_text
+        assert "[USER_DATA_BEGIN]" in context_text
+        assert "[USER_DATA_END]" in context_text
 
     def test_load_skill_message_in_runtime_not_sanitized(self, tmp_path: Path) -> None:
         """In the actor runtime, load-skill tool results bypass sanitize_tool_result."""
@@ -360,8 +360,10 @@ class TestSkillContextNotSanitized:
         )
         assert tool_msg is not None
         content = tool_msg["content"]
-        assert "[USER_DATA_BEGIN]" not in content
-        assert "[USER_DATA_END]" not in content
+        # Skill content is now sanitized (defense in depth) — load-skill
+        # was removed from _TRUSTED_TOOLS so all tool results get markers.
+        assert "[USER_DATA_BEGIN]" in content
+        assert "[USER_DATA_END]" in content
 
 
 # ─── Test: skill catalog pre-packed ──────────────────────────────────

@@ -195,6 +195,11 @@ def _load_one_skill(name: str, skill_root: Path, context: ToolContext) -> Loaded
 
     _, body = parse_frontmatter(manifest.path / "SKILL.md")
 
+    # Defense in depth: wrap skill body with USER_DATA markers even for
+    # verified skills, so the LLM treats the content as untrusted input.
+    from mallcop.sanitize import sanitize_field
+    body = sanitize_field(body, max_length=32768)
+
     verified_by, trust_chain = _verify_skill_trust(manifest, context)
     new_tools = _load_skill_tools(manifest, context)
 
@@ -241,6 +246,10 @@ def _load_with_parents(name: str, skill_root: Path, context: ToolContext) -> Loa
 
     # Combine: parent context first, then child
     combined_context = (parent_context + "\n" + body).lstrip("\n") if parent_context else body
+
+    # Defense in depth: wrap combined skill body with USER_DATA markers
+    from mallcop.sanitize import sanitize_field
+    combined_context = sanitize_field(combined_context, max_length=32768)
 
     loaded = LoadedSkill(
         name=name,
