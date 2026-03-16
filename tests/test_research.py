@@ -667,6 +667,46 @@ def test_check_python_safety_blocks_socket():
     assert any("socket" in v for v in violations)
 
 
+def test_check_python_safety_blocks_importlib():
+    """importlib.import_module("os") — indirect import via importlib is blocked."""
+    from mallcop.research import check_python_safety
+
+    violations = check_python_safety('import importlib\nimportlib.import_module("os")')
+    assert len(violations) > 0, "importlib bypass not caught"
+
+
+def test_check_python_safety_blocks_builtins_import():
+    """builtins.__import__("subprocess") is blocked."""
+    from mallcop.research import check_python_safety
+
+    violations = check_python_safety('import builtins\nbuiltins.__import__("subprocess")')
+    assert len(violations) > 0, "builtins.__import__ bypass not caught"
+
+
+def test_check_python_safety_blocks_getattr_exec():
+    """getattr(__builtins__, "exec")("code") is blocked."""
+    from mallcop.research import check_python_safety
+
+    violations = check_python_safety('getattr(__builtins__, "exec")("print(1)")')
+    assert len(violations) > 0, "getattr exec bypass not caught"
+
+
+def test_check_python_safety_blocks_compile_eval():
+    """compile() followed by eval() is blocked."""
+    from mallcop.research import check_python_safety
+
+    violations = check_python_safety('code = compile("print(1)", "<>", "exec")\neval(code)')
+    assert len(violations) > 0, "compile/eval bypass not caught"
+
+
+def test_check_python_safety_blocks_globals_exploitation():
+    """globals()["__builtins__"]["__import__"]("os") is blocked."""
+    from mallcop.research import check_python_safety
+
+    violations = check_python_safety('globals()["__builtins__"]["__import__"]("os")')
+    assert len(violations) > 0, "globals exploitation not caught"
+
+
 def test_write_detector_python_rejects_unsafe_code(tmp_path):
     """_write_detector_python raises ValueError for unsafe code."""
     from mallcop.research import _write_detector_python
