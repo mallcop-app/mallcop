@@ -202,6 +202,7 @@ def run_batch(
                 annotations=[],
                 detector=finding.detector,
                 source="batch",
+                weight=0.3,
             ))
 
         # If this result was deferred, record the index for later update

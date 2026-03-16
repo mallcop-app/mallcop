@@ -104,3 +104,24 @@ class TestRunBatchFraming:
 
         assert len(captured_kwargs) == 1
         assert "batch_context" not in captured_kwargs[0]
+
+    def test_batch_feedback_records_use_reduced_weight(self):
+        """Batch-generated feedback records must use weight=0.3, not default 1.0."""
+        findings = [_make_finding("f1"), _make_finding("f2")]
+
+        def mock_runner(finding: Finding, **kwargs) -> RunResult:
+            return RunResult(
+                resolution=ActorResolution(
+                    finding_id=finding.id,
+                    action=ResolutionAction.RESOLVED,
+                    reason="batch resolved",
+                ),
+                tokens_used=10,
+                iterations=1,
+            )
+
+        result = run_batch(mock_runner, findings, actor_name="triage")
+        assert len(result.feedback_records) == 2
+        for rec in result.feedback_records:
+            assert rec.weight == 0.3, f"Batch feedback weight should be 0.3, got {rec.weight}"
+            assert rec.source == "batch"
