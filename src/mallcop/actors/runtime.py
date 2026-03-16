@@ -236,6 +236,8 @@ class ActorRuntime:
             from mallcop.skills._schema import SkillManifest as _SkillManifest
 
             skill_root_path = _Path(skill_root)
+            from mallcop.sanitize import sanitize_field as _sanitize_field
+
             catalog: list[dict[str, Any]] = []
             if skill_root_path.exists() and skill_root_path.is_dir():
                 for skill_dir in sorted(skill_root_path.iterdir()):
@@ -245,9 +247,9 @@ class ActorRuntime:
                     if manifest is None:
                         continue
                     catalog.append({
-                        "name": manifest.name,
-                        "description": manifest.description,
-                        "parent": manifest.parent,
+                        "name": _sanitize_field(manifest.name, max_length=128),
+                        "description": _sanitize_field(manifest.description, max_length=512),
+                        "parent": _sanitize_field(manifest.parent, max_length=128) if manifest.parent else None,
                         "has_tools": manifest.tools is not None,
                     })
             if catalog:
