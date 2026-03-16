@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import logging
 import os
 import re
 import sqlite3
@@ -16,6 +17,8 @@ from abc import ABC, abstractmethod
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 _SAFE_SOURCE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,62}$")
 
@@ -159,19 +162,25 @@ class JsonlStore(Store):
         # Load events
         if self._events_dir.exists():
             for jsonl_file in sorted(self._events_dir.glob("*.jsonl")):
-                for line in jsonl_file.read_text().strip().split("\n"):
+                for line_num, line in enumerate(jsonl_file.read_text().strip().split("\n"), 1):
                     if line:
-                        evt = Event.from_json(line)
-                        self._insert_event_to_cache(evt)
+                        try:
+                            evt = Event.from_json(line)
+                            self._insert_event_to_cache(evt)
+                        except Exception:
+                            logger.warning("Skipping corrupt event line %d in %s", line_num, jsonl_file.name)
 
         # Load findings
         if self._findings_path.exists():
             text = self._findings_path.read_text().strip()
             if text:
-                for line in text.split("\n"):
+                for line_num, line in enumerate(text.split("\n"), 1):
                     if line:
-                        fnd = Finding.from_json(line)
-                        self._insert_finding_to_cache(fnd)
+                        try:
+                            fnd = Finding.from_json(line)
+                            self._insert_finding_to_cache(fnd)
+                        except Exception:
+                            logger.warning("Skipping corrupt finding line %d in findings.jsonl", line_num)
 
         # Load checkpoints
         self._checkpoints: dict[str, Checkpoint] = {}

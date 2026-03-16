@@ -953,31 +953,31 @@ class TestAtomicWrites:
 class TestCorruptJsonlRecovery:
     """Tests for store behavior with corrupt/truncated JSONL files."""
 
-    def test_corrupt_findings_line_crashes_on_load(self, tmp_path: Path) -> None:
-        """A corrupt line in findings.jsonl raises on reload.
-
-        Documents current behavior: _load_from_disk() has no error handling
-        for malformed JSON lines, so a corrupt file crashes initialization.
-        """
+    def test_corrupt_findings_line_skipped_on_load(self, tmp_path: Path) -> None:
+        """A corrupt line in findings.jsonl is skipped, valid lines are loaded."""
         store = JsonlStore(tmp_path)
         store.append_findings([_make_finding(id="fnd_ok")])
 
         with open(store._findings_path, "a") as f:
             f.write('{"id": "fnd_bad", TRUNCATED\n')
 
-        with pytest.raises((json.JSONDecodeError, Exception)):
-            JsonlStore(tmp_path)
+        store2 = JsonlStore(tmp_path)
+        findings = store2.query_findings()
+        assert len(findings) == 1
+        assert findings[0].id == "fnd_ok"
 
     def test_reload_after_truncated_findings(self, tmp_path: Path) -> None:
-        """A truncated findings.jsonl (missing newline, partial JSON) crashes on reload."""
+        """A truncated findings.jsonl (partial JSON) is handled gracefully."""
         store = JsonlStore(tmp_path)
         store.append_findings([_make_finding(id="fnd_ok")])
 
         with open(store._findings_path, "a") as f:
             f.write('{"id": "fnd_partial"')  # no closing brace, no newline
 
-        with pytest.raises((json.JSONDecodeError, Exception)):
-            JsonlStore(tmp_path)
+        store2 = JsonlStore(tmp_path)
+        findings = store2.query_findings()
+        assert len(findings) == 1
+        assert findings[0].id == "fnd_ok"
 
 
 class TestUpdateFindingNonexistent:
