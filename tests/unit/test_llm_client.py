@@ -333,7 +333,7 @@ class TestConvertTools:
 
     def test_input_schema_has_type_object_when_already_proper(self) -> None:
         """A tool with proper JSON Schema passes through with type: object."""
-        from mallcop.llm import _convert_tools
+        from mallcop.llm.anthropic import _convert_tools
 
         tools = [{
             "name": "read-events",
@@ -355,7 +355,7 @@ class TestConvertTools:
         This is the actual bug: _build_tool_schemas passes meta.parameter_schema
         which is {param_name: {type, required}} — missing the JSON Schema wrapper.
         """
-        from mallcop.llm import _convert_tools
+        from mallcop.llm.anthropic import _convert_tools
 
         # This is what _derive_schema / _build_tool_schemas actually produces
         tools = [{
@@ -376,7 +376,7 @@ class TestConvertTools:
 
     def test_input_schema_has_type_object_when_empty(self) -> None:
         """A tool with no parameters still gets type: object."""
-        from mallcop.llm import _convert_tools
+        from mallcop.llm.anthropic import _convert_tools
 
         tools = [{
             "name": "get-status",
@@ -388,7 +388,7 @@ class TestConvertTools:
 
     def test_input_schema_has_type_object_when_parameters_missing(self) -> None:
         """A tool with no parameters key at all still gets type: object."""
-        from mallcop.llm import _convert_tools
+        from mallcop.llm.anthropic import _convert_tools
 
         tools = [{"name": "noop", "description": "No-op"}]
         result = _convert_tools(tools)
@@ -396,7 +396,7 @@ class TestConvertTools:
 
     def test_python_type_mapping(self) -> None:
         """Python type names from _derive_schema map to JSON Schema types."""
-        from mallcop.llm import _convert_tools
+        from mallcop.llm.anthropic import _convert_tools
 
         tools = [{
             "name": "test-tool",

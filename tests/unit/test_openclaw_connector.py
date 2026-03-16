@@ -96,8 +96,8 @@ class TestOpenClawConnectorAuthenticate:
         from mallcop.connectors.openclaw.connector import OpenClawConnector
 
         class FakeSecrets(SecretProvider):
-            def get(self, key: str) -> str | None:
-                return None
+            def resolve(self, name: str) -> str:
+                return ""
 
         connector = OpenClawConnector()
         # Should not raise

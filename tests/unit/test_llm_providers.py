@@ -12,12 +12,10 @@ from mallcop.llm import (
     AnthropicClient,
     ClaudeCodeClient,
     LLMAPIError,
-    _convert_messages_bedrock,
-    _convert_messages_openai,
-    _convert_tools_bedrock,
-    _convert_tools_openai,
-    _sign_v4,
 )
+from mallcop.llm.bedrock import _convert_messages_bedrock, _convert_tools_bedrock
+from mallcop.llm.openai_compat import _convert_messages_openai, _convert_tools_openai
+from mallcop.aws_sigv4 import sign_v4_request as _sign_v4
 from mallcop.config import LLMConfig
 from mallcop.actors.runtime import ToolCall
 
@@ -774,3 +772,64 @@ class TestManagedClientErrorSanitization:
                 )
             assert "SENSITIVE_MANAGED_ERROR_BODY_456" not in str(exc_info.value)
             assert "502" in str(exc_info.value)
+
+
+# ---------------------------------------------------------------------------
+# resolve_model_id tests (mallcop-ak1n.5.11)
+# ---------------------------------------------------------------------------
+
+class TestResolveModelId:
+    def test_haiku_alias(self):
+        from mallcop.llm import resolve_model_id
+        assert resolve_model_id("haiku") == "claude-haiku-4-5-20251001"
+
+    def test_sonnet_alias(self):
+        from mallcop.llm import resolve_model_id
+        assert resolve_model_id("sonnet") == "claude-sonnet-4-6"
+
+    def test_opus_alias(self):
+        from mallcop.llm import resolve_model_id
+        assert resolve_model_id("opus") == "claude-opus-4-6"
+
+    def test_full_id_passthrough(self):
+        from mallcop.llm import resolve_model_id
+        assert resolve_model_id("claude-haiku-4-5-20251001") == "claude-haiku-4-5-20251001"
+
+    def test_unknown_alias_passthrough(self):
+        from mallcop.llm import resolve_model_id
+        assert resolve_model_id("gpt-4o") == "gpt-4o"
+
+
+class TestRegisterProvider:
+    def test_custom_provider_callable(self):
+        from mallcop.llm import register_provider, _PROVIDERS
+
+        @register_provider("test_custom_provider")
+        def _build_test(llm_config):
+            return "test_client"
+
+        assert "test_custom_provider" in _PROVIDERS
+        assert _PROVIDERS["test_custom_provider"](None) == "test_client"
+        # Cleanup
+        del _PROVIDERS["test_custom_provider"]
+
+
+class TestBuildLlmClientWithProConfig:
+    def test_bedrock_provider_with_pro_config_does_not_route_to_managed(self):
+        """When provider is 'bedrock' (not 'anthropic'), pro_config should not override."""
+        from mallcop.llm import build_llm_client, LLMConfig
+        llm_config = LLMConfig(
+            provider="bedrock",
+            default_model="haiku",
+            api_key="test_key",
+            secret_key="test_secret",
+            endpoint="us-east-1",
+        )
+        pro_config = MagicMock()
+        pro_config.service_token = "test_token"
+        pro_config.inference_url = "https://api.mallcop.app"
+
+        client = build_llm_client(llm_config, backend="bedrock", pro_config=pro_config)
+        # Should be a BedrockClient, not ManagedClient
+        assert client is not None
+        assert type(client).__name__ != "ManagedClient"

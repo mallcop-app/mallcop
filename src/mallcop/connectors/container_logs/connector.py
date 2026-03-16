@@ -365,9 +365,12 @@ class ContainerLogsConnector(ConnectorBase):
             ).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
             time_filter = f'| where TimeGenerated > datetime("{lookback}")'
 
+        # Sanitize app_name for KQL: only allow alphanumeric, hyphens, underscores
+        import re as _re
+        safe_app = _re.sub(r"[^a-zA-Z0-9_-]", "", app_name)[:128]
         query = (
             f"ContainerAppConsoleLogs_CL "
-            f'| where ContainerAppName_s == "{app_name}" '
+            f'| where ContainerAppName_s == "{safe_app}" '
             f"{time_filter} "
             f"| order by TimeGenerated asc "
             f"| take {_MAX_LOG_ROWS}"

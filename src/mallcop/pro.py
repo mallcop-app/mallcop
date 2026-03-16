@@ -7,9 +7,11 @@ from dataclasses import dataclass
 
 import requests
 
+from mallcop.config import DEFAULT_API_URL
+
 _log = logging.getLogger(__name__)
 
-_DEFAULT_ACCOUNT_URL = "https://api.mallcop.app"
+_DEFAULT_ACCOUNT_URL = DEFAULT_API_URL
 
 
 @dataclass

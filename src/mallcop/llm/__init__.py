@@ -6,35 +6,14 @@ import logging
 from typing import Any
 
 from mallcop.llm_types import LLMAPIError, LLMClient, LLMResponse, ToolCall  # noqa: F401
-from mallcop.config import LLMConfig
+from mallcop.config import DEFAULT_API_URL, LLMConfig
 
-from mallcop.llm.anthropic import (  # noqa: F401
-    AnthropicClient,
-    _convert_messages,
-    _convert_tools,
-)
+from mallcop.llm.anthropic import AnthropicClient  # noqa: F401
 from mallcop.llm.managed import ManagedClient  # noqa: F401
-from mallcop.aws_sigv4 import sign_v4_request as _sign_v4  # noqa: F401
-from mallcop.llm.bedrock import (  # noqa: F401
-    BedrockClient,
-    _convert_messages_bedrock,
-    _convert_tools_bedrock,
-)
-from mallcop.llm.openai_compat import (  # noqa: F401
-    OpenAICompatClient,
-    _convert_messages_openai,
-    _convert_tools_openai,
-)
+from mallcop.llm.bedrock import BedrockClient  # noqa: F401
+from mallcop.llm.openai_compat import OpenAICompatClient  # noqa: F401
 from mallcop.llm.bedrock_mantle import BedrockMantleClient  # noqa: F401
 from mallcop.llm.claude_code import ClaudeCodeClient  # noqa: F401
-from mallcop.llm.converters import (  # noqa: F401
-    _extract_resolution,
-    _normalize_tool_schema,
-    _python_type_to_json,
-)
-
-# Backward compat alias
-sign_v4 = _sign_v4
 
 __all__ = [
     "LLMAPIError",
@@ -51,17 +30,6 @@ __all__ = [
     "_PROVIDERS",
     "build_llm_client",
     "resolve_model_id",
-    "sign_v4",
-    "_sign_v4",
-    "_convert_messages",
-    "_convert_tools",
-    "_convert_messages_bedrock",
-    "_convert_tools_bedrock",
-    "_convert_messages_openai",
-    "_convert_tools_openai",
-    "_extract_resolution",
-    "_normalize_tool_schema",
-    "_python_type_to_json",
 ]
 
 _log = logging.getLogger(__name__)
@@ -108,7 +76,7 @@ def _build_managed(llm_config: LLMConfig) -> LLMClient | None:
     if not llm_config.api_key:
         _log.warning("Managed provider requires api_key (service_token)")
         return None
-    endpoint = llm_config.endpoint or "https://api.mallcop.app"
+    endpoint = llm_config.endpoint or DEFAULT_API_URL
     return ManagedClient(
         endpoint=endpoint,
         service_token=llm_config.api_key,
@@ -164,7 +132,7 @@ def build_llm_client(
         if service_token and (
             llm_config is None or llm_config.provider == "anthropic"
         ):
-            inference_url = getattr(pro_config, "inference_url", None) or "https://api.mallcop.app"
+            inference_url = getattr(pro_config, "inference_url", None) or DEFAULT_API_URL
             return ManagedClient(
                 endpoint=inference_url,
                 service_token=service_token,

@@ -5,13 +5,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 
 from mallcop.schemas import Checkpoint, DiscoveryResult, PollResult
-
-
-class SecretProvider:
-    """Placeholder for secret resolution. Connectors receive this to authenticate."""
-
-    def get(self, key: str) -> str | None:
-        return None
+from mallcop.secrets import SecretProvider
 
 
 class ConnectorBase(ABC):

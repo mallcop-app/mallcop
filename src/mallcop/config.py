@@ -12,7 +12,9 @@ import yaml
 from mallcop.secrets import ConfigError, SecretProvider, EnvSecretProvider
 from mallcop.patrol import PatrolConfig, parse_patrols
 
-__all__ = ["load_config", "MallcopConfig", "BudgetConfig", "BaselineConfig", "LLMConfig", "RouteConfig", "ProConfig", "GitHubConfig", "ResearchConfig", "NotifyConfig", "ConfigError", "_parse_routing", "PatrolConfig"]
+__all__ = ["load_config", "MallcopConfig", "BudgetConfig", "BaselineConfig", "LLMConfig", "RouteConfig", "ProConfig", "GitHubConfig", "ResearchConfig", "NotifyConfig", "ConfigError", "_parse_routing", "PatrolConfig", "DEFAULT_API_URL"]
+
+DEFAULT_API_URL = "https://api.mallcop.app"
 
 # Re-export ConfigError so tests can import from mallcop.config
 ConfigError = ConfigError
@@ -96,7 +98,7 @@ def _parse_routing(raw: dict[str, Any] | None) -> dict[str, RouteConfig | None]:
 class ProConfig:
     account_id: str = ""
     service_token: str = ""
-    account_url: str = "https://api.mallcop.app"
+    account_url: str = DEFAULT_API_URL
     inference_url: str = ""
 
 
@@ -261,9 +263,9 @@ def _parse_pro(raw: dict[str, Any] | None, provider: SecretProvider) -> ProConfi
     except ConfigError:
         service_token = ""
     # Resolve URL fields through SecretProvider (may reference env vars)
-    account_url_raw = raw.get("account_url", "https://api.mallcop.app")
+    account_url_raw = raw.get("account_url", DEFAULT_API_URL)
     try:
-        account_url = _resolve_value(account_url_raw, provider) if account_url_raw else "https://api.mallcop.app"
+        account_url = _resolve_value(account_url_raw, provider) if account_url_raw else DEFAULT_API_URL
     except ConfigError:
         account_url = account_url_raw  # Fall back to literal if env var missing
 

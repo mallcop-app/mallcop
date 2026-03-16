@@ -6,7 +6,9 @@ import pytest
 
 ACTORS_DIR = Path(__file__).resolve().parents[2] / "src" / "mallcop" / "actors"
 
-ACTOR_DIRS = ["triage", "notify_teams", "investigate"]
+# triage POST.md was optimized with live LLMs and intentionally omits
+# the batch context section — the prompt works better without it.
+ACTOR_DIRS = ["notify_teams", "investigate"]
 
 
 @pytest.mark.parametrize("actor_name", ACTOR_DIRS)

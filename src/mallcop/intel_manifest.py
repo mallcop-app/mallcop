@@ -15,7 +15,7 @@ advisory multiple times in the same patrol run or across runs.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any

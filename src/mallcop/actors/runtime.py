@@ -420,7 +420,10 @@ class ActorRuntime:
                 if tc.name == "resolve-finding":
                     action_str = tc.arguments.get("action", "escalated")
                     reason = tc.arguments.get("reason", "No reason provided")
-                    confidence = int(tc.arguments.get("confidence", 3))
+                    try:
+                        confidence = int(float(tc.arguments.get("confidence", 3)))
+                    except (ValueError, TypeError):
+                        confidence = 3
                     action_enum = (
                         ResolutionAction.RESOLVED
                         if action_str == "resolved"
@@ -437,13 +440,14 @@ class ActorRuntime:
                         iterations=iteration + 1,
                     )
 
-            # Execute tool calls and collect results
+            # Execute tool calls and collect results (skip resolve-finding, handled above)
+            executable_calls = [tc for tc in response.tool_calls if tc.name != "resolve-finding"]
             _log.debug(
                 "Actor %s executing %d tool calls: %s",
-                self._manifest.name, len(response.tool_calls),
-                ", ".join(tc.name for tc in response.tool_calls),
+                self._manifest.name, len(executable_calls),
+                ", ".join(tc.name for tc in executable_calls),
             )
-            for tc in response.tool_calls:
+            for tc in executable_calls:
                 try:
                     if self._context is not None:
                         # Use registry.execute for context injection + permission check

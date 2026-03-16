@@ -10,6 +10,7 @@ touching other crontab content.
 
 from __future__ import annotations
 
+import shlex
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -145,7 +146,7 @@ class CrontabBackend:
 
     def _build_command(self, command: str, with_git: bool) -> str:
         """Build the full shell command for a crontab line."""
-        repo = str(self.repo_path)
+        repo = shlex.quote(str(self.repo_path))
         mallcop_cmd = f"{MALLCOP_BIN} {command.removeprefix('mallcop ').strip()}"
         base = f"cd {repo} && {mallcop_cmd}"
         if with_git:
@@ -156,33 +157,45 @@ class CrontabBackend:
         """Read current crontab contents as a list of lines (no trailing newlines).
 
         Returns an empty list if there is no crontab for the current user.
+        Raises RuntimeError on unexpected crontab errors.
         """
         result = subprocess.run(
             ["crontab", "-l"],
             capture_output=True,
         )
-        # rc=1 with "no crontab for user" is the normal empty state
         if result.returncode != 0:
-            return []
+            stderr = result.stderr.decode(errors="replace").lower()
+            if "no crontab" in stderr:
+                return []
+            raise RuntimeError(
+                f"crontab -l failed (rc={result.returncode}): "
+                f"{result.stderr.decode(errors='replace').strip()}"
+            )
 
         text = result.stdout.decode(errors="replace")
-        # splitlines handles \r\n, \n, etc.
         lines = text.splitlines()
-        # Strip trailing empty lines to keep the file tidy
         while lines and lines[-1].strip() == "":
             lines.pop()
         return lines
 
     def _write_raw_lines(self, lines: list[str]) -> None:
-        """Write lines back to the crontab via ``crontab -``."""
+        """Write lines back to the crontab via ``crontab -``.
+
+        Raises RuntimeError if the write fails.
+        """
         content = "\n".join(lines)
         if content and not content.endswith("\n"):
             content += "\n"
-        subprocess.run(
+        result = subprocess.run(
             ["crontab", "-"],
             input=content.encode(),
             capture_output=True,
         )
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"crontab write failed (rc={result.returncode}): "
+                f"{result.stderr.decode(errors='replace').strip()}"
+            )
 
     @staticmethod
     def _remove_patrol_lines(lines: list[str], name: str) -> list[str]:

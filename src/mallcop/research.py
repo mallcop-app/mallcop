@@ -37,6 +37,7 @@ import yaml
 
 _log = logging.getLogger(__name__)
 
+from mallcop.config import ResearchConfig
 from mallcop.intel_manifest import IntelEntry, filter_new, save_entry
 from mallcop.llm_types import LLMClient
 from mallcop.sanitize import sanitize_field
@@ -59,19 +60,6 @@ class Advisory:
     id: str
     source: str
     summary: str
-
-
-@dataclass
-class ResearchConfig:
-    """Configuration for the research pipeline.
-
-    Attributes:
-        allow_python: If True, the LLM agent may produce Python detector files
-            (detector.py) in addition to declarative YAML. Default False for
-            security: YAML-only detectors are sandboxed by the declarative
-            interpreter; Python detectors run arbitrary code.
-    """
-    allow_python: bool = False
 
 
 @dataclass
@@ -278,7 +266,9 @@ def _build_research_prompt(
     Returns:
         System prompt string for the LLM.
     """
-    connectors_str = ", ".join(connector_names) if connector_names else "none configured"
+    safe_names = [re.sub(r"[^a-zA-Z0-9_-]", "", n)[:64] for n in connector_names]
+    safe_names = [n for n in safe_names if n]
+    connectors_str = ", ".join(safe_names) if safe_names else "none configured"
     safe_id = sanitize_field(advisory.id, max_length=256)
     safe_source = sanitize_field(advisory.source, max_length=256)
     safe_summary = sanitize_field(advisory.summary, max_length=4096)

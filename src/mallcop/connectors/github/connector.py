@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 import requests
+
+_log = logging.getLogger(__name__)
 
 from mallcop.connectors._base import ConnectorBase
 from mallcop.connectors._util import build_checkpoint, make_event_id, validate_next_link
@@ -111,7 +114,10 @@ class GitHubConnector(ConnectorBase):
             event_type = _classify_action(action)
             severity = _map_severity(event_type)
 
-            ts_ms = entry.get("@timestamp") or entry.get("created_at", 0)
+            ts_ms = entry.get("@timestamp") or entry.get("created_at")
+            if not ts_ms:
+                _log.warning("GitHub audit entry missing timestamp, skipping: %s", entry.get("_document_id", "unknown"))
+                continue
             timestamp = _ts_from_epoch_ms(ts_ms)
 
             doc_id = entry.get("_document_id", "")
@@ -196,11 +202,16 @@ class GitHubConnector(ConnectorBase):
         data = resp.json()
         if isinstance(data, list):
             results.extend(data)
-        elif isinstance(data, dict) and "value" in data:
-            results.extend(data["value"])
+        elif isinstance(data, dict):
+            for key in ("value", "data", "items"):
+                if key in data and isinstance(data[key], list):
+                    results.extend(data[key])
+                    break
+            else:
+                results.append(data)
         else:
             raise TypeError(
-                f"Expected JSON array from GitHub API, got {type(data).__name__}: {str(data)[:200]}"
+                f"Expected JSON array or object from GitHub API, got {type(data).__name__}"
             )
 
         # Extract cursor from current page's Link header
@@ -219,8 +230,13 @@ class GitHubConnector(ConnectorBase):
             data = resp.json()
             if isinstance(data, list):
                 results.extend(data)
-            elif isinstance(data, dict) and "value" in data:
-                results.extend(data["value"])
+            elif isinstance(data, dict):
+                for key in ("value", "data", "items"):
+                    if key in data and isinstance(data[key], list):
+                        results.extend(data[key])
+                        break
+                else:
+                    results.append(data)
 
             cursor = self._parse_after_cursor(resp.headers.get("Link", ""))
             if cursor:

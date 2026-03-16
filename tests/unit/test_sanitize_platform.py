@@ -467,6 +467,7 @@ class TestSanitizeEvent:
         assert result.actor == "[USER_DATA_BEGIN]eviluser[USER_DATA_END]"
 
     def test_source_not_sanitized(self) -> None:
+        """Source is validated by store as safe identifier, not marker-wrapped."""
         evt = _make_event(source="azure")
         result = sanitize_event(evt)
         assert result.source == "azure"

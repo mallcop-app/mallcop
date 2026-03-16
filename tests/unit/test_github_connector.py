@@ -391,6 +391,18 @@ class TestGitHubConnectorPoll:
         assert evt.metadata["org"] == "acme-corp"
         assert evt.metadata["action_detail"] == "org.add_member"
 
+    def test_poll_skips_entries_without_timestamp(self) -> None:
+        """Entries missing both @timestamp and created_at should be skipped."""
+        connector = self._make_connector()
+        entries = [
+            {"action": "org.add_member", "_document_id": "no_ts_1"},
+            {"action": "org.add_member", "_document_id": "has_ts_1", "@timestamp": 1710000000000},
+        ]
+        with patch.object(connector, "_fetch_audit_log", return_value=(entries, None)):
+            result = connector.poll(checkpoint=None)
+        assert len(result.events) == 1
+        assert result.events[0].raw["_document_id"] == "has_ts_1"
+
 
 # ─── Event type mapping (all 10 types) ──────────────────────────────
 
@@ -677,17 +689,18 @@ class TestGitHubConnectorErrorPaths:
             with pytest.raises(ReqConnectionError):
                 connector._get_paginated("https://api.github.com/test")
 
-    def test_get_paginated_malformed_json_raises_type_error(self) -> None:
+    def test_get_paginated_dict_without_known_key_wraps_as_result(self) -> None:
         connector = self._make_connector()
 
         fake_resp = MagicMock()
         fake_resp.raise_for_status = MagicMock()
-        fake_resp.json.return_value = {"not_a_list": True}  # dict without "value" key
+        fake_resp.json.return_value = {"not_a_list": True}
         fake_resp.headers = {}
 
         with patch("requests.get", return_value=fake_resp):
-            with pytest.raises(TypeError, match="Expected JSON array"):
-                connector._get_paginated("https://api.github.com/test")
+            results, cursor = connector._get_paginated("https://api.github.com/test")
+        assert results == [{"not_a_list": True}]
+        assert cursor is None
 
 
 class TestPaginationMultiPage:

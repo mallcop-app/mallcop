@@ -12,12 +12,12 @@ from typing import Any
 import click
 import yaml
 
-from mallcop.config import load_config, BudgetConfig
+from mallcop.config import load_config, BudgetConfig, DEFAULT_API_URL
 from mallcop.cli_format import print_review_human, print_investigate_human, print_finding_human
 from mallcop.cli_pipeline import run_scan_pipeline, run_detect_pipeline, run_retrospective_if_transitioning
 from mallcop.cost_estimator import estimate_costs
 from mallcop.patrol_cli import patrol
-from mallcop.plugins import discover_plugins, get_search_paths, instantiate_connector, load_plugin_class
+from mallcop.plugins import discover_plugins, get_search_paths, instantiate_connector
 from mallcop.schemas import Finding, Severity
 from mallcop.secrets import ConfigError, EnvSecretProvider
 from mallcop.store import JsonlStore, Store
@@ -29,6 +29,21 @@ def _emit_error(message: str, human: bool) -> None:
         click.echo(f"ERROR: {message}", err=True)
     else:
         click.echo(json.dumps({"status": "error", "error": message}))
+
+
+def _build_actor_runner(root: Path, backend: str = "anthropic"):
+    """Build an actor runner from a deployment root. Returns None on failure."""
+    from mallcop.actors.runtime import build_actor_runner
+    from mallcop.llm import build_llm_client
+    config = load_config(root)
+    store = JsonlStore(root)
+    llm_client = build_llm_client(config.llm, backend=backend, pro_config=config.pro)
+    if llm_client is None:
+        raise ValueError("No LLM client configured")
+    return build_actor_runner(
+        root=root, store=store, config=config, llm=llm_client,
+        validate_paths=True,
+    )
 
 
 def _warn_escalation_health(root: Path) -> None:
@@ -143,7 +158,7 @@ def _setup_pro(config_data: dict[str, Any]) -> dict[str, Any] | None:
         )
         return None
 
-    account_url = "https://api.mallcop.app"
+    account_url = DEFAULT_API_URL
     client = ProClient(account_url)
 
     # Create account (server uses anti-enumeration: duplicate emails return 200 silently)
@@ -188,7 +203,7 @@ def _setup_pro(config_data: dict[str, Any]) -> dict[str, Any] | None:
         "account_id": account_id,
         "service_token": service_token,
         "account_url": account_url,
-        "inference_url": "https://api.mallcop.app",
+        "inference_url": DEFAULT_API_URL,
     }
     if "llm" in config_data:
         del config_data["llm"]
@@ -224,6 +239,7 @@ def init(pro: bool) -> None:
     connector_results: list[dict[str, Any]] = []
     available_connectors: dict[str, dict[str, Any]] = {}
     total_sample_events = 0
+    required_secrets: list[str] = []
 
     secrets = EnvSecretProvider()
 
@@ -249,16 +265,25 @@ def init(pro: bool) -> None:
         }
         connector_results.append(connector_entry)
 
+        # Read manifest once per connector for auth config and required secrets
+        manifest_path = plugin_info.path / "manifest.yaml"
+        auth_required: list[str] = []
+        if manifest_path.exists():
+            with open(manifest_path) as f:
+                manifest_data = yaml.safe_load(f)
+            auth_required = manifest_data.get("auth", {}).get("required", [])
+
+        # Collect required secrets for all connectors
+        for key in auth_required:
+            env_var = f"{name.upper()}_{key.upper()}"
+            if env_var not in required_secrets:
+                required_secrets.append(env_var)
+
         if result.available:
             connector_config: dict[str, Any] = {}
-            manifest_path = plugin_info.path / "manifest.yaml"
-            if manifest_path.exists():
-                with open(manifest_path) as f:
-                    manifest_data = yaml.safe_load(f)
-                auth_required = manifest_data.get("auth", {}).get("required", [])
-                for key in auth_required:
-                    env_var = f"{name.upper()}_{key.upper()}"
-                    connector_config[key] = f"${{{env_var}}}"
+            for key in auth_required:
+                env_var = f"{name.upper()}_{key.upper()}"
+                connector_config[key] = f"${{{env_var}}}"
 
             for k, v in result.suggested_config.items():
                 connector_config[k] = v
@@ -308,18 +333,6 @@ def init(pro: bool) -> None:
         sample_event_count=total_sample_events,
         budget=budget,
     )
-
-    # Collect required secrets from connector manifests
-    required_secrets: list[str] = []
-    for name, plugin_info in plugins["connectors"].items():
-        manifest_path = plugin_info.path / "manifest.yaml"
-        if manifest_path.exists():
-            with open(manifest_path) as f:
-                manifest_data = yaml.safe_load(f)
-            for key in manifest_data.get("auth", {}).get("required", []):
-                env_var = f"{name.upper()}_{key.upper()}"
-                if env_var not in required_secrets:
-                    required_secrets.append(env_var)
 
     # Reference the example workflow template
     workflow_ref = (
@@ -378,27 +391,13 @@ def escalate(dir_path: str | None, human: bool, no_actors: bool, backend: str) -
 
     actor_runner = None
     if not no_actors:
-        from mallcop.actors.runtime import EscalationPathError, build_actor_runner
-        from mallcop.llm import build_llm_client
+        from mallcop.actors.runtime import EscalationPathError
         try:
-            config = load_config(root)
-            store = JsonlStore(root)
-            llm_client = build_llm_client(config.llm, backend=backend, pro_config=config.pro)
-            if llm_client is None:
-                raise ValueError("No LLM client configured")
-            actor_runner = build_actor_runner(
-                root=root,
-                store=store,
-                config=config,
-                llm=llm_client,
-                validate_paths=True,
-            )
+            actor_runner = _build_actor_runner(root, backend=backend)
         except EscalationPathError as e:
-            # Broken escalation path is fatal — security tool must deliver alerts
             _emit_error(str(e), human)
             raise SystemExit(1)
         except Exception:
-            # No config or LLM not configured — fall back to no-actors mode
             pass
 
     result = run_escalate(root, actor_runner=actor_runner)
@@ -429,26 +428,15 @@ def watch(dry_run: bool, dir_path: str | None, human: bool, backend: str) -> Non
     # Step 0: Build and validate actor runner once (reused in Step 3)
     watch_runner = None
     if not dry_run:
-        from mallcop.actors.runtime import EscalationPathError, build_actor_runner
-        from mallcop.llm import build_llm_client
+        from mallcop.actors.runtime import EscalationPathError
         try:
-            watch_config = load_config(root)
-            watch_store = JsonlStore(root)
-            watch_llm = build_llm_client(watch_config.llm, backend=backend, pro_config=watch_config.pro)
-            if watch_llm is None:
-                raise ValueError("No LLM client configured")
-            watch_runner = build_actor_runner(
-                root=root, store=watch_store, config=watch_config, llm=watch_llm,
-                validate_paths=True,
-            )
+            watch_runner = _build_actor_runner(root, backend=backend)
         except EscalationPathError as e:
-            # Broken escalation path is fatal
             result["status"] = "error"
             result["error"] = str(e)
             click.echo(json.dumps(result))
             raise SystemExit(1)
         except Exception:
-            # No config — watch still runs scan+detect, just no actors
             pass
 
     # Step 1: Scan (fail-fast)
@@ -494,19 +482,29 @@ def watch(dry_run: bool, dir_path: str | None, human: bool, backend: str) -> Non
     result["status"] = "ok"
 
     if human:
-        click.echo(f"Watch: {result['status']}")
-        if "scan" in result:
-            click.echo(f"  Scan: {result['scan'].get('total_events_ingested', 0)} events")
-        if "detect" in result:
-            click.echo(f"  Detect: {result['detect'].get('findings_count', 0)} findings")
-        if "escalate" in result:
-            esc = result["escalate"]
-            if esc.get("skipped"):
-                click.echo(f"  Escalate: skipped ({esc.get('reason', 'unknown')})")
-            else:
-                click.echo(f"  Escalate: {esc.get('findings_processed', 0)} processed")
+        _watch_human_output(result, root)
     else:
         click.echo(json.dumps(result))
+
+
+def _watch_human_output(result: dict[str, Any], root: Path) -> None:
+    """Human-readable watch output including push status."""
+    click.echo(f"Watch: {result['status']}")
+    if "scan" in result:
+        click.echo(f"  Scan: {result['scan'].get('total_events_ingested', 0)} events")
+    if "detect" in result:
+        click.echo(f"  Detect: {result['detect'].get('findings_count', 0)} findings")
+    if "escalate" in result:
+        esc = result["escalate"]
+        if esc.get("skipped"):
+            click.echo(f"  Escalate: skipped ({esc.get('reason', 'unknown')})")
+        else:
+            click.echo(f"  Escalate: {esc.get('findings_processed', 0)} processed")
+    push = result.get("push", {})
+    if push.get("status") == "ok":
+        click.echo("  Pushed to GitHub.")
+    elif push.get("status") == "error":
+        click.echo(f"  Push failed: {push.get('error', 'unknown')}")
 
 
 # Backward-compat aliases for internal callers
@@ -900,10 +898,10 @@ def ack(finding_id: str, author: str, reason: str | None, dir_path: str | None, 
         except ConfigError:
             from mallcop.config import BaselineConfig
             ack_window_days = BaselineConfig().window_days
-        # Pass ALL events so relationships/freq tables are recomputed correctly
-        # (not just the triggering subset, which would wipe history)
-        all_events = store.query_events(limit=100_000)
-        store.update_baseline(all_events, window_days=ack_window_days)
+        # Pass only the triggering events so only the acked actor becomes
+        # "known". Passing all events would mark unrelated actors as known,
+        # suppressing their findings — acking actor A must not silence actor B.
+        store.update_baseline(triggering_events, window_days=ack_window_days)
 
     # Re-read the updated finding for output
     updated_findings = store.query_findings()

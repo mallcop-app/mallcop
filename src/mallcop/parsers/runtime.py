@@ -149,7 +149,7 @@ class ParserRuntime:
             matched = False
 
             for template in self._manifest.templates:
-                m = template.compiled.match(line)
+                m = template.compiled.search(line)
                 if m is None:
                     continue
 
