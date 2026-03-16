@@ -71,9 +71,10 @@ class BatchResult:
 
 _VALID_ACTIONS = {a.value for a in ResolutionAction}
 
-# Tools whose results are trusted instructions (not attacker-controlled data).
-# These bypass sanitize_tool_result() so their content reaches the LLM unmarked.
-_TRUSTED_TOOLS: frozenset[str] = frozenset({"load-skill"})
+# All tool results are sanitized (defense in depth). Skills are verified at
+# load time via trust infrastructure, but their content still gets USER_DATA
+# markers to prevent injection if a skill is compromised.
+_TRUSTED_TOOLS: frozenset[str] = frozenset()
 
 
 def validate_resolution(raw: Any) -> ActorResolution | None:

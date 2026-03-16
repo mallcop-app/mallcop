@@ -37,6 +37,9 @@ _NEVER_AUTO_RESOLVE = frozenset({
     "priv-escalation",
     "boundary-violation",
     "log-format-drift",
+    "new-external-access",
+    "unusual-resource-access",
+    "injection-probe",
 })
 
 # Detectors that are ALWAYS escalated deterministically — no LLM involved.
@@ -140,9 +143,17 @@ def _extract_pattern_key(record: FeedbackRecord) -> tuple[str, str, str, str] | 
     # Wildcard target to the first path component
     # "acme-corp/atom-api" → "acme-corp/*"
     if "/" in target:
-        target_prefix = target.split("/")[0] + "/*"
+        first_component = target.split("/")[0]
+        # Reject overly broad prefixes (empty, wildcard, or too short)
+        if not first_component or first_component == "*" or len(first_component) < 2:
+            return None
+        target_prefix = first_component + "/*"
     else:
         target_prefix = target
+
+    # Reject empty or wildcard-only targets
+    if not target_prefix or target_prefix in ("*", "/*"):
+        return None
 
     return (detector, actor, event_type, target_prefix)
 

@@ -26,7 +26,7 @@ from mallcop.schemas import Baseline, Finding, FindingStatus, Severity
 def _make_feedback(
     finding_id: str = "fnd_001",
     action: HumanAction = HumanAction.AGREE,
-    detector: str = "new-external-access",
+    detector: str = "volume-anomaly",
     actor: str = "admin-user",
     event_type: str = "add_collaborator",
     target: str = "acme-corp/atom-api",
@@ -56,7 +56,7 @@ def _make_feedback(
 
 def _make_finding(
     finding_id: str = "fnd_test",
-    detector: str = "new-external-access",
+    detector: str = "volume-anomaly",
     actor: str = "admin-user",
     event_type: str = "add_collaborator",
     target: str = "acme-corp/atom-api",
@@ -125,6 +125,16 @@ class TestCountPatterns:
         candidates = count_patterns(records)
         assert len(candidates) == 0
 
+    def test_never_auto_resolve_external_access(self) -> None:
+        records = [_make_feedback(detector="new-external-access") for _ in range(10)]
+        candidates = count_patterns(records)
+        assert len(candidates) == 0
+
+    def test_never_auto_resolve_unusual_resource_access(self) -> None:
+        records = [_make_feedback(detector="unusual-resource-access") for _ in range(10)]
+        candidates = count_patterns(records)
+        assert len(candidates) == 0
+
     def test_confidence_weighting(self) -> None:
         records = [
             _make_feedback(weight=0.3),  # batch
@@ -136,6 +146,16 @@ class TestCountPatterns:
         # weighted_confidence = 0.3 + 0.3 + 1.0 = 1.6
         # confidence = 1.6 / 3 = 0.533
         assert abs(candidates[0].confidence - 0.533) < 0.01
+
+    def test_rejects_broad_wildcard_target(self) -> None:
+        records = [_make_feedback(target="*/something") for _ in range(10)]
+        candidates = count_patterns(records)
+        assert len(candidates) == 0
+
+    def test_rejects_single_char_prefix(self) -> None:
+        records = [_make_feedback(target="x/something") for _ in range(10)]
+        candidates = count_patterns(records)
+        assert len(candidates) == 0
 
     def test_empty_records(self) -> None:
         assert count_patterns([]) == []
@@ -150,7 +170,7 @@ class TestGenerateRules:
         candidates = count_patterns(records)
         rules = generate_rules(candidates)
         assert len(rules) == 1
-        assert rules[0].detector == "new-external-access"
+        assert rules[0].detector == "volume-anomaly"
         assert rules[0].actor == "admin-user"
 
     def test_skips_below_threshold(self) -> None:
@@ -207,7 +227,7 @@ class TestEvaluateRules:
     def test_matching_rule_returns_rule(self) -> None:
         rule = ResolutionRule(
             id="auto-test",
-            detector="new-external-access",
+            detector="volume-anomaly",
             actor="admin-user",
             event_type="add_collaborator",
             target_prefix="acme-corp/*",
@@ -220,7 +240,7 @@ class TestEvaluateRules:
     def test_wrong_detector_no_match(self) -> None:
         rule = ResolutionRule(
             id="auto-test",
-            detector="volume-anomaly",
+            detector="count-threshold",
             actor="admin-user",
             event_type="add_collaborator",
             target_prefix="acme-corp/*",
@@ -231,7 +251,7 @@ class TestEvaluateRules:
     def test_wrong_actor_no_match(self) -> None:
         rule = ResolutionRule(
             id="auto-test",
-            detector="new-external-access",
+            detector="volume-anomaly",
             actor="other-user",
             event_type="add_collaborator",
             target_prefix="acme-corp/*",
@@ -242,7 +262,7 @@ class TestEvaluateRules:
     def test_target_wildcard_match(self) -> None:
         rule = ResolutionRule(
             id="auto-test",
-            detector="new-external-access",
+            detector="volume-anomaly",
             actor="admin-user",
             event_type="add_collaborator",
             target_prefix="acme-corp/*",
@@ -264,7 +284,7 @@ class TestEvaluateRules:
     def test_unknown_actor_in_baseline_skips(self) -> None:
         rule = ResolutionRule(
             id="auto-test",
-            detector="new-external-access",
+            detector="volume-anomaly",
             actor="admin-user",
             event_type="add_collaborator",
             target_prefix="acme-corp/*",
@@ -280,7 +300,7 @@ class TestEvaluateRules:
     def test_known_actor_in_baseline_matches(self) -> None:
         rule = ResolutionRule(
             id="auto-test",
-            detector="new-external-access",
+            detector="volume-anomaly",
             actor="admin-user",
             event_type="add_collaborator",
             target_prefix="acme-corp/*",
