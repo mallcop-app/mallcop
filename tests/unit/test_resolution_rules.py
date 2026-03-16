@@ -442,3 +442,41 @@ class TestAutoEscalateFinding:
         finding = _make_finding()
         result = auto_escalate_finding(finding, "test reason")
         assert result.status == FindingStatus.OPEN
+
+
+class TestUserDataMarkerStripping:
+    """Pattern keys and rule matching must strip USER_DATA markers."""
+
+    def test_pattern_key_strips_markers_from_events(self) -> None:
+        """Feedback events with USER_DATA markers produce clean pattern keys."""
+        fb = _make_feedback(
+            actor="[USER_DATA_BEGIN]admin-user[USER_DATA_END]",
+            event_type="[USER_DATA_BEGIN]add_collaborator[USER_DATA_END]",
+            target="[USER_DATA_BEGIN]acme-corp/atom-api[USER_DATA_END]",
+        )
+        patterns = count_patterns([fb])
+        assert len(patterns) == 1
+        # Key should be clean, no markers
+        assert "[USER_DATA" not in patterns[0].key
+        assert patterns[0].actor == "admin-user"
+        assert patterns[0].event_type == "add_collaborator"
+
+    def test_evaluate_rules_matches_despite_markers_in_metadata(self) -> None:
+        """Rules with clean keys match findings whose metadata has USER_DATA markers."""
+        rule = ResolutionRule(
+            id="rule_1",
+            detector="volume-anomaly",
+            actor="admin-user",
+            event_type="add_collaborator",
+            target_prefix="acme-corp/*",
+            source_feedback_count=3,
+            confidence=0.9,
+        )
+        finding = _make_finding(
+            actor="[USER_DATA_BEGIN]admin-user[USER_DATA_END]",
+            event_type="[USER_DATA_BEGIN]add_collaborator[USER_DATA_END]",
+            target="[USER_DATA_BEGIN]acme-corp/atom-api[USER_DATA_END]",
+        )
+        result = evaluate_rules(finding, [rule])
+        assert result is not None
+        assert result.id == "rule_1"

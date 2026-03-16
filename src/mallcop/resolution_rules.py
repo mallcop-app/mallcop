@@ -119,6 +119,11 @@ class PatternCandidate:
         return self.count >= CONFIRM_THRESHOLD and self.confidence >= CONFIDENCE_THRESHOLD
 
 
+def _strip_markers(value: str) -> str:
+    """Strip USER_DATA markers from a value so pattern keys stay clean."""
+    return value.replace("[USER_DATA_BEGIN]", "").replace("[USER_DATA_END]", "").strip()
+
+
 def _extract_pattern_key(record: FeedbackRecord) -> tuple[str, str, str, str] | None:
     """Extract (detector, actor, event_type, target_prefix) from a feedback record."""
     detector = record.detector
@@ -133,9 +138,11 @@ def _extract_pattern_key(record: FeedbackRecord) -> tuple[str, str, str, str] | 
 
     # Use the first event as representative
     evt = record.events[0]
-    actor = evt.get("actor", "")
-    event_type = evt.get("event_type", "")
-    target = evt.get("target", "")
+    # Strip USER_DATA markers that may have been added by sanitize_event()
+    # so pattern keys on disk contain clean values and matching is robust.
+    actor = _strip_markers(evt.get("actor", ""))
+    event_type = _strip_markers(evt.get("event_type", ""))
+    target = _strip_markers(evt.get("target", ""))
 
     if not actor or not event_type:
         return None
@@ -326,9 +333,9 @@ def evaluate_rules(
     """
     detector = finding.detector
     metadata = finding.metadata or {}
-    actor = metadata.get("actor", "")
-    event_type = metadata.get("event_type", "")
-    target = metadata.get("target", "") or metadata.get("resource", "")
+    actor = _strip_markers(metadata.get("actor", ""))
+    event_type = _strip_markers(metadata.get("event_type", ""))
+    target = _strip_markers(metadata.get("target", "") or metadata.get("resource", ""))
 
     for rule in rules:
         if rule.detector != detector:
