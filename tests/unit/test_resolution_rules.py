@@ -10,10 +10,13 @@ import yaml
 
 from mallcop.feedback import FeedbackRecord, HumanAction
 from mallcop.resolution_rules import (
+    ALWAYS_ESCALATE_DETECTORS,
     CONFIRM_THRESHOLD,
     PatternCandidate,
     ResolutionRule,
+    auto_escalate_finding,
     auto_resolve_finding,
+    check_hard_constraints,
     count_patterns,
     evaluate_rules,
     generate_rules,
@@ -381,3 +384,61 @@ class TestEndToEnd:
             actor="other-user",
         )
         assert evaluate_rules(finding, rules) is None
+
+
+# --- Hard constraints ---
+
+
+class TestCheckHardConstraints:
+    def test_priv_escalation_returns_reason(self) -> None:
+        finding = _make_finding(detector="priv-escalation")
+        reason = check_hard_constraints(finding)
+        assert reason is not None
+        assert "priv-escalation" in reason
+
+    def test_injection_probe_returns_reason(self) -> None:
+        finding = _make_finding(detector="injection-probe")
+        assert check_hard_constraints(finding) is not None
+
+    def test_boundary_violation_returns_reason(self) -> None:
+        finding = _make_finding(detector="boundary-violation")
+        assert check_hard_constraints(finding) is not None
+
+    def test_log_format_drift_returns_reason(self) -> None:
+        finding = _make_finding(detector="log-format-drift")
+        assert check_hard_constraints(finding) is not None
+
+    def test_normal_detector_returns_none(self) -> None:
+        finding = _make_finding(detector="volume-anomaly")
+        assert check_hard_constraints(finding) is None
+
+    def test_unknown_detector_returns_none(self) -> None:
+        finding = _make_finding(detector="totally-new-detector")
+        assert check_hard_constraints(finding) is None
+
+    def test_all_escalate_detectors_covered(self) -> None:
+        for det in ALWAYS_ESCALATE_DETECTORS:
+            finding = _make_finding(detector=det)
+            assert check_hard_constraints(finding) is not None, f"{det} should trigger hard constraint"
+
+
+class TestAutoEscalateFinding:
+    def test_adds_annotation(self) -> None:
+        finding = _make_finding()
+        result = auto_escalate_finding(finding, "test reason")
+        assert len(result.annotations) == 1
+
+    def test_annotation_actor_is_hard_constraint(self) -> None:
+        finding = _make_finding()
+        result = auto_escalate_finding(finding, "test reason")
+        assert result.annotations[0].actor == "hard-constraint"
+
+    def test_annotation_action_is_escalated(self) -> None:
+        finding = _make_finding()
+        result = auto_escalate_finding(finding, "test reason")
+        assert result.annotations[0].action == "escalated"
+
+    def test_status_stays_open(self) -> None:
+        finding = _make_finding()
+        result = auto_escalate_finding(finding, "test reason")
+        assert result.status == FindingStatus.OPEN
