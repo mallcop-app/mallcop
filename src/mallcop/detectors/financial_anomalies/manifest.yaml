@@ -1,0 +1,10 @@
+name: financial-anomaly
+description: Flags new financial recipients and transfers above historical max
+version: 0.1.0
+sources: "*"
+event_types:
+  - transaction
+  - transfer
+  - payment
+  - withdrawal
+severity_default: warn

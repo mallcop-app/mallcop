@@ -1,0 +1,1 @@
+"""Financial anomalies detector plugin."""
