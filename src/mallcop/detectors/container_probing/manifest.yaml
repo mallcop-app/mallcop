@@ -1,0 +1,6 @@
+name: container-probing
+description: Flags unusual request patterns to self-hosted container services
+version: 0.1.0
+sources: ["container_logs"]
+event_types: ["http_request", "container_access", "container_log"]
+severity_default: warn
