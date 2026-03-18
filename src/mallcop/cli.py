@@ -2251,3 +2251,173 @@ def trust_list(ctx: click.Context) -> None:
         "keyring": list(ts.keyring.keys()),
         "endorsements": endorsement_data,
     }, indent=2))
+
+
+# --- Academy Flywheel: contribute ---
+
+_DEFAULT_CAPTURES_DIR = Path.home() / ".mallcop" / "captures"
+_DEFAULT_SYNTHETIC_DIR = (
+    Path(__file__).resolve().parents[2] / "tests" / "shakedown" / "scenarios" / "synthetic"
+)
+
+
+def _scan_captures(captures_dir: Path) -> list[Path]:
+    """Return all cap-*.jsonl files that have no .evaluated marker."""
+    if not captures_dir.exists():
+        return []
+    results = []
+    for cap_file in sorted(captures_dir.rglob("cap-*.jsonl")):
+        marker = cap_file.with_suffix(".evaluated")
+        if not marker.exists():
+            results.append(cap_file)
+    return results
+
+
+def _load_capture(cap_file: Path) -> dict | None:
+    """Load the first JSON object from a capture JSONL file. Returns None on error."""
+    try:
+        for line in cap_file.read_text().splitlines():
+            line = line.strip()
+            if line:
+                return json.loads(line)
+    except Exception:
+        pass
+    return None
+
+
+@cli.command()
+@click.option("--dry-run", "mode", flag_value="dry-run", default=True,
+              help="Print what would be contributed without writing files (default).")
+@click.option("--local", "mode", flag_value="local",
+              help="Write synthesized scenarios to the synthetic/ directory.")
+@click.option("--submit", "mode", flag_value="submit",
+              help="Create a PR to the OSS repo via gh CLI.")
+@click.option("--captures-dir", default=None,
+              help="Override captures directory (default: ~/.mallcop/captures).")
+@click.option("--synthetic-dir", default=None,
+              help="Override synthetic scenarios output directory.")
+def contribute(
+    mode: str,
+    captures_dir: str | None,
+    synthetic_dir: str | None,
+) -> None:
+    """Contribute anonymized production captures to the OSS scenario corpus.
+
+    Scans ~/.mallcop/captures/ for unevaluated captures, runs the anonymizer
+    and quality gate on each, then synthesizes passing captures into shakedown
+    scenario YAML files.
+
+    Modes:
+      --dry-run (default)  Print a summary of what would be contributed.
+      --local              Write YAML files to tests/shakedown/scenarios/synthetic/.
+      --submit             Create a PR to the OSS repo via gh CLI.
+    """
+    import subprocess
+
+    from mallcop.flywheel.anonymizer import anonymize_capture
+    from mallcop.flywheel.quality_gate import QualityGate
+    from mallcop.flywheel.synthesizer import Synthesizer
+
+    cap_dir = Path(captures_dir) if captures_dir else _DEFAULT_CAPTURES_DIR
+    syn_dir = Path(synthetic_dir) if synthetic_dir else _DEFAULT_SYNTHETIC_DIR
+
+    cap_files = _scan_captures(cap_dir)
+
+    if not cap_files:
+        click.echo(json.dumps({
+            "command": "contribute",
+            "status": "ok",
+            "captures_found": 0,
+            "synthesized": 0,
+            "rejected": 0,
+            "message": "No unevaluated captures found.",
+        }, indent=2))
+        return
+
+    gate = QualityGate()
+    synthesizer = Synthesizer()
+
+    results = []
+    synthesized = []
+    rejected = []
+
+    for cap_file in cap_files:
+        raw = _load_capture(cap_file)
+        if raw is None:
+            rejected.append({"file": str(cap_file), "reason": "parse error"})
+            if mode != "dry-run":
+                cap_file.with_suffix(".evaluated").touch()
+            continue
+
+        # Anonymize first, then evaluate
+        anon = anonymize_capture(raw)
+
+        gate_result = gate.evaluate(anon)
+        if not gate_result.passed:
+            rejected.append({
+                "file": str(cap_file),
+                "reason": gate_result.rejection_reason,
+            })
+            if mode != "dry-run":
+                cap_file.with_suffix(".evaluated").touch()
+            continue
+
+        # Quality gate passed: synthesize
+        scenario = synthesizer.synthesize(anon)
+        synthesized.append({
+            "file": str(cap_file),
+            "scenario_id": scenario["id"],
+            "scenario": scenario,
+        })
+
+        if mode == "local":
+            syn_dir.mkdir(parents=True, exist_ok=True)
+            out_file = syn_dir / f"{scenario['id']}.yaml"
+            out_file.write_text(
+                yaml.dump(scenario, allow_unicode=True, sort_keys=False),
+                encoding="utf-8",
+            )
+            cap_file.with_suffix(".evaluated").touch()
+        elif mode == "submit":
+            syn_dir.mkdir(parents=True, exist_ok=True)
+            out_file = syn_dir / f"{scenario['id']}.yaml"
+            out_file.write_text(
+                yaml.dump(scenario, allow_unicode=True, sort_keys=False),
+                encoding="utf-8",
+            )
+            cap_file.with_suffix(".evaluated").touch()
+
+    summary: dict[str, Any] = {
+        "command": "contribute",
+        "status": "ok",
+        "mode": mode,
+        "captures_found": len(cap_files),
+        "synthesized": len(synthesized),
+        "rejected": len(rejected),
+    }
+
+    if mode == "dry-run":
+        summary["would_contribute"] = [s["scenario_id"] for s in synthesized]
+        summary["rejected_captures"] = rejected
+    else:
+        summary["contributed"] = [s["scenario_id"] for s in synthesized]
+        summary["rejected_captures"] = rejected
+
+    if mode == "submit" and synthesized:
+        # Create a PR via gh CLI
+        branch = f"synthetic-scenarios-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}"
+        try:
+            subprocess.run(
+                ["gh", "pr", "create",
+                 "--title", f"Add {len(synthesized)} synthetic scenario(s) from flywheel",
+                 "--body", "Synthesized from anonymized production captures via `mallcop contribute --submit`.",
+                 "--base", "main",
+                 "--head", branch],
+                check=True,
+                capture_output=True,
+            )
+            summary["pr_created"] = True
+        except Exception as exc:
+            summary["pr_error"] = str(exc)
+
+    click.echo(json.dumps(summary, indent=2))
