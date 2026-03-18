@@ -42,4 +42,7 @@ markers = [
     "academy_exam: Academy Exam scenario tests — alias for shakedown (requires LLM access)",
     "stability: stability tests — run 3x per scenario (set SHAKEDOWN_STABILITY=1)",
     "integration: integration tests that use real actor runtime with mock LLMs (no API key needed)",
+    "install_push: installation path tests, runs on every push to main",
+    "install_prerelease: installation path tests, runs on pre-release only",
+    "functional: functional tests exercising CLI commands end-to-end with mocked externals",
 ]
