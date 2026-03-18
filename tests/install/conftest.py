@@ -190,3 +190,92 @@ def clawcop_container():
 # Manual install fixtures (bead mallcop-opoq)
 # ---------------------------------------------------------------------------
 # Add fixtures for test_manual_install.py here when bead mallcop-opoq is worked.
+
+
+# ---------------------------------------------------------------------------
+# GitHub Device Flow mock fixture (bead mallcop-xr5h)
+# ---------------------------------------------------------------------------
+
+def _build_device_flow_app():
+    """Build a minimal FastAPI app that mimics GitHub's device flow endpoints."""
+    try:
+        from fastapi import FastAPI, Request
+        from fastapi.responses import JSONResponse
+    except ImportError:
+        return None
+
+    app = FastAPI()
+
+    @app.get("/login/device/code")
+    async def device_code(request: Request):
+        """Step 1: client exchanges client_id for a device_code + user_code."""
+        return JSONResponse({
+            "device_code": "mock_device_code_abc123",
+            "user_code": "MOCK-CODE",
+            "verification_uri": "https://github.com/login/device",
+            "expires_in": 900,
+            "interval": 1,
+        })
+
+    @app.post("/login/oauth/access_token")
+    async def access_token(request: Request):
+        """Step 2: client polls here until access_token is granted."""
+        return JSONResponse({
+            "access_token": "ghs_mock_device_flow_token",
+            "token_type": "bearer",
+            "scope": "repo,read:org",
+        })
+
+    return app
+
+
+@pytest.fixture
+def mock_github_device_flow():
+    """
+    Fixture that intercepts GitHub device-flow OAuth HTTP calls (bead mallcop-xr5h).
+
+    Uses the `responses` library to mock:
+      GET  /login/device/code          → device_code + user_code
+      POST /login/oauth/access_token   → access_token
+
+    This allows tests that exercise GitHub OAuth setup steps to run without
+    network access or real GitHub credentials. The fixture is a context manager
+    — it is active for the duration of the test function.
+
+    Usage:
+        def test_something(mock_github_device_flow):
+            # GitHub device flow calls are automatically intercepted
+            ...
+    """
+    try:
+        import responses as responses_lib
+    except ImportError:
+        pytest.skip("responses library not installed — skipping device flow mock")
+        return
+
+    with responses_lib.RequestsMock(assert_all_requests_are_fired=False) as rsps:
+        # Device code request
+        rsps.add(
+            responses_lib.GET,
+            "https://github.com/login/device/code",
+            json={
+                "device_code": "mock_device_code_abc123",
+                "user_code": "MOCK-CODE",
+                "verification_uri": "https://github.com/login/device",
+                "expires_in": 900,
+                "interval": 1,
+            },
+            status=200,
+        )
+        # Access token polling endpoint
+        rsps.add(
+            responses_lib.POST,
+            "https://github.com/login/oauth/access_token",
+            json={
+                "access_token": "ghs_mock_device_flow_token",
+                "token_type": "bearer",
+                "scope": "repo,read:org",
+            },
+            status=200,
+        )
+        yield rsps
