@@ -221,3 +221,71 @@ class TestProInitAppetiteOutput:
 
         # Error output should mention the issue
         assert "error" in result.output.lower() or "error" in (result.stderr or "").lower()
+
+
+# ---------------------------------------------------------------------------
+# mallcop-ak1n.1.18: email disclosure and validation in _setup_pro
+# ---------------------------------------------------------------------------
+
+class TestProInitEmailDisclosure:
+    """_setup_pro shows the email to the user before sending it to the API,
+    and validates email format. (mallcop-ak1n.1.18)"""
+
+    def _run_pro_init_with_email(self, tmp_path, email: str):
+        runner = CliRunner()
+        mock_discover, mock_connector, mock_git, mock_client = _make_mocks()
+        mock_git.stdout = email
+
+        with runner.isolated_filesystem(temp_dir=tmp_path):
+            with patch("mallcop.cli.instantiate_connector", return_value=mock_connector), \
+                 patch("mallcop.cli.discover_plugins", mock_discover), \
+                 patch("mallcop.pro.ProClient", return_value=mock_client), \
+                 patch("subprocess.run", return_value=mock_git), \
+                 patch("mallcop.cli.EnvSecretProvider"), \
+                 patch("sys.stdin.isatty", return_value=False):
+                result = runner.invoke(cli, ["init", "--pro"])
+        return result, mock_client
+
+    def test_email_shown_to_user_before_sending(self, tmp_path):
+        """CLI prints the email to stderr before creating the account in TTY mode.
+
+        The disclosure message includes the email address so the user knows what
+        is being sent to api.mallcop.dev before it happens.
+        """
+        runner = CliRunner()
+        mock_discover, mock_connector, mock_git, mock_client = _make_mocks()
+        mock_git.stdout = "user@example.com"
+
+        with runner.isolated_filesystem(temp_dir=tmp_path):
+            with patch("mallcop.cli.instantiate_connector", return_value=mock_connector), \
+                 patch("mallcop.cli.discover_plugins", mock_discover), \
+                 patch("mallcop.pro.ProClient", return_value=mock_client), \
+                 patch("subprocess.run", return_value=mock_git), \
+                 patch("mallcop.cli.EnvSecretProvider"), \
+                 patch("sys.stdin.isatty", return_value=True), \
+                 patch("click.prompt", return_value="Y"):
+                result = runner.invoke(cli, ["init", "--pro"])
+
+        # Email address must appear in output (disclosure message goes to stderr/mixed)
+        assert "user@example.com" in result.output
+
+    def test_invalid_email_format_returns_error(self, tmp_path):
+        """If git config user.email is not a valid email address, CLI returns error."""
+        result, mock_client = self._run_pro_init_with_email(tmp_path, "not-an-email")
+        # Should fail with an error, not attempt to call create_account
+        assert "error" in result.output.lower()
+        mock_client.create_account.assert_not_called()
+
+    def test_email_without_domain_rejected(self, tmp_path):
+        """Email without domain (e.g. 'user@') is rejected before hitting the API."""
+        result, mock_client = self._run_pro_init_with_email(tmp_path, "user@")
+        # create_account must not be called with a malformed email
+        mock_client.create_account.assert_not_called()
+
+    def test_valid_email_proceeds_without_error(self, tmp_path):
+        """A properly formatted email address proceeds normally."""
+        result, _mock_client = self._run_pro_init_with_email(tmp_path, "baron@example.com")
+        assert result.exit_code == 0, f"Exit {result.exit_code}: {result.output!r}"
+        data = json.loads(result.output)
+        assert data.get("status") == "ok"
+

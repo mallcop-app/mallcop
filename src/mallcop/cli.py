@@ -170,8 +170,8 @@ def _setup_pro(config_data: dict[str, Any]) -> dict[str, Any] | None:
     # Disclosure prompt: inform user their email is being sent to api.mallcop.dev (mallcop-ak1n.1.18).
     # Only prompt in interactive terminals — skip in CI/automated pipelines.
     import sys
-    click.echo(f"Creating Pro account with email: {email}", err=True)
     if sys.stdin.isatty():
+        click.echo(f"Creating Pro account with email: {email}", err=True)
         confirm = click.prompt("Continue? [Y/n]", default="Y", err=True)
         if confirm.strip().lower() not in ("y", "yes", ""):
             click.echo(json.dumps({"status": "error", "error": "Cancelled by user."}), err=True)
