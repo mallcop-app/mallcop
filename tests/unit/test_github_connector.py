@@ -790,3 +790,93 @@ class TestFetchAuditLogParams:
 
         _, kwargs = mock_pg.call_args
         assert "after" not in kwargs["params"]
+
+
+# ---------------------------------------------------------------------------
+# Checkpoint cursor validation (ak1n.1.16)
+# ---------------------------------------------------------------------------
+
+
+class TestGitHubCheckpointCursorValidation:
+    """Checkpoint cursor must be validated before use as GitHub API parameter.
+
+    The checkpoint is read from a plain YAML file that could be tampered with.
+    An invalid cursor must be rejected to prevent checkpoint injection attacks
+    that could skip events (blind spots) or manipulate pagination.
+    """
+
+    def _make_connector(self):
+        from mallcop.connectors.github.connector import GitHubConnector
+        from unittest.mock import patch
+
+        connector = GitHubConnector()
+        with patch.object(connector, "_validate_token"):
+            connector.configure({
+                "org": "test-org",
+                "token": "ghp_test",
+                "credentials_path": "",
+            })
+        return connector
+
+    def test_valid_cursor_accepted(self) -> None:
+        """A well-formed GitHub cursor is accepted and passed to the API."""
+        from unittest.mock import patch
+        from mallcop.schemas import Checkpoint
+        from datetime import datetime, timezone
+
+        connector = self._make_connector()
+        # GitHub audit log cursors are base64-like alphanumeric strings
+        valid_cursor = "MS42NjAzNzE0NDE4MzM1OTg2NCtleUpoWkdRaU9pSWlmUT09"
+        cp = Checkpoint(connector="github", value=valid_cursor,
+                        updated_at=datetime.now(timezone.utc))
+
+        with patch.object(connector, "_get_paginated", return_value=([], None)) as mock_pg:
+            connector._fetch_audit_log(cp)
+
+        _, kwargs = mock_pg.call_args
+        assert kwargs["params"]["after"] == valid_cursor
+
+    def test_cursor_with_newlines_rejected(self) -> None:
+        """Cursor containing newlines (header injection attempt) is rejected."""
+        from unittest.mock import patch
+        from mallcop.schemas import Checkpoint
+        from datetime import datetime, timezone
+
+        connector = self._make_connector()
+        injected_cursor = "validcursor\nX-Injected: evil"
+        cp = Checkpoint(connector="github", value=injected_cursor,
+                        updated_at=datetime.now(timezone.utc))
+
+        with patch.object(connector, "_get_paginated", return_value=([], None)) as mock_pg:
+            with pytest.raises(ValueError, match="[Ii]nvalid.*cursor"):
+                connector._fetch_audit_log(cp)
+
+    def test_cursor_with_null_bytes_rejected(self) -> None:
+        """Cursor containing null bytes is rejected."""
+        from unittest.mock import patch
+        from mallcop.schemas import Checkpoint
+        from datetime import datetime, timezone
+
+        connector = self._make_connector()
+        bad_cursor = "cursor\x00evil"
+        cp = Checkpoint(connector="github", value=bad_cursor,
+                        updated_at=datetime.now(timezone.utc))
+
+        with patch.object(connector, "_get_paginated", return_value=([], None)) as mock_pg:
+            with pytest.raises(ValueError, match="[Ii]nvalid.*cursor"):
+                connector._fetch_audit_log(cp)
+
+    def test_excessively_long_cursor_rejected(self) -> None:
+        """A cursor longer than the expected maximum is rejected."""
+        from unittest.mock import patch
+        from mallcop.schemas import Checkpoint
+        from datetime import datetime, timezone
+
+        connector = self._make_connector()
+        long_cursor = "A" * 10001
+        cp = Checkpoint(connector="github", value=long_cursor,
+                        updated_at=datetime.now(timezone.utc))
+
+        with patch.object(connector, "_get_paginated", return_value=([], None)) as mock_pg:
+            with pytest.raises(ValueError, match="[Ii]nvalid.*cursor"):
+                connector._fetch_audit_log(cp)

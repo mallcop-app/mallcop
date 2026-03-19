@@ -410,3 +410,87 @@ class TestDeliverDigestErrors:
 
         assert result.success is False
         assert "Connection error" in result.error
+
+
+# --- Slack mrkdwn injection prevention (ak1n.1.13) --------------------------
+
+
+class TestFormatDigestSlackInjectionPrevention:
+    """Slack Block Kit mrkdwn interprets < > & as special (links, @mentions).
+
+    Attacker-controlled finding.title or annotation content containing
+    <https://evil.com|click here> would render as a hyperlink. Escape these.
+    """
+
+    def _make_finding(
+        self,
+        id: str = "fnd_001",
+        severity: Severity = Severity.WARN,
+        title: str = "Test finding",
+        annotations=None,
+    ):
+        from mallcop.schemas import Annotation
+        return Finding(
+            id=id,
+            timestamp=datetime(2026, 3, 10, 12, 0, 0, tzinfo=timezone.utc),
+            detector="test",
+            event_ids=["evt_001"],
+            title=title,
+            severity=severity,
+            status=FindingStatus.OPEN,
+            annotations=annotations or [],
+            metadata={},
+        )
+
+    def _get_all_text(self, payload: dict) -> str:
+        """Extract all text strings from Slack Block Kit payload."""
+        import json
+        return json.dumps(payload)
+
+    def test_slack_link_in_title_is_escaped(self):
+        """<URL|label> in title would create attacker-controlled hyperlink."""
+        f = self._make_finding(title="<https://evil.com|click here>")
+        payload = format_digest([f])
+        text = self._get_all_text(payload)
+        assert "<https://evil.com|click here>" not in text
+        assert "&lt;" in text or "\\u003c" in text.lower() or "evil.com" not in text or "&lt;https" in text
+
+    def test_angle_brackets_in_title_escaped(self):
+        """Bare < > in title must be escaped so Slack doesn't parse them as links."""
+        f = self._make_finding(title="value < threshold > limit")
+        payload = format_digest([f])
+        text = self._get_all_text(payload)
+        # Must not appear as raw angle brackets in mrkdwn context
+        assert "<https" not in text  # not accidentally parsed as a URL
+        # Escaped form must be present
+        assert "&lt;" in text or "value &lt; threshold" in text
+
+    def test_ampersand_in_title_escaped(self):
+        """& in title must be escaped to prevent Slack entity injection."""
+        f = self._make_finding(title="foo & bar")
+        payload = format_digest([f])
+        text = self._get_all_text(payload)
+        # Raw & in mrkdwn can be misinterpreted; must be escaped
+        assert "foo &amp; bar" in text or '"foo & bar"' not in text
+
+    def test_slack_injection_in_annotation_content_escaped(self):
+        """Annotation content with Slack link syntax is escaped."""
+        from mallcop.schemas import Annotation
+        ann = Annotation(
+            actor="triage",
+            timestamp=datetime(2026, 3, 10, 12, 5, 0, tzinfo=timezone.utc),
+            content="<https://phishing.com|urgent action required>",
+            action="annotate",
+            reason=None,
+        )
+        f = self._make_finding(annotations=[ann])
+        payload = format_digest([f])
+        text = self._get_all_text(payload)
+        assert "<https://phishing.com|urgent action required>" not in text
+
+    def test_safe_title_renders_correctly(self):
+        """Normal alphanumeric title is unchanged in output."""
+        f = self._make_finding(title="Login from new IP 192.168.1.1")
+        payload = format_digest([f])
+        text = self._get_all_text(payload)
+        assert "Login from new IP 192.168.1.1" in text

@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import email.utils
+import html
 import smtplib
+import ssl
 from dataclasses import dataclass
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -75,10 +77,10 @@ def format_digest(findings: list[Finding]) -> str:
         html_parts.append(f'<h3 style="color: {color}">{sev.upper()} ({len(group)})</h3>')
         html_parts.append("<ul>")
         for f in group:
-            line = f"<li><code>{f.id}</code> {f.title}"
+            line = f"<li><code>{html.escape(f.id)}</code> {html.escape(f.title)}"
             if f.annotations:
                 last = f.annotations[-1]
-                line += f"<br><em>{last.actor}: {last.content}</em>"
+                line += f"<br><em>{html.escape(last.actor)}: {html.escape(last.content)}</em>"
             line += "</li>"
             html_parts.append(line)
         html_parts.append("</ul>")
@@ -143,8 +145,14 @@ def deliver_digest(
     msg.attach(MIMEText(html_body, "html"))
 
     try:
+        # Explicit hardened SSLContext: cert verification + hostname check enforced.
+        # Python's default starttls() context is already correct, but we make the
+        # security intent explicit to guard against future Python version changes (mallcop-ak1n.1.17).
+        _ssl_ctx = ssl.create_default_context()
+        _ssl_ctx.verify_mode = ssl.CERT_REQUIRED
+        _ssl_ctx.check_hostname = True
         with smtplib.SMTP(smtp_host, smtp_port, timeout=30) as server:
-            server.starttls()
+            server.starttls(context=_ssl_ctx)
             if username and password:
                 server.login(username, password)
             server.sendmail(from_addr, to_addrs, msg.as_string())

@@ -208,3 +208,84 @@ class TestDiscoverPlugins:
         assert "custom" in result["detectors"]
         # built-in detector still available
         assert "new-actor" in result["detectors"]
+
+
+# ---------------------------------------------------------------------------
+# External plugin security warning (ak1n.1.14)
+# ---------------------------------------------------------------------------
+
+
+class TestExternalPluginSecurityWarning:
+    """Loading external plugins must emit a security warning.
+
+    The deployment repo plugins/ directory is a code-execution boundary.
+    Any file placed there by anyone with write access executes in the mallcop
+    process. Users must be warned that external plugin loading is occurring.
+    """
+
+    def _make_external_plugin(self, plugin_dir: Path, name: str, code: str) -> None:
+        """Create a minimal external connector plugin for testing."""
+        connector_dir = plugin_dir / "connectors" / name
+        connector_dir.mkdir(parents=True, exist_ok=True)
+        # Manifest
+        manifest = {
+            "name": name,
+            "description": f"{name} connector",
+            "version": "0.1.0",
+            "auth": {"required": [], "optional": []},
+            "event_types": ["test"],
+            "discovery": {"probes": []},
+            "tools": [],
+        }
+        (connector_dir / "manifest.yaml").write_text(yaml.dump(manifest))
+        (connector_dir / "connector.py").write_text(code)
+
+    def test_external_plugin_load_emits_warning(self, tmp_path: Path, caplog) -> None:
+        """load_plugin_class must emit a WARNING when loading an external plugin."""
+        import logging
+        from mallcop.plugins import load_plugin_class, discover_plugins
+        from mallcop.connectors._base import ConnectorBase
+
+        code = '''
+from mallcop.connectors._base import ConnectorBase
+class TestConnector(ConnectorBase):
+    def poll(self, checkpoint=None): return None
+    def event_types(self): return ["test"]
+    def relevant_event_types(self): return ["test"]
+'''
+        self._make_external_plugin(tmp_path, "testconn", code)
+        plugins = discover_plugins([tmp_path])
+        info = plugins["connectors"].get("testconn")
+        assert info is not None, "External plugin not discovered"
+
+        with caplog.at_level(logging.WARNING, logger="mallcop.plugins"):
+            load_plugin_class(info)
+
+        # Must have emitted a security warning about external plugin loading
+        warning_messages = [r.message for r in caplog.records if r.levelno >= logging.WARNING]
+        assert any(
+            "external" in msg.lower() or "code execution" in msg.lower() or "trust" in msg.lower()
+            for msg in warning_messages
+        ), f"No external plugin security warning found. Got: {warning_messages}"
+
+    def test_builtin_plugin_load_no_security_warning(self, tmp_path: Path, caplog) -> None:
+        """Built-in plugins must NOT trigger the external plugin warning."""
+        import logging
+        from mallcop.plugins import load_plugin_class, discover_plugins
+
+        # Use the actual mallcop package as the search path (built-in only)
+        from mallcop import plugins as plugins_mod
+        package_root = Path(plugins_mod.__file__).parent
+        builtin_plugins = discover_plugins([package_root])
+        info = builtin_plugins.get("connectors", {}).get("github")
+        if info is None:
+            pytest.skip("github connector not available in test env")
+
+        with caplog.at_level(logging.WARNING, logger="mallcop.plugins"):
+            load_plugin_class(info)
+
+        warning_messages = [r.message for r in caplog.records if r.levelno >= logging.WARNING]
+        assert not any(
+            "external" in msg.lower() or "code execution" in msg.lower()
+            for msg in warning_messages
+        ), f"Unexpected security warning for built-in plugin: {warning_messages}"

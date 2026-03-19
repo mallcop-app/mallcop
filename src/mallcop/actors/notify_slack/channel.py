@@ -4,6 +4,19 @@ from __future__ import annotations
 
 from typing import Any
 
+
+def _escape_mrkdwn(text: str) -> str:
+    """Escape Slack mrkdwn special characters in user-controlled text.
+
+    Slack Block Kit interprets < > & as special (links, mentions, entities).
+    Escape them so attacker-controlled data cannot inject hyperlinks or mentions.
+    Per Slack docs: & → &amp;, < → &lt;, > → &gt; (in that order).
+    """
+    text = text.replace("&", "&amp;")
+    text = text.replace("<", "&lt;")
+    text = text.replace(">", "&gt;")
+    return text
+
 from mallcop.actors.notify_base import DeliveryResult, validate_webhook_url, post_webhook
 from mallcop.schemas import Finding, Severity, SEVERITY_ORDER
 
@@ -69,10 +82,10 @@ def format_digest(findings: list[Finding]) -> dict[str, Any]:
         )
 
         for f in group:
-            text = f"\u2022 `{f.id}` {f.title}"
+            text = f"\u2022 `{f.id}` {_escape_mrkdwn(f.title)}"
             if f.annotations:
                 last = f.annotations[-1]
-                text += f"\n  _{last.actor}: {last.content}_"
+                text += f"\n  _{_escape_mrkdwn(last.actor)}: {_escape_mrkdwn(last.content)}_"
             blocks.append(
                 {"type": "section", "text": {"type": "mrkdwn", "text": text}}
             )

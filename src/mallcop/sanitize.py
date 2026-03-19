@@ -21,22 +21,30 @@ from mallcop.schemas import Event, Finding
 def sanitize_field(value: str | None, max_length: int = 1024) -> str:
     """Sanitize a field value from external data.
 
-    - Strips control characters (preserves \\n, \\r, \\t)
+    - Strips control characters (including \\n, \\r, \\t — replaced with placeholders)
     - Caps length at max_length
     - Wraps with [USER_DATA_BEGIN]/[USER_DATA_END] markers
+
+    Newlines and tabs are replaced with [NEWLINE] and [TAB] placeholders rather
+    than preserved as literal whitespace. Preserving them allowed multi-line
+    injection payloads to mimic system-level prompt formatting (markdown headers,
+    ALL CAPS keywords) inside USER_DATA boundaries, weakening the defense against
+    prompt injection.
     """
     if value is None:
         value = ""
 
-    # Strip control characters except \n (0x0a), \r (0x0d), \t (0x09)
+    # Strip all control characters; replace newlines/tabs with safe placeholders
     cleaned = []
     for ch in value:
         cat = unicodedata.category(ch)
         if cat.startswith("C"):
             # Control/format/surrogate/private-use/unassigned
-            if ch in ("\n", "\r", "\t"):
-                cleaned.append(ch)
-            # else: strip it
+            if ch == "\n" or ch == "\r":
+                cleaned.append("[NEWLINE]")
+            elif ch == "\t":
+                cleaned.append("[TAB]")
+            # else: strip it entirely
         else:
             cleaned.append(ch)
     result = "".join(cleaned)

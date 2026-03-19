@@ -287,3 +287,45 @@ class TestPatrolsOptional:
         config = {"patrols": {}}
         patrols = parse_patrols(config, max_donuts_per_run=50000)
         assert patrols == []
+
+
+# ---------------------------------------------------------------------------
+# period_to_cron — undocumented behavior / latent bugs
+# ---------------------------------------------------------------------------
+
+
+class TestPeriodToCronEdgeCases:
+    def test_2d_same_as_1d_documents_behavior(self):
+        """2d produces daily cron, same as 1d. Multi-day periods are not supported.
+
+        This is a documented limitation: the 'd' unit always produces
+        "0 0 * * *" regardless of the N value. A user setting "2d" gets
+        daily scheduling, not every-2-days scheduling. This test documents
+        the current behavior so a future change is visible.
+        """
+        assert period_to_cron("2d") == "0 0 * * *"
+        assert period_to_cron("3d") == "0 0 * * *"
+
+    def test_2w_same_as_1w_documents_behavior(self):
+        """2w produces weekly cron, same as 1w. Multi-week periods are not supported."""
+        assert period_to_cron("2w") == "0 0 * * 0"
+
+    def test_90m_documents_behavior(self):
+        """90m produces */90 * * * * which is valid cron but only fires at minute 0.
+
+        This is a documented limitation: */90 in the minutes field only triggers
+        when the minute is divisible by 90, which only occurs at minute 0 in each
+        hour (90 > 60 so no other minute qualifies). Users expecting "every 90
+        minutes" should use a different scheduling approach.
+        """
+        assert period_to_cron("90m") == "*/90 * * * *"
+
+    def test_parse_patrols_string_value_raises(self):
+        """A patrol configured as a string (not a dict) should raise ConfigError."""
+        config = {
+            "patrols": {
+                "bad": "this-should-be-a-dict"
+            }
+        }
+        with pytest.raises(ConfigError, match="mapping"):
+            parse_patrols(config, max_donuts_per_run=50000)

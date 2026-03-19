@@ -271,6 +271,62 @@ class TestCostLogging:
         assert entry.donuts_used == 7777
 
 
+class TestBudgetTrackerBoundaries:
+    """Boundary tests for BudgetTracker — strict greater-than semantics."""
+
+    def test_run_budget_not_exhausted_at_exact_threshold(self) -> None:
+        """run_budget_exhausted uses strict >, so equal to limit is NOT exhausted."""
+        config = BudgetConfig(max_donuts_per_run=1000, max_donuts_per_finding=5000)
+        tracker = BudgetTracker(config)
+        tracker.add_donuts(1000)
+        # donuts_used == max_donuts_per_run -> NOT exhausted (strict >)
+        assert not tracker.run_budget_exhausted()
+
+    def test_run_budget_exhausted_one_over_threshold(self) -> None:
+        """One over the limit IS exhausted."""
+        config = BudgetConfig(max_donuts_per_run=1000, max_donuts_per_finding=5000)
+        tracker = BudgetTracker(config)
+        tracker.add_donuts(1001)
+        assert tracker.run_budget_exhausted()
+
+    def test_finding_budget_not_exhausted_at_exact_threshold(self) -> None:
+        """finding_budget_exhausted uses strict >, so equal to limit is NOT exhausted."""
+        config = BudgetConfig(max_donuts_per_run=50000, max_donuts_per_finding=500)
+        tracker = BudgetTracker(config)
+        # finding_donuts == max_donuts_per_finding -> NOT exhausted (strict >)
+        assert not tracker.finding_budget_exhausted(500)
+
+    def test_finding_budget_exhausted_one_over_threshold(self) -> None:
+        """One over the per-finding limit IS exhausted."""
+        config = BudgetConfig(max_donuts_per_run=50000, max_donuts_per_finding=500)
+        tracker = BudgetTracker(config)
+        assert tracker.finding_budget_exhausted(501)
+
+    def test_budget_remaining_pct_zero_when_over_budget(self) -> None:
+        """budget_remaining_pct() returns 0.0 when donuts_used exceeds the limit."""
+        config = BudgetConfig(max_donuts_per_run=1000, max_donuts_per_finding=5000)
+        tracker = BudgetTracker(config)
+        tracker.add_donuts(2000)  # well over limit
+        # run_budget_remaining clamps at 0, so pct should be 0.0, not negative
+        assert tracker.budget_remaining_pct() == 0.0
+
+    def test_append_cost_log_parent_dir_not_exist_creates_it(self, tmp_path: Path) -> None:
+        """append_cost_log creates the parent directory when it does not exist."""
+        nested = tmp_path / "a" / "b" / "costs.jsonl"
+        assert not nested.parent.exists()
+        entry = CostEntry(
+            timestamp=datetime(2026, 3, 6, 18, 0, 0, tzinfo=timezone.utc),
+            events=1,
+            findings=0,
+            actors_invoked=False,
+            donuts_used=0,
+            estimated_cost_usd=0.0,
+            budget_remaining_pct=100.0,
+        )
+        append_cost_log(nested, entry)
+        assert nested.exists()
+
+
 class TestAppendCostLogAtomic:
     """Verify append_cost_log uses atomic os.write with O_APPEND."""
 

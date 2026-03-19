@@ -9,7 +9,29 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import regex as _regex
 import yaml
+
+# Maximum seconds allowed for a single regex match against one log line.
+# Protects against ReDoS from LLM-generated or user-supplied parser patterns.
+_REGEX_TIMEOUT = 5.0
+
+
+def _safe_search(
+    pattern: re.Pattern[str] | _regex.Pattern[str],
+    line: str,
+    *,
+    timeout: float = _REGEX_TIMEOUT,
+) -> re.Match[str] | _regex.Match[str] | None:
+    """Call pattern.search(line) with a timeout to prevent ReDoS hangs.
+
+    Uses the `regex` library's timeout parameter when available (the compiled
+    pattern is a regex.Pattern). Falls back to plain search for stdlib re.Pattern.
+
+    Raises:
+        regex.TimeoutError: propagated to caller — treated as no-match by callers.
+    """
+    return pattern.search(line, timeout=timeout)  # type: ignore[call-arg]
 
 from mallcop.schemas import Event, Severity
 
@@ -30,16 +52,17 @@ class ParserTemplate:
     noise_filter: bool
 
     def __post_init__(self) -> None:
-        # Compile the regex early to catch errors at load time
+        # Compile using the regex library to gain timeout support at match time.
+        # This guards against ReDoS from LLM-generated or user-supplied patterns.
         try:
-            self._compiled: re.Pattern[str] = re.compile(self.pattern)
-        except re.error as e:
+            self._compiled: _regex.Pattern[str] = _regex.compile(self.pattern)
+        except (_regex.error, re.error) as e:
             raise ValueError(
                 f"Template '{self.name}' has invalid regex: {e}"
             ) from e
 
     @property
-    def compiled(self) -> re.Pattern[str]:
+    def compiled(self) -> _regex.Pattern[str]:
         return self._compiled
 
 
@@ -149,7 +172,12 @@ class ParserRuntime:
             matched = False
 
             for template in self._manifest.templates:
-                m = template.compiled.search(line)
+                try:
+                    m = _safe_search(template.compiled, line)
+                except TimeoutError:
+                    # Pattern exceeded timeout limit on this line; treat as no-match.
+                    # This prevents a single malicious log line from hanging the process.
+                    continue
                 if m is None:
                     continue
 

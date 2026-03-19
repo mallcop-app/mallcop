@@ -18,6 +18,39 @@ from mallcop.connectors.openclaw.skills import enumerate_skills, hash_file, pars
 from mallcop.schemas import Checkpoint, DiscoveryResult, Event, PollResult, Severity
 
 
+_REDACT_PLACEHOLDER = "[REDACTED]"
+
+# Field name patterns that may contain secrets.
+# Any config key containing one of these substrings (case-insensitive) will be redacted.
+_SECRET_FIELD_PATTERNS = (
+    "api_key",
+    "apikey",
+    "token",
+    "secret",
+    "password",
+    "credential",
+    "auth",
+    "private_key",
+    "access_key",
+)
+
+
+def _redact_config(config: dict[str, Any]) -> dict[str, Any]:
+    """Return a copy of config with sensitive fields replaced by a placeholder.
+
+    Any top-level key whose name contains a known secret pattern is redacted.
+    Nested structures are not traversed — the caller should avoid nesting secrets.
+    """
+    redacted: dict[str, Any] = {}
+    for key, value in config.items():
+        key_lower = key.lower()
+        if any(pattern in key_lower for pattern in _SECRET_FIELD_PATTERNS):
+            redacted[key] = _REDACT_PLACEHOLDER
+        else:
+            redacted[key] = value
+    return redacted
+
+
 _EVENT_TYPES = [
     "skill_installed",
     "skill_modified",
@@ -167,8 +200,7 @@ class OpenClawConnector(ConnectorBase):
                     target=str(config_path),
                     severity=Severity.WARN,
                     metadata={
-                        "config": current_config,
-                        "config_raw": config_path.read_text(encoding="utf-8"),
+                        "config": _redact_config(current_config),
                         "config_hash": current_config_hash,
                         "openclaw_home": str(self._openclaw_home),
                     },
@@ -207,13 +239,33 @@ def _decode_checkpoint(checkpoint: Checkpoint | None) -> dict[str, Any]:
 
 
 def _skill_info_to_dict(info: object) -> dict[str, Any]:
-    """Convert a SkillInfo to a metadata-friendly dict."""
+    """Convert a SkillInfo to a metadata-friendly dict.
+
+    skill_content is included because the malicious-skill detector performs
+    static pattern matching against it to detect encoded payloads, quarantine
+    bypasses, and external binary downloads. Removing it would disable that
+    detection path.
+
+    Defense-in-depth note (mallcop-o8cj): the content is wrapped in USER_DATA
+    markers by sanitize_tool_result() before reaching any LLM actor. The actor
+    system prompt explicitly instructs the model to treat USER_DATA as untrusted.
+    Additionally, newlines are now replaced with [NEWLINE] placeholders by
+    sanitize_field(), preventing multi-line injection payloads from mimicking
+    system-level prompt formatting (fixed via mallcop-ux2g).
+
+    A size cap of 4096 chars is applied here to bound storage bloat from large
+    SKILL.md files while preserving enough content for pattern matching.
+    """
+    content = info.content  # type: ignore[attr-defined]
+    if content and len(content) > 4096:
+        content = content[:4096]
     return {
         "skill_name": info.name,  # type: ignore[attr-defined]
         "skill_description": info.description,  # type: ignore[attr-defined]
         "skill_version": info.version,  # type: ignore[attr-defined]
         "skill_author": info.author,  # type: ignore[attr-defined]
-        "skill_content": info.content,  # type: ignore[attr-defined]
+        "skill_content": content,
+        "skill_hash": getattr(info, "hash", None),  # type: ignore[attr-defined]
         "skill_path": str(info.path),  # type: ignore[attr-defined]
     }
 

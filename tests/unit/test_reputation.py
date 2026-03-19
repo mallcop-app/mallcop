@@ -279,6 +279,67 @@ class TestEnrichFinding:
         enriched = rep.enrich_finding(finding)
         assert enriched.metadata == original_meta
 
+
+class TestScoreClamping:
+    """Boundary value tests for score min/max clamping."""
+
+    def test_score_clamped_at_minimum_zero(self, tmp_path):
+        """Applying a large negative delta must not drive score below 0."""
+        rep = _make_reputation(tmp_path)
+        # Start at 50 (neutral), apply 6 CRITICAL findings (-20 each = -120 total)
+        for i in range(6):
+            rep.record_finding("user", "bad@example.com", _make_finding(Severity.CRITICAL, f"f-{i}"))
+        score = rep.get_score("user", "bad@example.com")
+        assert score.score >= 0.0
+        assert score.score == pytest.approx(0.0, abs=1e-9)
+
+    def test_score_clamped_at_maximum_100(self, tmp_path):
+        """Applying many positive deltas must not drive score above 100."""
+        rep = _make_reputation(tmp_path)
+        # Apply enough baseline matches to try to exceed 100 (each adds +2)
+        for _ in range(60):
+            rep.record_baseline_match("user", "good@example.com")
+        score = rep.get_score("user", "good@example.com")
+        assert score.score <= 100.0
+        assert score.score == pytest.approx(100.0, abs=1e-9)
+
+    def test_decay_at_exact_half_life_halves_distance_from_neutral(self, tmp_path):
+        """After exactly DECAY_HALF_LIFE_DAYS, deviation from neutral should halve."""
+        from mallcop.reputation import NEUTRAL_SCORE, DECAY_HALF_LIFE_DAYS
+
+        rep = _make_reputation(tmp_path)
+        es = rep.get_score("user", "alice@example.com")
+        initial_score = 80.0
+        es.score = initial_score
+        es.last_updated = datetime.now(timezone.utc) - timedelta(days=DECAY_HALF_LIFE_DAYS)
+
+        decayed = rep.apply_decay(es)
+        # deviation = 80 - 50 = 30; after half-life: 30 * 0.5 = 15; new score = 65
+        expected = NEUTRAL_SCORE + (initial_score - NEUTRAL_SCORE) * 0.5
+        assert decayed.score == pytest.approx(expected, abs=0.01)
+
+    def test_decay_zero_elapsed_time_no_change(self, tmp_path):
+        """Applying decay with no elapsed time must leave score unchanged."""
+        rep = _make_reputation(tmp_path)
+        es = rep.get_score("user", "alice@example.com")
+        es.score = 70.0
+        # last_updated is now (default from _get_or_create is datetime.now)
+        # Force it to be exactly now so elapsed_days <= 0
+        es.last_updated = datetime.now(timezone.utc)
+
+        decayed = rep.apply_decay(es)
+        assert decayed.score == pytest.approx(70.0, abs=0.01)
+
+    def test_mixed_severity_findings_accumulate_correctly(self, tmp_path):
+        """INFO, WARN, and CRITICAL findings should stack with correct deltas."""
+        rep = _make_reputation(tmp_path)
+        rep.record_finding("user", "mixed@example.com", _make_finding(Severity.INFO, "f-1"))
+        rep.record_finding("user", "mixed@example.com", _make_finding(Severity.WARN, "f-2"))
+        rep.record_finding("user", "mixed@example.com", _make_finding(Severity.CRITICAL, "f-3"))
+        score = rep.get_score("user", "mixed@example.com")
+        # 50 - 5 (INFO) - 10 (WARN) - 20 (CRITICAL) = 15
+        assert score.score == pytest.approx(15.0, abs=0.01)
+
     def test_enrich_unknown_actor_shows_neutral_score(self, tmp_path):
         rep = _make_reputation(tmp_path)
         finding = _make_finding(Severity.WARN)

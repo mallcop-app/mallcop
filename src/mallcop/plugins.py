@@ -156,7 +156,19 @@ def load_plugin_class(info: PluginInfo) -> type | None:
         dotted = "mallcop." + ".".join(rel.parts) + "." + module_stem
         mod = importlib.import_module(dotted)
     else:
-        # External plugin: load from file
+        # External plugin: load from file.
+        # SECURITY: The deployment repo plugins/ directory is a code-execution
+        # boundary. Any Python file placed there executes within the mallcop
+        # process, which has access to all secrets and API keys. Treat the
+        # deployment repo with the same security controls as the mallcop install.
+        logger.warning(
+            "Loading external plugin '%s' (%s) from %s — "
+            "external plugins execute as trusted code. "
+            "Ensure the deployment repo has appropriate access controls.",
+            info.name,
+            info.plugin_type,
+            module_path,
+        )
         spec = importlib.util.spec_from_file_location(
             f"mallcop._plugins.{info.plugin_type}.{info.name}",
             module_path,

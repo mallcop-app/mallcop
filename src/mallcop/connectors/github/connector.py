@@ -18,6 +18,37 @@ from mallcop.secrets import ConfigError, SecretProvider
 
 _API_BASE = "https://api.github.com"
 
+# GitHub audit log cursors are base64-encoded strings.
+# Max length is set conservatively to detect tampered or oversized values.
+_CURSOR_MAX_LEN = 1000
+# Valid cursor characters: base64 URL-safe alphabet + padding
+import re as _re
+_CURSOR_RE = _re.compile(r'^[A-Za-z0-9+/=_\-]+$')
+
+
+def _validate_cursor(cursor: str) -> None:
+    """Validate a checkpoint cursor value before passing to the GitHub API.
+
+    Guards against tampered checkpoints from a compromised deployment repo.
+    An invalid cursor could skip events or manipulate pagination.
+
+    Raises:
+        ValueError: if the cursor contains invalid characters, newlines,
+                    null bytes, or exceeds the maximum allowed length.
+    """
+    if len(cursor) > _CURSOR_MAX_LEN:
+        raise ValueError(
+            f"Invalid cursor: length {len(cursor)} exceeds maximum {_CURSOR_MAX_LEN}"
+        )
+    if "\n" in cursor or "\r" in cursor or "\x00" in cursor:
+        raise ValueError(
+            "Invalid cursor: contains control characters (newline or null byte)"
+        )
+    if not _CURSOR_RE.match(cursor):
+        raise ValueError(
+            f"Invalid cursor: contains unexpected characters (expected base64 alphabet)"
+        )
+
 # Map GitHub audit log actions to mallcop event types
 _ACTION_MAP: list[tuple[str, str]] = [
     ("org.add_member", "collaborator_added"),
@@ -254,6 +285,7 @@ class GitHubConnector(ConnectorBase):
         url = f"{_API_BASE}/orgs/{self._org}/audit-log"
         params: dict[str, str] = {"per_page": "100"}
         if checkpoint is not None and checkpoint.value:
+            _validate_cursor(checkpoint.value)
             params["after"] = checkpoint.value
 
         return self._get_paginated(url, params=params)

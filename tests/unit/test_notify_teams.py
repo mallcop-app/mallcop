@@ -189,3 +189,55 @@ class TestDeliverDigestErrors:
             deliver_digest(
                 [_make_finding()], "https://10.0.0.1/webhook"
             )
+
+
+# --- Teams markdown injection prevention (ak1n.1.13) ------------------------
+
+
+class TestFormatDigestTeamsInjectionPrevention:
+    """Teams AdaptiveCard activityTitle and facts render markdown.
+
+    Attacker-controlled finding.title can inject markdown links or formatting.
+    Escape < > & in user-data fields before embedding in Teams payload.
+    """
+
+    def _make_finding_with_title(self, title: str):
+        from mallcop.schemas import Annotation
+        return Finding(
+            id="fnd_001",
+            timestamp=__import__("datetime").datetime(2026, 3, 10, 12, 0, 0,
+                tzinfo=__import__("datetime").timezone.utc),
+            detector="test",
+            event_ids=["evt_001"],
+            title=title,
+            severity=Severity.WARN,
+            status=FindingStatus.OPEN,
+            annotations=[],
+            metadata={},
+        )
+
+    def _get_all_text(self, payload: dict) -> str:
+        import json
+        return json.dumps(payload)
+
+    def test_html_angle_brackets_in_title_escaped(self):
+        """< > in finding title must be escaped before embedding in Teams fact value."""
+        f = self._make_finding_with_title("<script>alert(1)</script>")
+        payload = format_digest([f])
+        text = self._get_all_text(payload)
+        assert "<script>" not in text
+        assert "&lt;script&gt;" in text or "\\u003c" in text.lower()
+
+    def test_ampersand_in_title_escaped(self):
+        """& in finding title must be escaped for Teams payload."""
+        f = self._make_finding_with_title("foo & bar")
+        payload = format_digest([f])
+        text = self._get_all_text(payload)
+        assert "foo &amp; bar" in text or '"foo & bar"' not in text
+
+    def test_safe_title_unmodified(self):
+        """Normal text passes through without modification."""
+        f = self._make_finding_with_title("Brute force from 1.2.3.4")
+        payload = format_digest([f])
+        text = self._get_all_text(payload)
+        assert "Brute force from 1.2.3.4" in text

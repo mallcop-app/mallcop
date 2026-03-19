@@ -258,7 +258,10 @@ class TestOpenClawConnectorPoll:
 
         skill_events = [e for e in result.events if e.event_type == "skill_installed"]
         for evt in skill_events:
+            # skill_content is retained for malicious-skill pattern matching,
+            # but is now size-capped and supplemented with skill_hash.
             assert "skill_content" in evt.metadata
+            assert "skill_hash" in evt.metadata
             assert "skill_name" in evt.metadata
 
     def test_poll_config_event_has_config_in_metadata(self, tmp_path: Path) -> None:
@@ -280,7 +283,8 @@ class TestOpenClawConnectorPoll:
         config_events = [e for e in result.events if e.event_type == "config_changed"]
         assert len(config_events) == 1
         assert "config" in config_events[0].metadata
-        assert "config_raw" in config_events[0].metadata
+        # config_raw must NOT be present — it may contain secrets from openclaw.json
+        assert "config_raw" not in config_events[0].metadata
 
 
 # ─── event_types() ───────────────────────────────────────────────────
@@ -424,6 +428,8 @@ class TestSkillInfoToDict:
         assert result["skill_version"] == "2.0.0"
         assert result["skill_author"] == "alice"
         assert result["skill_content"] == "content"
+        # skill_hash added for integrity verification (mallcop-o8cj)
+        assert "skill_hash" in result
         assert result["skill_path"] == str(skill_path)
 
     def test_path_is_string(self, tmp_path: Path) -> None:
@@ -446,7 +452,7 @@ class TestMakeSkillEvent:
         evt = _make_skill_event(
             event_type="skill_installed",
             skill_name="my-skill",
-            skill_info_dict={"skill_name": "my-skill", "skill_content": "body"},
+            skill_info_dict={"skill_name": "my-skill", "skill_content": "body", "skill_hash": "abc123"},
             timestamp=now,
             openclaw_home=tmp_path,
         )
@@ -774,3 +780,89 @@ class TestOpenClawManifest:
         connector = OpenClawConnector()
 
         assert set(connector.event_types()) == set(manifest.event_types)
+
+
+# ---------------------------------------------------------------------------
+# config_raw secret exposure prevention (ak1n.1.15)
+# ---------------------------------------------------------------------------
+
+
+class TestOpenClawConfigSecretRedaction:
+    """config_changed events must not expose raw config text or secret fields.
+
+    openclaw.json may contain API keys, tokens, or webhook URLs. These must not
+    appear in the event metadata verbatim.
+    """
+
+    def _make_connector_with_secret_config(self, tmp_path, config_dict):
+        import json, shutil
+        from mallcop.connectors.openclaw.connector import OpenClawConnector
+
+        src = FIXTURES_DIR / "clean_install"
+        shutil.copytree(src, tmp_path / "openclaw")
+
+        # Write config with secrets
+        config_path = tmp_path / "openclaw" / "openclaw.json"
+        config_path.write_text(json.dumps(config_dict))
+
+        connector = OpenClawConnector()
+        connector.configure({"openclaw_home": str(tmp_path / "openclaw")})
+        return connector
+
+    def test_config_raw_not_in_metadata(self, tmp_path) -> None:
+        """config_raw field must be absent from config_changed event metadata."""
+        config = {"model": "gpt-4", "api_key": "sk-secret-key-1234"}
+        connector = self._make_connector_with_secret_config(tmp_path, config)
+
+        # Force config_changed by using wrong hash
+        from tests.unit.test_openclaw_connector import _make_checkpoint
+        fake_cp = _make_checkpoint(skill_hashes={}, config_hash="000000")
+        result = connector.poll(checkpoint=fake_cp)
+
+        config_events = [e for e in result.events if e.event_type == "config_changed"]
+        assert len(config_events) == 1
+        assert "config_raw" not in config_events[0].metadata
+
+    def test_secret_fields_redacted_from_config_dict(self, tmp_path) -> None:
+        """Known secret field names (api_key, token, secret, password) are redacted."""
+        config = {
+            "model": "gpt-4",
+            "api_key": "sk-super-secret",
+            "webhook_token": "ghp_abcdef",
+            "password": "hunter2",
+            "name": "my-agent",
+        }
+        connector = self._make_connector_with_secret_config(tmp_path, config)
+
+        from tests.unit.test_openclaw_connector import _make_checkpoint
+        fake_cp = _make_checkpoint(skill_hashes={}, config_hash="000000")
+        result = connector.poll(checkpoint=fake_cp)
+
+        config_events = [e for e in result.events if e.event_type == "config_changed"]
+        assert len(config_events) == 1
+        stored_config = config_events[0].metadata["config"]
+
+        # Secret values must not appear verbatim
+        assert stored_config.get("api_key") != "sk-super-secret"
+        assert stored_config.get("webhook_token") != "ghp_abcdef"
+        assert stored_config.get("password") != "hunter2"
+        # Non-secret fields pass through
+        assert stored_config.get("model") == "gpt-4"
+        assert stored_config.get("name") == "my-agent"
+
+    def test_redacted_value_is_placeholder(self, tmp_path) -> None:
+        """Redacted fields contain a placeholder, not just an empty string."""
+        config = {"api_key": "sk-real-key"}
+        connector = self._make_connector_with_secret_config(tmp_path, config)
+
+        from tests.unit.test_openclaw_connector import _make_checkpoint
+        fake_cp = _make_checkpoint(skill_hashes={}, config_hash="000000")
+        result = connector.poll(checkpoint=fake_cp)
+
+        config_events = [e for e in result.events if e.event_type == "config_changed"]
+        stored = config_events[0].metadata["config"]
+        # Value should be a redaction marker, not empty or None
+        redacted = stored.get("api_key")
+        assert redacted is not None
+        assert redacted != ""
+        assert "sk-real-key" not in str(redacted)

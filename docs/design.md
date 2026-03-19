@@ -530,7 +530,7 @@ The baseline represents "normal" — what actors, event types, timing patterns, 
 | **Frequency tables** | event_type x source x actor x day_of_week x hour_bucket | Computed from events (cached in `baseline/`) |
 | **Known entities** | IP addresses, user agents, actor IDs, resource names | `baseline/known-entities.jsonl` |
 | **Relationships** | which actors normally touch which resources | Computed from events |
-| **Config snapshots** | resource configuration at last scan (for drift detection) | `baseline/config-snapshots.jsonl` |
+| **Config snapshots** | resource configuration at last scan (for drift detection) | `baseline/config-snapshots.jsonl` — **descoped to v1.1**: generic config snapshot capture is not in the Baseline dataclass. Drift detection is handled by specific detectors (openclaw_config_drift, log_format_drift) rather than a generic baseline field. |
 
 ### Learning Mode
 

@@ -53,6 +53,9 @@ def run_detect(
         detectors.extend(load_app_detectors(root, app_names))
     all_findings: list[Finding] = []
 
+    # Build event-id-to-source lookup once for O(1) per finding (not O(N) per finding)
+    event_source_by_id = {e.id: e.source for e in events}
+
     for detector in detectors:
         # Filter events by detector's relevant sources/types
         filtered = events
@@ -67,9 +70,11 @@ def run_detect(
 
         # Apply learning mode: force severity to INFO for learning connectors
         for finding in findings:
-            # Check if any of the finding's source events are from learning connectors
+            # Use pre-built lookup dict for O(k) per finding, not O(N*k)
             finding_sources = {
-                e.source for e in events if e.id in finding.event_ids
+                event_source_by_id[eid]
+                for eid in finding.event_ids
+                if eid in event_source_by_id
             }
             if finding_sources & learning_connectors:
                 finding.severity = Severity.INFO

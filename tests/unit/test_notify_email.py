@@ -261,6 +261,29 @@ class TestDeliverDigest:
                 to_addrs=None,
             )
 
+    def test_starttls_called_with_explicit_ssl_context(self):
+        """deliver_digest must call starttls with an explicit SSLContext (mallcop-ak1n.1.17).
+
+        The explicit context ensures cert verification and hostname checking are
+        enforced regardless of Python version defaults.
+        """
+        import ssl
+        with patch("mallcop.actors.notify_email.channel.smtplib.SMTP") as mock_smtp:
+            mock_server = MagicMock()
+            mock_smtp.return_value.__enter__ = MagicMock(return_value=mock_server)
+            mock_smtp.return_value.__exit__ = MagicMock(return_value=False)
+
+            deliver_digest([_make_finding()], **_email_kwargs())
+
+        # starttls must be called with a keyword context= argument
+        mock_server.starttls.assert_called_once()
+        call_kwargs = mock_server.starttls.call_args[1]
+        assert "context" in call_kwargs, "starttls must receive an explicit ssl context"
+        ctx = call_kwargs["context"]
+        assert isinstance(ctx, ssl.SSLContext), "context must be an ssl.SSLContext"
+        assert ctx.verify_mode == ssl.CERT_REQUIRED, "cert verification must be required"
+        assert ctx.check_hostname is True, "hostname checking must be enabled"
+
     def test_default_port(self):
         """Port defaults to 587 when not specified."""
         with patch("mallcop.actors.notify_email.channel.smtplib.SMTP") as mock_smtp:
@@ -562,3 +585,69 @@ class TestDeliverDigestErrors:
 
         assert result.success is False
         assert "SMTP error" in result.error
+
+
+# --- XSS prevention in HTML body (ak1n.1.12) --------------------------------
+
+
+class TestFormatDigestXSSPrevention:
+    """HTML-escape user-controlled fields before embedding in email body.
+
+    Finding fields (title, id, annotation actor/content) come from attacker-controlled
+    event data. Embedding them verbatim creates XSS if the email client renders HTML.
+    """
+
+    def test_html_special_chars_in_title_are_escaped(self):
+        """< > & in finding.title must be HTML-escaped."""
+        f = _make_finding(title='<script>alert("xss")</script>')
+        result = format_digest([f])
+        assert "<script>" not in result
+        assert "&lt;script&gt;" in result
+
+    def test_ampersand_in_title_is_escaped(self):
+        """& in finding.title must be escaped to &amp;."""
+        f = _make_finding(title="foo & bar")
+        result = format_digest([f])
+        assert "foo & bar" not in result
+        assert "foo &amp; bar" in result
+
+    def test_html_in_annotation_actor_is_escaped(self):
+        """< > in annotation actor field must be HTML-escaped."""
+        ann = Annotation(
+            actor='<b>attacker</b>',
+            timestamp=datetime(2026, 3, 10, 12, 5, 0, tzinfo=timezone.utc),
+            content="normal content",
+            action="annotate",
+            reason=None,
+        )
+        f = _make_finding(annotations=[ann])
+        result = format_digest([f])
+        assert "<b>attacker</b>" not in result
+        assert "&lt;b&gt;attacker&lt;/b&gt;" in result
+
+    def test_html_in_annotation_content_is_escaped(self):
+        """< > in annotation content must be HTML-escaped."""
+        ann = Annotation(
+            actor="triage",
+            timestamp=datetime(2026, 3, 10, 12, 5, 0, tzinfo=timezone.utc),
+            content='<img src=x onerror=alert(1)>',
+            action="annotate",
+            reason=None,
+        )
+        f = _make_finding(annotations=[ann])
+        result = format_digest([f])
+        assert "<img" not in result
+        assert "&lt;img" in result
+
+    def test_finding_id_with_html_is_escaped(self):
+        """finding.id containing HTML is escaped in <code> block."""
+        f = _make_finding(id='fnd_<evil>')
+        result = format_digest([f])
+        assert "<evil>" not in result
+        assert "&lt;evil&gt;" in result
+
+    def test_safe_text_renders_correctly_after_escaping(self):
+        """Normal text without special chars still renders correctly."""
+        f = _make_finding(title="Login from new IP 192.168.1.1")
+        result = format_digest([f])
+        assert "Login from new IP 192.168.1.1" in result

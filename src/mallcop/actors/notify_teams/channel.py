@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import html as _html
 from typing import Any
 
 from mallcop.actors.notify_base import DeliveryResult, validate_webhook_url, post_webhook
@@ -35,11 +36,11 @@ def format_digest(findings: list[Finding]) -> dict[str, Any]:
         group = groups[severity_val]
         facts: list[dict[str, str]] = []
         for f in group:
-            value = f.title
+            value = _html.escape(f.title)
             if f.annotations:
                 last_ann = f.annotations[-1]
-                value += f" | {last_ann.actor}: {last_ann.content}"
-            facts.append({"name": f.id, "value": value})
+                value += f" | {_html.escape(last_ann.actor)}: {_html.escape(last_ann.content)}"
+            facts.append({"name": _html.escape(f.id), "value": value})
         sections.append({
             "activityTitle": f"{severity_val.upper()} ({len(group)})",
             "facts": facts,

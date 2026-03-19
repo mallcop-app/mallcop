@@ -396,3 +396,108 @@ class TestParserRuntimeEventFields:
         rt = ParserRuntime(manifest, source="test", app_name="testapp")
         result = rt.parse(["HELLO world"])
         assert result.events[0].actor == "testapp"
+
+
+# ---------------------------------------------------------------------------
+# ReDoS protection: timeout wiring (ak1n.1.7)
+# ---------------------------------------------------------------------------
+
+
+class TestParserRuntimeReDoSProtection:
+    """Parser regex matching must be guarded with a timeout.
+
+    A malicious or poorly-crafted LLM-generated regex in parser.yaml can cause
+    catastrophic backtracking on attacker-controlled log content.
+    The timeout must be wired so that a match() call that exceeds the limit
+    raises an exception (TimeoutError or similar) rather than hanging.
+    """
+
+    def _make_manifest_with_pattern(self, pattern: str) -> ParserManifest:
+        return ParserManifest(
+            app="testapp",
+            version=1,
+            generated_at="",
+            generated_by="",
+            templates=[
+                ParserTemplate(
+                    name="probe",
+                    pattern=pattern,
+                    classification="security",
+                    event_mapping={
+                        "event_type": "probe",
+                        "actor": "",
+                        "action": "probe",
+                        "target": "",
+                        "severity": "warn",
+                    },
+                    noise_filter=False,
+                )
+            ],
+            noise_summary=False,
+            unmatched_threshold=0.3,
+        )
+
+    def test_normal_pattern_matches(self):
+        """Sanity: a safe pattern still produces events."""
+        manifest = self._make_manifest_with_pattern(r"ERROR: (?P<msg>.+)")
+        rt = ParserRuntime(manifest, source="test", app_name="testapp")
+        result = rt.parse(["ERROR: disk full"])
+        assert len(result.events) == 1
+
+    def test_regex_match_uses_timeout(self):
+        """parse() must pass a timeout when calling _safe_search.
+
+        We patch _safe_search to simulate a timeout on the first call.
+        The runtime should catch it and treat the line as unmatched.
+        """
+        from unittest.mock import patch
+        manifest = self._make_manifest_with_pattern(r"(?P<target>.+)")
+        rt = ParserRuntime(manifest, source="test", app_name="testapp")
+
+        call_count = [0]
+
+        def flaky_search(pattern, line, **kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                raise TimeoutError("simulated timeout")
+            return pattern.search(line)
+
+        with patch("mallcop.parsers.runtime._safe_search", side_effect=flaky_search):
+            result = rt.parse(["some line"])
+
+        # Timed-out line counted as unmatched, no crash
+        assert result.unmatched_count == 1
+        assert result.events == []
+
+    def test_parse_skips_line_on_timeout(self):
+        """Lines whose regex times out are counted as unmatched, not as a crash."""
+        from unittest.mock import patch
+        manifest = self._make_manifest_with_pattern(r"(?P<target>.+)")
+        rt = ParserRuntime(manifest, source="test", app_name="testapp")
+
+        def always_timeout(pattern, line, **kwargs):
+            raise TimeoutError("catastrophic backtracking")
+
+        with patch("mallcop.parsers.runtime._safe_search", side_effect=always_timeout):
+            result = rt.parse(["line1", "line2"])
+
+        # Both lines timed out → both unmatched
+        assert result.unmatched_count == 2
+        assert result.events == []
+
+    def test_safe_search_passes_timeout_kwarg(self):
+        """_safe_search must call pattern.search with a timeout argument."""
+        from unittest.mock import MagicMock, patch
+        import mallcop.parsers.runtime as rt_mod
+
+        mock_pattern = MagicMock()
+        mock_pattern.search.return_value = None
+
+        rt_mod._safe_search(mock_pattern, "some text")
+
+        # Verify timeout was passed
+        call_kwargs = mock_pattern.search.call_args
+        assert call_kwargs is not None
+        # timeout should be in kwargs or args
+        all_kwargs = call_kwargs.kwargs if hasattr(call_kwargs, 'kwargs') else call_kwargs[1]
+        assert "timeout" in all_kwargs, "_safe_search must pass timeout= to pattern.search"

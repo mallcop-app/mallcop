@@ -28,7 +28,7 @@ _ALLOWED_PAGINATION_HOSTS: dict[str, frozenset[str]] = {
     "azure": frozenset({"management.azure.com"}),
     "log_analytics": frozenset({"api.loganalytics.io"}),
     "github": frozenset({"api.github.com"}),
-    "m365": frozenset({"manage.office.com", "graph.microsoft.com"}),
+    "m365": frozenset({"manage.office.com", "protection.office.com", "graph.microsoft.com"}),
 }
 
 

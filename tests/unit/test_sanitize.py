@@ -20,9 +20,21 @@ class TestSanitizeField:
         assert "\x02" not in result
         assert "helloworld" in result
 
-    def test_preserves_newlines_and_tabs(self) -> None:
-        result = sanitize_field("line1\nline2\ttab")
-        assert "line1\nline2\ttab" in result
+    def test_newlines_replaced_with_placeholder(self) -> None:
+        """Newlines are replaced with [NEWLINE] to prevent multi-line injection."""
+        result = sanitize_field("line1\nline2")
+        assert "\n" not in result
+        assert "[NEWLINE]" in result
+        assert "line1" in result
+        assert "line2" in result
+
+    def test_tabs_replaced_with_placeholder(self) -> None:
+        """Tabs are replaced with [TAB] to prevent whitespace-based injection."""
+        result = sanitize_field("before\tafter")
+        assert "\t" not in result
+        assert "[TAB]" in result
+        assert "before" in result
+        assert "after" in result
 
     def test_length_cap_default(self) -> None:
         long_string = "a" * 2000
@@ -64,9 +76,18 @@ class TestSanitizeField:
         result = sanitize_field("a\x07b\x08c\x0cd\x0b")
         assert "abcd" in result
 
-    def test_does_not_strip_carriage_return(self) -> None:
+    def test_carriage_return_replaced_with_placeholder(self) -> None:
+        """Carriage returns are replaced with [NEWLINE] placeholders, not preserved.
+
+        This changed from the original behavior (which preserved \\r\\n) to prevent
+        multi-line injection payloads from mimicking system-level prompt formatting.
+        """
         result = sanitize_field("line1\r\nline2")
-        assert "line1\r\nline2" in result
+        assert "\r" not in result
+        assert "\n" not in result
+        assert "[NEWLINE]" in result
+        assert "line1" in result
+        assert "line2" in result
 
     def test_marker_injection_neutralized(self) -> None:
         # If input contains the markers themselves, they should not
