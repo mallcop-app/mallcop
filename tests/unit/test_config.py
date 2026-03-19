@@ -693,3 +693,58 @@ class TestLoadConfigEdgeCases:
         config = load_config(tmp_path)
         assert config.pro is not None
         assert config.pro.inference_url == ""
+
+
+# ---------------------------------------------------------------------------
+# Squelch range validation (bead 2.30)
+# ---------------------------------------------------------------------------
+
+
+class TestSquelchRangeValidation:
+    """squelch must be validated as 0-10 and raise ConfigError for out-of-range values."""
+
+    def _write_config(self, tmp_path: Path, squelch_value: str | int | None) -> Path:
+        yaml_content = f"""\
+secrets:
+  backend: env
+connectors: {{}}
+routing: {{}}
+actor_chain: {{}}
+squelch: {squelch_value}
+"""
+        cfg = tmp_path / "mallcop.yaml"
+        cfg.write_text(yaml_content)
+        return tmp_path
+
+    def test_squelch_zero_is_valid(self, tmp_path: Path) -> None:
+        path = self._write_config(tmp_path, 0)
+        config = load_config(path)
+        assert config.squelch == 0
+
+    def test_squelch_ten_is_valid(self, tmp_path: Path) -> None:
+        path = self._write_config(tmp_path, 10)
+        config = load_config(path)
+        assert config.squelch == 10
+
+    def test_squelch_five_is_valid(self, tmp_path: Path) -> None:
+        path = self._write_config(tmp_path, 5)
+        config = load_config(path)
+        assert config.squelch == 5
+
+    def test_squelch_eleven_raises_config_error(self, tmp_path: Path) -> None:
+        """squelch: 11 is out of range and must raise ConfigError."""
+        path = self._write_config(tmp_path, 11)
+        with pytest.raises(ConfigError, match="squelch"):
+            load_config(path)
+
+    def test_squelch_negative_raises_config_error(self, tmp_path: Path) -> None:
+        """squelch: -1 is out of range and must raise ConfigError."""
+        path = self._write_config(tmp_path, -1)
+        with pytest.raises(ConfigError, match="squelch"):
+            load_config(path)
+
+    def test_squelch_hundred_raises_config_error(self, tmp_path: Path) -> None:
+        """squelch: 100 would make threshold=10.0, squelching everything. Must raise."""
+        path = self._write_config(tmp_path, 100)
+        with pytest.raises(ConfigError, match="squelch"):
+            load_config(path)

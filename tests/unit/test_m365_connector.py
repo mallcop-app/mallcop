@@ -661,3 +661,163 @@ class TestM365ConnectorErrorPaths:
              patch("mallcop.connectors.m365.connector.requests.post", return_value=fake_resp):
             with pytest.raises(HTTPError, match="400"):
                 c._ensure_subscriptions()
+
+    def test_list_subscriptions_error_object_raises_config_error(self) -> None:
+        """_list_subscriptions raises ConfigError when API returns an error dict instead of list."""
+        from mallcop.secrets import ConfigError
+
+        c = _make_authenticated_connector()
+
+        fake_resp = MagicMock()
+        fake_resp.raise_for_status.return_value = None
+        fake_resp.json.return_value = {"error": {"code": "AF20023", "message": "No subscription found"}}
+
+        with patch.object(c, "_get_token", return_value="fake-token"), \
+             patch("mallcop.connectors.m365.connector.requests.get", return_value=fake_resp):
+            with pytest.raises(ConfigError, match="unexpected shape"):
+                c._list_subscriptions()
+
+    def test_list_subscriptions_returns_list_unchanged(self) -> None:
+        """_list_subscriptions returns a valid list without modification."""
+        c = _make_authenticated_connector()
+
+        sub = {"contentType": "Audit.SharePoint", "status": "enabled", "webhook": {}}
+        fake_resp = MagicMock()
+        fake_resp.raise_for_status.return_value = None
+        fake_resp.json.return_value = [sub]
+
+        with patch.object(c, "_get_token", return_value="fake-token"), \
+             patch("mallcop.connectors.m365.connector.requests.get", return_value=fake_resp):
+            result = c._list_subscriptions()
+        assert result == [sub]
+
+
+# ─── configure() / content_types filtering (bead 2.15) ──────────────
+
+
+class TestM365ConnectorConfigureContentTypes:
+    """poll() must use only configured content_types, not the full _CONTENT_TYPES list."""
+
+    def test_default_uses_all_content_types(self) -> None:
+        """Without configure(), poll iterates all 4 content types."""
+        from mallcop.connectors.m365.connector import M365Connector, _CONTENT_TYPES
+        c = _make_authenticated_connector()
+        assert c._content_types == list(_CONTENT_TYPES)
+
+    def test_configure_restricts_content_types(self) -> None:
+        """configure() with content_types stores them so poll() uses only those."""
+        c = _make_authenticated_connector()
+        c.configure({"content_types": ["Audit.AzureActiveDirectory", "Audit.Exchange"]})
+        assert c._content_types == ["Audit.AzureActiveDirectory", "Audit.Exchange"]
+
+    def test_configure_empty_dict_preserves_defaults(self) -> None:
+        """configure() with no content_types key leaves defaults intact."""
+        from mallcop.connectors.m365.connector import _CONTENT_TYPES
+        c = _make_authenticated_connector()
+        c.configure({})
+        assert c._content_types == list(_CONTENT_TYPES)
+
+    def test_poll_only_fetches_configured_content_types(self) -> None:
+        """poll() calls _list_content_blobs only for configured content_types."""
+        c = _make_authenticated_connector()
+        c.configure({"content_types": ["Audit.AzureActiveDirectory"]})
+
+        fetched_types: list[str] = []
+
+        def fake_list_blobs(content_type, start, end):
+            fetched_types.append(content_type)
+            return []
+
+        with patch.object(c, "_list_content_blobs", side_effect=fake_list_blobs):
+            c.poll(checkpoint=None)
+
+        assert fetched_types == ["Audit.AzureActiveDirectory"]
+
+    def test_poll_without_configure_fetches_all_four_types(self) -> None:
+        """poll() without configure() iterates all 4 content types."""
+        from mallcop.connectors.m365.connector import _CONTENT_TYPES
+        c = _make_authenticated_connector()
+
+        fetched_types: list[str] = []
+
+        def fake_list_blobs(content_type, start, end):
+            fetched_types.append(content_type)
+            return []
+
+        with patch.object(c, "_list_content_blobs", side_effect=fake_list_blobs):
+            c.poll(checkpoint=None)
+
+        assert set(fetched_types) == set(_CONTENT_TYPES)
+
+
+# ---------------------------------------------------------------------------
+# M365 content blob URI domain validation (ak1n.1.20)
+# ---------------------------------------------------------------------------
+
+
+class TestM365ContentUriDomainValidation:
+    """Content blob URIs must be validated against allowed M365 domains.
+
+    If an attacker can influence M365 API responses (MITM, DNS rebinding),
+    they could inject a contentUri pointing to an internal service.
+    The Bearer token is forwarded with the request, enabling token theft and SSRF.
+    """
+
+    def _make_patched_connector(self):
+        """Return an authenticated M365 connector with _get_token mocked."""
+        from unittest.mock import patch
+        c = _make_authenticated_connector()
+        c._cached_token = "fake-bearer-token"
+        c._token_expires_at = float("inf")  # never expires
+        return c
+
+    def test_manage_office_com_uri_accepted(self) -> None:
+        """URIs from manage.office.com are accepted (primary M365 API domain)."""
+        from unittest.mock import MagicMock, patch
+
+        c = self._make_patched_connector()
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = []
+
+        with patch("mallcop.connectors.m365.connector.requests.get", return_value=mock_resp):
+            result = c._fetch_audit_records("https://manage.office.com/api/v1.0/tenant/blobs/xyz")
+        assert result == []
+
+    def test_protection_office_com_uri_accepted(self) -> None:
+        """URIs from protection.office.com are accepted (M365 compliance domain)."""
+        from unittest.mock import MagicMock, patch
+
+        c = self._make_patched_connector()
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = []
+
+        with patch("mallcop.connectors.m365.connector.requests.get", return_value=mock_resp):
+            result = c._fetch_audit_records("https://protection.office.com/api/v1.0/blobs/xyz")
+        assert result == []
+
+    def test_ssrf_internal_ip_rejected(self) -> None:
+        """contentUri pointing to an internal IP is rejected."""
+        import pytest
+
+        c = self._make_patched_connector()
+
+        with pytest.raises(ValueError):
+            c._fetch_audit_records("https://192.168.1.100/steal-token")
+
+    def test_ssrf_arbitrary_domain_rejected(self) -> None:
+        """contentUri pointing to an attacker-controlled domain is rejected."""
+        import pytest
+
+        c = self._make_patched_connector()
+
+        with pytest.raises(ValueError):
+            c._fetch_audit_records("https://evil.com/steal-token")
+
+    def test_http_uri_rejected(self) -> None:
+        """Non-HTTPS URIs are rejected."""
+        import pytest
+
+        c = self._make_patched_connector()
+
+        with pytest.raises(ValueError):
+            c._fetch_audit_records("http://manage.office.com/api/blobs/xyz")

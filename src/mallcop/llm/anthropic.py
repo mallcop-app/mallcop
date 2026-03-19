@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import uuid
 from typing import Any
 
 import requests
@@ -20,26 +21,33 @@ from mallcop.llm.converters import DEFAULT_MAX_TOKENS as _MAX_TOKENS_DEFAULT
 def _convert_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Convert internal message format to Anthropic API format."""
     converted: list[dict[str, Any]] = []
-    tool_use_counter = 0
 
     i = 0
     while i < len(messages):
         msg = messages[i]
 
         if msg["role"] == "tool":
-            tool_use_counter += 1
-            tool_use_id = f"toolu_{tool_use_counter:04d}"
+            tool_use_id = f"toolu_{uuid.uuid4().hex[:12]}"
 
             if converted and converted[-1]["role"] == "assistant":
                 prev = converted.pop()
+                # Preserve any text content from the previous assistant message
+                prev_content = prev.get("content", [])
+                preserved_text = []
+                if isinstance(prev_content, list):
+                    preserved_text = [
+                        block for block in prev_content
+                        if isinstance(block, dict) and block.get("type") == "text"
+                    ]
+                new_content = preserved_text + [{
+                    "type": "tool_use",
+                    "id": tool_use_id,
+                    "name": msg["name"],
+                    "input": {},
+                }]
                 converted.append({
                     "role": "assistant",
-                    "content": [{
-                        "type": "tool_use",
-                        "id": tool_use_id,
-                        "name": msg["name"],
-                        "input": {},
-                    }],
+                    "content": new_content,
                 })
 
             converted.append({

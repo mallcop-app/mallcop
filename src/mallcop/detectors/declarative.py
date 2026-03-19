@@ -9,10 +9,29 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+import regex as _regex
 import yaml
 
 from mallcop.detectors._base import DetectorBase
 from mallcop.schemas import Baseline, Event, Finding, FindingStatus, Severity
+
+# Timeout for regex matches in declarative detectors.
+# Protects against ReDoS from LLM-generated or user-supplied rule patterns.
+_REGEX_TIMEOUT = 5.0
+
+
+def _safe_regex_search(
+    pattern: _regex.Pattern,
+    text: str,
+    *,
+    timeout: float = _REGEX_TIMEOUT,
+) -> _regex.Match | None:
+    """Call pattern.search(text) with a timeout to prevent ReDoS hangs.
+
+    Raises:
+        TimeoutError: propagated to caller — treated as no-match by callers.
+    """
+    return pattern.search(text, timeout=timeout)
 
 
 def _resolve_field(obj: Event, field: str) -> Any:
@@ -59,6 +78,12 @@ class DeclarativeDetector(DetectorBase):
         self._event_type: str = rule["event_type"]
         self._condition: dict[str, Any] = rule["condition"]
         self._severity = Severity(rule["severity"])
+        # Pre-compile regex pattern once if this is a regex_match condition.
+        # Use the regex library for timeout support (ReDoS protection).
+        if self._condition.get("type") == "regex_match" and "pattern" in self._condition:
+            self._regex_pattern: _regex.Pattern | None = _regex.compile(self._condition["pattern"])
+        else:
+            self._regex_pattern = None
 
     def relevant_sources(self) -> list[str] | None:
         return None
@@ -104,6 +129,7 @@ class DeclarativeDetector(DetectorBase):
             # Sliding window: find max count within window
             best_count = 0
             best_start = 0
+            best_right = 0
             left = 0
             for right in range(len(group_events)):
                 while group_events[right].timestamp - group_events[left].timestamp > window:
@@ -112,9 +138,10 @@ class DeclarativeDetector(DetectorBase):
                 if count > best_count:
                     best_count = count
                     best_start = left
+                    best_right = right
 
             if best_count >= threshold:
-                window_events = group_events[best_start:best_start + best_count]
+                window_events = group_events[best_start:best_right + 1]
                 key_str = ", ".join(str(v) for v in key)
                 findings.append(self._make_finding(
                     event_ids=[e.id for e in window_events],
@@ -213,12 +240,19 @@ class DeclarativeDetector(DetectorBase):
 
     def _detect_regex_match(self, events: list[Event]) -> list[Finding]:
         field: str = self._condition["field"]
-        pattern = re.compile(self._condition["pattern"])
+        pattern = self._regex_pattern or _regex.compile(self._condition["pattern"])
 
         findings: list[Finding] = []
         for evt in events:
             val = _resolve_field(evt, field)
-            if val is not None and pattern.search(str(val)):
+            if val is None:
+                continue
+            try:
+                matched = _safe_regex_search(pattern, str(val))
+            except TimeoutError:
+                # Pattern timed out on this event value; skip to avoid ReDoS hang.
+                continue
+            if matched:
                 findings.append(self._make_finding(
                     event_ids=[evt.id],
                     title=f"{self._name}: matched {field}={val}",

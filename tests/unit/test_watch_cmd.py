@@ -519,3 +519,79 @@ class TestWatchProConfigPartialState:
         mock_client.record_usage.assert_called_once()
         call_kwargs = mock_client.record_usage.call_args
         assert call_kwargs[1]["input_tokens"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Watch escalation not blocked by learning connectors (bead 2.28)
+# ---------------------------------------------------------------------------
+
+
+class TestWatchLearningModeEscalation:
+    """Escalation must proceed even when some connectors are in learning mode."""
+
+    def test_escalate_runs_when_learning_connector_present(self, tmp_path: Path) -> None:
+        """A learning connector must not suppress escalation for the whole run."""
+        from click.testing import CliRunner
+        from mallcop.cli import cli
+
+        escalate_calls: list = []
+
+        def mock_scan(root):
+            return {"status": "ok", "total_events_ingested": 5, "connectors": {}}
+
+        def mock_detect(root):
+            return {
+                "status": "ok",
+                "findings_count": 2,
+                "summary": {},
+                "learning_connectors": ["my-new-connector"],
+            }
+
+        def mock_escalate(root, **kwargs):
+            escalate_calls.append("escalate")
+            return {"status": "ok", "findings_processed": 2,
+                    "circuit_breaker_triggered": False, "budget_exhausted": False,
+                    "tokens_used": 0}
+
+        _write_config(tmp_path)
+        runner = CliRunner()
+        with patch("mallcop.cli._run_scan_pipeline", side_effect=mock_scan), \
+             patch("mallcop.cli._run_detect_pipeline", side_effect=mock_detect), \
+             patch("mallcop.escalate.run_escalate", side_effect=mock_escalate), \
+             patch("mallcop.cli._build_actor_runner", return_value=None):
+            result = runner.invoke(cli, ["watch", "--dir", str(tmp_path)])
+
+        output = json.loads(result.output)
+        assert output["status"] == "ok"
+        assert escalate_calls == ["escalate"], (
+            "escalate should run even when learning_connectors is non-empty"
+        )
+
+    def test_escalate_skipped_only_on_dry_run(self, tmp_path: Path) -> None:
+        """--dry-run skips escalation; learning mode alone does not."""
+        from click.testing import CliRunner
+        from mallcop.cli import cli
+
+        escalate_calls: list = []
+
+        def mock_scan(root):
+            return {"status": "ok", "total_events_ingested": 0, "connectors": {}}
+
+        def mock_detect(root):
+            return {"status": "ok", "findings_count": 1, "summary": {},
+                    "learning_connectors": ["brand-new"]}
+
+        def mock_escalate(root, **kwargs):
+            escalate_calls.append("escalate")
+            return {"status": "ok", "findings_processed": 0}
+
+        _write_config(tmp_path)
+        runner = CliRunner()
+        with patch("mallcop.cli._run_scan_pipeline", side_effect=mock_scan), \
+             patch("mallcop.cli._run_detect_pipeline", side_effect=mock_detect), \
+             patch("mallcop.escalate.run_escalate", side_effect=mock_escalate):
+            result = runner.invoke(cli, ["watch", "--dry-run", "--dir", str(tmp_path)])
+
+        output = json.loads(result.output)
+        assert output["escalate"]["skipped"] is True
+        assert escalate_calls == [], "escalate must not be called on dry_run"

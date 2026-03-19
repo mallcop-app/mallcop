@@ -384,6 +384,8 @@ def load_config(config_dir: Path) -> MallcopConfig:
     # Squelch: 0-10 integer gate, default 5
     squelch_raw = raw.get("squelch", 5)
     squelch = int(squelch_raw) if squelch_raw is not None else 5
+    if not (0 <= squelch <= 10):
+        raise ConfigError(f"squelch must be 0-10, got {squelch}")
 
     # Patrols — optional, defaults to empty list
     patrols_config = parse_patrols(raw, max_donuts_per_run=budget.max_donuts_per_run)

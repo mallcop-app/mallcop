@@ -603,3 +603,253 @@ class TestLoadFromYaml:
 
         detectors = load_declarative_detectors(yaml_path)
         assert detectors == []
+
+
+# ---------------------------------------------------------------------------
+# ReDoS protection: declarative detector regex_match (ak1n.1.7)
+# ---------------------------------------------------------------------------
+
+
+class TestDeclarativeDetectorReDoSProtection:
+    """regex_match conditions must be guarded with a timeout.
+
+    LLM-generated detector rules may produce regex patterns vulnerable to
+    catastrophic backtracking. A TimeoutError from the regex engine must be
+    caught and treated as no-match, not a process hang.
+    """
+
+    def _make_detector(self, pattern: str) -> "DeclarativeDetector":
+        from mallcop.detectors.declarative import DeclarativeDetector
+        return DeclarativeDetector({
+            "name": "test-regex",
+            "description": "Test",
+            "event_type": "http_request",
+            "condition": {
+                "type": "regex_match",
+                "field": "actor",
+                "pattern": pattern,
+            },
+            "severity": "warn",
+        })
+
+    def _make_event(self, actor: str) -> "Event":
+        from mallcop.schemas import Event, Severity
+        from datetime import datetime, timezone
+        return Event(
+            id="evt_001",
+            timestamp=datetime(2026, 3, 10, tzinfo=timezone.utc),
+            ingested_at=datetime(2026, 3, 10, tzinfo=timezone.utc),
+            source="test",
+            event_type="http_request",
+            actor=actor,
+            action="GET",
+            target="/path",
+            severity=Severity.INFO,
+            metadata={},
+            raw={},
+        )
+
+    def _make_baseline(self) -> "Baseline":
+        from mallcop.schemas import Baseline
+        return Baseline(
+            frequency_tables={},
+            known_entities={},
+            relationships={},
+        )
+
+    def test_normal_regex_match_works(self):
+        """Sanity: a safe pattern matches correctly."""
+        detector = self._make_detector(r"admin")
+        baseline = self._make_baseline()
+        findings = detector.detect([self._make_event("admin_user")], baseline)
+        assert len(findings) == 1
+
+    def test_regex_timeout_skips_event(self):
+        """When regex times out, the event is skipped, not a crash."""
+        from unittest.mock import patch
+        detector = self._make_detector(r".+")
+        baseline = self._make_baseline()
+
+        def timeout_search(pattern, text, **kwargs):
+            raise TimeoutError("catastrophic backtracking")
+
+        with patch("mallcop.detectors.declarative._safe_regex_search", side_effect=timeout_search):
+            findings = detector.detect([self._make_event("someactor")], baseline)
+
+        assert findings == []
+
+    def test_uses_regex_library_for_compilation(self):
+        """_regex_pattern must be a regex.Pattern, not a stdlib re.Pattern."""
+        import regex
+        detector = self._make_detector(r"\w+")
+        assert isinstance(detector._regex_pattern, regex.Pattern)
+
+
+# ---------------------------------------------------------------------------
+# regex pre-compile correctness (bead 2.21)
+# ---------------------------------------------------------------------------
+
+
+class TestRegexPreCompile:
+    """Regex pattern should be compiled once at __init__, not on every detect() call."""
+
+    def _make_regex_rule(self, pattern: str = r"admin|root") -> dict:
+        return {
+            "name": "test-regex-precompile",
+            "description": "Test regex pre-compile",
+            "event_type": "http_request",
+            "condition": {
+                "type": "regex_match",
+                "field": "actor",
+                "pattern": pattern,
+            },
+            "severity": "warn",
+        }
+
+    def test_regex_pattern_compiled_at_init(self) -> None:
+        """_regex_pattern is a compiled pattern after __init__."""
+        import regex
+        from mallcop.detectors.declarative import DeclarativeDetector
+        det = DeclarativeDetector(self._make_regex_rule())
+        assert isinstance(det._regex_pattern, regex.Pattern)
+        assert det._regex_pattern.pattern == r"admin|root"
+
+    def test_non_regex_condition_has_no_precompiled_pattern(self) -> None:
+        """Detectors with non-regex conditions have _regex_pattern = None."""
+        from mallcop.detectors.declarative import DeclarativeDetector
+        rule = {
+            "name": "test-count-no-regex",
+            "description": "Count threshold",
+            "event_type": "auth_failure",
+            "condition": {"type": "count_threshold", "group_by": ["actor"],
+                          "window_minutes": 5, "threshold": 3},
+            "severity": "critical",
+        }
+        det = DeclarativeDetector(rule)
+        assert det._regex_pattern is None
+
+    def test_detect_uses_precompiled_pattern_not_fresh_compile(self) -> None:
+        """detect() uses self._regex_pattern (no re-compile on each call)."""
+        import regex
+        from mallcop.detectors.declarative import DeclarativeDetector
+
+        det = DeclarativeDetector(self._make_regex_rule())
+        original_pattern = det._regex_pattern
+
+        events = [_make_event(event_type="http_request", actor="admin")]
+
+        # Run detect twice; the same pattern object should be reused
+        det.detect(events, _empty_baseline())
+        assert det._regex_pattern is original_pattern
+
+    def test_regex_matches_correct_events(self) -> None:
+        from mallcop.detectors.declarative import DeclarativeDetector
+
+        det = DeclarativeDetector(self._make_regex_rule(pattern=r"^attacker"))
+        events = [
+            _make_event(event_type="http_request", actor="attacker1"),
+            _make_event(event_type="http_request", actor="legitimate_user"),
+        ]
+        findings = det.detect(events, _empty_baseline())
+        assert len(findings) == 1
+        assert "attacker1" in findings[0].title
+
+
+# ---------------------------------------------------------------------------
+# count_threshold sliding window correctness (bead 2.22)
+# ---------------------------------------------------------------------------
+
+
+class TestCountThresholdSlidingWindow:
+    """best_right must be recorded so window_events slice is correct."""
+
+    def _make_rule(self, threshold: int = 3, window_minutes: int = 5) -> dict:
+        return {
+            "name": "test-window-correctness",
+            "description": "Window correctness",
+            "event_type": "auth_failure",
+            "condition": {
+                "type": "count_threshold",
+                "group_by": ["actor"],
+                "window_minutes": window_minutes,
+                "threshold": threshold,
+            },
+            "severity": "warn",
+        }
+
+    def test_window_events_are_all_within_time_window(self) -> None:
+        """All event_ids in the finding must be within window_minutes of each other."""
+        from mallcop.detectors.declarative import DeclarativeDetector
+
+        det = DeclarativeDetector(self._make_rule(threshold=3, window_minutes=5))
+        now = datetime.now(timezone.utc)
+
+        # 5 events: first 2 are outside the 5-min window relative to the last 3
+        events = [
+            _make_event(event_type="auth_failure", actor="bob",
+                        timestamp=now - timedelta(minutes=20)),
+            _make_event(event_type="auth_failure", actor="bob",
+                        timestamp=now - timedelta(minutes=15)),
+            _make_event(event_type="auth_failure", actor="bob",
+                        timestamp=now - timedelta(minutes=4)),
+            _make_event(event_type="auth_failure", actor="bob",
+                        timestamp=now - timedelta(minutes=3)),
+            _make_event(event_type="auth_failure", actor="bob",
+                        timestamp=now - timedelta(minutes=2)),
+        ]
+        findings = det.detect(events, _empty_baseline())
+        assert len(findings) == 1
+        assert len(findings[0].event_ids) == 3
+        in_window_ids = {events[2].id, events[3].id, events[4].id}
+        assert set(findings[0].event_ids) == in_window_ids
+
+    def test_best_window_selected_when_two_candidate_windows(self) -> None:
+        """When multiple windows exist, the largest is selected."""
+        from mallcop.detectors.declarative import DeclarativeDetector
+
+        det = DeclarativeDetector(self._make_rule(threshold=2, window_minutes=5))
+        now = datetime.now(timezone.utc)
+
+        # First cluster: 2 events (t-20 and t-16)
+        # Second cluster: 3 events (t-3, t-2, t-1) — bigger window wins
+        events = [
+            _make_event(event_type="auth_failure", actor="eve",
+                        timestamp=now - timedelta(minutes=20)),
+            _make_event(event_type="auth_failure", actor="eve",
+                        timestamp=now - timedelta(minutes=16)),
+            _make_event(event_type="auth_failure", actor="eve",
+                        timestamp=now - timedelta(minutes=3)),
+            _make_event(event_type="auth_failure", actor="eve",
+                        timestamp=now - timedelta(minutes=2)),
+            _make_event(event_type="auth_failure", actor="eve",
+                        timestamp=now - timedelta(minutes=1)),
+        ]
+        findings = det.detect(events, _empty_baseline())
+        assert len(findings) == 1
+        assert len(findings[0].event_ids) == 3
+        best_ids = {events[2].id, events[3].id, events[4].id}
+        assert set(findings[0].event_ids) == best_ids
+
+    def test_stale_best_start_bug_repro(self) -> None:
+        """Regression: window_events slice uses best_right, not stale best_start+best_count."""
+        from mallcop.detectors.declarative import DeclarativeDetector
+
+        det = DeclarativeDetector(self._make_rule(threshold=3, window_minutes=5))
+        now = datetime.now(timezone.utc)
+        events = [
+            _make_event(event_type="auth_failure", actor="carol",
+                        timestamp=now - timedelta(minutes=10)),
+            _make_event(event_type="auth_failure", actor="carol",
+                        timestamp=now - timedelta(minutes=9)),
+            _make_event(event_type="auth_failure", actor="carol",
+                        timestamp=now - timedelta(minutes=4)),
+            _make_event(event_type="auth_failure", actor="carol",
+                        timestamp=now - timedelta(minutes=3)),
+            _make_event(event_type="auth_failure", actor="carol",
+                        timestamp=now - timedelta(minutes=2)),
+        ]
+        findings = det.detect(events, _empty_baseline())
+        assert len(findings) == 1
+        assert len(findings[0].event_ids) == 3
+        expected = {events[2].id, events[3].id, events[4].id}
+        assert set(findings[0].event_ids) == expected

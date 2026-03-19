@@ -151,8 +151,14 @@ class TestLearningModeDuringWindow:
                 for sev in sevs:
                     assert sev == "info", f"Expected INFO severity during learning, got {sev}"
 
-    def test_watch_learning_mode_no_escalation(self, tmp_path: Path) -> None:
-        """During learning mode, watch reports escalation skipped."""
+    def test_watch_learning_mode_escalation_proceeds(self, tmp_path: Path) -> None:
+        """During learning mode, watch still runs escalation.
+
+        Learning mode suppression is per-finding (findings from learning connectors
+        are forced to INFO severity in detect). The watch command must not skip
+        escalation entirely when some connectors are in learning mode — that would
+        block findings from mature connectors too (bead mallcop-ak1n.2.28).
+        """
         root = tmp_path
         _make_config_yaml(root)
 
@@ -179,12 +185,17 @@ class TestLearningModeDuringWindow:
         assert data["command"] == "watch"
         assert data["status"] == "ok"
 
-        # Escalation should be skipped because of learning mode
-        assert data["escalate"]["skipped"] is True
-        assert data["escalate"]["reason"] == "learning_mode"
-
         # Azure should be listed as learning
         assert "azure" in data["detect"]["learning_connectors"]
+
+        # Escalation must NOT be skipped due to learning mode — it runs for all connectors.
+        # Learning mode suppresses individual findings (forces INFO severity in detect),
+        # not the escalation pipeline as a whole.
+        assert "escalate" in data
+        assert data["escalate"].get("skipped") is not True, (
+            "Escalation must not be skipped when only some connectors are in learning mode. "
+            "Learning mode suppression is per-finding."
+        )
 
 
 class TestLearningModeExpiry:

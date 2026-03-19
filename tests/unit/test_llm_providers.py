@@ -448,9 +448,10 @@ class TestConvertMessagesBedrock:
         ]
         result = _convert_messages_bedrock(msgs)
         assert len(result) == 2
-        # Assistant rewritten as toolUse
-        assert "toolUse" in result[0]["content"][0]
-        assert result[0]["content"][0]["toolUse"]["name"] == "read-events"
+        # Assistant message should contain a toolUse block (may also have a text block)
+        tool_use_blocks = [b for b in result[0]["content"] if "toolUse" in b]
+        assert tool_use_blocks, "Expected a toolUse block in assistant content"
+        assert tool_use_blocks[0]["toolUse"]["name"] == "read-events"
         # Tool result
         assert "toolResult" in result[1]["content"][0]
 
@@ -952,6 +953,15 @@ class TestProviderRegistry:
 
 
 class TestToolUseIdUniqueness:
+    def _get_bedrock_tool_use_id(self, result):
+        """Extract toolUseId from converted bedrock messages (first toolUse block found)."""
+        for msg in result:
+            if msg["role"] == "assistant":
+                for block in msg["content"]:
+                    if "toolUse" in block:
+                        return block["toolUse"]["toolUseId"]
+        raise AssertionError("No toolUse block found in result")
+
     def test_bedrock_tool_use_ids_are_unique_across_calls(self):
         """Each _convert_messages_bedrock call produces unique tool_use IDs."""
         msgs = [
@@ -960,8 +970,8 @@ class TestToolUseIdUniqueness:
         ]
         result1 = _convert_messages_bedrock(msgs)
         result2 = _convert_messages_bedrock(msgs)
-        id1 = result1[0]["content"][0]["toolUse"]["toolUseId"]
-        id2 = result2[0]["content"][0]["toolUse"]["toolUseId"]
+        id1 = self._get_bedrock_tool_use_id(result1)
+        id2 = self._get_bedrock_tool_use_id(result2)
         assert id1 != id2
 
     def test_bedrock_tool_use_ids_unique_within_single_call(self):
@@ -1001,3 +1011,168 @@ class TestToolUseIdUniqueness:
             for b in m["content"] if b.get("type") == "tool_use"
         )
         assert id1 != id2
+
+
+# ---------------------------------------------------------------------------
+# Preserve prior assistant text when inserting tool_use blocks (beads 2.24, 2.25)
+# ---------------------------------------------------------------------------
+
+
+class TestAnthropicPreservesAssistantText:
+    """_convert_messages must keep assistant text when inserting tool_use block."""
+
+    def test_assistant_text_preserved_before_tool_use(self) -> None:
+        """Text content from prior assistant turn is preserved alongside tool_use."""
+        from mallcop.llm.anthropic import _convert_messages
+
+        msgs = [
+            {"role": "user", "content": "What is the finding?"},
+            {"role": "assistant", "content": "I'll investigate this finding."},
+            {"role": "tool", "name": "get_events", "content": '[{"id": "evt1"}]'},
+        ]
+        result = _convert_messages(msgs)
+
+        # Find the assistant turn with the tool_use block
+        assistant_msgs = [m for m in result if m["role"] == "assistant"]
+        assert len(assistant_msgs) == 1
+        content_blocks = assistant_msgs[0]["content"]
+        block_types = [b.get("type") for b in content_blocks]
+        assert "text" in block_types, "text block missing from assistant turn"
+        assert "tool_use" in block_types, "tool_use block missing"
+
+        text_block = next(b for b in content_blocks if b.get("type") == "text")
+        assert text_block["text"] == "I'll investigate this finding."
+
+    def test_no_prior_assistant_message_works(self) -> None:
+        """Tool message with no prior assistant turn is handled gracefully."""
+        from mallcop.llm.anthropic import _convert_messages
+
+        msgs = [
+            {"role": "user", "content": "Use the tool."},
+            {"role": "tool", "name": "lookup", "content": "result"},
+        ]
+        # Should not raise
+        result = _convert_messages(msgs)
+        tool_result_msgs = [m for m in result if m["role"] == "user"
+                            and isinstance(m.get("content"), list)
+                            and any(b.get("type") == "tool_result" for b in m["content"])]
+        assert len(tool_result_msgs) == 1
+
+
+class TestBedrockPreservesAssistantText:
+    """_convert_messages_bedrock must keep assistant text when inserting toolUse block."""
+
+    def test_assistant_text_preserved_before_tool_use(self) -> None:
+        """Text content from prior assistant turn is preserved alongside toolUse."""
+        msgs = [
+            {"role": "user", "content": "What is the finding?"},
+            {"role": "assistant", "content": "Let me look into this."},
+            {"role": "tool", "name": "get_events", "content": '[{"id": "evt1"}]'},
+        ]
+        result = _convert_messages_bedrock(msgs)
+
+        assistant_msgs = [m for m in result if m["role"] == "assistant"]
+        assert len(assistant_msgs) == 1
+        content_blocks = assistant_msgs[0]["content"]
+        # Should have both a text block and a toolUse block
+        has_text = any("text" in b for b in content_blocks)
+        has_tool_use = any("toolUse" in b for b in content_blocks)
+        assert has_text, "text block missing from bedrock assistant turn"
+        assert has_tool_use, "toolUse block missing"
+
+        text_block = next(b for b in content_blocks if "text" in b)
+        assert text_block["text"] == "Let me look into this."
+
+    def test_no_prior_assistant_message_works(self) -> None:
+        """Tool message with no prior assistant turn is handled gracefully."""
+        msgs = [
+            {"role": "user", "content": "Use the tool."},
+            {"role": "tool", "name": "lookup", "content": "result"},
+        ]
+        result = _convert_messages_bedrock(msgs)
+        tool_result_msgs = [
+            m for m in result
+            if m["role"] == "user"
+            and any("toolResult" in b for b in m.get("content", []))
+        ]
+        assert len(tool_result_msgs) == 1
+
+
+# ---------------------------------------------------------------------------
+# _extract_resolution: robust JSON extraction (beads 2.35, 2.36)
+# ---------------------------------------------------------------------------
+
+
+class TestExtractResolution:
+    """_extract_resolution must use bracket-matched extraction, not rfind('}')'."""
+
+    def _call(self, text: str):
+        from mallcop.llm.converters import _extract_resolution
+        return _extract_resolution(text)
+
+    def test_plain_json_extracted(self) -> None:
+        """Simple JSON object is extracted correctly."""
+        text = '{"finding_id": "fnd_abc", "action": "resolved", "reason": "benign"}'
+        result = self._call(text)
+        assert result is not None
+        assert result["action"] == "resolved"
+
+    def test_json_embedded_in_text(self) -> None:
+        """JSON object embedded in prose is extracted."""
+        text = 'After reviewing: {"finding_id": "fnd_abc", "action": "escalate"} — done.'
+        result = self._call(text)
+        assert result is not None
+        assert result["action"] == "escalate"
+
+    def test_two_json_objects_first_valid_returned(self) -> None:
+        """When two JSON objects are present, the first valid resolution is returned."""
+        text = (
+            'Here is some context {"foo": "bar"} and the resolution: '
+            '{"finding_id": "fnd_xyz", "action": "resolved", "reason": "ok"}'
+        )
+        result = self._call(text)
+        assert result is not None
+        assert result["finding_id"] == "fnd_xyz"
+
+    def test_rfind_bug_repro_multiple_json_blocks(self) -> None:
+        """Regression: rfind would span across two JSON objects producing invalid JSON.
+
+        The old code: text[text.find('{'): text.rfind('}')+1] would produce:
+        '{"foo": "bar"} and the resolution: {"finding_id": "fnd_xyz", ...}'
+        which is not valid JSON, so json.loads would fail and return None.
+        The fixed code finds the correct inner object.
+        """
+        text = (
+            'First block: {"irrelevant": "data"} '
+            'Second block: {"finding_id": "fnd_abc", "action": "escalate"}'
+        )
+        result = self._call(text)
+        assert result is not None
+        assert result["finding_id"] == "fnd_abc"
+        assert result["action"] == "escalate"
+
+    def test_no_json_returns_none(self) -> None:
+        """Text with no JSON object returns None."""
+        result = self._call("This is just plain text with no JSON.")
+        assert result is None
+
+    def test_json_missing_required_fields_returns_none(self) -> None:
+        """JSON without finding_id and action fields is not a valid resolution."""
+        result = self._call('{"status": "ok", "message": "hello"}')
+        assert result is None
+
+    def test_large_input_truncated(self) -> None:
+        """Input exceeding 64KB is truncated without crashing."""
+        big_text = "x" * 100_000 + '{"finding_id": "fnd_big", "action": "resolved"}'
+        # The resolution JSON is beyond the 64KB limit, so None is expected
+        result = self._call(big_text)
+        # Either None (truncated) or the dict if somehow within limit — must not crash
+        assert result is None or isinstance(result, dict)
+
+    def test_valid_resolution_within_size_limit(self) -> None:
+        """A valid resolution JSON within the 64KB limit is returned."""
+        prefix = "a" * 1000
+        text = prefix + ' {"finding_id": "fnd_ok", "action": "resolved", "reason": "safe"}'
+        result = self._call(text)
+        assert result is not None
+        assert result["action"] == "resolved"

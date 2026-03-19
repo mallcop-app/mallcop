@@ -49,21 +49,49 @@ def _normalize_tool_schema(raw: dict[str, Any]) -> dict[str, Any]:
 
 
 def _extract_resolution(text: str) -> dict[str, Any] | None:
-    """Try to extract a resolution JSON object from text content."""
-    text = text.strip()
+    """Try to extract a resolution JSON object from text content.
+
+    Tries each complete {...} span in left-to-right order rather than using
+    rfind('}'), which would span across multiple JSON objects and produce
+    invalid JSON.  A length cap (64 KB) guards against pathologically large
+    inputs.
+    """
+    MAX_LEN = 65536
+    text = text.strip()[:MAX_LEN]
+
+    # Fast path: the whole text is valid JSON
     try:
         obj = json.loads(text)
         if isinstance(obj, dict) and "finding_id" in obj and "action" in obj:
             return obj
     except (json.JSONDecodeError, ValueError):
         pass
-    start = text.find("{")
-    end = text.rfind("}")
-    if start >= 0 and end > start:
-        try:
-            obj = json.loads(text[start : end + 1])
-            if isinstance(obj, dict) and "finding_id" in obj and "action" in obj:
-                return obj
-        except (json.JSONDecodeError, ValueError):
-            pass
+
+    # Scan for each '{' and try to find the matching '}' via a bracket counter,
+    # then attempt json.loads on that span.  This avoids rfind picking the
+    # outermost '}' across multiple JSON objects.
+    i = 0
+    while i < len(text):
+        if text[i] != "{":
+            i += 1
+            continue
+        depth = 0
+        j = i
+        while j < len(text):
+            if text[j] == "{":
+                depth += 1
+            elif text[j] == "}":
+                depth -= 1
+                if depth == 0:
+                    candidate = text[i : j + 1]
+                    try:
+                        obj = json.loads(candidate)
+                        if isinstance(obj, dict) and "finding_id" in obj and "action" in obj:
+                            return obj
+                    except (json.JSONDecodeError, ValueError):
+                        pass
+                    break
+            j += 1
+        i += 1
+
     return None

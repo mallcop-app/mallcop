@@ -158,6 +158,25 @@ def _setup_pro(config_data: dict[str, Any]) -> dict[str, Any] | None:
         )
         return None
 
+    # Validate email format before sending to external API (mallcop-ak1n.1.18).
+    _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+    if not _EMAIL_RE.match(email):
+        click.echo(
+            json.dumps({"status": "error", "error": f"Invalid email address: {email!r}. Fix git config user.email first."}),
+            err=True,
+        )
+        return None
+
+    # Disclosure prompt: inform user their email is being sent to api.mallcop.dev (mallcop-ak1n.1.18).
+    # Only prompt in interactive terminals — skip in CI/automated pipelines.
+    import sys
+    click.echo(f"Creating Pro account with email: {email}", err=True)
+    if sys.stdin.isatty():
+        confirm = click.prompt("Continue? [Y/n]", default="Y", err=True)
+        if confirm.strip().lower() not in ("y", "yes", ""):
+            click.echo(json.dumps({"status": "error", "error": "Cancelled by user."}), err=True)
+            return None
+
     account_url = DEFAULT_API_URL
     client = ProClient(account_url)
 
@@ -462,10 +481,9 @@ def watch(dry_run: bool, dir_path: str | None, human: bool, backend: str) -> Non
         click.echo(json.dumps(result))
         raise SystemExit(1)
 
-    # Step 3: Escalate (skip if dry-run or learning mode)
-    learning = detect_result.get("learning_connectors", [])
-    skip_escalate = dry_run or bool(learning)
-    escalate_reason = "dry_run" if dry_run else ("learning_mode" if learning else None)
+    # Step 3: Escalate (skip only if dry-run; learning mode is handled per-finding in escalate)
+    skip_escalate = dry_run
+    escalate_reason = "dry_run" if dry_run else None
 
     if skip_escalate:
         result["escalate"] = {"skipped": True, "reason": escalate_reason}

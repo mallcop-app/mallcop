@@ -240,7 +240,9 @@ class AzureConnector(ConnectorBase):
         )
         now = datetime.now(timezone.utc)
         if checkpoint is not None:
-            start = checkpoint.value
+            # Normalize checkpoint to UTC ISO with Z suffix as required by Azure Activity Log API
+            cp_dt = parse_iso_timestamp(checkpoint.value)
+            start = cp_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
         else:
             start = (now - DEFAULT_FIRST_POLL_LOOKBACK).strftime("%Y-%m-%dT%H:%M:%SZ")
         end = now.strftime("%Y-%m-%dT%H:%M:%SZ")

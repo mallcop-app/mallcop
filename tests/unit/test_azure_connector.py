@@ -466,7 +466,8 @@ class TestAzureConnectorFetchActivityLogFilter:
 
         assert "$filter" in captured_params
         f = captured_params["$filter"]
-        assert "eventTimestamp ge '2026-03-06T10:00:00+00:00'" in f
+        # Azure Activity Log API requires Z suffix (not +00:00) for UTC timestamps
+        assert "eventTimestamp ge '2026-03-06T10:00:00Z'" in f
         assert "eventTimestamp le '2026-03-07T12:00:00Z'" in f
 
     def test_filter_always_present_even_without_checkpoint(self) -> None:
@@ -630,3 +631,65 @@ class TestAzureConnectorErrorPaths:
              patch("requests.get", side_effect=[page1_resp, page2_resp]):
             with pytest.raises(HTTPError, match="500"):
                 connector._get_paginated("https://management.azure.com/test")
+
+
+# ---------------------------------------------------------------------------
+# Checkpoint UTC normalization in _fetch_activity_log (bead 2.32)
+# ---------------------------------------------------------------------------
+
+
+class TestAzureCheckpointNormalization:
+    """_fetch_activity_log must normalize checkpoint.value to UTC Z format."""
+
+    def _make_connector(self):
+        from mallcop.connectors.azure.connector import AzureConnector
+        c = AzureConnector()
+        c._tenant_id = "tenant-001"
+        c._client_id = "client-001"
+        c._client_secret = "secret-001"
+        return c
+
+    def _capture_filter_params(self, connector, checkpoint):
+        """Call _fetch_activity_log and return the $filter param used."""
+        captured: list[dict] = []
+
+        def fake_get_paginated(url, *, params=None):
+            captured.append(params or {})
+            return []
+
+        with patch.object(connector, "_get_paginated", side_effect=fake_get_paginated), \
+             patch.object(connector, "_auth_headers", return_value={"Authorization": "Bearer t"}):
+            connector._fetch_activity_log("sub-001", checkpoint)
+
+        return captured[0].get("$filter", "")
+
+    def test_checkpoint_without_tz_suffix_gets_z_suffix(self) -> None:
+        """Checkpoint value without timezone suffix must be normalized to Z format."""
+        connector = self._make_connector()
+        cp = Checkpoint(
+            connector="azure",
+            value="2026-03-05T14:00:00",
+            updated_at=datetime(2026, 3, 5, 14, 0, 0, tzinfo=timezone.utc),
+        )
+        filter_str = self._capture_filter_params(connector, cp)
+        assert "2026-03-05T14:00:00Z" in filter_str, (
+            f"Expected UTC Z-suffix timestamp in filter, got: {filter_str}"
+        )
+
+    def test_checkpoint_with_plus00_gets_z_suffix(self) -> None:
+        """Checkpoint value with +00:00 offset must be normalized to Z format."""
+        connector = self._make_connector()
+        cp = Checkpoint(
+            connector="azure",
+            value="2026-03-05T15:30:00+00:00",
+            updated_at=datetime(2026, 3, 5, 15, 30, 0, tzinfo=timezone.utc),
+        )
+        filter_str = self._capture_filter_params(connector, cp)
+        assert "2026-03-05T15:30:00Z" in filter_str
+
+    def test_no_checkpoint_uses_z_format(self) -> None:
+        """Without a checkpoint, the default start time already uses Z format."""
+        connector = self._make_connector()
+        filter_str = self._capture_filter_params(connector, None)
+        # No explicit value to check, but the Z suffix must be present
+        assert "Z" in filter_str

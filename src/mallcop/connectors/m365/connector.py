@@ -146,6 +146,7 @@ class M365Connector(ConnectorBase):
         self._client_secret: str | None = None
         self._cached_token: str | None = None
         self._token_expires_at: float = 0.0
+        self._content_types: list[str] = list(_CONTENT_TYPES)
 
     def discover(self) -> DiscoveryResult:
         try:
@@ -181,6 +182,12 @@ class M365Connector(ConnectorBase):
             notes=[f"Found {len(subs)} active content subscription(s)."],
         )
 
+    def configure(self, config: dict) -> None:
+        """Store configured content_types so poll() only fetches what was subscribed."""
+        configured = config.get("content_types")
+        if configured:
+            self._content_types = list(configured)
+
     def authenticate(self, secrets: SecretProvider) -> None:
         self._tenant_id = secrets.resolve("ENTRA_TENANT_ID")
         self._client_id = secrets.resolve("ENTRA_CLIENT_ID")
@@ -202,7 +209,7 @@ class M365Connector(ConnectorBase):
             checkpoint_dt = _parse_creation_time(checkpoint.value)
 
         all_records: list[dict[str, Any]] = []
-        for content_type in _CONTENT_TYPES:
+        for content_type in self._content_types:
             blobs = self._list_content_blobs(content_type, start_time, end_time)
             for blob in blobs:
                 records = self._fetch_audit_records(blob["contentUri"])
@@ -302,7 +309,13 @@ class M365Connector(ConnectorBase):
         url = f"{_BASE_URL}/{self._tenant_id}/activity/feed/subscriptions/list"
         resp = requests.get(url, headers=self._auth_headers())
         resp.raise_for_status()
-        return resp.json()
+        data = resp.json()
+        if not isinstance(data, list):
+            raise ConfigError(
+                f"M365 subscriptions endpoint returned unexpected shape: {type(data).__name__}. "
+                "Expected a JSON array. Response may indicate an API error or permission issue."
+            )
+        return data
 
     def _list_content_blobs(
         self,
