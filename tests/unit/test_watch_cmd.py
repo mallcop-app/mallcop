@@ -371,3 +371,151 @@ class TestWatchProUsageReporting:
 
         assert result["dry_run"] is True
         MockProClient.assert_not_called()
+
+
+# ─── Watch: pro_config partial state ─────────────────────────────────────────
+# mallcop-ak1n.5.5: partial pro_config, escalate failure, missing tokens_used
+
+
+class TestWatchProConfigPartialState:
+    """5.5: pro_config partial state coverage."""
+
+    def _make_fns(self, tokens_used: int = 500) -> tuple:
+        def mock_scan(root: Path) -> dict[str, Any]:
+            return {"status": "ok", "total_events_ingested": 1, "connectors": {}}
+
+        def mock_detect(root: Path) -> dict[str, Any]:
+            return {"status": "ok", "findings_count": 1, "summary": {}, "learning_connectors": []}
+
+        def mock_escalate(root: Path, **kwargs: Any) -> dict[str, Any]:
+            return {
+                "status": "ok",
+                "findings_processed": 1,
+                "circuit_breaker_triggered": False,
+                "budget_exhausted": False,
+                "donuts_used": tokens_used,
+            }
+
+        return mock_scan, mock_detect, mock_escalate
+
+    def test_pro_config_missing_service_token_skips_record_usage(self, tmp_path: Path) -> None:
+        """ProConfig with account_id but no service_token must NOT call record_usage."""
+        from mallcop.watch import run_watch
+
+        pro_config = ProConfig(
+            account_id="acct-123",
+            service_token="",  # missing
+            account_url="https://api.mallcop.app",
+            inference_url="",
+        )
+        mock_scan, mock_detect, mock_escalate = self._make_fns()
+
+        with patch("mallcop.watch.ProClient") as MockProClient:
+            result = run_watch(
+                tmp_path,
+                scan_fn=mock_scan,
+                detect_fn=mock_detect,
+                escalate_fn=mock_escalate,
+                dry_run=False,
+                pro_config=pro_config,
+            )
+
+        assert result["status"] == "ok"
+        MockProClient.assert_not_called()
+
+    def test_pro_config_missing_account_id_skips_record_usage(self, tmp_path: Path) -> None:
+        """ProConfig with service_token but no account_id must NOT call record_usage."""
+        from mallcop.watch import run_watch
+
+        pro_config = ProConfig(
+            account_id="",  # missing
+            service_token="tok-abc",
+            account_url="https://api.mallcop.app",
+            inference_url="",
+        )
+        mock_scan, mock_detect, mock_escalate = self._make_fns()
+
+        with patch("mallcop.watch.ProClient") as MockProClient:
+            result = run_watch(
+                tmp_path,
+                scan_fn=mock_scan,
+                detect_fn=mock_detect,
+                escalate_fn=mock_escalate,
+                dry_run=False,
+                pro_config=pro_config,
+            )
+
+        assert result["status"] == "ok"
+        MockProClient.assert_not_called()
+
+    def test_escalate_failure_skips_record_usage(self, tmp_path: Path) -> None:
+        """When escalate raises, run_watch returns early — record_usage must NOT be called."""
+        from mallcop.watch import run_watch
+
+        pro_config = ProConfig(
+            account_id="acct-123",
+            service_token="tok-abc",
+            account_url="https://api.mallcop.app",
+            inference_url="",
+        )
+
+        def mock_scan(root: Path) -> dict[str, Any]:
+            return {"status": "ok", "total_events_ingested": 1, "connectors": {}}
+
+        def mock_detect(root: Path) -> dict[str, Any]:
+            return {"status": "ok", "findings_count": 1, "summary": {}, "learning_connectors": []}
+
+        def mock_escalate(root: Path, **kwargs: Any) -> dict[str, Any]:
+            raise RuntimeError("escalate exploded")
+
+        with patch("mallcop.watch.ProClient") as MockProClient:
+            result = run_watch(
+                tmp_path,
+                scan_fn=mock_scan,
+                detect_fn=mock_detect,
+                escalate_fn=mock_escalate,
+                dry_run=False,
+                pro_config=pro_config,
+            )
+
+        assert result["status"] == "error"
+        MockProClient.assert_not_called()
+
+    def test_missing_tokens_used_in_result_defaults_to_zero(self, tmp_path: Path) -> None:
+        """If escalate result has no 'donuts_used' key, watch uses 0 and does not crash."""
+        from mallcop.watch import run_watch
+
+        pro_config = ProConfig(
+            account_id="acct-123",
+            service_token="tok-abc",
+            account_url="https://api.mallcop.app",
+            inference_url="",
+        )
+
+        def mock_scan(root: Path) -> dict[str, Any]:
+            return {"status": "ok", "total_events_ingested": 0, "connectors": {}}
+
+        def mock_detect(root: Path) -> dict[str, Any]:
+            return {"status": "ok", "findings_count": 0, "summary": {}, "learning_connectors": []}
+
+        def mock_escalate(root: Path, **kwargs: Any) -> dict[str, Any]:
+            # Note: no 'donuts_used' key
+            return {"status": "ok", "findings_processed": 0}
+
+        mock_client = MagicMock()
+        mock_client.record_usage.return_value = {"recorded": True}
+
+        with patch("mallcop.watch.ProClient", return_value=mock_client):
+            result = run_watch(
+                tmp_path,
+                scan_fn=mock_scan,
+                detect_fn=mock_detect,
+                escalate_fn=mock_escalate,
+                dry_run=False,
+                pro_config=pro_config,
+            )
+
+        assert result["status"] == "ok"
+        mock_client.record_usage.assert_called_once()
+        call_kwargs = mock_client.record_usage.call_args
+        assert call_kwargs[1]["input_tokens"] == 0

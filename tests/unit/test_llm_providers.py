@@ -833,3 +833,171 @@ class TestBuildLlmClientWithProConfig:
         # Should be a BedrockClient, not ManagedClient
         assert client is not None
         assert type(client).__name__ != "ManagedClient"
+
+
+# ─── 5.12: resolve_model_id and provider registry ────────────────────────────
+
+
+class TestResolveModelId:
+    """mallcop-ak1n.5.12: resolve_model_id alias mappings."""
+
+    def test_haiku_alias_resolves(self) -> None:
+        from mallcop.llm import resolve_model_id
+        result = resolve_model_id("haiku")
+        assert result == "claude-haiku-4-5-20251001"
+
+    def test_sonnet_alias_resolves(self) -> None:
+        from mallcop.llm import resolve_model_id
+        result = resolve_model_id("sonnet")
+        assert result == "claude-sonnet-4-6"
+
+    def test_opus_alias_resolves(self) -> None:
+        from mallcop.llm import resolve_model_id
+        result = resolve_model_id("opus")
+        assert result == "claude-opus-4-6"
+
+    def test_full_model_id_passes_through_unchanged(self) -> None:
+        from mallcop.llm import resolve_model_id
+        full_id = "claude-haiku-4-5-20251001"
+        assert resolve_model_id(full_id) == full_id
+
+    def test_unknown_alias_returns_alias_unchanged(self) -> None:
+        from mallcop.llm import resolve_model_id
+        # Unknown alias should pass through as-is (no KeyError)
+        result = resolve_model_id("my-custom-model-v1")
+        assert result == "my-custom-model-v1"
+
+    def test_empty_string_returns_empty_string(self) -> None:
+        from mallcop.llm import resolve_model_id
+        assert resolve_model_id("") == ""
+
+
+class TestProviderRegistry:
+    """mallcop-ak1n.5.12: register_provider decorator and build_llm_client routing."""
+
+    def test_register_provider_decorator_registers_builder(self) -> None:
+        """register_provider registers a builder that is callable via build_llm_client."""
+        from mallcop.llm import register_provider, build_llm_client, _PROVIDERS
+        from mallcop.config import LLMConfig
+
+        test_provider_name = "_test_custom_provider_xyzzy"
+        call_log: list[LLMConfig] = []
+
+        @register_provider(test_provider_name)
+        def _build_test(llm_config: LLMConfig):
+            call_log.append(llm_config)
+            return MagicMock()
+
+        assert test_provider_name in _PROVIDERS
+
+        llm_cfg = LLMConfig(provider=test_provider_name, api_key="", default_model="haiku")
+        result = build_llm_client(llm_cfg, backend=test_provider_name)
+
+        assert result is not None
+        assert len(call_log) == 1
+
+        # Cleanup
+        del _PROVIDERS[test_provider_name]
+
+    def test_build_llm_client_bedrock_with_pro_config_uses_provider_builder(self) -> None:
+        """build_llm_client with bedrock provider AND pro_config routes to BedrockClient."""
+        from mallcop.llm import build_llm_client, LLMConfig
+        llm_config = LLMConfig(
+            provider="bedrock",
+            default_model="haiku",
+            api_key="AKIATEST",
+            secret_key="secretval",
+            endpoint="us-east-1",
+        )
+        pro_config = MagicMock()
+        pro_config.service_token = "svc_tok"
+        pro_config.inference_url = "https://api.mallcop.app"
+
+        # bedrock provider should not be overridden by pro_config
+        client = build_llm_client(llm_config, backend="bedrock", pro_config=pro_config)
+        assert client is not None
+        assert type(client).__name__ == "BedrockClient"
+
+    def test_build_llm_client_anthropic_with_pro_config_routes_to_managed(self) -> None:
+        """build_llm_client with anthropic provider AND pro_config routes to ManagedClient."""
+        from mallcop.llm import build_llm_client, LLMConfig, ManagedClient
+        llm_config = LLMConfig(
+            provider="anthropic",
+            api_key="sk-ant-test",
+            default_model="haiku",
+        )
+        pro_config = MagicMock()
+        pro_config.service_token = "svc_tok"
+        pro_config.inference_url = "https://api.mallcop.app"
+
+        client = build_llm_client(llm_config, pro_config=pro_config)
+        assert client is not None
+        assert isinstance(client, ManagedClient)
+
+    def test_build_llm_client_unsupported_provider_returns_none(self) -> None:
+        """Unsupported provider yields None and logs a warning (does not raise)."""
+        from mallcop.llm import build_llm_client, LLMConfig
+        llm_config = LLMConfig(
+            provider="totally-unknown-provider",
+            api_key="key",
+            default_model="haiku",
+        )
+        result = build_llm_client(llm_config)
+        assert result is None
+
+
+# ---------------------------------------------------------------------------
+# tool_use_id uniqueness (2.26)
+# ---------------------------------------------------------------------------
+
+
+class TestToolUseIdUniqueness:
+    def test_bedrock_tool_use_ids_are_unique_across_calls(self):
+        """Each _convert_messages_bedrock call produces unique tool_use IDs."""
+        msgs = [
+            {"role": "assistant", "content": "calling tool"},
+            {"role": "tool", "name": "read-events", "content": "result"},
+        ]
+        result1 = _convert_messages_bedrock(msgs)
+        result2 = _convert_messages_bedrock(msgs)
+        id1 = result1[0]["content"][0]["toolUse"]["toolUseId"]
+        id2 = result2[0]["content"][0]["toolUse"]["toolUseId"]
+        assert id1 != id2
+
+    def test_bedrock_tool_use_ids_unique_within_single_call(self):
+        """Multiple tool messages in one call each get distinct IDs."""
+        msgs = [
+            {"role": "assistant", "content": "step 1"},
+            {"role": "tool", "name": "tool-a", "content": "a result"},
+            {"role": "assistant", "content": "step 2"},
+            {"role": "tool", "name": "tool-b", "content": "b result"},
+        ]
+        result = _convert_messages_bedrock(msgs)
+        tool_use_ids = [
+            block["toolUse"]["toolUseId"]
+            for msg in result
+            if msg["role"] == "assistant"
+            for block in msg["content"]
+            if "toolUse" in block
+        ]
+        assert len(tool_use_ids) == 2
+        assert tool_use_ids[0] != tool_use_ids[1]
+
+    def test_anthropic_tool_use_ids_are_unique_across_calls(self):
+        """Each _convert_messages call in anthropic.py produces unique tool_use IDs."""
+        from mallcop.llm.anthropic import _convert_messages
+        msgs = [
+            {"role": "assistant", "content": "calling tool"},
+            {"role": "tool", "name": "read-events", "content": "result"},
+        ]
+        result1 = _convert_messages(msgs)
+        result2 = _convert_messages(msgs)
+        id1 = next(
+            b["id"] for m in result1 if m["role"] == "assistant"
+            for b in m["content"] if b.get("type") == "tool_use"
+        )
+        id2 = next(
+            b["id"] for m in result2 if m["role"] == "assistant"
+            for b in m["content"] if b.get("type") == "tool_use"
+        )
+        assert id1 != id2

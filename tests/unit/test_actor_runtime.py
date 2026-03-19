@@ -788,3 +788,139 @@ class TestSkillCatalogSanitization:
             assert entry["description"].startswith("[USER_DATA_BEGIN]")
             assert entry["description"].endswith("[USER_DATA_END]")
 
+
+# ─── _prepack_context isolation tests (mallcop-ak1n.5.9) ──────────────────────
+
+
+class TestPrepackContextIsolated:
+    """mallcop-ak1n.5.9: _prepack_context tested in isolation."""
+
+    def _make_ctx_with_baseline(self):
+        """Return a MagicMock ToolContext with a proper baseline mock."""
+        from unittest.mock import MagicMock
+        ctx = MagicMock()
+        ctx.skill_root = None
+
+        # Provide a real-ish baseline
+        baseline = MagicMock()
+        baseline.known_entities = {"actors": []}
+        baseline.frequency_tables = {}
+        baseline.relationships = {}
+        ctx.store.get_baseline.return_value = baseline
+        return ctx
+
+    def test_prepack_context_none_context_returns_empty(self) -> None:
+        """When context is None, _prepack_context returns []."""
+        manifest = _make_manifest()
+        reg = _build_registry()
+        llm = MockLLMClient([])
+
+        runtime = ActorRuntime(manifest, reg, llm, context=None)
+        finding = _make_finding()
+        msgs = runtime._prepack_context(finding)
+        assert msgs == []
+
+    def test_prepack_context_empty_event_ids_skips_events_block(self) -> None:
+        """When finding.event_ids is empty, no read-events messages are added."""
+        manifest = _make_manifest()
+        reg = _build_registry()
+        llm = MockLLMClient([])
+        ctx = self._make_ctx_with_baseline()
+
+        runtime = ActorRuntime(manifest, reg, llm, context=ctx)
+        finding = _make_finding()
+        finding.event_ids = []  # empty event list
+
+        msgs = runtime._prepack_context(finding)
+
+        # Should NOT call query_events_by_ids
+        ctx.store.query_events_by_ids.assert_not_called()
+        # No read-events message
+        tool_names = [m.get("name") for m in msgs if "name" in m]
+        assert "read-events" not in tool_names
+
+    def test_prepack_context_no_skill_root_no_catalog_messages(self) -> None:
+        """When skill_root is None, no list-skills messages are pre-packed."""
+        manifest = _make_manifest()
+        reg = _build_registry()
+        llm = MockLLMClient([])
+        ctx = self._make_ctx_with_baseline()
+        ctx.skill_root = None
+
+        # No events to avoid event pre-pack complexity
+        ctx.store.query_events_by_ids.return_value = []
+
+        runtime = ActorRuntime(manifest, reg, llm, context=ctx)
+        finding = _make_finding()
+        finding.event_ids = []
+
+        msgs = runtime._prepack_context(finding)
+        tool_names = [m.get("name") for m in msgs if "name" in m]
+        assert "list-skills" not in tool_names
+
+    def test_prepack_context_with_skill_root_injects_catalog(self, tmp_path: Path) -> None:
+        """When skill_root is set and skills exist, list-skills messages are injected."""
+        skill_dir = tmp_path / "my-skill"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text(
+            "---\nname: my-skill\ndescription: A test skill\n---\nBody.\n"
+        )
+
+        manifest = _make_manifest()
+        reg = _build_registry()
+        llm = MockLLMClient([])
+        ctx = self._make_ctx_with_baseline()
+        ctx.skill_root = str(tmp_path)
+        ctx.store.query_events_by_ids.return_value = []
+
+        runtime = ActorRuntime(manifest, reg, llm, context=ctx)
+        finding = _make_finding()
+        finding.event_ids = []
+
+        msgs = runtime._prepack_context(finding)
+        tool_names = [m.get("name") for m in msgs if "name" in m]
+        assert "list-skills" in tool_names
+
+    def test_prepack_context_with_events_adds_read_events_messages(self) -> None:
+        """When finding has event_ids and events are returned, read-events messages are added."""
+        from unittest.mock import MagicMock
+
+        manifest = _make_manifest()
+        reg = _build_registry()
+        llm = MockLLMClient([])
+        ctx = self._make_ctx_with_baseline()
+        ctx.skill_root = None
+
+        # Simulate one event returned
+        fake_event = MagicMock()
+        fake_event.to_dict.return_value = {"id": "evt_001", "actor": "alice", "action": "login"}
+        fake_event.actor = "alice"
+        ctx.store.query_events_by_ids.return_value = [fake_event]
+
+        runtime = ActorRuntime(manifest, reg, llm, context=ctx)
+        finding = _make_finding()  # event_ids=["evt_001"]
+
+        msgs = runtime._prepack_context(finding)
+        tool_names = [m.get("name") for m in msgs if "name" in m]
+        assert "read-events" in tool_names
+
+
+class TestRunLLMAPIError:
+    """mallcop-ak1n.5.9: ActorRuntime.run re-raises LLMAPIError."""
+
+    def test_run_llm_api_error_propagates(self) -> None:
+        """When LLM raises LLMAPIError, ActorRuntime.run() re-raises it."""
+        from mallcop.llm_types import LLMAPIError
+
+        manifest = _make_manifest(max_iterations=3)
+        reg = _build_registry()
+
+        class ErrorLLM(LLMClient):
+            def chat(self, model, system_prompt, messages, tools):
+                raise LLMAPIError("backend unavailable")
+
+        runtime = ActorRuntime(manifest, reg, ErrorLLM())
+        finding = _make_finding()
+
+        with pytest.raises(LLMAPIError, match="backend unavailable"):
+            runtime.run(finding, "system prompt")

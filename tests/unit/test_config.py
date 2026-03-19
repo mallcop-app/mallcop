@@ -104,6 +104,32 @@ class TestEnvSecretProvider:
         provider = EnvSecretProvider()
         assert provider.resolve("EMPTY_VAR") == ""
 
+    def test_env_provider_zero_value_returns_zero_string(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """EnvSecretProvider.resolve() with a var set to "0" returns "0", not None/falsy."""
+        monkeypatch.setenv("MY_ZERO_VAR", "0")
+        provider = EnvSecretProvider()
+        result = provider.resolve("MY_ZERO_VAR")
+        assert result == "0"
+
+    def test_env_provider_false_string_returns_false_string(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """EnvSecretProvider.resolve() with a var set to "false" returns "false", not None."""
+        monkeypatch.setenv("MY_FALSE_VAR", "false")
+        provider = EnvSecretProvider()
+        result = provider.resolve("MY_FALSE_VAR")
+        assert result == "false"
+
+    def test_config_error_importable_from_secrets(self) -> None:
+        """ConfigError is importable directly from mallcop.secrets."""
+        from mallcop.secrets import ConfigError as SecretsConfigError
+        from mallcop.config import ConfigError as ConfigConfigError
+        # Both import paths refer to the same class
+        assert SecretsConfigError is ConfigConfigError
+
+    def test_secret_provider_abstract_cannot_instantiate(self) -> None:
+        """SecretProvider cannot be directly instantiated (ABC enforcement)."""
+        with pytest.raises(TypeError):
+            SecretProvider()  # type: ignore[abstract]
+
 
 class TestLoadConfig:
     def _write_config(self, tmp_path: Path, content: str) -> Path:
@@ -479,3 +505,191 @@ class TestProConfigUrlResolution:
         config = load_config(tmp_path)
         assert config.pro is not None
         assert config.pro.account_url == "https://api.mallcop.app"
+
+
+# ─── 5.6: _parse_routing and _parse_llm edge cases ────────────────────────────
+
+
+class TestParseRoutingEdgeCases:
+    """mallcop-ak1n.5.6: _parse_routing edge cases."""
+
+    def test_parse_routing_integer_value_treated_as_none(self) -> None:
+        """Unexpected integer value for a severity should yield None (fallthrough)."""
+        from mallcop.config import _parse_routing
+
+        result = _parse_routing({"warn": 42})
+        assert result["warn"] is None
+
+    def test_parse_routing_list_value_treated_as_none(self) -> None:
+        """Unexpected list value for a severity should yield None (fallthrough)."""
+        from mallcop.config import _parse_routing
+
+        result = _parse_routing({"warn": ["triage", "notify"]})
+        assert result["warn"] is None
+
+    def test_parse_routing_new_dict_format_chain_and_notify(self) -> None:
+        """New dict format {chain: [...], notify: [...]} is parsed into RouteConfig."""
+        from mallcop.config import _parse_routing, RouteConfig
+
+        raw = {"warn": {"chain": ["triage"], "notify": ["slack-channel"]}}
+        result = _parse_routing(raw)
+        assert isinstance(result["warn"], RouteConfig)
+        assert result["warn"].chain == ["triage"]
+        assert result["warn"].notify == ["slack-channel"]
+
+    def test_parse_routing_dict_format_defaults_missing_keys(self) -> None:
+        """Dict format with only 'chain' (no 'notify') defaults notify to []."""
+        from mallcop.config import _parse_routing, RouteConfig
+
+        raw = {"critical": {"chain": ["escalate"]}}
+        result = _parse_routing(raw)
+        assert isinstance(result["critical"], RouteConfig)
+        assert result["critical"].chain == ["escalate"]
+        assert result["critical"].notify == []
+
+    def test_parse_routing_null_value_stays_none(self) -> None:
+        """Explicit None in YAML (info: null) should produce None in routing."""
+        from mallcop.config import _parse_routing
+
+        result = _parse_routing({"info": None})
+        assert result["info"] is None
+
+    def test_parse_routing_empty_dict_returns_empty(self) -> None:
+        """Empty routing dict returns empty result."""
+        from mallcop.config import _parse_routing
+
+        assert _parse_routing({}) == {}
+
+    def test_parse_routing_none_returns_empty(self) -> None:
+        """None input returns empty dict."""
+        from mallcop.config import _parse_routing
+
+        assert _parse_routing(None) == {}
+
+
+class TestParseLLMEdgeCases:
+    """mallcop-ak1n.5.6: _parse_llm edge cases."""
+
+    def _env_provider(self) -> "EnvSecretProvider":
+        return EnvSecretProvider()
+
+    def test_parse_llm_bedrock_no_api_key_returns_config(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """For bedrock provider, api_key is optional — config is returned even with empty key."""
+        from mallcop.config import _parse_llm, LLMConfig
+
+        provider = EnvSecretProvider()
+        raw = {"provider": "bedrock", "endpoint": "us-east-1"}
+        result = _parse_llm(raw, provider)
+        assert result is not None
+        assert result.provider == "bedrock"
+        assert result.api_key == ""
+
+    def test_parse_llm_anthropic_missing_api_key_returns_none(self) -> None:
+        """For anthropic provider, missing api_key returns None."""
+        from mallcop.config import _parse_llm
+
+        provider = EnvSecretProvider()
+        raw = {"provider": "anthropic"}
+        result = _parse_llm(raw, provider)
+        assert result is None
+
+    def test_parse_llm_none_section_returns_none(self) -> None:
+        """None input returns None."""
+        from mallcop.config import _parse_llm
+
+        result = _parse_llm(None, EnvSecretProvider())
+        assert result is None
+
+    def test_parse_llm_openai_compat_with_endpoint(self) -> None:
+        """openai-compat provider with endpoint and no api_key is allowed."""
+        from mallcop.config import _parse_llm
+
+        provider = EnvSecretProvider()
+        raw = {
+            "provider": "openai-compat",
+            "endpoint": "https://my-llm.internal",
+            "default_model": "llama-3",
+        }
+        result = _parse_llm(raw, provider)
+        assert result is not None
+        assert result.provider == "openai-compat"
+        assert result.endpoint == "https://my-llm.internal"
+
+
+class TestLoadConfigEdgeCases:
+    """mallcop-ak1n.5.6: load_config edge cases."""
+
+    def _write_config(self, tmp_path: Path, content: str) -> None:
+        (tmp_path / "mallcop.yaml").write_text(content)
+
+    def test_unknown_backend_raises_config_error(self, tmp_path: Path) -> None:
+        """Unknown secrets backend raises ConfigError with informative message."""
+        yaml_content = textwrap.dedent("""\
+            secrets:
+              backend: vault
+
+            connectors: {}
+            routing: {}
+            actor_chain: {}
+        """)
+        self._write_config(tmp_path, yaml_content)
+        with pytest.raises(ConfigError, match="vault"):
+            load_config(tmp_path)
+
+    def test_squelch_null_defaults_to_five(self, tmp_path: Path) -> None:
+        """squelch: null in YAML produces config.squelch == 5."""
+        yaml_content = textwrap.dedent("""\
+            secrets:
+              backend: env
+
+            connectors: {}
+            routing: {}
+            actor_chain: {}
+            squelch: null
+        """)
+        self._write_config(tmp_path, yaml_content)
+        config = load_config(tmp_path)
+        assert config.squelch == 5
+
+    def test_actor_non_dict_value_silently_skipped(self, tmp_path: Path) -> None:
+        """Non-dict actor config is silently skipped (no crash, no entry in actors dict)."""
+        yaml_content = textwrap.dedent("""\
+            secrets:
+              backend: env
+
+            connectors: {}
+            routing: {}
+            actor_chain: {}
+
+            actors:
+              triage: "not_a_dict"
+              valid_actor:
+                model: haiku
+        """)
+        self._write_config(tmp_path, yaml_content)
+        config = load_config(tmp_path)
+        assert "triage" not in config.actors
+        assert "valid_actor" in config.actors
+
+    def test_pro_inference_url_env_missing_falls_back_to_empty(
+        self, tmp_path: Path
+    ) -> None:
+        """When inference_url references a missing env var, it falls back to empty string."""
+        yaml_content = textwrap.dedent("""\
+            secrets:
+              backend: env
+
+            connectors: {}
+            routing: {}
+            actor_chain: {}
+
+            pro:
+              account_id: acct_123
+              service_token: tok_abc
+              inference_url: ${NONEXISTENT_INFERENCE_URL_XYZ}
+        """)
+        self._write_config(tmp_path, yaml_content)
+        # Should NOT raise — graceful fallback
+        config = load_config(tmp_path)
+        assert config.pro is not None
+        assert config.pro.inference_url == ""

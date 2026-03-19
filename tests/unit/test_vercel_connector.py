@@ -1281,3 +1281,119 @@ class TestAuditLogEdgeCases:
             # 0 is falsy but still a valid epoch timestamp — depends on implementation
             # The code checks `if not ts_raw: return None`, and 0 is falsy
             assert len(result.events) == 0
+
+
+# ─── 5.10: Vercel connector poll with no team_id / API edge cases ─────────────
+
+
+class TestVercelConnectorAPIEdgeCases:
+    """mallcop-ak1n.5.10: API GET, pagination limits, and checkpoint edge cases."""
+
+    def test_fetch_deployments_sends_limit_100_in_params(self) -> None:
+        """_fetch_deployments sends limit=100 in query params (documents the known cap)."""
+        connector = _make_connector()
+        captured_params: list[dict] = []
+
+        def fake_api_get(path: str, params: dict | None = None) -> dict:
+            captured_params.append(dict(params or {}))
+            return {"deployments": []}
+
+        connector._api_get = fake_api_get
+        connector._fetch_deployments(since_ms=1234567890000)
+
+        assert len(captured_params) == 1
+        assert captured_params[0].get("limit") == "100"
+
+    def test_fetch_audit_log_sends_limit_100_in_params(self) -> None:
+        """_fetch_audit_log sends limit=100 in query params (documents the known cap)."""
+        connector = _make_connector()
+        captured_params: list[dict] = []
+
+        def fake_api_get(path: str, params: dict | None = None) -> dict:
+            captured_params.append(dict(params or {}))
+            return {"events": []}
+
+        connector._api_get = fake_api_get
+        connector._fetch_audit_log(since_ms=1234567890000)
+
+        assert len(captured_params) == 1
+        assert captured_params[0].get("limit") == "100"
+
+    def test_api_get_non_200_raises_config_error(self) -> None:
+        """_api_get raises ConfigError when the response status is not 200."""
+        from unittest.mock import patch, MagicMock
+        from mallcop.secrets import ConfigError
+
+        connector = _make_connector(team_id=None)
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 401
+        mock_resp.text = "Unauthorized"
+
+        with patch("mallcop.connectors.vercel.connector.requests.get", return_value=mock_resp):
+            with pytest.raises(ConfigError, match="401"):
+                connector._api_get("/v2/user")
+
+    def test_api_get_403_raises_config_error(self) -> None:
+        """_api_get raises ConfigError on 403 as well."""
+        from unittest.mock import patch, MagicMock
+        from mallcop.secrets import ConfigError
+
+        connector = _make_connector(team_id=None)
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 403
+        mock_resp.text = "Forbidden"
+
+        with patch("mallcop.connectors.vercel.connector.requests.get", return_value=mock_resp):
+            with pytest.raises(ConfigError, match="403"):
+                connector._api_get("/v2/user")
+
+    def test_poll_no_team_id_skips_audit_log_fetch(self) -> None:
+        """When team_id is None, poll skips _fetch_audit_log entirely."""
+        connector = _make_connector(team_id=None)
+
+        with patch.object(connector, "_fetch_deployments", return_value=[]) as mock_dep, \
+             patch.object(connector, "_fetch_audit_log") as mock_audit:
+            connector.poll(checkpoint=None)
+
+        mock_dep.assert_called_once()
+        mock_audit.assert_not_called()
+
+    def test_checkpoint_with_timezone_aware_datetime_parses_correctly(self) -> None:
+        """poll correctly parses a timezone-aware ISO checkpoint value."""
+        connector = _make_connector(team_id=None)
+
+        cp = Checkpoint(
+            connector="vercel",
+            value="2026-03-01T12:00:00+00:00",
+            updated_at=datetime(2026, 3, 1, 12, 0, 0, tzinfo=timezone.utc),
+        )
+
+        with patch.object(connector, "_fetch_deployments", return_value=[]):
+            result = connector.poll(checkpoint=cp)
+
+        # Should not raise, checkpoint should be preserved
+        assert result.checkpoint is not None
+
+    def test_authenticate_validation_failure_raises_config_error(self) -> None:
+        """authenticate() raises ConfigError when token validation returns non-200."""
+        from unittest.mock import patch, MagicMock
+        from mallcop.connectors.vercel.connector import VercelConnector
+        from mallcop.secrets import ConfigError
+
+        connector = VercelConnector()
+
+        class FakeSecrets(SecretProvider):
+            def resolve(self, name: str) -> str:
+                if name == "VERCEL_TOKEN":
+                    return "bad-token"
+                raise ConfigError(f"not found: {name}")
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 401
+        mock_resp.text = "Invalid token"
+
+        with patch("mallcop.connectors.vercel.connector.requests.get", return_value=mock_resp):
+            with pytest.raises(ConfigError):
+                connector.authenticate(FakeSecrets())

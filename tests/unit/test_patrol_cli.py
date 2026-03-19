@@ -565,3 +565,95 @@ class TestPatrolRun:
 
         output = json.loads(result.output)
         assert output["status"] == "error"
+
+
+# ─── 5.7: patrol run error paths ─────────────────────────────────────────────
+
+
+class TestPatrolRunErrorPaths:
+    """mallcop-ak1n.5.7: patrol run error paths and fallback binary."""
+
+    def test_run_falls_back_to_sys_executable_when_bin_missing(self, tmp_path: Path) -> None:
+        """patrol run uses sys.executable -m mallcop when MALLCOP_BIN does not exist."""
+        import sys
+        _write_config(tmp_path, extra={"patrols": {"sweep": {"every": "6h"}}})
+        runner = CliRunner()
+        mock_backend = _mock_crontab_backend()
+
+        # Patch _MALLCOP_BIN to a path that does not exist
+        with patch("mallcop.patrol_cli._MALLCOP_BIN", "/nonexistent/path/mallcop"):
+            with patch("mallcop.patrol_cli.CrontabBackend", return_value=mock_backend):
+                with patch("mallcop.patrol_cli.subprocess.run") as mock_run:
+                    mock_run.return_value = MagicMock(returncode=0, stdout=b"", stderr=b"")
+                    result = runner.invoke(
+                        cli,
+                        ["patrol", "run", "sweep"],
+                        catch_exceptions=False,
+                        env={"MALLCOP_REPO": str(tmp_path)},
+                    )
+
+        assert result.exit_code == 0, result.output
+        mock_run.assert_called_once()
+        call_args = mock_run.call_args[0][0]
+        # Should use sys.executable, not the venv bin
+        assert call_args[0] == sys.executable
+        assert call_args[1] == "-m"
+        assert call_args[2] == "mallcop"
+
+    def test_update_invalid_period_returns_error_json(self, tmp_path: Path) -> None:
+        """patrol update with invalid period returns JSON error and SystemExit(1)."""
+        _write_config(tmp_path, extra={"patrols": {"sweep": {"every": "6h"}}})
+        runner = CliRunner()
+        mock_backend = _mock_crontab_backend()
+
+        with patch("mallcop.patrol_cli.CrontabBackend", return_value=mock_backend):
+            result = runner.invoke(
+                cli,
+                ["patrol", "update", "sweep", "--every", "99xyz"],
+                env={"MALLCOP_REPO": str(tmp_path)},
+            )
+
+        output = json.loads(result.output)
+        assert output["status"] == "error"
+        assert result.exit_code != 0
+
+    def test_enable_patrol_missing_every_field_returns_error(self, tmp_path: Path) -> None:
+        """patrol enable when patrol config has no 'every' field returns error."""
+        _write_config(tmp_path, extra={"patrols": {"sweep": {"enabled": False}}})
+        runner = CliRunner()
+        mock_backend = _mock_crontab_backend()
+
+        with patch("mallcop.patrol_cli.CrontabBackend", return_value=mock_backend):
+            result = runner.invoke(
+                cli,
+                ["patrol", "enable", "sweep"],
+                env={"MALLCOP_REPO": str(tmp_path)},
+            )
+
+        output = json.loads(result.output)
+        assert output["status"] == "error"
+        assert "every" in output["error"].lower()
+        assert result.exit_code != 0
+
+    def test_disable_when_not_in_crontab_still_updates_config(self, tmp_path: Path) -> None:
+        """patrol disable is idempotent: even if not in crontab, config is updated to enabled=False."""
+        _write_config(tmp_path, extra={"patrols": {"sweep": {"every": "6h"}}})
+        runner = CliRunner()
+        mock_backend = _mock_crontab_backend()
+        mock_backend.remove_entry.return_value = False  # not in crontab
+
+        with patch("mallcop.patrol_cli.CrontabBackend", return_value=mock_backend):
+            result = runner.invoke(
+                cli,
+                ["patrol", "disable", "sweep"],
+                catch_exceptions=False,
+                env={"MALLCOP_REPO": str(tmp_path)},
+            )
+
+        assert result.exit_code == 0, result.output
+        output = json.loads(result.output)
+        assert output["status"] == "ok"
+        assert output["enabled"] is False
+        # Config should reflect disabled
+        config = _read_config(tmp_path)
+        assert config["patrols"]["sweep"]["enabled"] is False
