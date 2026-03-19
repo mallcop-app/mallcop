@@ -229,3 +229,101 @@ class TestRelationshipEnrichment:
         bl = Baseline(frequency_tables={}, known_entities={}, relationships=rels)
         restored = Baseline.from_dict(bl.to_dict())
         assert restored.relationships == rels
+
+
+# ---------------------------------------------------------------------------
+# update_actor_context type merge (2.31)
+# ---------------------------------------------------------------------------
+
+
+class TestActorContextTypeMerge:
+    """Verify that actor type is merged with correct precedence.
+
+    Non-human types (automation/service) should not be downgraded to human
+    by subsequent observations. Human type should not override an existing
+    automation/service classification.
+    """
+
+    def _make_record(self, finding_id: str, reason: str, actor_name: str):
+        from mallcop.feedback import FeedbackRecord, HumanAction
+
+        event = _make_event(
+            id=f"evt_{finding_id}",
+            actor=actor_name,
+        )
+        return FeedbackRecord(
+            finding_id=finding_id,
+            human_action=HumanAction.AGREE,
+            reason=reason,
+            original_action="escalate",
+            original_reason=None,
+            timestamp=_utcnow(),
+            events=[event.to_dict()],
+            baseline_snapshot={"actor": actor_name},
+            annotations=[],
+        )
+
+    def test_automation_preserved_when_new_observation_is_human(self):
+        """Existing automation type must NOT be downgraded to human."""
+        from mallcop.baseline import update_actor_context
+        from mallcop.schemas import ActorProfile, Baseline
+
+        existing_profile = ActorProfile(
+            location=None, timezone=None, type="automation",
+            last_confirmed=_utcnow(), source_feedback_ids=["fnd_001"],
+            confidence=1.0,
+        )
+        baseline = Baseline(
+            frequency_tables={},
+            known_entities={},
+            relationships={},
+            actor_context={"deploy-bot": existing_profile},
+        )
+
+        record = self._make_record("fnd_002", "this is a human user", "deploy-bot")
+        updated = update_actor_context(baseline, [record])
+        # Human observation must not downgrade the existing automation label.
+        assert updated.actor_context["deploy-bot"].type == "automation"
+
+    def test_human_overridden_by_automation(self):
+        """If existing type is human and new observation is automation, prefer automation."""
+        from mallcop.baseline import update_actor_context
+        from mallcop.schemas import ActorProfile, Baseline
+
+        existing_profile = ActorProfile(
+            location=None, timezone=None, type="human",
+            last_confirmed=_utcnow(), source_feedback_ids=["fnd_001"],
+            confidence=1.0,
+        )
+        baseline = Baseline(
+            frequency_tables={},
+            known_entities={},
+            relationships={},
+            actor_context={"ci-runner": existing_profile},
+        )
+
+        record = self._make_record("fnd_003", "this is automation", "ci-runner")
+        updated = update_actor_context(baseline, [record])
+        # Automation is more specific; it should win over human.
+        assert updated.actor_context["ci-runner"].type == "automation"
+
+    def test_human_stays_human_when_existing_is_also_human(self):
+        """human + human → human (no conflict, type stays human)."""
+        from mallcop.baseline import update_actor_context
+        from mallcop.schemas import ActorProfile, Baseline
+
+        existing_profile = ActorProfile(
+            location=None, timezone=None, type="human",
+            last_confirmed=_utcnow(), source_feedback_ids=["fnd_001"],
+            confidence=1.0,
+        )
+        baseline = Baseline(
+            frequency_tables={},
+            known_entities={},
+            relationships={},
+            actor_context={"alice@corp.com": existing_profile},
+        )
+
+        record = self._make_record("fnd_004", "this is a human user", "alice@corp.com")
+        updated = update_actor_context(baseline, [record])
+        assert updated.actor_context["alice@corp.com"].type == "human"

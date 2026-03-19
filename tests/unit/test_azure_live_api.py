@@ -221,7 +221,8 @@ class TestFetchActivityLog:
         # Verify the filter parameter includes the checkpoint
         params = call_args[1]["params"]
         assert "$filter" in params
-        assert "2026-03-05T14:00:00+00:00" in params["$filter"]
+        # Azure Activity Log API requires Z suffix (not +00:00) for UTC timestamps
+        assert "2026-03-05T14:00:00Z" in params["$filter"]
 
     def test_fetch_activity_log_pagination(self) -> None:
         """Follows nextLink to aggregate all pages."""

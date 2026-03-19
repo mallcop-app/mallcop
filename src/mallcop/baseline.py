@@ -146,7 +146,9 @@ def update_actor_context(
             ctx[actor] = ActorProfile(
                 location=profile.location if profile.location is not None else existing.location,
                 timezone=profile.timezone if profile.timezone is not None else existing.timezone,
-                type=profile.type if profile.type != "human" or existing.type == "human" else existing.type,
+                # Prefer non-human type (automation/service) over human — more specific.
+                # Keep existing non-human type if new observation is "human" (don't downgrade).
+                type=existing.type if profile.type == "human" and existing.type != "human" else profile.type,
                 last_confirmed=profile.last_confirmed,
                 source_feedback_ids=merged_ids,
                 confidence=existing.confidence,  # updated after loop

@@ -20,6 +20,11 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+# Source values come from connector manifests (trusted config), not raw
+# external input.  The regex enforces alphanumeric-plus-hyphen/dot/underscore
+# to prevent any path-traversal character (slashes, null bytes, colons, etc.)
+# from reaching the filesystem.  The resolve().is_relative_to() check in
+# _event_file_path() provides a second safety layer.
 _SAFE_SOURCE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,62}$")
 
 import yaml

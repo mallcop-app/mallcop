@@ -480,3 +480,103 @@ class TestUserDataMarkerStripping:
         result = evaluate_rules(finding, [rule])
         assert result is not None
         assert result.id == "rule_1"
+
+
+class TestEvaluateRulesEventFallback:
+    """evaluate_rules should fall back to event-level actor/event_type when
+    finding.metadata is sparse (most built-in detectors don't populate these)."""
+
+    def _make_sparse_finding(
+        self,
+        finding_id: str = "fnd_sparse",
+        detector: str = "volume-anomaly",
+    ) -> Finding:
+        """Finding with no actor/event_type in metadata."""
+        return Finding(
+            id=finding_id,
+            timestamp=datetime.now(timezone.utc),
+            detector=detector,
+            event_ids=["evt_001"],
+            title="Sparse finding",
+            severity=Severity.WARN,
+            status=FindingStatus.OPEN,
+            annotations=[],
+            metadata={},  # no actor, no event_type
+        )
+
+    def _make_event_obj(
+        self,
+        actor: str = "admin-user",
+        event_type: str = "add_collaborator",
+        target: str = "acme-corp/atom-api",
+    ):
+        from mallcop.schemas import Event, Severity
+
+        return Event(
+            id="evt_001",
+            timestamp=datetime.now(timezone.utc),
+            ingested_at=datetime.now(timezone.utc),
+            source="github",
+            event_type=event_type,
+            actor=actor,
+            action="add",
+            target=target,
+            severity=Severity.WARN,
+            metadata={},
+            raw={},
+        )
+
+    def test_matches_via_event_fallback_when_metadata_empty(self):
+        """Rule should match when actor/event_type come from events, not metadata."""
+        rule = ResolutionRule(
+            id="auto-event-fallback",
+            detector="volume-anomaly",
+            actor="admin-user",
+            event_type="add_collaborator",
+            target_prefix="acme-corp/*",
+        )
+        finding = self._make_sparse_finding()
+        events = [self._make_event_obj()]
+
+        result = evaluate_rules(finding, [rule], events=events)
+        assert result is not None
+        assert result.id == "auto-event-fallback"
+
+    def test_no_match_without_events_and_sparse_metadata(self):
+        """Without events, sparse metadata should not produce a false match."""
+        rule = ResolutionRule(
+            id="auto-event-fallback",
+            detector="volume-anomaly",
+            actor="admin-user",
+            event_type="add_collaborator",
+            target_prefix="acme-corp/*",
+        )
+        finding = self._make_sparse_finding()
+        result = evaluate_rules(finding, [rule])
+        assert result is None
+
+    def test_metadata_takes_precedence_over_events(self):
+        """If metadata has actor, it takes priority; event actor is ignored."""
+        rule = ResolutionRule(
+            id="meta-priority",
+            detector="volume-anomaly",
+            actor="meta-actor",
+            event_type="add_collaborator",
+            target_prefix="acme-corp/*",
+        )
+        finding = Finding(
+            id="fnd_meta",
+            timestamp=datetime.now(timezone.utc),
+            detector="volume-anomaly",
+            event_ids=["evt_001"],
+            title="Meta finding",
+            severity=Severity.WARN,
+            status=FindingStatus.OPEN,
+            annotations=[],
+            metadata={"actor": "meta-actor", "event_type": "add_collaborator",
+                       "target": "acme-corp/atom-api"},
+        )
+        # Event has a DIFFERENT actor that doesn't match the rule
+        events = [self._make_event_obj(actor="wrong-actor")]
+        result = evaluate_rules(finding, [rule], events=events)
+        assert result is not None

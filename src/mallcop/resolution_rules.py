@@ -326,16 +326,34 @@ def evaluate_rules(
     finding: Finding,
     rules: list[ResolutionRule],
     baseline: Baseline | None = None,
+    events: list[Any] | None = None,
 ) -> ResolutionRule | None:
     """Check if a finding matches any resolution rule.
 
     Returns the matching rule, or None if no match.
+
+    If the finding's metadata does not carry actor/event_type (most built-in
+    detectors store these on the event objects, not on the finding), pass the
+    resolved event objects via ``events`` so the rule evaluator can extract
+    them.  The first event that provides a non-empty actor/event_type wins.
     """
     detector = finding.detector
     metadata = finding.metadata or {}
     actor = _strip_markers(metadata.get("actor", ""))
     event_type = _strip_markers(metadata.get("event_type", ""))
     target = _strip_markers(metadata.get("target", "") or metadata.get("resource", ""))
+
+    # Fall back to event-level fields when metadata is sparse.
+    if (not actor or not event_type) and events:
+        for evt in events:
+            if not actor and getattr(evt, "actor", ""):
+                actor = _strip_markers(evt.actor)
+            if not event_type and getattr(evt, "event_type", ""):
+                event_type = _strip_markers(evt.event_type)
+            if not target and getattr(evt, "target", ""):
+                target = _strip_markers(evt.target)
+            if actor and event_type:
+                break
 
     for rule in rules:
         if rule.detector != detector:

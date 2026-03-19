@@ -295,7 +295,10 @@ def run_escalate(
 
         # Resolution rules — deterministic, no LLM
         if rules:
-            match = evaluate_rules(finding, rules, baseline=baseline_for_rules)
+            # Resolve event objects so evaluate_rules can fall back to event-level
+            # actor/event_type for findings whose metadata is sparse.
+            finding_events = store.query_events_by_ids(finding.event_ids) if finding.event_ids else []
+            match = evaluate_rules(finding, rules, baseline=baseline_for_rules, events=finding_events)
             if match is not None:
                 auto_resolve_finding(finding, match)
                 store.update_finding(finding.id, status="resolved", annotations=finding.annotations)
