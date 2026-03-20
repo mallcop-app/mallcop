@@ -43,7 +43,7 @@ class OpenClawConfigDriftDetector(DetectorBase):
         findings: list[Finding] = []
         for evt in relevant:
             config = evt.metadata.get("config", {})
-            config_raw = evt.metadata.get("config_raw", "")
+            config_raw = evt.raw.get("config_raw", "") or evt.metadata.get("config_raw", "")
 
             # --- auth-disabled ---
             auth_enabled = _get_nested(config, "$.gateway.auth.enabled")

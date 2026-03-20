@@ -34,6 +34,23 @@ from mallcop.schemas import (
 from mallcop.store import JsonlStore
 
 
+# ── Dynamic timestamps (5 days ago — always within 14-day learning window) ──
+
+def _days_ago(days: int, hour: int = 10) -> datetime:
+    """Return a UTC datetime N days before now at the given hour."""
+    return (datetime.now(timezone.utc) - timedelta(days=days)).replace(
+        hour=hour, minute=0, second=0, microsecond=0
+    )
+
+
+def _iso(dt: datetime) -> str:
+    return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _epoch_ms(dt: datetime) -> int:
+    return int(dt.timestamp() * 1000)
+
+
 # ── Fake Azure data ──────────────────────────────────────────────────
 
 FAKE_AZURE_SUBSCRIPTIONS = [
@@ -41,34 +58,37 @@ FAKE_AZURE_SUBSCRIPTIONS = [
     {"subscriptionId": "sub-002", "displayName": "Dev/Test"},
 ]
 
-FAKE_AZURE_ACTIVITY_LOG = [
-    {
-        "eventDataId": "az-evt-001",
-        "eventTimestamp": "2026-03-05T10:00:00Z",
-        "caller": "admin@acme-corp.dev",
-        "operationName": {"value": "Microsoft.Authorization/roleAssignments/write"},
-        "resourceType": {"value": "Microsoft.Authorization/roleAssignments"},
-        "resourceId": "/subscriptions/sub-001/providers/Microsoft.Authorization/roleAssignments/ra-1",
-        "level": "Informational",
-        "subscriptionId": "sub-001",
-        "resourceGroupName": "rg-prod",
-        "correlationId": "corr-001",
-        "status": {"value": "Succeeded"},
-    },
-    {
-        "eventDataId": "az-evt-002",
-        "eventTimestamp": "2026-03-05T11:00:00Z",
-        "caller": "deploy-sp@acme-corp.dev",
-        "operationName": {"value": "Microsoft.ContainerApp/containerApps/write"},
-        "resourceType": {"value": "Microsoft.ContainerApp/containerApps"},
-        "resourceId": "/subscriptions/sub-001/resourceGroups/rg-prod/providers/Microsoft.ContainerApp/containerApps/myapp",
-        "level": "Informational",
-        "subscriptionId": "sub-001",
-        "resourceGroupName": "rg-prod",
-        "correlationId": "corr-002",
-        "status": {"value": "Succeeded"},
-    },
-]
+
+def _fake_azure_activity_log() -> list[dict]:
+    return [
+        {
+            "eventDataId": "az-evt-001",
+            "eventTimestamp": _iso(_days_ago(5, 10)),
+            "caller": "admin@acme-corp.dev",
+            "operationName": {"value": "Microsoft.Authorization/roleAssignments/write"},
+            "resourceType": {"value": "Microsoft.Authorization/roleAssignments"},
+            "resourceId": "/subscriptions/sub-001/providers/Microsoft.Authorization/roleAssignments/ra-1",
+            "level": "Informational",
+            "subscriptionId": "sub-001",
+            "resourceGroupName": "rg-prod",
+            "correlationId": "corr-001",
+            "status": {"value": "Succeeded"},
+        },
+        {
+            "eventDataId": "az-evt-002",
+            "eventTimestamp": _iso(_days_ago(5, 11)),
+            "caller": "deploy-sp@acme-corp.dev",
+            "operationName": {"value": "Microsoft.ContainerApp/containerApps/write"},
+            "resourceType": {"value": "Microsoft.ContainerApp/containerApps"},
+            "resourceId": "/subscriptions/sub-001/resourceGroups/rg-prod/providers/Microsoft.ContainerApp/containerApps/myapp",
+            "level": "Informational",
+            "subscriptionId": "sub-001",
+            "resourceGroupName": "rg-prod",
+            "correlationId": "corr-002",
+            "status": {"value": "Succeeded"},
+        },
+    ]
+
 
 # ── Fake GitHub data ─────────────────────────────────────────────────
 
@@ -82,32 +102,35 @@ FAKE_GITHUB_MEMBERS = [
     {"login": "deploy-bot"},
 ]
 
-FAKE_GITHUB_AUDIT_LOG = [
-    {
-        "_document_id": "gh-doc-001",
-        "@timestamp": 1741168800000,  # 2025-03-05T10:00:00Z
-        "action": "org.add_member",
-        "actor": "admin-user",
-        "repo": "acme-corp/mallcop",
-        "org": "acme-corp",
-    },
-    {
-        "_document_id": "gh-doc-002",
-        "@timestamp": 1741172400000,  # 2025-03-05T11:00:00Z
-        "action": "repo.access",
-        "actor": "admin-user",
-        "repo": "acme-corp/website",
-        "org": "acme-corp",
-    },
-    {
-        "_document_id": "gh-doc-003",
-        "@timestamp": 1741176000000,  # 2025-03-05T12:00:00Z
-        "action": "git.push",
-        "actor": "deploy-bot",
-        "repo": "acme-corp/mallcop",
-        "org": "acme-corp",
-    },
-]
+
+def _fake_github_audit_log() -> list[dict]:
+    return [
+        {
+            "_document_id": "gh-doc-001",
+            "@timestamp": _epoch_ms(_days_ago(5, 10)),
+            "action": "org.add_member",
+            "actor": "admin-user",
+            "repo": "acme-corp/mallcop",
+            "org": "acme-corp",
+        },
+        {
+            "_document_id": "gh-doc-002",
+            "@timestamp": _epoch_ms(_days_ago(5, 11)),
+            "action": "repo.access",
+            "actor": "admin-user",
+            "repo": "acme-corp/website",
+            "org": "acme-corp",
+        },
+        {
+            "_document_id": "gh-doc-003",
+            "@timestamp": _epoch_ms(_days_ago(5, 12)),
+            "action": "git.push",
+            "actor": "deploy-bot",
+            "repo": "acme-corp/mallcop",
+            "org": "acme-corp",
+        },
+    ]
+
 
 # ── Fake M365 data ───────────────────────────────────────────────────
 
@@ -121,44 +144,46 @@ FAKE_M365_CONTENT_BLOBS = [
     {"contentUri": "https://manage.office.com/blob/001", "contentId": "blob-001"},
 ]
 
-FAKE_M365_AUDIT_RECORDS = [
-    {
-        "Id": "m365-rec-001",
-        "CreationTime": "2026-03-05T10:00:00Z",
-        "Operation": "UserLoggedIn",
-        "UserId": "admin@acme-corp.dev",
-        "Workload": "AzureActiveDirectory",
-        "ObjectId": "",
-        "ResultStatus": "Success",
-        "RecordType": 15,
-        "OrganizationId": "org-001",
-        "ClientIP": "10.0.0.1",
-    },
-    {
-        "Id": "m365-rec-002",
-        "CreationTime": "2026-03-05T11:00:00Z",
-        "Operation": "New-InboxRule",
-        "UserId": "user@acme-corp.dev",
-        "Workload": "Exchange",
-        "ObjectId": "inbox-rule-001",
-        "ResultStatus": "Success",
-        "RecordType": 2,
-        "OrganizationId": "org-001",
-        "ClientIP": "10.0.0.2",
-    },
-    {
-        "Id": "m365-rec-003",
-        "CreationTime": "2026-03-05T12:00:00Z",
-        "Operation": "UserLoginFailed",
-        "UserId": "attacker@evil.com",
-        "Workload": "AzureActiveDirectory",
-        "ObjectId": "",
-        "ResultStatus": "Failed",
-        "RecordType": 15,
-        "OrganizationId": "org-001",
-        "ClientIP": "203.0.113.99",
-    },
-]
+
+def _fake_m365_audit_records() -> list[dict]:
+    return [
+        {
+            "Id": "m365-rec-001",
+            "CreationTime": _iso(_days_ago(5, 10)),
+            "Operation": "UserLoggedIn",
+            "UserId": "admin@acme-corp.dev",
+            "Workload": "AzureActiveDirectory",
+            "ObjectId": "",
+            "ResultStatus": "Success",
+            "RecordType": 15,
+            "OrganizationId": "org-001",
+            "ClientIP": "10.0.0.1",
+        },
+        {
+            "Id": "m365-rec-002",
+            "CreationTime": _iso(_days_ago(5, 11)),
+            "Operation": "New-InboxRule",
+            "UserId": "user@acme-corp.dev",
+            "Workload": "Exchange",
+            "ObjectId": "inbox-rule-001",
+            "ResultStatus": "Success",
+            "RecordType": 2,
+            "OrganizationId": "org-001",
+            "ClientIP": "10.0.0.2",
+        },
+        {
+            "Id": "m365-rec-003",
+            "CreationTime": _iso(_days_ago(5, 12)),
+            "Operation": "UserLoginFailed",
+            "UserId": "attacker@evil.com",
+            "Workload": "AzureActiveDirectory",
+            "ObjectId": "",
+            "ResultStatus": "Failed",
+            "RecordType": 15,
+            "OrganizationId": "org-001",
+            "ClientIP": "203.0.113.99",
+        },
+    ]
 
 
 # ── Mock helpers ─────────────────────────────────────────────────────
@@ -171,7 +196,7 @@ def _mock_azure_list_subs(self: Any) -> list[dict[str, Any]]:
 def _mock_azure_fetch_log(
     self: Any, subscription_id: str, checkpoint: Checkpoint | None
 ) -> list[dict[str, Any]]:
-    return FAKE_AZURE_ACTIVITY_LOG
+    return _fake_azure_activity_log()
 
 
 def _mock_github_list_repos(self: Any) -> list[dict[str, Any]]:
@@ -185,7 +210,7 @@ def _mock_github_list_members(self: Any) -> list[dict[str, Any]]:
 def _mock_github_fetch_audit_log(
     self: Any, checkpoint: Checkpoint | None
 ) -> tuple[list[dict[str, Any]], str | None]:
-    return FAKE_GITHUB_AUDIT_LOG, None
+    return _fake_github_audit_log(), None
 
 
 def _mock_github_validate_token(self: Any) -> None:
@@ -213,7 +238,7 @@ def _mock_m365_list_blobs(
 
 
 def _mock_m365_fetch_records(self: Any, content_uri: str) -> list[dict[str, Any]]:
-    return FAKE_M365_AUDIT_RECORDS
+    return _fake_m365_audit_records()
 
 
 # ── Patch context managers ───────────────────────────────────────────

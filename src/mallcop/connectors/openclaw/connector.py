@@ -204,7 +204,11 @@ class OpenClawConnector(ConnectorBase):
                         "config_hash": current_config_hash,
                         "openclaw_home": str(self._openclaw_home),
                     },
-                    raw={"config_hash": current_config_hash, "path": str(config_path)},
+                    raw={
+                        "config_hash": current_config_hash,
+                        "path": str(config_path),
+                        "config_raw": config_path.read_text(encoding="utf-8"),
+                    },
                 )
                 events.append(evt)
 
