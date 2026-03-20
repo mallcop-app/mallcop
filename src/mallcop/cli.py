@@ -347,6 +347,11 @@ def init(pro: bool) -> None:
     with open(config_path, "w") as f:
         yaml.dump(config_data, f, default_flow_style=False, sort_keys=False)
 
+    # Create .mallcop/ data directory so it exists before the first scan.
+    # JsonlStore creates it on instantiation, but init runs before any scan.
+    mallcop_dir = cwd / ".mallcop"
+    mallcop_dir.mkdir(parents=True, exist_ok=True)
+
     cost_estimate = estimate_costs(
         num_connectors=len(available_connectors),
         sample_event_count=total_sample_events,
