@@ -6,7 +6,11 @@ internal engines behind the scan, detect, and watch CLI commands.
 
 from __future__ import annotations
 
+import hashlib
 import json
+import sys
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -17,9 +21,117 @@ from mallcop.secrets import ConfigError, EnvSecretProvider
 from mallcop.store import JsonlStore, Store
 
 
+def _compute_exit_code(connector_summaries: dict[str, Any]) -> int:
+    """Compute exit code from connector results.
+
+    0: all succeeded, 1: partial failure, 2: total failure (no connectors succeeded).
+    """
+    if not connector_summaries:
+        return 2
+    failed = [n for n, s in connector_summaries.items() if s.get("status") == "error"]
+    succeeded = [n for n, s in connector_summaries.items() if s.get("status") == "ok"]
+    if not failed:
+        return 0
+    if succeeded:
+        return 1
+    return 2
+
+
+def _compute_config_hash(root: Path) -> str:
+    """Return sha256:<hex> hash of mallcop.yaml, or empty string if missing."""
+    config_path = root / "mallcop.yaml"
+    if not config_path.exists():
+        return ""
+    raw = config_path.read_bytes()
+    return "sha256:" + hashlib.sha256(raw).hexdigest()
+
+
+def _compute_recommended_action(
+    connector_summaries: dict[str, Any],
+    exit_code: int,
+) -> str:
+    """Return a single recommended action string, or empty string if healthy."""
+    if exit_code == 0:
+        return ""
+    for name, summary in connector_summaries.items():
+        if summary.get("status") == "error":
+            error = summary.get("error", "")
+            return f"rotate-secret:{name}" if "token" in error.lower() or "auth" in error.lower() or "secret" in error.lower() else f"fix-connector:{name}"
+    return ""
+
+
+def _write_manifest(
+    root: Path,
+    connector_summaries: dict[str, Any],
+    start_time: float,
+    stderr: Any = None,
+) -> None:
+    """Write .mallcop/manifest.json with diagnostic data from this run.
+
+    When stderr is provided and exit code > 0, writes a single JSON line to stderr
+    with the exit code, failed connectors, and error details.
+    """
+    from mallcop import __version__
+
+    exit_code = _compute_exit_code(connector_summaries)
+    now = datetime.now(timezone.utc)
+    duration_s = int(time.time() - start_time)
+
+    connectors_configured = list(connector_summaries.keys())
+    connectors_succeeded = [n for n, s in connector_summaries.items() if s.get("status") == "ok"]
+    connectors_failed = {
+        name: {
+            "error": s.get("error", "unknown"),
+            "since": now.isoformat(),
+            "suggestion": f"Check {name} credentials in repo secrets",
+        }
+        for name, s in connector_summaries.items()
+        if s.get("status") == "error"
+    }
+
+    total_configured = len(connectors_configured)
+    pulse = len(connectors_succeeded) / total_configured if total_configured > 0 else 0.0
+
+    manifest = {
+        "schema_version": 1,
+        "cli_version": __version__,
+        "last_run": now.isoformat(),
+        "last_run_exit": exit_code,
+        "last_run_duration_s": duration_s,
+        "pulse": pulse,
+        "heartbeat_cron": "",
+        "connectors_configured": connectors_configured,
+        "connectors_succeeded": connectors_succeeded,
+        "connectors_failed": connectors_failed,
+        "findings_summary": {"total_lines": 0, "newest_timestamp": "", "parse_errors": 0},
+        "config_hash": _compute_config_hash(root),
+        "recommended_action": _compute_recommended_action(connector_summaries, exit_code),
+    }
+
+    mallcop_dir = root / ".mallcop"
+    mallcop_dir.mkdir(parents=True, exist_ok=True)
+    manifest_path = mallcop_dir / "manifest.json"
+    manifest_path.write_text(json.dumps(manifest, indent=2))
+
+    if exit_code > 0 and stderr is not None:
+        failed_names = list(connectors_failed.keys())
+        first_error = next(
+            (s.get("error", "unknown") for s in connectors_failed.values()), "unknown"
+        )
+        stderr_payload = {
+            "exit": exit_code,
+            "connectors_failed": failed_names,
+            "error": first_error,
+            "suggestion": f"Check credentials for: {', '.join(failed_names)}" if failed_names else "",
+        }
+        print(json.dumps(stderr_payload), file=stderr)
+
+
 def run_scan_pipeline(root: Path, store: Store | None = None) -> dict[str, Any]:
     """Run the scan step of the pipeline."""
     from mallcop.app_integration import apply_parsers, get_configured_app_names
+
+    start_time = time.time()
 
     try:
         config = load_config(root)
@@ -76,6 +188,8 @@ def run_scan_pipeline(root: Path, store: Store | None = None) -> dict[str, Any]:
                 "error": str(e),
                 "events_ingested": 0,
             }
+
+    _write_manifest(root, connector_summaries, start_time)
 
     return {
         "status": "ok",

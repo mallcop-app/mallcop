@@ -378,12 +378,28 @@ def init(pro: bool) -> None:
 @cli.command()
 def scan() -> None:
     """Poll all connectors, store events."""
+    from mallcop.cli_pipeline import _compute_exit_code
     try:
         result = _run_scan_pipeline(Path.cwd())
     except RuntimeError as e:
         click.echo(json.dumps({"status": "error", "error": str(e)}))
         raise SystemExit(1)
     click.echo(json.dumps(result))
+    # Emit stderr JSON diagnostic when any connector failed (exit > 0)
+    connector_summaries = result.get("connectors", {})
+    exit_code = _compute_exit_code(connector_summaries)
+    if exit_code > 0:
+        failed_names = [n for n, s in connector_summaries.items() if s.get("status") == "error"]
+        first_error = next(
+            (connector_summaries[n].get("error", "unknown") for n in failed_names), "unknown"
+        )
+        stderr_payload = {
+            "exit": exit_code,
+            "connectors_failed": failed_names,
+            "error": first_error,
+            "suggestion": f"Check credentials for: {', '.join(failed_names)}" if failed_names else "",
+        }
+        click.echo(json.dumps(stderr_payload), err=True)
 
 
 @cli.command()
