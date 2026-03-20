@@ -10,6 +10,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       id-token: write  # trusted publishing via OIDC
+      contents: read   # checkout the repo
     steps:
       - uses: actions/checkout@v4
 
