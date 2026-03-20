@@ -22,9 +22,11 @@ def _make_baseline() -> Baseline:
     )
 
 
-def _make_config_event(config: dict, config_raw: str = "", override_type: str = "") -> Event:
-    if not config_raw:
-        config_raw = json.dumps(config)
+def _make_config_event(
+    config: dict,
+    secrets_found: bool = False,
+    override_type: str = "",
+) -> Event:
     return Event(
         id="evt_cfgtest001",
         timestamp=datetime.now(timezone.utc),
@@ -37,10 +39,9 @@ def _make_config_event(config: dict, config_raw: str = "", override_type: str = 
         severity=Severity.WARN,
         metadata={
             "config": config,
-            "config_raw": config_raw,
             "override_type": override_type,
         },
-        raw={},
+        raw={"secrets_found": secrets_found},
     )
 
 
@@ -103,10 +104,7 @@ class TestOpenClawConfigDriftPlaintextSecrets:
     def test_plaintext_secrets_detected_openai(self) -> None:
         from mallcop.detectors.openclaw_config_drift.detector import OpenClawConfigDriftDetector
 
-        config_raw = json.dumps({
-            "secrets": {"openai_key": "sk-proj-FakeKeyForTestingPurposesOnly1234567890"}
-        })
-        evt = _make_config_event({}, config_raw=config_raw)
+        evt = _make_config_event({}, secrets_found=True)
 
         detector = OpenClawConfigDriftDetector()
         findings = detector.detect([evt], _make_baseline())
@@ -116,8 +114,7 @@ class TestOpenClawConfigDriftPlaintextSecrets:
     def test_plaintext_secrets_detected_aws(self) -> None:
         from mallcop.detectors.openclaw_config_drift.detector import OpenClawConfigDriftDetector
 
-        config_raw = json.dumps({"aws_key": "AKIAFAKEAWSACCESSKEYY"})
-        evt = _make_config_event({}, config_raw=config_raw)
+        evt = _make_config_event({}, secrets_found=True)
 
         detector = OpenClawConfigDriftDetector()
         findings = detector.detect([evt], _make_baseline())
@@ -127,8 +124,7 @@ class TestOpenClawConfigDriftPlaintextSecrets:
     def test_plaintext_secrets_detected_github(self) -> None:
         from mallcop.detectors.openclaw_config_drift.detector import OpenClawConfigDriftDetector
 
-        config_raw = json.dumps({"gh_token": "ghp_FakeGitHubTokenForTestingPurposesXXXXXXXXX"})
-        evt = _make_config_event({}, config_raw=config_raw)
+        evt = _make_config_event({}, secrets_found=True)
 
         detector = OpenClawConfigDriftDetector()
         findings = detector.detect([evt], _make_baseline())
@@ -261,10 +257,10 @@ class TestOpenClawConfigDriftHealthyConfig:
         from mallcop.detectors.openclaw_config_drift.detector import OpenClawConfigDriftDetector
 
         config_path = FIXTURES_DIR / "config_drift" / "openclaw.json"
-        config_raw = config_path.read_text()
-        config = json.loads(config_raw)
+        config = json.loads(config_path.read_text())
 
-        evt = _make_config_event(config, config_raw=config_raw)
+        # The fixture contains plaintext secrets — simulate connector setting secrets_found=True.
+        evt = _make_config_event(config, secrets_found=True)
 
         detector = OpenClawConfigDriftDetector()
         findings = detector.detect([evt], _make_baseline())
@@ -290,9 +286,8 @@ class TestOpenClawConfigDriftHealthyConfig:
             severity=Severity.WARN,
             metadata={
                 "config": {"gateway": {"auth": {"enabled": False}}},
-                "config_raw": '{"auth_enabled": false}',
             },
-            raw={},
+            raw={"secrets_found": False},
         )
         detector = OpenClawConfigDriftDetector()
         findings = detector.detect([evt], _make_baseline())

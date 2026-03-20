@@ -7,6 +7,7 @@ No API calls needed — all data is on the local filesystem.
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -19,6 +20,12 @@ from mallcop.schemas import Checkpoint, DiscoveryResult, Event, PollResult, Seve
 
 
 _REDACT_PLACEHOLDER = "[REDACTED]"
+
+# Plaintext secret value patterns (same as detector — used for secrets_found boolean).
+# config_raw is never stored; only the boolean is persisted.
+_SECRET_PATTERN = re.compile(
+    r"(sk-[a-zA-Z0-9-]{20,}|AKIA[A-Z0-9]{16}|ghp_[a-zA-Z0-9]{36})"
+)
 
 # Field name patterns that may contain secrets.
 # Any config key containing one of these substrings (case-insensitive) will be redacted.
@@ -189,6 +196,8 @@ class OpenClawConnector(ConnectorBase):
                 except json.JSONDecodeError:
                     current_config = {}
 
+                config_text = config_path.read_text(encoding="utf-8")
+                secrets_found = bool(_SECRET_PATTERN.search(config_text))
                 evt = Event(
                     id=make_event_id(f"openclaw:config_changed:{current_config_hash}"),
                     timestamp=now,
@@ -207,7 +216,7 @@ class OpenClawConnector(ConnectorBase):
                     raw={
                         "config_hash": current_config_hash,
                         "path": str(config_path),
-                        "config_raw": config_path.read_text(encoding="utf-8"),
+                        "secrets_found": secrets_found,
                     },
                 )
                 events.append(evt)

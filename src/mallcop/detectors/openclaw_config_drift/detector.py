@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import re
 import uuid
 from datetime import datetime, timezone
 from typing import Any
@@ -25,11 +24,6 @@ def _get_nested(data: dict, path: str) -> Any:
     return current
 
 
-# Plaintext secret patterns
-_SECRET_PATTERN = re.compile(
-    r"(sk-[a-zA-Z0-9-]{20,}|AKIA[A-Z0-9]{16}|ghp_[a-zA-Z0-9]{36})"
-)
-
 
 class OpenClawConfigDriftDetector(DetectorBase):
     """Detects insecure OpenClaw gateway configuration from config_changed events."""
@@ -43,7 +37,7 @@ class OpenClawConfigDriftDetector(DetectorBase):
         findings: list[Finding] = []
         for evt in relevant:
             config = evt.metadata.get("config", {})
-            config_raw = evt.raw.get("config_raw", "") or evt.metadata.get("config_raw", "")
+            secrets_found = evt.raw.get("secrets_found", False)
 
             # --- auth-disabled ---
             auth_enabled = _get_nested(config, "$.gateway.auth.enabled")
@@ -57,7 +51,7 @@ class OpenClawConfigDriftDetector(DetectorBase):
                 ))
 
             # --- plaintext-secrets ---
-            if config_raw and _SECRET_PATTERN.search(config_raw):
+            if secrets_found:
                 findings.append(self._make_finding(
                     evt=evt,
                     rule="plaintext-secrets",
