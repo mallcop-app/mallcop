@@ -130,12 +130,159 @@ cli.add_command(patrol)
 # --- Core pipeline ---
 
 
+def _detect_github_remote() -> str | None:
+    """Detect a GitHub remote URL from the current git repo. Returns owner/repo or None."""
+    import subprocess
+
+    try:
+        result = subprocess.run(
+            ["git", "remote", "get-url", "origin"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode != 0:
+            return None
+        url = result.stdout.strip()
+        # Parse GitHub remote: git@github.com:owner/repo.git or https://github.com/owner/repo.git
+        import re
+        m = re.match(r"(?:git@github\.com:|https://github\.com/)(.+?)(?:\.git)?$", url)
+        return m.group(1) if m else None
+    except Exception:
+        return None
+
+
+def _is_git_repo() -> bool:
+    """Check if cwd is inside a git working tree."""
+    import subprocess
+
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--is-inside-work-tree"],
+            capture_output=True, text=True, timeout=5,
+        )
+        return result.returncode == 0
+    except Exception:
+        return False
+
+
+def _setup_github(config_data: dict[str, Any]) -> dict[str, Any] | None:
+    """Detect git/GitHub state and walk user through GitHub auth via device flow.
+
+    Mutates config_data (adds 'github' section).
+    Returns github result dict for CLI output, or None if skipped.
+    """
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    interactive = sys.stdin.isatty()
+    cwd = Path.cwd()
+
+    # Step 1: Detect git state
+    if not _is_git_repo():
+        if not interactive:
+            return None
+        click.echo("\nNo git repository detected.", err=True)
+        choice = click.prompt(
+            "  [1] Run git init here\n  [2] Skip GitHub integration\nChoice",
+            default="2", err=True,
+        )
+        if choice.strip() == "1":
+            result = subprocess.run(
+                ["git", "init"], capture_output=True, text=True, cwd=str(cwd),
+            )
+            if result.returncode != 0:
+                click.echo(f"git init failed: {result.stderr}", err=True)
+                return None
+            click.echo("Initialized git repository.", err=True)
+        else:
+            return None
+
+    # Step 2: Detect GitHub remote
+    github_repo = _detect_github_remote()
+    if github_repo is None:
+        if not interactive:
+            return None
+        click.echo("\nNo GitHub remote found.", err=True)
+        click.echo("Add a GitHub remote to enable finding sync and dashboard.", err=True)
+        choice = click.prompt(
+            "  [1] I'll add a remote later (skip for now)\n  [2] Enter a GitHub repo (owner/repo)\nChoice",
+            default="1", err=True,
+        )
+        if choice.strip() == "2":
+            github_repo = click.prompt("GitHub repo (owner/repo)", err=True).strip()
+            if "/" not in github_repo:
+                click.echo("Invalid format. Expected owner/repo.", err=True)
+                return None
+            # Add the remote
+            remote_url = f"https://github.com/{github_repo}.git"
+            subprocess.run(
+                ["git", "remote", "add", "origin", remote_url],
+                capture_output=True, text=True, cwd=str(cwd),
+            )
+            click.echo(f"Added remote: {remote_url}", err=True)
+        else:
+            return None
+
+    # Step 3: GitHub OAuth device flow
+    click.echo(f"\nGitHub repo: {github_repo}", err=True)
+    click.echo("Authorizing mallcop to push findings to your repo...", err=True)
+
+    from mallcop.github_auth import start_device_flow, poll_for_token, save_credentials
+
+    # Use the mallcop OAuth App client ID
+    client_id = config_data.get("github", {}).get("client_id", "")
+    if not client_id:
+        # Default client ID for the mallcop GitHub App
+        client_id = "Iv23li2NjQafyaxgyTUF"
+
+    try:
+        pending = start_device_flow(client_id)
+    except Exception as e:
+        click.echo(f"Failed to start GitHub auth: {e}", err=True)
+        return None
+
+    click.echo(f"\n  Open: {pending.verification_uri}", err=True)
+    click.echo(f"  Enter code: {pending.user_code}\n", err=True)
+    click.echo("Waiting for authorization...", err=True)
+
+    try:
+        tokens = poll_for_token(client_id, pending.device_code, pending.interval, timeout=300)
+    except Exception as e:
+        click.echo(f"GitHub auth failed: {e}", err=True)
+        return None
+
+    # Save credentials
+    credentials_path = cwd / ".mallcop" / ".github-credentials"
+    save_credentials(credentials_path, tokens)
+    click.echo("GitHub authorized.", err=True)
+
+    # Configure git to use the token for push
+    subprocess.run(
+        ["git", "config", f"credential.https://github.com.helper",
+         f"!f() {{ echo username=x-access-token; echo password={tokens.access_token}; }}; f"],
+        capture_output=True, text=True, cwd=str(cwd),
+    )
+
+    # Write github section to config
+    config_data["github"] = {
+        "repo": github_repo,
+        "credentials_path": str(credentials_path),
+        "client_id": client_id,
+    }
+
+    return {
+        "repo": github_repo,
+        "status": "authorized",
+    }
+
+
 def _setup_pro(config_data: dict[str, Any]) -> dict[str, Any] | None:
     """Set up Pro managed inference after connector discovery.
 
     Mutates config_data in place (adds 'pro' section, removes 'llm').
     Returns a dict with pro account info for CLI output, or None on failure.
     """
+    import os
     import subprocess
 
     from mallcop.pro import ProClient
@@ -180,9 +327,14 @@ def _setup_pro(config_data: dict[str, Any]) -> dict[str, Any] | None:
     account_url = DEFAULT_API_URL
     client = ProClient(account_url)
 
+    # Invite code from env or interactive prompt
+    invite_code = os.environ.get("MALLCOP_INVITE_CODE", "")
+    if not invite_code and sys.stdin.isatty():
+        invite_code = click.prompt("Invite code (leave blank to skip)", default="", err=True).strip()
+
     # Create account (server uses anti-enumeration: duplicate emails return 200 silently)
     try:
-        account_id, service_token = client.create_account(email)
+        account_id, service_token = client.create_account(email, invite_code=invite_code or None)
     except (RuntimeError, OSError) as e:
         click.echo(
             json.dumps({"status": "error", "error": "Account creation failed"}),
@@ -222,7 +374,7 @@ def _setup_pro(config_data: dict[str, Any]) -> dict[str, Any] | None:
         "account_id": account_id,
         "service_token": service_token,
         "account_url": account_url,
-        "inference_url": DEFAULT_API_URL,
+        "inference_url": "https://mallcop.app/api/inference",
     }
     if "llm" in config_data:
         del config_data["llm"]
@@ -331,6 +483,11 @@ def init(pro: bool) -> None:
         },
     }
 
+    # GitHub setup: detect repo, auth via device flow
+    github_result: dict[str, Any] | None = None
+    if pro:
+        github_result = _setup_github(config_data)
+
     # Pro setup modifies config_data before writing.
     # Deep-copy so we can restore on failure (setup mutates in place).
     pro_result: dict[str, Any] | None = None
@@ -374,6 +531,8 @@ def init(pro: bool) -> None:
         "required_secrets": required_secrets,
     }
 
+    if github_result:
+        output["github"] = github_result
     if pro_result:
         output["pro"] = pro_result
 

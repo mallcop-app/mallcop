@@ -64,15 +64,18 @@ class ProClient:
             raise RuntimeError(f"ProClient.{caller}: HTTP {resp.status_code}")
         return resp.json()
 
-    def create_account(self, email: str) -> tuple[str, str]:
+    def create_account(self, email: str, invite_code: str | None = None) -> tuple[str, str]:
         """Create account. Returns (account_id, service_token).
 
         Note: the server uses anti-enumeration — duplicate emails return 200
         with a fake account rather than 409. Callers cannot detect duplicates.
         """
+        body: dict = {"email": email}
+        if invite_code:
+            body["invite_code"] = invite_code
         resp = requests.post(
             f"{self._url}/accounts",
-            json={"email": email},
+            json=body,
             timeout=30,
         )
         if resp.status_code != 200:

@@ -14,7 +14,7 @@ from mallcop.patrol import PatrolConfig, parse_patrols
 
 __all__ = ["load_config", "MallcopConfig", "BudgetConfig", "BaselineConfig", "LLMConfig", "RouteConfig", "ProConfig", "GitHubConfig", "ResearchConfig", "NotifyConfig", "ConfigError", "_parse_routing", "PatrolConfig", "DEFAULT_API_URL"]
 
-DEFAULT_API_URL = "https://api.mallcop.app"
+DEFAULT_API_URL = "https://mallcop.app/api/account"
 
 # Re-export ConfigError so tests can import from mallcop.config
 ConfigError = ConfigError
