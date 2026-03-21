@@ -696,3 +696,188 @@ class TestFullInitScanDetectPipeline:
 
                 # Escalate was skipped (dry run)
                 assert watch_data["escalate"]["skipped"] is True
+
+
+# ── Bad-pattern seeding helpers ──────────────────────────────────────
+
+
+def _make_plaintext_api_key_event(now: datetime, cwd: Path) -> Event:
+    """Create an openclaw config_changed event with secrets_found=True.
+
+    The OpenClawConfigDriftDetector fires plaintext-secrets when raw.secrets_found is True.
+    """
+    return Event(
+        id="evt_plaintext_api_key_001",
+        timestamp=now - timedelta(hours=1),
+        ingested_at=now,
+        source="openclaw",
+        event_type="config_changed",
+        actor="filesystem",
+        action="config_changed",
+        target=str(cwd / "openclaw.json"),
+        severity=Severity.WARN,
+        metadata={
+            "config": {
+                "gateway": {
+                    "auth": {"enabled": True},
+                    "mdns": {"enabled": False},
+                    "guestMode": {"enabled": False, "tools": []},
+                },
+                "openai_api_key": "sk-proj-FAKE_KEY_FOR_TESTING_ONLY_NOT_REAL",
+            },
+        },
+        raw={"secrets_found": True},
+    )
+
+
+def _make_unusual_timing_event(actor: str, now: datetime) -> Event:
+    """Create a GitHub event at Monday 03:00 UTC — unusual for an actor
+    whose baseline only records Tuesday 08:00-11:59 UTC activity.
+
+    Monday 03:00 UTC -> weekday()=0, hour_bucket(3)=0 -> key suffix ":0:0"
+    Baseline will have the actor at Tuesday bucket=8 -> ":1:8" but NOT ":0:0".
+    The unusual-timing detector fires when freq.get(key, 0) == 0 and freq is non-empty.
+    """
+    # Force to a specific Monday 03:00 so the weekday/bucket is deterministic.
+    # Find the most recent past Monday from now, set to 03:00 UTC.
+    days_since_monday = now.weekday()  # 0=Mon, so if today is Mon, days_since=0
+    if days_since_monday == 0 and now.hour >= 3:
+        # today is Monday and it's past 03:00, use today
+        monday = now.replace(hour=3, minute=0, second=0, microsecond=0)
+    elif days_since_monday == 0:
+        # today is Monday but before 03:00, go back 7 days
+        monday = (now - timedelta(days=7)).replace(hour=3, minute=0, second=0, microsecond=0)
+    else:
+        monday = (now - timedelta(days=days_since_monday)).replace(
+            hour=3, minute=0, second=0, microsecond=0
+        )
+    return Event(
+        id="evt_unusual_timing_001",
+        timestamp=monday,
+        ingested_at=now,
+        source="github",
+        event_type="push",
+        actor=actor,
+        action="git.push",
+        target="acme-corp/sensitive-repo",
+        severity=Severity.INFO,
+        metadata={"org": "acme-corp"},
+        raw={"raw_data": True},
+    )
+
+
+def _seed_baseline_for_unusual_timing(
+    store: JsonlStore, actor: str, now: datetime
+) -> None:
+    """Seed the store with baseline events at Tuesday 08:00-11:59 UTC.
+
+    This populates frequency_tables with key "{source}:{event_type}:{actor}:1:8"
+    (Tuesday, hour_bucket=8). When detect runs and sees the actor at Monday 03:00
+    (key suffix ":0:0"), the frequency is 0 -> unusual-timing fires.
+    """
+    # Tuesday = weekday 1; hour 10 -> bucket 8
+    days_since_tuesday = (now.weekday() - 1) % 7
+    if days_since_tuesday == 0 and now.hour >= 10:
+        base_tuesday = now.replace(hour=10, minute=0, second=0, microsecond=0)
+    else:
+        base_tuesday = (now - timedelta(days=days_since_tuesday or 7)).replace(
+            hour=10, minute=0, second=0, microsecond=0
+        )
+
+    baseline_events = []
+    for i in range(5):
+        ts = base_tuesday - timedelta(weeks=i + 1)
+        baseline_events.append(Event(
+            id=f"evt_baseline_tuesday_{i:02d}",
+            timestamp=ts,
+            ingested_at=ts + timedelta(seconds=5),
+            source="github",
+            event_type="push",
+            actor=actor,
+            action="git.push",
+            target="acme-corp/web-app",
+            severity=Severity.INFO,
+            metadata={"org": "acme-corp"},
+            raw={"raw_data": True},
+        ))
+
+    store.append_events(baseline_events)
+    store.update_baseline(baseline_events)
+
+
+# ── Tests ─────────────────────────────────────────────────────────────
+
+
+class TestDetectBadPatterns:
+    """Detect pipeline fires plaintext-secrets and unusual-timing on seeded events."""
+
+    def _setup_detect(self, tmp_path: Path, monkeypatch: Any) -> tuple[Any, Path]:
+        """Seed bad-pattern events and baseline, run detect, return (result, cwd)."""
+        cwd = tmp_path
+        _write_multiplatform_config(cwd)
+        monkeypatch.chdir(cwd)
+
+        store = JsonlStore(cwd)
+        now = datetime.now(timezone.utc)
+        actor = "deploy-bot@acme-corp.dev"
+
+        # Seed baseline with known Tuesday 08:00 activity for actor.
+        # This gives freq tables non-empty -> unusual-timing detector is active.
+        _seed_baseline_for_unusual_timing(store, actor, now)
+
+        # Seed the two bad-pattern events into the store
+        plaintext_evt = _make_plaintext_api_key_event(now, cwd)
+        unusual_evt = _make_unusual_timing_event(actor, now)
+        store.append_events([plaintext_evt, unusual_evt])
+
+        runner = CliRunner()
+        with patch.dict(os.environ, _SCAN_ENV):
+            detect_result = runner.invoke(
+                cli, ["detect", "--dir", str(cwd)], catch_exceptions=False
+            )
+        return detect_result, cwd
+
+    def test_plaintext_secrets_detector_fires(
+        self, tmp_path: Path, monkeypatch: Any
+    ) -> None:
+        """openclaw-config-drift [plaintext-secrets] fires on seeded API key event."""
+        detect_result, cwd = self._setup_detect(tmp_path, monkeypatch)
+
+        assert detect_result.exit_code == 0, (
+            f"detect exit {detect_result.exit_code}: {detect_result.output}"
+        )
+
+        store = JsonlStore(cwd)
+        findings = store.query_findings()
+        # Metadata values are sanitized on store (wrapped in USER_DATA markers).
+        # Check that the rule field contains "plaintext-secrets" after stripping markers.
+        plaintext_findings = [
+            f for f in findings
+            if f.detector == "openclaw-config-drift"
+            and "plaintext-secrets" in f.metadata.get("rule", "")
+        ]
+        assert len(plaintext_findings) >= 1, (
+            f"Expected plaintext-secrets finding, got detectors: "
+            f"{[f.detector + ':' + f.metadata.get('rule','') for f in findings]}"
+        )
+
+    def test_unusual_timing_detector_fires(
+        self, tmp_path: Path, monkeypatch: Any
+    ) -> None:
+        """unusual-timing detector fires on seeded Monday 03:00 event for actor
+        whose baseline only records Tuesday 08:00 activity."""
+        detect_result, cwd = self._setup_detect(tmp_path, monkeypatch)
+
+        assert detect_result.exit_code == 0, (
+            f"detect exit {detect_result.exit_code}: {detect_result.output}"
+        )
+
+        store = JsonlStore(cwd)
+        findings = store.query_findings()
+        timing_findings = [
+            f for f in findings if f.detector == "unusual-timing"
+        ]
+        assert len(timing_findings) >= 1, (
+            f"Expected unusual-timing finding, got detectors: "
+            f"{[f.detector for f in findings]}"
+        )
