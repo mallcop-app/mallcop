@@ -120,10 +120,11 @@ def patrol_create(
         )
         raise SystemExit(1)
 
-    # Check for duplicate
+    # Check for duplicate within this repo's config.
+    # Stale crontab entries from other (deleted) repos are overwritten silently.
     patrols = config.get("patrols") or {}
     backend = CrontabBackend(repo_path=root)
-    if name in patrols or backend.entry_exists(name):
+    if name in patrols:
         _error(f"Patrol '{name}' already exists. Use 'patrol update' to change it.")
         raise SystemExit(1)
 
@@ -371,13 +372,25 @@ def patrol_run(name: str) -> None:
 
     command = _patrol_command_for(patrol_cfg)
 
-    # Resolve the mallcop binary: prefer the installed path, fall back to current interpreter
-    mallcop_bin = _MALLCOP_BIN if Path(_MALLCOP_BIN).exists() else None
-    if mallcop_bin is None:
-        # Fall back: run as python module
-        cmd = [sys.executable, "-m", "mallcop", command, "--dir", str(root)]
+    # Resolve the mallcop binary: prefer the installed path, fall back to the
+    # mallcop console script in the same venv as sys.executable.
+    mallcop_bin: str | None = None
+    if Path(_MALLCOP_BIN).exists():
+        mallcop_bin = _MALLCOP_BIN
     else:
-        cmd = [mallcop_bin, command, "--dir", str(root)]
+        # Try the mallcop binary next to sys.executable (same venv)
+        candidate = Path(sys.executable).parent / "mallcop"
+        if candidate.exists():
+            mallcop_bin = str(candidate)
+
+    if mallcop_bin is None:
+        _error(
+            f"Could not locate the mallcop binary. "
+            f"Expected {_MALLCOP_BIN} or alongside {sys.executable}."
+        )
+        raise SystemExit(1)
+
+    cmd = [mallcop_bin, command, "--dir", str(root)]
 
     proc = subprocess.run(cmd, capture_output=True)
     if proc.returncode != 0:
