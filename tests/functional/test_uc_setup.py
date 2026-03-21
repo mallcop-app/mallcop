@@ -151,6 +151,7 @@ class TestUCSetupInitDiscoversEnvironment:
             assert result.exit_code == 0
             config_path = cwd / "mallcop.yaml"
             assert config_path.exists(), "mallcop.yaml not created"
+            assert (cwd / ".mallcop").exists(), ".mallcop directory not created"
 
             config = yaml.safe_load(config_path.read_text())
 
