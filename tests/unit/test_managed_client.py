@@ -228,7 +228,8 @@ class TestBuildLLMClientManaged:
 
         client = build_llm_client(llm_config, pro_config=pro)
         assert isinstance(client, ManagedClient)
-        assert client._endpoint == "https://api.mallcop.app"
+        from mallcop.config import DEFAULT_INFERENCE_URL
+        assert client._endpoint == DEFAULT_INFERENCE_URL
 
     def test_pro_config_without_service_token_falls_through(self) -> None:
         from mallcop.config import LLMConfig

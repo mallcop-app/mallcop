@@ -488,7 +488,8 @@ class TestProConfigUrlResolution:
         assert config.pro.inference_url == "https://inference.literal.com"
 
     def test_pro_account_url_default_when_not_specified(self, tmp_path: Path) -> None:
-        """account_url defaults to https://api.mallcop.app when omitted."""
+        """account_url defaults to DEFAULT_API_URL when omitted."""
+        from mallcop.config import DEFAULT_API_URL
         yaml_content = textwrap.dedent("""\
             secrets:
               backend: env
@@ -504,7 +505,7 @@ class TestProConfigUrlResolution:
         self._write_config(tmp_path, yaml_content)
         config = load_config(tmp_path)
         assert config.pro is not None
-        assert config.pro.account_url == "https://api.mallcop.app"
+        assert config.pro.account_url == DEFAULT_API_URL
 
 
 # ─── 5.6: _parse_routing and _parse_llm edge cases ────────────────────────────

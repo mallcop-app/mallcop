@@ -6,7 +6,7 @@ import logging
 from typing import Any
 
 from mallcop.llm_types import LLMAPIError, LLMClient, LLMResponse, ToolCall  # noqa: F401
-from mallcop.config import DEFAULT_API_URL, LLMConfig
+from mallcop.config import DEFAULT_API_URL, DEFAULT_INFERENCE_URL, LLMConfig
 
 from mallcop.llm.anthropic import AnthropicClient  # noqa: F401
 from mallcop.llm.managed import ManagedClient  # noqa: F401
@@ -132,7 +132,7 @@ def build_llm_client(
         if service_token and (
             llm_config is None or llm_config.provider == "anthropic"
         ):
-            inference_url = getattr(pro_config, "inference_url", None) or DEFAULT_API_URL
+            inference_url = getattr(pro_config, "inference_url", None) or DEFAULT_INFERENCE_URL
             return ManagedClient(
                 endpoint=inference_url,
                 service_token=service_token,

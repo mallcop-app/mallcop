@@ -189,6 +189,12 @@ def run_scan_pipeline(root: Path, store: Store | None = None) -> dict[str, Any]:
                 "events_ingested": 0,
             }
 
+    # Ensure events/ directory exists even when no connectors ran (so downstream
+    # tooling and tests can always rely on it being present after a scan).
+    if store is not None:
+        events_dir = root / ".mallcop" / "events"
+        events_dir.mkdir(parents=True, exist_ok=True)
+
     _write_manifest(root, connector_summaries, start_time)
 
     return {
@@ -263,6 +269,7 @@ def run_detect_pipeline(root: Path, store: Store | None = None) -> dict[str, Any
         window_days: int | None = config.baseline.window_days
         config_connectors: dict[str, Any] | None = config.connectors
     except ConfigError:
+        config = None
         window_days = BaselineConfig().window_days
         config_connectors = None
 
@@ -282,6 +289,21 @@ def run_detect_pipeline(root: Path, store: Store | None = None) -> dict[str, Any
         all_events, baseline, learning_connectors=learning,
         root=root, config_connectors=config_connectors,
     )
+
+    # Run git-oops local repo scan when GitHub integration is configured.
+    # Scans the local repo for committed secrets, hardcoded credentials, and
+    # security antipatterns. Deduplicates against existing findings so repeated
+    # watch runs don't re-report the same issues.
+    if config is not None and config.github and config.github.repo:
+        try:
+            from mallcop.detectors.git_oops.detector import scan_repo
+            git_findings = scan_repo(root)
+            if git_findings:
+                existing_ids = {f.id for f in store.query_findings()}
+                new_git_findings = [f for f in git_findings if f.id not in existing_ids]
+                findings.extend(new_git_findings)
+        except Exception:
+            pass  # git-oops scan is non-critical; don't fail the watch pipeline
 
     if findings:
         store.append_findings(findings)
