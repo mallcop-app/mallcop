@@ -793,3 +793,111 @@ class TestHumanReadableOutput:
             )
             assert result.exit_code == 0
             assert "Coverage:" in result.output or "%" in result.output
+
+
+# ---------------------------------------------------------------------------
+# I/O error handling in write_discovery_json and discover CLI command
+# ---------------------------------------------------------------------------
+
+
+class TestWriteDiscoveryJsonIOErrors:
+    """write_discovery_json raises DiscoverError on I/O failures; CLI handles it cleanly."""
+
+    def test_write_text_oserror_raises_discover_error(self, tmp_path: Path) -> None:
+        """OSError from write_text propagates as DiscoverError."""
+        from unittest.mock import patch
+
+        from mallcop.discover import DiscoverError, write_discovery_json
+
+        data = {"schema_version": "1.0"}
+        with patch("mallcop.discover.Path.write_text", side_effect=OSError("disk full")):
+            with pytest.raises(DiscoverError) as exc_info:
+                write_discovery_json(tmp_path, data)
+        assert "disk full" in str(exc_info.value) or "Cannot write" in str(exc_info.value)
+
+    def test_mkdir_oserror_raises_discover_error(self, tmp_path: Path) -> None:
+        """OSError from mkdir (e.g. read-only parent) propagates as DiscoverError."""
+        from unittest.mock import patch
+
+        from mallcop.discover import DiscoverError, write_discovery_json
+
+        data = {"schema_version": "1.0"}
+        with patch("mallcop.discover.Path.mkdir", side_effect=OSError("permission denied")):
+            with pytest.raises(DiscoverError) as exc_info:
+                write_discovery_json(tmp_path, data)
+        assert "permission denied" in str(exc_info.value) or "Cannot create" in str(exc_info.value)
+
+    def test_discover_error_message_is_user_friendly(self, tmp_path: Path) -> None:
+        """DiscoverError message includes path context, not raw Python internals."""
+        from unittest.mock import patch
+
+        from mallcop.discover import DiscoverError, write_discovery_json
+
+        data = {"schema_version": "1.0"}
+        with patch("mallcop.discover.Path.write_text", side_effect=OSError(28, "No space left on device")):
+            with pytest.raises(DiscoverError) as exc_info:
+                write_discovery_json(tmp_path, data)
+        msg = str(exc_info.value)
+        # Message must reference the path or contain actionable context
+        assert "discovery.json" in msg or str(tmp_path) in msg
+
+    def test_cli_discover_exits_1_on_io_error(self, tmp_path: Path) -> None:
+        """discover command exits with code 1 when write_discovery_json fails."""
+        from unittest.mock import patch
+
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path.parent) as td:
+            dest = Path(td) / "repo"
+            dest.mkdir()
+            _init_git_repo(dest)
+            with patch(
+                "mallcop.discover.Path.write_text",
+                side_effect=OSError("disk full"),
+            ):
+                result = runner.invoke(
+                    cli, ["discover", "--json", "--dir", str(dest)],
+                    catch_exceptions=False, env={}
+                )
+            assert result.exit_code == 1
+
+    def test_cli_discover_emits_json_error_on_io_error(self, tmp_path: Path) -> None:
+        """discover --json emits JSON with status=error and error message when write fails."""
+        from unittest.mock import patch
+
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path.parent) as td:
+            dest = Path(td) / "repo"
+            dest.mkdir()
+            _init_git_repo(dest)
+            with patch(
+                "mallcop.discover.Path.write_text",
+                side_effect=OSError("disk full"),
+            ):
+                result = runner.invoke(
+                    cli, ["discover", "--json", "--dir", str(dest)],
+                    catch_exceptions=False, env={}
+                )
+            assert result.exit_code == 1
+            error_output = json.loads(result.output)
+            assert error_output["status"] == "error"
+            assert "error" in error_output
+            assert len(error_output["error"]) > 0
+
+    def test_cli_discover_no_json_exits_1_on_io_error(self, tmp_path: Path) -> None:
+        """discover (no --json) also exits 1 when write fails."""
+        from unittest.mock import patch
+
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path.parent) as td:
+            dest = Path(td) / "repo"
+            dest.mkdir()
+            _init_git_repo(dest)
+            with patch(
+                "mallcop.discover.Path.write_text",
+                side_effect=OSError("permission denied"),
+            ):
+                result = runner.invoke(
+                    cli, ["discover", "--dir", str(dest)],
+                    catch_exceptions=False, env={}
+                )
+            assert result.exit_code == 1

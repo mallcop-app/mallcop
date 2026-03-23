@@ -544,11 +544,15 @@ def init(pro: bool) -> None:
 @click.option("--dir", "dir_path", default=None, help="Repo directory to inspect (default: cwd).")
 def discover(output_json: bool, dir_path: str | None) -> None:
     """Inspect repo for connectors, write .mallcop/discovery.json."""
-    from mallcop.discover import discover as _discover, write_discovery_json
+    from mallcop.discover import DiscoverError, discover as _discover, write_discovery_json
 
     repo_dir = Path(dir_path) if dir_path else Path.cwd()
     data = _discover(repo_dir)
-    write_discovery_json(repo_dir, data)
+    try:
+        write_discovery_json(repo_dir, data)
+    except DiscoverError as exc:
+        click.echo(json.dumps({"status": "error", "error": str(exc)}))
+        raise SystemExit(1)
     if output_json:
         click.echo(json.dumps(data))
     else:

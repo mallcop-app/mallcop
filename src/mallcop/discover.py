@@ -22,6 +22,10 @@ import yaml
 from mallcop.__init__ import __version__
 
 
+class DiscoverError(Exception):
+    """Raised when write_discovery_json fails due to an I/O error."""
+
+
 # ---------------------------------------------------------------------------
 # Connector catalog
 # ---------------------------------------------------------------------------
@@ -732,13 +736,24 @@ def discover(
 
 
 def write_discovery_json(repo_dir: Path, discovery_data: dict[str, Any]) -> Path:
-    """Write discovery data to .mallcop/discovery.json in the repo directory."""
-    import logging
+    """Write discovery data to .mallcop/discovery.json in the repo directory.
+
+    Raises:
+        DiscoverError: If the directory cannot be created or the file cannot
+            be written due to an OS-level error (e.g. disk full, permissions).
+    """
     mallcop_dir = repo_dir / ".mallcop"
-    mallcop_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        mallcop_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise DiscoverError(
+            f"Cannot create .mallcop/ directory in {repo_dir}: {exc}"
+        ) from exc
     discovery_path = mallcop_dir / "discovery.json"
     try:
         discovery_path.write_text(json.dumps(discovery_data, indent=2))
     except OSError as exc:
-        logging.warning("Could not write discovery.json: %s", exc)
+        raise DiscoverError(
+            f"Cannot write {discovery_path}: {exc}"
+        ) from exc
     return discovery_path
