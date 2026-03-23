@@ -128,10 +128,23 @@ def _write_manifest(
 
 
 def run_scan_pipeline(root: Path, store: Store | None = None) -> dict[str, Any]:
-    """Run the scan step of the pipeline."""
+    """Run the scan step of the pipeline.
+
+    Phase 0: Run discover to update discovery.json before connectors run.
+    This ensures the dashboard always has fresh connector state after every scan.
+    Discover failures are non-fatal — scan continues regardless.
+    """
     from mallcop.app_integration import apply_parsers, get_configured_app_names
+    from mallcop import discover as _discover_module
 
     start_time = time.time()
+
+    # Phase 0: discover — write discovery.json for the dashboard (non-fatal)
+    try:
+        discovery_data = _discover_module.discover(root)
+        _discover_module.write_discovery_json(root, discovery_data)
+    except Exception:
+        pass  # Discover failure must not block scan
 
     try:
         config = load_config(root)
