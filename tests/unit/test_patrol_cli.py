@@ -573,32 +573,46 @@ class TestPatrolRun:
 class TestPatrolRunErrorPaths:
     """mallcop-ak1n.5.7: patrol run error paths and fallback binary."""
 
-    def test_run_falls_back_to_sys_executable_when_bin_missing(self, tmp_path: Path) -> None:
-        """patrol run uses sys.executable -m mallcop when MALLCOP_BIN does not exist."""
-        import sys
+    def test_run_falls_back_to_path_lookup_when_bin_missing(self, tmp_path: Path) -> None:
+        """patrol run uses shutil.which fallback when MALLCOP_BIN and venv bin don't exist."""
         _write_config(tmp_path, extra={"patrols": {"sweep": {"every": "6h"}}})
         runner = CliRunner()
         mock_backend = _mock_crontab_backend()
 
-        # Patch _MALLCOP_BIN to a path that does not exist
         with patch("mallcop.patrol_cli._MALLCOP_BIN", "/nonexistent/path/mallcop"):
-            with patch("mallcop.patrol_cli.CrontabBackend", return_value=mock_backend):
-                with patch("mallcop.patrol_cli.subprocess.run") as mock_run:
-                    mock_run.return_value = MagicMock(returncode=0, stdout=b"", stderr=b"")
-                    result = runner.invoke(
-                        cli,
-                        ["patrol", "run", "sweep"],
-                        catch_exceptions=False,
-                        env={"MALLCOP_REPO": str(tmp_path)},
-                    )
+            with patch("mallcop.patrol_cli.shutil.which", return_value="/usr/local/bin/mallcop"):
+                with patch("mallcop.patrol_cli.CrontabBackend", return_value=mock_backend):
+                    with patch("mallcop.patrol_cli.subprocess.run") as mock_run:
+                        mock_run.return_value = MagicMock(returncode=0, stdout=b"", stderr=b"")
+                        result = runner.invoke(
+                            cli,
+                            ["patrol", "run", "sweep"],
+                            catch_exceptions=False,
+                            env={"MALLCOP_REPO": str(tmp_path)},
+                        )
 
         assert result.exit_code == 0, result.output
         mock_run.assert_called_once()
         call_args = mock_run.call_args[0][0]
-        # Should use sys.executable, not the venv bin
-        assert call_args[0] == sys.executable
-        assert call_args[1] == "-m"
-        assert call_args[2] == "mallcop"
+        assert call_args[0] == "/usr/local/bin/mallcop"
+
+    def test_run_errors_when_mallcop_not_found_anywhere(self, tmp_path: Path) -> None:
+        """patrol run errors when mallcop binary cannot be found anywhere."""
+        _write_config(tmp_path, extra={"patrols": {"sweep": {"every": "6h"}}})
+        runner = CliRunner()
+        mock_backend = _mock_crontab_backend()
+
+        with patch("mallcop.patrol_cli._MALLCOP_BIN", "/nonexistent/path/mallcop"):
+            with patch("mallcop.patrol_cli.shutil.which", return_value=None):
+                with patch("mallcop.patrol_cli.CrontabBackend", return_value=mock_backend):
+                    result = runner.invoke(
+                        cli,
+                        ["patrol", "run", "sweep"],
+                        env={"MALLCOP_REPO": str(tmp_path)},
+                    )
+
+        assert result.exit_code == 1
+        assert "Could not locate the mallcop binary" in result.output
 
     def test_update_invalid_period_returns_error_json(self, tmp_path: Path) -> None:
         """patrol update with invalid period returns JSON error and SystemExit(1)."""
