@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import subprocess
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 from click.testing import CliRunner
@@ -52,10 +53,10 @@ def _init_git_repo(path: Path) -> None:
 
 
 def _run_discover(repo_path: Path, extra_args: list[str] | None = None) -> dict:
-    """Run mallcop discover in repo_path, return parsed JSON output."""
+    """Run mallcop discover against repo_path, return parsed JSON output."""
     runner = CliRunner()
-    args = ["discover"] + (extra_args or [])
-    result = runner.invoke(cli, args, catch_exceptions=False, env={"HOME": str(repo_path)})
+    args = ["discover", "--dir", str(repo_path)] + (extra_args or [])
+    result = runner.invoke(cli, args, catch_exceptions=False, env={})
     # Use mix_stderr=False so stdout is clean
     assert result.exit_code == 0, f"exit_code={result.exit_code}\n{result.output}"
     return json.loads(result.output)
@@ -241,7 +242,7 @@ class TestBootstrapMode:
             assert result.exit_code == 0
             out = json.loads(result.output)
             aws_connector = next(
-                (c for c in out["connectors"] if c["type"] == "aws-cloudtrail"), None
+                (c for c in out["connectors"] if c["type"] == "aws"), None
             )
             if aws_connector is not None:
                 assert aws_connector["status"] in {"detected", "error"}, (
@@ -255,7 +256,7 @@ class TestBootstrapMode:
 
 
 class TestRepoContentDetectionAWS:
-    """Repo with boto3 in requirements.txt triggers aws-cloudtrail detection."""
+    """Repo with boto3 in requirements.txt triggers aws detection."""
 
     def _make_aws_repo(self, dest: Path) -> None:
         _init_git_repo(dest)
@@ -276,8 +277,8 @@ class TestRepoContentDetectionAWS:
             assert result.exit_code == 0
             out = json.loads(result.output)
             connectors_by_type = {c["type"]: c for c in out["connectors"]}
-            assert "aws-cloudtrail" in connectors_by_type, (
-                f"Expected aws-cloudtrail in connectors, got: {list(connectors_by_type.keys())}"
+            assert "aws" in connectors_by_type, (
+                f"Expected aws in connectors, got: {list(connectors_by_type.keys())}"
             )
 
     def test_boto3_detection_signal_references_requirements_txt(self, tmp_path: Path) -> None:
@@ -292,7 +293,7 @@ class TestRepoContentDetectionAWS:
             )
             out = json.loads(result.output)
             connectors_by_type = {c["type"]: c for c in out["connectors"]}
-            aws = connectors_by_type.get("aws-cloudtrail")
+            aws = connectors_by_type.get("aws")
             if aws is not None:
                 signals = " ".join(aws["detection_signals"]).lower()
                 assert "boto3" in signals or "requirements" in signals, (
@@ -310,7 +311,7 @@ class TestRepoContentDetectionAWS:
                 catch_exceptions=False, env={}
             )
             out = json.loads(result.output)
-            aws = next((c for c in out["connectors"] if c["type"] == "aws-cloudtrail"), None)
+            aws = next((c for c in out["connectors"] if c["type"] == "aws"), None)
             if aws is not None:
                 # secrets_status should indicate missing credentials
                 assert len(aws["secrets_status"]) > 0, "Expected secrets_status to be populated"
@@ -381,8 +382,8 @@ class TestRepoContentDetectionNode:
             )
             out = json.loads(result.output)
             connectors_by_type = {c["type"]: c for c in out["connectors"]}
-            assert "aws-cloudtrail" in connectors_by_type, (
-                f"Expected aws-cloudtrail when @aws-sdk/* present, got: {list(connectors_by_type.keys())}"
+            assert "aws" in connectors_by_type, (
+                f"Expected aws when @aws-sdk/* present, got: {list(connectors_by_type.keys())}"
             )
 
 
@@ -565,10 +566,10 @@ class TestCredentialMetadata:
                 catch_exceptions=False, env={}
             )
             out = json.loads(result.output)
-            aws = next((c for c in out["connectors"] if c["type"] == "aws-cloudtrail"), None)
+            aws = next((c for c in out["connectors"] if c["type"] == "aws"), None)
             assert aws is not None
             assert len(aws["secrets_required"]) > 0, (
-                "aws-cloudtrail should have secrets_required metadata"
+                "aws should have secrets_required metadata"
             )
             for secret in aws["secrets_required"]:
                 assert "name" in secret
@@ -577,22 +578,27 @@ class TestCredentialMetadata:
                 assert "permissions_needed" in secret
 
     def test_no_credential_connector_has_empty_secrets_required(self, tmp_path: Path) -> None:
-        """Connectors with no required auth have empty secrets_required."""
+        """Connectors with no required auth have empty secrets_required.
+
+        openclaw is detected by ~/.openclaw existing. We mock Path.home() to
+        return dest so the detection signal fires without touching the real HOME.
+        """
         runner = CliRunner()
         with runner.isolated_filesystem(temp_dir=tmp_path.parent) as td:
             dest = Path(td) / "repo"
             dest.mkdir()
             _init_git_repo(dest)
-            # openclaw has no required auth
+            # Plant .openclaw in dest; mock Path.home() so detection finds it
             (dest / ".openclaw").mkdir()
-            result = runner.invoke(
-                cli, ["discover", "--dir", str(dest)],
-                catch_exceptions=False, env={}
-            )
+            with patch("mallcop.discover.Path.home", return_value=dest):
+                result = runner.invoke(
+                    cli, ["discover", "--dir", str(dest)],
+                    catch_exceptions=False, env={}
+                )
             out = json.loads(result.output)
             openclaw = next((c for c in out["connectors"] if c["type"] == "openclaw"), None)
-            if openclaw is not None:
-                assert openclaw["secrets_required"] == []
+            assert openclaw is not None, "openclaw connector should be detected when ~/.openclaw exists"
+            assert openclaw["secrets_required"] == []
 
 
 # ---------------------------------------------------------------------------
