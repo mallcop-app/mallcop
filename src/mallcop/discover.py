@@ -295,7 +295,7 @@ def _read_requirements_txt(repo_dir: Path) -> list[str]:
     if not req_file.exists():
         return []
     packages = []
-    for line in req_file.read_text().splitlines():
+    for line in req_file.read_text(errors="replace").splitlines():
         line = line.strip()
         if not line or line.startswith("#") or line.startswith("-"):
             continue
@@ -312,7 +312,7 @@ def _read_package_json(repo_dir: Path) -> dict[str, list[str]]:
     if not pkg_file.exists():
         return {"deps": [], "dev": []}
     try:
-        data = json.loads(pkg_file.read_text())
+        data = json.loads(pkg_file.read_text(errors="replace"))
     except (json.JSONDecodeError, OSError):
         return {"deps": [], "dev": []}
     deps = list((data.get("dependencies") or {}).keys())
@@ -406,6 +406,16 @@ def detect_repo_signals(repo_dir: Path) -> dict[str, list[str]]:
         signals.setdefault("azure", []).append(f"{azure_py_pkgs[0]} in requirements.txt")
     if (repo_dir / ".azure").is_dir():
         signals.setdefault("azure", []).append(".azure/ directory")
+
+    # ---- M365 detection ----
+    # Python: msgraph-* or msal packages
+    m365_py_pkgs = [p for p in py_packages if p.startswith("msgraph-") or p == "msal"]
+    if m365_py_pkgs:
+        signals.setdefault("m365", []).append(f"{m365_py_pkgs[0]} in requirements.txt")
+    # Node: @microsoft/microsoft-graph-client
+    m365_node_pkgs = [p for p in node_all if p == "@microsoft/microsoft-graph-client"]
+    if m365_node_pkgs:
+        signals.setdefault("m365", []).append(f"{m365_node_pkgs[0]} in package.json")
 
     # ---- Auth provider detection ----
     supabase_node = [p for p in node_all if "@supabase" in p]
@@ -538,28 +548,61 @@ def probe_credentials(
     return result
 
 
+def _validate_credential(var_name: str, value: str) -> bool:
+    """Return True if the credential value looks valid (non-empty, minimum length).
+
+    Minimum lengths are heuristic: short values are almost certainly placeholders
+    or truncated secrets rather than real credentials.
+    """
+    if not value or not value.strip():
+        return False
+    # Generic minimum: most real secrets/keys are at least 8 characters
+    _MIN_LENGTHS: dict[str, int] = {
+        "AWS_ACCESS_KEY_ID": 16,
+        "AWS_SECRET_ACCESS_KEY": 20,
+        "GITHUB_TOKEN": 20,
+        "VERCEL_TOKEN": 20,
+        "SUPABASE_SERVICE_ROLE_KEY": 20,
+        "AZURE_CLIENT_SECRET": 8,
+        "M365_CLIENT_SECRET": 8,
+    }
+    min_len = _MIN_LENGTHS.get(var_name, 8)
+    return len(value.strip()) >= min_len
+
+
 def connector_status(
     connector_type: str,
     detection_signals: list[str],
     secrets_status: dict[str, str],
+    env: dict[str, str] | None = None,
 ) -> str:
     """Derive connector status from detection signals and credential status.
 
     Rules:
     - No-credential connectors: active if detected or no detection needed.
     - Connectors with required creds and detection signals but missing creds: detected.
-    - Connectors with all required creds present: active (if detected or always-on).
+    - Connectors with all required creds present but invalid format: error.
+    - Connectors with all required creds present and valid: active (if detected or always-on).
     - Connectors with no detection signals and no creds: available.
     """
     if connector_type in _NO_CREDENTIAL_CONNECTORS:
         return "active" if detection_signals else "available"
 
+    if env is None:
+        env = {}
+
     required = _CONNECTOR_REQUIRED_ENV_VARS.get(connector_type, [])
     missing_required = [v for v in required if secrets_status.get(v) == "missing"]
 
+    # Check for present-but-invalid credentials
+    present_required = [v for v in required if secrets_status.get(v) == "present"]
+    invalid_required = [v for v in present_required if not _validate_credential(v, env.get(v, ""))]
+
     if detection_signals:
         if not required or not missing_required:
-            # Detected and credentials present (or no creds needed)
+            if invalid_required:
+                # Credentials present but fail format validation
+                return "error"
             return "active"
         else:
             # Detected but missing required credentials
@@ -567,6 +610,8 @@ def connector_status(
     else:
         # No detection signals
         if not required or not missing_required:
+            if invalid_required:
+                return "error"
             # No signals, but credentials are present — connector is available and configured
             return "active"
         else:
@@ -598,9 +643,9 @@ def get_repo_name(repo_dir: Path) -> str:
             if match:
                 return f"{match.group(1)}/{match.group(2)}"
             # Try parsing other remote formats: last two path components
-            parts = re.split(r"[/:]", url.rstrip("/").rstrip(".git"))
+            parts = re.split(r"[/:]", url.rstrip("/").removesuffix(".git"))
             if len(parts) >= 2:
-                return f"{parts[-2]}/{parts[-1].replace('.git', '')}"
+                return f"{parts[-2]}/{parts[-1].removesuffix('.git')}"
     except Exception:
         pass
     return repo_dir.name
@@ -638,7 +683,7 @@ def discover(
         catalog_entry = _CONNECTOR_CATALOG[connector_type]
         signals = detected_signals.get(connector_type, [])
         secrets_st = probe_credentials(connector_type, env)
-        status = connector_status(connector_type, signals, secrets_st)
+        status = connector_status(connector_type, signals, secrets_st, env)
 
         # Filter secrets_status to only required vars when no signals (available connector)
         if not signals and status == "available":
