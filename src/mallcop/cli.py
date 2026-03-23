@@ -540,6 +540,19 @@ def init(pro: bool) -> None:
 
 
 @cli.command()
+@click.option("--json", "output_json", is_flag=True, help="Output JSON (default).")
+@click.option("--dir", "dir_path", default=None, help="Repo directory to inspect (default: cwd).")
+def discover(output_json: bool, dir_path: str | None) -> None:
+    """Inspect repo for connectors, write .mallcop/discovery.json."""
+    from mallcop.discover import discover as _discover, write_discovery_json
+
+    repo_dir = Path(dir_path) if dir_path else Path.cwd()
+    data = _discover(repo_dir)
+    write_discovery_json(repo_dir, data)
+    click.echo(json.dumps(data))
+
+
+@cli.command()
 def scan() -> None:
     """Poll all connectors, store events."""
     from mallcop.cli_pipeline import _compute_exit_code
