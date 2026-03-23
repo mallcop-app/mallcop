@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -382,6 +383,11 @@ def patrol_run(name: str) -> None:
         candidate = Path(sys.executable).parent / "mallcop"
         if candidate.exists():
             mallcop_bin = str(candidate)
+        else:
+            # Fall back to PATH lookup (pip install --user, editable installs)
+            on_path = shutil.which("mallcop")
+            if on_path:
+                mallcop_bin = on_path
 
     if mallcop_bin is None:
         _error(
