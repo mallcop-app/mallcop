@@ -540,7 +540,7 @@ def init(pro: bool) -> None:
 
 
 @cli.command()
-@click.option("--json", "output_json", is_flag=True, help="Output JSON (default).")
+@click.option("--json", "output_json", is_flag=True, help="Output discovery data as JSON instead of human-readable summary.")
 @click.option("--dir", "dir_path", default=None, help="Repo directory to inspect (default: cwd).")
 def discover(output_json: bool, dir_path: str | None) -> None:
     """Inspect repo for connectors, write .mallcop/discovery.json."""
@@ -549,7 +549,19 @@ def discover(output_json: bool, dir_path: str | None) -> None:
     repo_dir = Path(dir_path) if dir_path else Path.cwd()
     data = _discover(repo_dir)
     write_discovery_json(repo_dir, data)
-    click.echo(json.dumps(data))
+    if output_json:
+        click.echo(json.dumps(data))
+    else:
+        cov = data["coverage"]
+        active = [c for c in data["connectors"] if c["status"] == "active"]
+        detected = [c for c in data["connectors"] if c["status"] == "detected"]
+        click.echo(f"Repo: {data['repo']}")
+        click.echo(f"Coverage: {cov['percentage']}% ({cov['active_count']} active, {cov['detected_count']} detected, {cov['available_count']} available)")
+        if active:
+            click.echo("Active: " + ", ".join(c["type"] for c in active))
+        if detected:
+            click.echo("Detected (needs credentials): " + ", ".join(c["type"] for c in detected))
+        click.echo(f"Written: {repo_dir / '.mallcop' / 'discovery.json'}")
 
 
 @cli.command()

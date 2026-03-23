@@ -55,7 +55,7 @@ def _init_git_repo(path: Path) -> None:
 def _run_discover(repo_path: Path, extra_args: list[str] | None = None) -> dict:
     """Run mallcop discover against repo_path, return parsed JSON output."""
     runner = CliRunner()
-    args = ["discover", "--dir", str(repo_path)] + (extra_args or [])
+    args = ["discover", "--json", "--dir", str(repo_path)] + (extra_args or [])
     result = runner.invoke(cli, args, catch_exceptions=False, env={})
     # Use mix_stderr=False so stdout is clean
     assert result.exit_code == 0, f"exit_code={result.exit_code}\n{result.output}"
@@ -174,7 +174,7 @@ class TestDiscoveryJsonWrittenToDisk:
             dest = Path(td) / "repo"
             dest.mkdir()
             _init_git_repo(dest)
-            runner.invoke(cli, ["discover", "--dir", str(dest)], catch_exceptions=False)
+            runner.invoke(cli, ["discover", "--json", "--dir", str(dest)], catch_exceptions=False)
             discovery_path = dest / ".mallcop" / "discovery.json"
             assert discovery_path.exists(), f"Expected {discovery_path} to exist"
 
@@ -185,7 +185,7 @@ class TestDiscoveryJsonWrittenToDisk:
             dest = Path(td) / "repo"
             dest.mkdir()
             _init_git_repo(dest)
-            runner.invoke(cli, ["discover", "--dir", str(dest)], catch_exceptions=False)
+            runner.invoke(cli, ["discover", "--json", "--dir", str(dest)], catch_exceptions=False)
             content = (dest / ".mallcop" / "discovery.json").read_text()
             data = json.loads(content)
             assert data["schema_version"] == "1.0"
@@ -198,7 +198,7 @@ class TestDiscoveryJsonWrittenToDisk:
             dest.mkdir()
             _init_git_repo(dest)
             assert not (dest / ".mallcop").exists()
-            runner.invoke(cli, ["discover", "--dir", str(dest)], catch_exceptions=False)
+            runner.invoke(cli, ["discover", "--json", "--dir", str(dest)], catch_exceptions=False)
             assert (dest / ".mallcop").exists()
 
 
@@ -218,7 +218,7 @@ class TestBootstrapMode:
             dest = Path(td) / "repo"
             dest.mkdir()
             _init_git_repo(dest)
-            result = runner.invoke(cli, ["discover", "--dir", str(dest)], catch_exceptions=False)
+            result = runner.invoke(cli, ["discover", "--json", "--dir", str(dest)], catch_exceptions=False)
             assert result.exit_code == 0
 
     def test_detected_connectors_have_status_detected_not_active_without_credentials(
@@ -235,7 +235,7 @@ class TestBootstrapMode:
             # Run with no AWS credentials in env
             result = runner.invoke(
                 cli,
-                ["discover", "--dir", str(dest)],
+                ["discover", "--json", "--dir", str(dest)],
                 catch_exceptions=False,
                 env={},  # no env vars → no credentials
             )
@@ -271,7 +271,7 @@ class TestRepoContentDetectionAWS:
             dest.mkdir()
             self._make_aws_repo(dest)
             result = runner.invoke(
-                cli, ["discover", "--dir", str(dest)],
+                cli, ["discover", "--json", "--dir", str(dest)],
                 catch_exceptions=False, env={}
             )
             assert result.exit_code == 0
@@ -288,7 +288,7 @@ class TestRepoContentDetectionAWS:
             dest.mkdir()
             self._make_aws_repo(dest)
             result = runner.invoke(
-                cli, ["discover", "--dir", str(dest)],
+                cli, ["discover", "--json", "--dir", str(dest)],
                 catch_exceptions=False, env={}
             )
             out = json.loads(result.output)
@@ -307,7 +307,7 @@ class TestRepoContentDetectionAWS:
             dest.mkdir()
             self._make_aws_repo(dest)
             result = runner.invoke(
-                cli, ["discover", "--dir", str(dest)],
+                cli, ["discover", "--json", "--dir", str(dest)],
                 catch_exceptions=False, env={}
             )
             out = json.loads(result.output)
@@ -347,7 +347,7 @@ class TestRepoContentDetectionNode:
             dest.mkdir()
             self._make_node_repo(dest)
             result = runner.invoke(
-                cli, ["discover", "--dir", str(dest)],
+                cli, ["discover", "--json", "--dir", str(dest)],
                 catch_exceptions=False, env={}
             )
             assert result.exit_code == 0
@@ -377,7 +377,7 @@ class TestRepoContentDetectionNode:
             }
             (dest / "package.json").write_text(json.dumps(package_json, indent=2))
             result = runner.invoke(
-                cli, ["discover", "--dir", str(dest)],
+                cli, ["discover", "--json", "--dir", str(dest)],
                 catch_exceptions=False, env={}
             )
             out = json.loads(result.output)
@@ -402,7 +402,7 @@ class TestEmptyRepo:
             dest.mkdir()
             _init_git_repo(dest)
             result = runner.invoke(
-                cli, ["discover", "--dir", str(dest)],
+                cli, ["discover", "--json", "--dir", str(dest)],
                 catch_exceptions=False, env={}
             )
             assert result.exit_code == 0
@@ -415,7 +415,7 @@ class TestEmptyRepo:
             dest.mkdir()
             _init_git_repo(dest)
             result = runner.invoke(
-                cli, ["discover", "--dir", str(dest)],
+                cli, ["discover", "--json", "--dir", str(dest)],
                 catch_exceptions=False, env={}
             )
             out = json.loads(result.output)
@@ -431,7 +431,7 @@ class TestEmptyRepo:
             dest.mkdir()
             _init_git_repo(dest)
             result = runner.invoke(
-                cli, ["discover", "--dir", str(dest)],
+                cli, ["discover", "--json", "--dir", str(dest)],
                 catch_exceptions=False, env={}
             )
             out = json.loads(result.output)
@@ -454,7 +454,7 @@ class TestCoverageCalculation:
             dest.mkdir()
             _init_git_repo(dest)
             result = runner.invoke(
-                cli, ["discover", "--dir", str(dest)],
+                cli, ["discover", "--json", "--dir", str(dest)],
                 catch_exceptions=False, env={}
             )
             out = json.loads(result.output)
@@ -478,7 +478,7 @@ class TestCoverageCalculation:
             dest.mkdir()
             _init_git_repo(dest)
             result = runner.invoke(
-                cli, ["discover", "--dir", str(dest)],
+                cli, ["discover", "--json", "--dir", str(dest)],
                 catch_exceptions=False, env={}
             )
             out = json.loads(result.output)
@@ -522,7 +522,7 @@ class TestCLIFlags:
             (dest / "requirements.txt").write_text("boto3==1.34.0\n")
             # cwd is td, not dest — but --dir points to dest
             result = runner.invoke(
-                cli, ["discover", "--dir", str(dest)],
+                cli, ["discover", "--json", "--dir", str(dest)],
                 catch_exceptions=False, env={}
             )
             assert result.exit_code == 0
@@ -536,7 +536,7 @@ class TestCLIFlags:
             dest.mkdir()
             _init_git_repo(dest)
             result = runner.invoke(
-                cli, ["discover", "--dir", str(dest)],
+                cli, ["discover", "--json", "--dir", str(dest)],
                 catch_exceptions=False, env={}
             )
             assert result.exit_code == 0
@@ -562,7 +562,7 @@ class TestCredentialMetadata:
             _init_git_repo(dest)
             (dest / "requirements.txt").write_text("boto3==1.34.0\n")
             result = runner.invoke(
-                cli, ["discover", "--dir", str(dest)],
+                cli, ["discover", "--json", "--dir", str(dest)],
                 catch_exceptions=False, env={}
             )
             out = json.loads(result.output)
@@ -592,7 +592,7 @@ class TestCredentialMetadata:
             (dest / ".openclaw").mkdir()
             with patch("mallcop.discover.Path.home", return_value=dest):
                 result = runner.invoke(
-                    cli, ["discover", "--dir", str(dest)],
+                    cli, ["discover", "--json", "--dir", str(dest)],
                     catch_exceptions=False, env={}
                 )
             out = json.loads(result.output)
@@ -616,7 +616,7 @@ class TestRepoIdentification:
             dest.mkdir()
             _init_git_repo(dest)  # sets origin to github.com/test-org/test-repo
             result = runner.invoke(
-                cli, ["discover", "--dir", str(dest)],
+                cli, ["discover", "--json", "--dir", str(dest)],
                 catch_exceptions=False, env={}
             )
             out = json.loads(result.output)
@@ -632,10 +632,164 @@ class TestRepoIdentification:
             # Init git but no remote
             subprocess.run(["git", "init", str(dest)], check=True, capture_output=True)
             result = runner.invoke(
-                cli, ["discover", "--dir", str(dest)],
+                cli, ["discover", "--json", "--dir", str(dest)],
                 catch_exceptions=False, env={}
             )
             assert result.exit_code == 0
             out = json.loads(result.output)
             # repo field must exist (even if empty or just dir name)
             assert "repo" in out
+
+
+# ---------------------------------------------------------------------------
+# Secrets connector
+# ---------------------------------------------------------------------------
+
+
+class TestSecretsConnector:
+    """secrets connector is always active (source scan, no credentials needed)."""
+
+    def test_secrets_connector_present_in_every_repo(self, tmp_path: Path) -> None:
+        """secrets connector must appear in output for any repo."""
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path.parent) as td:
+            dest = Path(td) / "repo"
+            dest.mkdir()
+            _init_git_repo(dest)
+            result = runner.invoke(
+                cli, ["discover", "--json", "--dir", str(dest)],
+                catch_exceptions=False, env={}
+            )
+            assert result.exit_code == 0
+            out = json.loads(result.output)
+            types = [c["type"] for c in out["connectors"]]
+            assert "secrets" in types, f"Expected secrets connector, got: {types}"
+
+    def test_secrets_connector_is_always_active(self, tmp_path: Path) -> None:
+        """secrets connector status must be 'active' — it needs no credentials."""
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path.parent) as td:
+            dest = Path(td) / "repo"
+            dest.mkdir()
+            _init_git_repo(dest)
+            result = runner.invoke(
+                cli, ["discover", "--json", "--dir", str(dest)],
+                catch_exceptions=False, env={}
+            )
+            out = json.loads(result.output)
+            secrets = next((c for c in out["connectors"] if c["type"] == "secrets"), None)
+            assert secrets is not None
+            assert secrets["status"] == "active", (
+                f"secrets connector should be active, got: {secrets['status']}"
+            )
+
+    def test_secrets_connector_has_source_scan_signal(self, tmp_path: Path) -> None:
+        """secrets connector detection_signals must include 'source scan'."""
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path.parent) as td:
+            dest = Path(td) / "repo"
+            dest.mkdir()
+            _init_git_repo(dest)
+            result = runner.invoke(
+                cli, ["discover", "--json", "--dir", str(dest)],
+                catch_exceptions=False, env={}
+            )
+            out = json.loads(result.output)
+            secrets = next((c for c in out["connectors"] if c["type"] == "secrets"), None)
+            assert secrets is not None
+            signals = " ".join(secrets["detection_signals"]).lower()
+            assert "source scan" in signals, (
+                f"Expected 'source scan' in detection_signals, got: {secrets['detection_signals']}"
+            )
+
+    def test_secrets_connector_has_no_secrets_required(self, tmp_path: Path) -> None:
+        """secrets connector requires no credentials — secrets_required must be empty."""
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path.parent) as td:
+            dest = Path(td) / "repo"
+            dest.mkdir()
+            _init_git_repo(dest)
+            result = runner.invoke(
+                cli, ["discover", "--json", "--dir", str(dest)],
+                catch_exceptions=False, env={}
+            )
+            out = json.loads(result.output)
+            secrets = next((c for c in out["connectors"] if c["type"] == "secrets"), None)
+            assert secrets is not None
+            assert secrets["secrets_required"] == [], (
+                f"secrets connector should have no secrets_required, got: {secrets['secrets_required']}"
+            )
+
+    def test_secrets_connector_category_is_code(self, tmp_path: Path) -> None:
+        """secrets connector category must be 'code'."""
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path.parent) as td:
+            dest = Path(td) / "repo"
+            dest.mkdir()
+            _init_git_repo(dest)
+            result = runner.invoke(
+                cli, ["discover", "--json", "--dir", str(dest)],
+                catch_exceptions=False, env={}
+            )
+            out = json.loads(result.output)
+            secrets = next((c for c in out["connectors"] if c["type"] == "secrets"), None)
+            assert secrets is not None
+            assert secrets["category"] == "code", (
+                f"secrets connector category should be 'code', got: {secrets['category']}"
+            )
+
+
+# ---------------------------------------------------------------------------
+# Human-readable output (no --json flag)
+# ---------------------------------------------------------------------------
+
+
+class TestHumanReadableOutput:
+    """Without --json flag, discover outputs a human-readable summary."""
+
+    def test_no_json_flag_outputs_human_readable(self, tmp_path: Path) -> None:
+        """Without --json, output is not JSON — it's a human-readable summary."""
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path.parent) as td:
+            dest = Path(td) / "repo"
+            dest.mkdir()
+            _init_git_repo(dest)
+            result = runner.invoke(
+                cli, ["discover", "--dir", str(dest)],
+                catch_exceptions=False, env={}
+            )
+            assert result.exit_code == 0
+            # Output must NOT be valid JSON (it's human-readable)
+            try:
+                json.loads(result.output)
+                assert False, "Expected human-readable output, got parseable JSON"
+            except json.JSONDecodeError:
+                pass  # expected
+
+    def test_no_json_flag_output_contains_repo(self, tmp_path: Path) -> None:
+        """Human-readable output includes the repo name."""
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path.parent) as td:
+            dest = Path(td) / "repo"
+            dest.mkdir()
+            _init_git_repo(dest)
+            result = runner.invoke(
+                cli, ["discover", "--dir", str(dest)],
+                catch_exceptions=False, env={}
+            )
+            assert result.exit_code == 0
+            assert "Repo:" in result.output or "repo" in result.output.lower()
+
+    def test_no_json_flag_output_contains_coverage(self, tmp_path: Path) -> None:
+        """Human-readable output includes coverage percentage."""
+        runner = CliRunner()
+        with runner.isolated_filesystem(temp_dir=tmp_path.parent) as td:
+            dest = Path(td) / "repo"
+            dest.mkdir()
+            _init_git_repo(dest)
+            result = runner.invoke(
+                cli, ["discover", "--dir", str(dest)],
+                catch_exceptions=False, env={}
+            )
+            assert result.exit_code == 0
+            assert "Coverage:" in result.output or "%" in result.output

@@ -474,6 +474,10 @@ def detect_repo_signals(repo_dir: Path) -> dict[str, list[str]]:
     if openclaw_home.is_dir():
         signals.setdefault("openclaw", []).append("~/.openclaw found")
 
+    # ---- Secrets detection ----
+    # Always active: source scan runs against any repo.
+    signals.setdefault("secrets", []).append("source scan")
+
     return signals
 
 
@@ -684,8 +688,12 @@ def discover(
 
 def write_discovery_json(repo_dir: Path, discovery_data: dict[str, Any]) -> Path:
     """Write discovery data to .mallcop/discovery.json in the repo directory."""
+    import logging
     mallcop_dir = repo_dir / ".mallcop"
     mallcop_dir.mkdir(parents=True, exist_ok=True)
     discovery_path = mallcop_dir / "discovery.json"
-    discovery_path.write_text(json.dumps(discovery_data, indent=2))
+    try:
+        discovery_path.write_text(json.dumps(discovery_data, indent=2))
+    except OSError as exc:
+        logging.warning("Could not write discovery.json: %s", exc)
     return discovery_path
