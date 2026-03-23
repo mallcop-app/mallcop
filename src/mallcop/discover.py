@@ -38,7 +38,7 @@ _CONNECTOR_CATALOG: dict[str, dict[str, Any]] = {
         "category": "code",
         "credential_help": [],
     },
-    "aws-cloudtrail": {
+    "aws": {
         "display_name": "AWS",
         "description": "CloudTrail events, IAM configuration, S3 bucket policies.",
         "category": "cloud",
@@ -124,9 +124,47 @@ _CONNECTOR_CATALOG: dict[str, dict[str, Any]] = {
             },
         ],
     },
-    "container-logs": {
-        "display_name": "Container Logs",
-        "description": "Azure Container Apps stdout logs via REST API.",
+    "auth-provider": {
+        "display_name": "Auth Provider",
+        "description": "Authentication provider audit logs — Supabase Auth, Auth0, Okta, Clerk.",
+        "category": "identity",
+        "credential_help": [
+            {
+                "name": "SUPABASE_PROJECT_URL",
+                "description": "Supabase project URL (if using Supabase Auth).",
+                "how_to_get": "Supabase Dashboard > Project Settings > API > Project URL.",
+                "permissions_needed": "Service role access",
+                "help_url": "https://supabase.com/docs/guides/api",
+            },
+            {
+                "name": "SUPABASE_SERVICE_ROLE_KEY",
+                "description": "Supabase service role key (if using Supabase Auth).",
+                "how_to_get": "Supabase Dashboard > Project Settings > API > service_role key.",
+                "permissions_needed": "Service role",
+                "help_url": "https://supabase.com/docs/guides/api",
+            },
+        ],
+    },
+    "ci-pipeline": {
+        "display_name": "CI Pipeline",
+        "description": "GitHub Actions, GitLab CI, CircleCI — workflow runs, secret access, permissions.",
+        "category": "code",
+        "credential_help": [
+            {
+                "name": "GITHUB_TOKEN",
+                "description": "GitHub personal access token or GitHub App token.",
+                "how_to_get": (
+                    "GitHub > Settings > Developer settings > Personal access tokens > "
+                    "Generate new token. Requires repo and read:org scopes."
+                ),
+                "permissions_needed": "repo, read:org",
+                "help_url": "https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/creating-a-personal-access-token",
+            },
+        ],
+    },
+    "container-scan": {
+        "display_name": "Container Scan",
+        "description": "Docker image vulnerabilities, base image currency, runtime configuration.",
         "category": "infra",
         "credential_help": [
             {
@@ -149,23 +187,6 @@ _CONNECTOR_CATALOG: dict[str, dict[str, Any]] = {
                 "how_to_get": "Azure Portal > Azure Active Directory > Overview > Tenant ID.",
                 "permissions_needed": "None (tenant identifier only)",
                 "help_url": None,
-            },
-        ],
-    },
-    "github": {
-        "display_name": "GitHub",
-        "description": "Org audit log, Dependabot alerts, secret scanning alerts.",
-        "category": "code",
-        "credential_help": [
-            {
-                "name": "GITHUB_TOKEN",
-                "description": "GitHub personal access token or GitHub App token.",
-                "how_to_get": (
-                    "GitHub > Settings > Developer settings > Personal access tokens > "
-                    "Generate new token. Requires repo and read:org scopes."
-                ),
-                "permissions_needed": "repo, read:org",
-                "help_url": "https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/creating-a-personal-access-token",
             },
         ],
     },
@@ -231,9 +252,9 @@ _CONNECTOR_CATALOG: dict[str, dict[str, Any]] = {
             },
         ],
     },
-    "vercel": {
-        "display_name": "Vercel",
-        "description": "Deployment and team audit monitoring.",
+    "deployment": {
+        "display_name": "Deployment",
+        "description": "Deployment platform audit — Vercel, Netlify, Railway deployment events and access.",
         "category": "infra",
         "credential_help": [
             {
@@ -247,6 +268,18 @@ _CONNECTOR_CATALOG: dict[str, dict[str, Any]] = {
                 "help_url": "https://vercel.com/docs/rest-api#authentication",
             },
         ],
+    },
+    "database": {
+        "display_name": "Database",
+        "description": "Database access patterns, connection string hygiene, ORM configuration.",
+        "category": "infra",
+        "credential_help": [],
+    },
+    "secrets": {
+        "display_name": "Secrets",
+        "description": "Secret and credential hygiene — API keys, tokens, and passwords in source or env.",
+        "category": "code",
+        "credential_help": [],
     },
 }
 
@@ -345,12 +378,12 @@ def detect_repo_signals(repo_dir: Path) -> dict[str, list[str]]:
     # ---- AWS detection ----
     # Python: boto3 or botocore in requirements
     if "boto3" in py_packages or "botocore" in py_packages:
-        signals.setdefault("aws-cloudtrail", []).append("boto3 in requirements.txt")
+        signals.setdefault("aws", []).append("boto3 in requirements.txt")
     # Node: @aws-sdk/* packages
     node_all = node_pkgs["deps"] + node_pkgs["dev"]
     aws_node_pkgs = [p for p in node_all if p.startswith("@aws-sdk/") or p == "aws-sdk"]
     if aws_node_pkgs:
-        signals.setdefault("aws-cloudtrail", []).append(
+        signals.setdefault("aws", []).append(
             f"{aws_node_pkgs[0]} in package.json"
         )
     # .env.example or .env with AWS_REGION
@@ -359,7 +392,7 @@ def detect_repo_signals(repo_dir: Path) -> dict[str, list[str]]:
         if env_path.exists():
             content = env_path.read_text(errors="replace")
             if "AWS_" in content:
-                signals.setdefault("aws-cloudtrail", []).append(
+                signals.setdefault("aws", []).append(
                     f"AWS_ variables in {env_file}"
                 )
                 break
@@ -374,23 +407,23 @@ def detect_repo_signals(repo_dir: Path) -> dict[str, list[str]]:
     if (repo_dir / ".azure").is_dir():
         signals.setdefault("azure", []).append(".azure/ directory")
 
-    # ---- Supabase detection ----
+    # ---- Auth provider detection ----
     supabase_node = [p for p in node_all if "@supabase" in p]
     if supabase_node:
-        signals.setdefault("supabase", []).append(f"{supabase_node[0]} in package.json")
+        signals.setdefault("auth-provider", []).append(f"{supabase_node[0]} in package.json")
     if (repo_dir / "supabase").is_dir() and (repo_dir / "supabase" / "config.toml").exists():
-        signals.setdefault("supabase", []).append("supabase/config.toml")
+        signals.setdefault("auth-provider", []).append("supabase/config.toml")
 
-    # ---- GitHub Actions detection (ci-pipeline) ----
+    # ---- CI pipeline detection (GitHub Actions) ----
     workflows_dir = repo_dir / ".github" / "workflows"
     if workflows_dir.is_dir():
         yml_files = list(workflows_dir.glob("*.yml")) + list(workflows_dir.glob("*.yaml"))
         if yml_files:
-            signals.setdefault("github", []).append(
+            signals.setdefault("ci-pipeline", []).append(
                 f".github/workflows/ ({len(yml_files)} workflow files)"
             )
 
-    # ---- Container detection ----
+    # ---- Container scan detection ----
     container_signals = []
     if (repo_dir / "Dockerfile").exists():
         container_signals.append("Dockerfile")
@@ -399,16 +432,42 @@ def detect_repo_signals(repo_dir: Path) -> dict[str, list[str]]:
     if (repo_dir / "docker-compose.yaml").exists():
         container_signals.append("docker-compose.yaml")
     if container_signals:
-        signals.setdefault("container-logs", []).append(", ".join(container_signals))
+        signals.setdefault("container-scan", []).append(", ".join(container_signals))
 
-    # ---- Vercel detection ----
-    vercel_signals = []
+    # ---- Deployment platform detection ----
+    deployment_signals = []
     if (repo_dir / "vercel.json").exists():
-        vercel_signals.append("vercel.json")
+        deployment_signals.append("vercel.json")
     if (repo_dir / ".vercel").is_dir():
-        vercel_signals.append(".vercel/")
-    if vercel_signals:
-        signals.setdefault("vercel", []).append(", ".join(vercel_signals))
+        deployment_signals.append(".vercel/")
+    if (repo_dir / "netlify.toml").exists():
+        deployment_signals.append("netlify.toml")
+    if (repo_dir / ".netlify").is_dir():
+        deployment_signals.append(".netlify/")
+    if (repo_dir / "railway.toml").exists():
+        deployment_signals.append("railway.toml")
+    if deployment_signals:
+        signals.setdefault("deployment", []).append(", ".join(deployment_signals))
+
+    # ---- Database detection ----
+    # ORM / schema files: Prisma, Drizzle, SQLAlchemy, Alembic
+    db_signals = []
+    if (repo_dir / "prisma" / "schema.prisma").exists():
+        db_signals.append("prisma/schema.prisma")
+    if (repo_dir / "drizzle.config.ts").exists() or (repo_dir / "drizzle.config.js").exists():
+        db_signals.append("drizzle.config")
+    if "sqlalchemy" in py_packages or "alembic" in py_packages:
+        db_signals.append("sqlalchemy/alembic in requirements.txt")
+    # Connection string env vars
+    for env_file in [".env.example", ".env.sample", ".env"]:
+        env_path = repo_dir / env_file
+        if env_path.exists():
+            content = env_path.read_text(errors="replace")
+            if "DATABASE_URL" in content or "DB_URL" in content or "POSTGRES" in content:
+                db_signals.append(f"database URL in {env_file}")
+                break
+    if db_signals:
+        signals.setdefault("database", []).append(", ".join(db_signals))
 
     # ---- OpenClaw detection ----
     openclaw_home = Path.home() / ".openclaw"
@@ -427,31 +486,35 @@ def detect_repo_signals(repo_dir: Path) -> dict[str, list[str]]:
 # used by EnvSecretProvider: {CONNECTOR_NAME_UPPER}_{KEY_UPPER}
 _CONNECTOR_ENV_VARS: dict[str, list[str]] = {
     "dependency-scan": [],
-    "aws-cloudtrail": ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_REGION"],
+    "aws": ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_REGION"],
     "azure": ["AZURE_TENANT_ID", "AZURE_CLIENT_ID", "AZURE_CLIENT_SECRET", "AZURE_SUBSCRIPTION_ID"],
-    "container-logs": ["AZURE_TENANT_ID", "AZURE_CLIENT_ID", "AZURE_CLIENT_SECRET"],
-    "github": ["GITHUB_TOKEN"],
+    "auth-provider": ["SUPABASE_PROJECT_URL", "SUPABASE_SERVICE_ROLE_KEY"],
+    "ci-pipeline": ["GITHUB_TOKEN"],
+    "container-scan": ["AZURE_TENANT_ID", "AZURE_CLIENT_ID", "AZURE_CLIENT_SECRET"],
+    "deployment": ["VERCEL_TOKEN"],
+    "database": [],
+    "secrets": [],
     "m365": ["M365_TENANT_ID", "M365_CLIENT_ID", "M365_CLIENT_SECRET"],
     "openclaw": [],  # no credentials required
-    "supabase": ["SUPABASE_PROJECT_URL", "SUPABASE_SERVICE_ROLE_KEY", "SUPABASE_PROJECT_REF"],
-    "vercel": ["VERCEL_TOKEN"],
 }
 
 # Env vars that are required (missing means status = detected, not active)
 _CONNECTOR_REQUIRED_ENV_VARS: dict[str, list[str]] = {
     "dependency-scan": [],
-    "aws-cloudtrail": ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"],
+    "aws": ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"],
     "azure": ["AZURE_TENANT_ID", "AZURE_CLIENT_ID", "AZURE_CLIENT_SECRET"],
-    "container-logs": ["AZURE_TENANT_ID", "AZURE_CLIENT_ID", "AZURE_CLIENT_SECRET"],
-    "github": ["GITHUB_TOKEN"],
+    "auth-provider": ["SUPABASE_PROJECT_URL", "SUPABASE_SERVICE_ROLE_KEY"],
+    "ci-pipeline": ["GITHUB_TOKEN"],
+    "container-scan": ["AZURE_TENANT_ID", "AZURE_CLIENT_ID", "AZURE_CLIENT_SECRET"],
+    "deployment": ["VERCEL_TOKEN"],
+    "database": [],
+    "secrets": [],
     "m365": ["M365_TENANT_ID", "M365_CLIENT_ID", "M365_CLIENT_SECRET"],
     "openclaw": [],
-    "supabase": ["SUPABASE_PROJECT_URL", "SUPABASE_SERVICE_ROLE_KEY", "SUPABASE_PROJECT_REF"],
-    "vercel": ["VERCEL_TOKEN"],
 }
 
 # Connectors that are active even without credentials (no external auth needed)
-_NO_CREDENTIAL_CONNECTORS: frozenset[str] = frozenset(["dependency-scan", "openclaw"])
+_NO_CREDENTIAL_CONNECTORS: frozenset[str] = frozenset(["dependency-scan", "database", "secrets", "openclaw"])
 
 
 def probe_credentials(
