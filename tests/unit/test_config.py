@@ -507,6 +507,62 @@ class TestProConfigUrlResolution:
         assert config.pro is not None
         assert config.pro.account_url == DEFAULT_API_URL
 
+    def test_mallcop_api_key_env_overrides_service_token(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """MALLCOP_API_KEY env var overrides service_token from mallcop.yaml."""
+        yaml_content = textwrap.dedent("""\
+            secrets:
+              backend: env
+
+            connectors: {}
+            routing: {}
+            actor_chain: {}
+
+            pro:
+              account_id: acct_123
+              service_token: old-token
+        """)
+        monkeypatch.setenv("MALLCOP_API_KEY", "mallcop-sk-newkey123")
+        self._write_config(tmp_path, yaml_content)
+        config = load_config(tmp_path)
+        assert config.pro is not None
+        assert config.pro.service_token == "mallcop-sk-newkey123"
+
+    def test_mallcop_api_key_env_creates_pro_config_without_pro_section(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """MALLCOP_API_KEY env var bootstraps a ProConfig even without a pro: section."""
+        yaml_content = textwrap.dedent("""\
+            secrets:
+              backend: env
+
+            connectors: {}
+            routing: {}
+            actor_chain: {}
+        """)
+        monkeypatch.setenv("MALLCOP_API_KEY", "mallcop-sk-bootstrap")
+        self._write_config(tmp_path, yaml_content)
+        config = load_config(tmp_path)
+        assert config.pro is not None
+        assert config.pro.service_token == "mallcop-sk-bootstrap"
+        assert config.pro.account_url.startswith("https://mallcop.app")
+        assert config.pro.inference_url.startswith("https://mallcop.app")
+
+    def test_mallcop_api_url_bootstrap_pro_config_uses_defaults(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Bootstrap ProConfig (MALLCOP_API_KEY, no pro: section) uses DEFAULT_API_URL/DEFAULT_INFERENCE_URL.
+
+        MALLCOP_API_URL is read at module import time, so we verify that _parse_pro uses
+        the module-level DEFAULT_* constants (which honour the env var) rather than
+        hardcoding mallcop.app strings.
+        """
+        from mallcop.config import _parse_pro, DEFAULT_API_URL, DEFAULT_INFERENCE_URL
+        from mallcop.secrets import EnvSecretProvider
+
+        monkeypatch.setenv("MALLCOP_API_KEY", "mallcop-sk-test")
+        provider = EnvSecretProvider()
+        result = _parse_pro(None, provider)
+        assert result is not None
+        # The bootstrap ProConfig must reference the module-level defaults, not literals.
+        assert result.account_url == DEFAULT_API_URL
+        assert result.inference_url == DEFAULT_INFERENCE_URL
+
 
 # ─── 5.6: _parse_routing and _parse_llm edge cases ────────────────────────────
 
