@@ -401,7 +401,8 @@ def _setup_pro(config_data: dict[str, Any]) -> dict[str, Any] | None:
 
 @cli.command()
 @click.option("--pro", is_flag=True, help="Set up Pro managed inference")
-def init(pro: bool) -> None:
+@click.option("--api-key", "api_key", default=None, help="mallcop Pro API key (mallcop-sk-* format); stored in mallcop.yaml")
+def init(pro: bool, api_key: str | None) -> None:
     """Discover environment, write config, estimate costs."""
     cwd = Path.cwd()
     search_paths = get_search_paths(cwd)
@@ -488,10 +489,25 @@ def init(pro: bool) -> None:
     if pro:
         github_result = _setup_github(config_data)
 
+    # --api-key: direct key-injection path — store the key in config without
+    # going through the full account-creation flow.
+    api_key_result: dict[str, Any] | None = None
+    if api_key:
+        import os as _os
+        _base = _os.environ.get("MALLCOP_API_URL", "https://mallcop.app").rstrip("/")
+        config_data["pro"] = {
+            "service_token": api_key,
+            "account_url": f"{_base}/api/account",
+            "inference_url": f"{_base}/api/inference",
+        }
+        if "llm" in config_data:
+            del config_data["llm"]
+        api_key_result = {"api_key": api_key, "inference_url": config_data["pro"]["inference_url"]}
+
     # Pro setup modifies config_data before writing.
     # Deep-copy so we can restore on failure (setup mutates in place).
     pro_result: dict[str, Any] | None = None
-    if pro:
+    if pro and not api_key:
         config_backup = copy.deepcopy(config_data)
         pro_result = _setup_pro(config_data)
         if pro_result is None:
@@ -535,6 +551,8 @@ def init(pro: bool) -> None:
         output["github"] = github_result
     if pro_result:
         output["pro"] = pro_result
+    if api_key_result:
+        output["pro"] = api_key_result
 
     click.echo(json.dumps(output))
 

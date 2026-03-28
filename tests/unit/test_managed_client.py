@@ -242,3 +242,166 @@ class TestBuildLLMClientManaged:
 
         client = build_llm_client(llm_config, pro_config=pro)
         assert isinstance(client, AnthropicClient)
+
+    def test_pro_config_mallcop_app_url_enables_lanes(self) -> None:
+        """When inference_url points to mallcop.app, use_lanes is True."""
+        from mallcop.llm import ManagedClient, build_llm_client
+
+        pro = MagicMock()
+        pro.service_token = "mallcop-sk-abc123"
+        pro.inference_url = "https://mallcop.app/api/inference"
+        pro.use_lanes = False  # attribute present but url-based detection wins
+
+        client = build_llm_client(None, pro_config=pro)
+        assert isinstance(client, ManagedClient)
+        assert client._use_lanes is True
+
+    def test_pro_config_non_mallcop_url_lanes_disabled(self) -> None:
+        """When inference_url is not mallcop.app, use_lanes is False by default."""
+        from mallcop.llm import ManagedClient, build_llm_client
+
+        pro = MagicMock()
+        pro.service_token = "svc-tok"
+        pro.inference_url = "https://forge.internal/api/inference"
+        pro.use_lanes = False
+
+        client = build_llm_client(None, pro_config=pro)
+        assert isinstance(client, ManagedClient)
+        assert client._use_lanes is False
+
+
+class TestManagedClientLaneMode:
+    """ManagedClient in lane mode sends lane names as model field."""
+
+    def _make_client(self, use_lanes: bool = True):
+        from mallcop.llm import ManagedClient
+
+        return ManagedClient(
+            endpoint="https://mallcop.app/api/inference",
+            service_token="mallcop-sk-test",
+            use_lanes=use_lanes,
+        )
+
+    def _mock_response(self, status_code=200):
+        mock = MagicMock()
+        mock.status_code = status_code
+        mock.json.return_value = {
+            "id": "msg_lane",
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "text", "text": "ok"}],
+            "model": "patrol",
+            "usage": {"input_tokens": 10, "output_tokens": 5},
+            "stop_reason": "end_turn",
+        }
+        mock.text = "error"
+        return mock
+
+    def test_lane_mode_sends_patrol_for_haiku(self) -> None:
+        client = self._make_client(use_lanes=True)
+        mock_resp = self._mock_response()
+
+        with patch("mallcop.llm.managed.requests.post", return_value=mock_resp) as mock_post:
+            client.chat(
+                model="haiku",
+                system_prompt="System",
+                messages=[{"role": "user", "content": "Hi"}],
+                tools=[],
+            )
+
+        body = mock_post.call_args[1]["json"]
+        assert body["model"] == "patrol"
+
+    def test_lane_mode_sends_detective_for_sonnet(self) -> None:
+        client = self._make_client(use_lanes=True)
+        mock_resp = self._mock_response()
+
+        with patch("mallcop.llm.managed.requests.post", return_value=mock_resp) as mock_post:
+            client.chat(
+                model="sonnet",
+                system_prompt="System",
+                messages=[{"role": "user", "content": "Hi"}],
+                tools=[],
+            )
+
+        body = mock_post.call_args[1]["json"]
+        assert body["model"] == "detective"
+
+    def test_lane_mode_sends_forensic_for_opus(self) -> None:
+        client = self._make_client(use_lanes=True)
+        mock_resp = self._mock_response()
+
+        with patch("mallcop.llm.managed.requests.post", return_value=mock_resp) as mock_post:
+            client.chat(
+                model="opus",
+                system_prompt="System",
+                messages=[{"role": "user", "content": "Hi"}],
+                tools=[],
+            )
+
+        body = mock_post.call_args[1]["json"]
+        assert body["model"] == "forensic"
+
+    def test_lane_mode_passes_lane_name_unchanged(self) -> None:
+        """When model is already a lane name, it should pass through unchanged."""
+        client = self._make_client(use_lanes=True)
+        mock_resp = self._mock_response()
+
+        with patch("mallcop.llm.managed.requests.post", return_value=mock_resp) as mock_post:
+            client.chat(
+                model="detective",
+                system_prompt="System",
+                messages=[{"role": "user", "content": "Hi"}],
+                tools=[],
+            )
+
+        body = mock_post.call_args[1]["json"]
+        assert body["model"] == "detective"
+
+    def test_lane_mode_full_claude_model_id_maps_to_patrol(self) -> None:
+        """Full Claude haiku model ID maps to patrol lane."""
+        client = self._make_client(use_lanes=True)
+        mock_resp = self._mock_response()
+
+        with patch("mallcop.llm.managed.requests.post", return_value=mock_resp) as mock_post:
+            client.chat(
+                model="claude-haiku-4-5-20251001",
+                system_prompt="System",
+                messages=[{"role": "user", "content": "Hi"}],
+                tools=[],
+            )
+
+        body = mock_post.call_args[1]["json"]
+        assert body["model"] == "patrol"
+
+    def test_non_lane_mode_resolves_haiku_to_full_id(self) -> None:
+        """When use_lanes=False, haiku resolves to a full Claude model ID."""
+        client = self._make_client(use_lanes=False)
+        mock_resp = self._mock_response()
+
+        with patch("mallcop.llm.managed.requests.post", return_value=mock_resp) as mock_post:
+            client.chat(
+                model="haiku",
+                system_prompt="System",
+                messages=[{"role": "user", "content": "Hi"}],
+                tools=[],
+            )
+
+        body = mock_post.call_args[1]["json"]
+        assert body["model"] == "claude-haiku-4-5-20251001"
+
+    def test_unknown_model_defaults_to_patrol(self) -> None:
+        """Unknown model names default to 'patrol' lane in lane mode."""
+        client = self._make_client(use_lanes=True)
+        mock_resp = self._mock_response()
+
+        with patch("mallcop.llm.managed.requests.post", return_value=mock_resp) as mock_post:
+            client.chat(
+                model="some-unknown-model-v99",
+                system_prompt="System",
+                messages=[{"role": "user", "content": "Hi"}],
+                tools=[],
+            )
+
+        body = mock_post.call_args[1]["json"]
+        assert body["model"] == "patrol"
