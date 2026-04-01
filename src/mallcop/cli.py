@@ -1249,6 +1249,49 @@ def status(costs: bool, dir_path: str | None, human: bool) -> None:
         click.echo(json.dumps(result))
 
 
+# --- Chat ---
+
+
+@cli.command()
+@click.option("--dir", "dir_path", default=None, help="Deployment repo directory.", hidden=True)
+def chat(dir_path: str | None) -> None:
+    """Interactive chat REPL — ask questions about your security posture."""
+    from mallcop.chat import run_chat_repl
+    from mallcop.config import load_config
+    from mallcop.llm.managed import ManagedClient
+
+    root = Path(dir_path) if dir_path else Path.cwd()
+
+    try:
+        config = load_config(root)
+    except Exception as exc:
+        click.echo(f"ERROR: could not load config: {exc}", err=True)
+        raise SystemExit(1)
+
+    pro = config.pro
+    if pro is None or not getattr(pro, "api_key", None):
+        click.echo(
+            "ERROR: mallcop Pro not configured. Run `mallcop init --pro` first.",
+            err=True,
+        )
+        raise SystemExit(1)
+
+    import uuid
+    session_id = str(uuid.uuid4())
+
+    managed_client = ManagedClient(
+        endpoint=getattr(pro, "endpoint", "https://mallcop.app"),
+        service_token=pro.api_key,
+        use_lanes=True,
+        extra_headers={
+            "X-Mallcop-Session": session_id,
+            "X-Mallcop-Surface": "cli",
+        },
+    )
+
+    run_chat_repl(managed_client=managed_client, root=root)
+
+
 # --- Development ---
 
 

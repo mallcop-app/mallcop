@@ -34,6 +34,7 @@ class LLMClient(ABC):
         system_prompt: str,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]],
+        max_tokens: int | None = None,
     ) -> LLMResponse:
         ...
 
