@@ -664,12 +664,36 @@ def escalate(dir_path: str | None, human: bool, no_actors: bool, backend: str) -
 @click.option("--human", is_flag=True, help="Human-readable output.")
 @click.option("--backend", default="anthropic", type=click.Choice(["anthropic", "claude-code"]),
               help="LLM backend: 'anthropic' (API) or 'claude-code' (CLI, uses subscription).")
-def watch(dry_run: bool, dir_path: str | None, human: bool, backend: str) -> None:
+@click.option("--bridge", "bridge", is_flag=True, default=False,
+              help="Start bridge polling daemon (requires Pro config).")
+def watch(dry_run: bool, dir_path: str | None, human: bool, backend: str, bridge: bool) -> None:
     """Scan + detect + escalate (cron-friendly)."""
     from mallcop.escalate import run_escalate
 
     root = Path(dir_path) if dir_path else Path.cwd()
     result: dict[str, Any] = {"command": "watch", "dry_run": dry_run}
+
+    # Step -1: Start bridge polling thread if requested
+    if bridge:
+        from mallcop.bridge import start_bridge_thread
+        try:
+            config = load_config(root)
+            pro = config.pro
+            if pro and pro.service_token and pro.inference_url:
+                findings_path = root / "findings.jsonl"
+                start_bridge_thread(
+                    inference_url=pro.inference_url,
+                    service_token=pro.service_token,
+                    findings_path=findings_path,
+                )
+                click.echo("bridge: polling started", err=True)
+            else:
+                click.echo(
+                    "bridge: skipped — Pro config missing (need service_token + inference_url)",
+                    err=True,
+                )
+        except Exception as exc:
+            click.echo(f"bridge: failed to start — {exc}", err=True)
 
     # Step 0: Build and validate actor runner once (reused in Step 3)
     watch_runner = None

@@ -17,7 +17,7 @@ __all__ = ["load_config", "MallcopConfig", "BudgetConfig", "BaselineConfig", "LL
 
 # MALLCOP_API_URL overrides the base URL for all mallcop.app endpoints.
 # Useful for local development / testing against a staging server.
-_MALLCOP_API_URL_BASE = os.environ.get("MALLCOP_API_URL", "https://mallcop.app").rstrip("/")
+_MALLCOP_API_URL_BASE = os.environ.get("MALLCOP_API_URL", "https://api.mallcop.app").rstrip("/")
 
 DEFAULT_API_URL = f"{_MALLCOP_API_URL_BASE}/api/account"
 DEFAULT_INFERENCE_URL = f"{_MALLCOP_API_URL_BASE}/api/inference"

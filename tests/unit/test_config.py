@@ -542,8 +542,8 @@ class TestProConfigUrlResolution:
         config = load_config(tmp_path)
         assert config.pro is not None
         assert config.pro.service_token == "mallcop-sk-bootstrap"
-        assert config.pro.account_url.startswith("https://mallcop.app")
-        assert config.pro.inference_url.startswith("https://mallcop.app")
+        assert config.pro.account_url.startswith("https://api.mallcop.app")
+        assert config.pro.inference_url.startswith("https://api.mallcop.app")
 
     def test_mallcop_api_url_bootstrap_pro_config_uses_defaults(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Bootstrap ProConfig (MALLCOP_API_KEY, no pro: section) uses DEFAULT_API_URL/DEFAULT_INFERENCE_URL.
