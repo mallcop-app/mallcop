@@ -430,3 +430,105 @@ class TestForgeErrorHandling:
                 context_manager=cm,
                 root=tmp_path,
             )
+
+    def test_402_store_append_raises_still_returns_platform_msg(self, tmp_path: Path) -> None:
+        """If store.append raises inside the 402 handler, chat_turn still returns the platform message."""
+        client = MagicMock()
+        client.chat.side_effect = LLMAPIError("error", status_code=402)
+        store = MagicMock()
+        # First call (user message) succeeds; second call (platform message) raises.
+        store.append.side_effect = [None, IOError("disk full")]
+        store.load_session.return_value = []
+        cm = ContextWindowManager()
+        session_id = str(uuid.uuid4())
+
+        # Must not raise — store failure is swallowed.
+        result = chat_turn(
+            question="Hello",
+            session_id=session_id,
+            managed_client=client,
+            store=store,
+            context_manager=cm,
+            root=tmp_path,
+        )
+
+        assert "insufficient donut balance" in result["response"]
+        assert result["tokens_used"] == 0
+
+    def test_503_store_append_raises_still_returns_platform_msg(self, tmp_path: Path) -> None:
+        """If store.append raises inside the 503 handler, chat_turn still returns the platform message."""
+        client = MagicMock()
+        client.chat.side_effect = LLMAPIError("error", status_code=503)
+        store = MagicMock()
+        store.append.side_effect = [None, IOError("disk full")]
+        store.load_session.return_value = []
+        cm = ContextWindowManager()
+        session_id = str(uuid.uuid4())
+
+        result = chat_turn(
+            question="Hello",
+            session_id=session_id,
+            managed_client=client,
+            store=store,
+            context_manager=cm,
+            root=tmp_path,
+        )
+
+        assert "inference service unavailable" in result["response"]
+        assert result["tokens_used"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Bug fix: invalid MALLCOP_BUDGET_WARNING_THRESHOLD (mallcop-pro-tz5)
+# ---------------------------------------------------------------------------
+
+class TestBudgetThresholdValidation:
+    """MALLCOP_BUDGET_WARNING_THRESHOLD <= 0 falls back to the default."""
+
+    def setup_method(self) -> None:
+        _session_donut_spend.clear()
+
+    def test_threshold_zero_does_not_fire_on_first_turn(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """With MALLCOP_BUDGET_WARNING_THRESHOLD=0, warning does NOT fire on first turn."""
+        monkeypatch.setenv("MALLCOP_BUDGET_WARNING_THRESHOLD", "0")
+        # Any token count: if threshold were truly 0, cumulative_donuts >= 0 is always True.
+        tokens = 100  # 0.1 donuts — well below the default 50
+        client = _make_mock_client(_make_llm_response(tokens=tokens))
+        store = _make_store(tmp_path)
+        cm = ContextWindowManager()
+        session_id = str(uuid.uuid4())
+
+        result = chat_turn(
+            question="Hello",
+            session_id=session_id,
+            managed_client=client,
+            store=store,
+            context_manager=cm,
+            root=tmp_path,
+        )
+
+        assert "budget_warning" not in result
+
+    def test_negative_threshold_does_not_fire_on_first_turn(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Negative MALLCOP_BUDGET_WARNING_THRESHOLD falls back to default — no spurious warning."""
+        monkeypatch.setenv("MALLCOP_BUDGET_WARNING_THRESHOLD", "-10")
+        tokens = 100
+        client = _make_mock_client(_make_llm_response(tokens=tokens))
+        store = _make_store(tmp_path)
+        cm = ContextWindowManager()
+        session_id = str(uuid.uuid4())
+
+        result = chat_turn(
+            question="Hello",
+            session_id=session_id,
+            managed_client=client,
+            store=store,
+            context_manager=cm,
+            root=tmp_path,
+        )
+
+        assert "budget_warning" not in result
