@@ -12,6 +12,7 @@ TDD sequence:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import uuid
 from pathlib import Path
@@ -27,8 +28,13 @@ from mallcop.chat import (
     _burn_rate_footer,
     _build_system_prompt,
     _load_finding_summaries,
-    chat_turn,
+    chat_turn as _async_chat_turn,
 )
+
+
+def chat_turn(*args: Any, **kwargs: Any) -> Any:
+    """Sync wrapper around async chat_turn for test convenience."""
+    return asyncio.run(_async_chat_turn(*args, **kwargs))
 from mallcop.conversation import ConversationStore
 from mallcop.context_window import ContextWindowManager
 from mallcop.llm_types import LLMResponse, ToolCall
