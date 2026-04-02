@@ -233,7 +233,7 @@ class CampfireDispatcher:
         )
 
         try:
-            result = chat_turn(
+            result = await chat_turn(
                 question=question,
                 session_id=session_id,
                 managed_client=self._managed_client,
@@ -256,16 +256,20 @@ class CampfireDispatcher:
             "tokens_used": result.get("tokens_used", 0),
         })
 
+        send_args = [
+            "send", self._campfire_id,
+            "--instance", "mallcop",
+            "--tag", _CHAT_TAG,
+            "--tag", session_tag,
+            "--tag", f"platform:{_SURFACE}",
+            "--tag", "response",
+        ]
+        if result.get("is_platform_error"):
+            send_args += ["--tag", "platform-error"]
+        send_args.append(payload)
+
         try:
-            await self._cf(
-                "send", self._campfire_id,
-                "--instance", "mallcop",
-                "--tag", _CHAT_TAG,
-                "--tag", session_tag,
-                "--tag", f"platform:{_SURFACE}",
-                "--tag", "response",
-                payload,
-            )
+            await self._cf(*send_args)
         except _SubprocessError as exc:
             _log.error("campfire_dispatch: failed to post response: %s", exc)
 

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import inspect
 import json
 import logging
 import os
@@ -90,7 +92,7 @@ def _burn_rate_footer(tokens_used: int) -> str:
     return f"[{donuts:.1f} donuts]"
 
 
-def chat_turn(
+async def chat_turn(
     question: str,
     session_id: str,
     managed_client: Any,
@@ -123,15 +125,22 @@ def chat_turn(
         footer: str — burn-rate footer string
     """
     # Append user message to store.
-    store.append(
+    # Support both sync (ConversationStore) and async (CampfireConversationAdapter) stores.
+    _append_result = store.append(
         session_id=session_id,
         surface=SURFACE,
         role="user",
         content=question,
     )
+    if inspect.isawaitable(_append_result):
+        await _append_result
 
     # Load full session history and build context.
-    history = store.load_session(session_id)
+    _load_result = store.load_session(session_id)
+    if inspect.isawaitable(_load_result):
+        history = await _load_result
+    else:
+        history = _load_result
     context = context_manager.build_context(history)
 
     # Build messages list for inference from context.
@@ -187,16 +196,23 @@ def chat_turn(
                 "Your message is saved and I'll respond when service resumes."
             )
             try:
-                store.append(
+                _r = store.append(
                     session_id=session_id,
                     surface=SURFACE,
                     role="assistant",
                     content=platform_msg,
                     tokens_used=0,
                 )
+                if inspect.isawaitable(_r):
+                    await _r
             except Exception as store_exc:
                 _log.error("chat: failed to persist 402 platform message: %s", store_exc)
-            return {"response": platform_msg, "tokens_used": 0, "footer": _burn_rate_footer(0)}
+            return {
+                "response": platform_msg,
+                "tokens_used": 0,
+                "footer": _burn_rate_footer(0),
+                "is_platform_error": True,
+            }
         elif status_code == 503:
             platform_msg = (
                 "I received your message but can't respond right now — "
@@ -204,16 +220,23 @@ def chat_turn(
                 "Your message is saved and I'll respond when service resumes."
             )
             try:
-                store.append(
+                _r = store.append(
                     session_id=session_id,
                     surface=SURFACE,
                     role="assistant",
                     content=platform_msg,
                     tokens_used=0,
                 )
+                if inspect.isawaitable(_r):
+                    await _r
             except Exception as store_exc:
                 _log.error("chat: failed to persist 503 platform message: %s", store_exc)
-            return {"response": platform_msg, "tokens_used": 0, "footer": _burn_rate_footer(0)}
+            return {
+                "response": platform_msg,
+                "tokens_used": 0,
+                "footer": _burn_rate_footer(0),
+                "is_platform_error": True,
+            }
         raise
 
     # Extract text from response.
@@ -231,13 +254,15 @@ def chat_turn(
     cumulative_donuts = _session_donut_spend[session_id]
 
     # Append assistant response to store.
-    store.append(
+    _r = store.append(
         session_id=session_id,
         surface=SURFACE,
         role="assistant",
         content=text,
         tokens_used=tokens_used,
     )
+    if inspect.isawaitable(_r):
+        await _r
 
     footer = _burn_rate_footer(tokens_used)
     result: dict[str, Any] = {"response": text, "tokens_used": tokens_used, "footer": footer}
@@ -293,14 +318,14 @@ def run_chat_repl(
             break
 
         try:
-            result = chat_turn(
+            result = asyncio.run(chat_turn(
                 question=question,
                 session_id=session_id,
                 managed_client=managed_client,
                 store=store,
                 context_manager=context_manager,
                 root=root,
-            )
+            ))
             click.echo(f"\nmallcop> {result['response']}")
             click.echo(result["footer"])
             if result.get("budget_warning"):
