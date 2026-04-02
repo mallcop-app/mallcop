@@ -40,4 +40,14 @@ class LLMClient(ABC):
 
 
 class LLMAPIError(Exception):
-    """Raised when an LLM API returns an error."""
+    """Raised when an LLM API returns an error.
+
+    Attributes
+    ----------
+    status_code:
+        HTTP status code from the upstream API response, if available.
+    """
+
+    def __init__(self, message: str = "", status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code: int | None = status_code
