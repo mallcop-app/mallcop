@@ -139,3 +139,89 @@ class TestInitTelegram:
         assert result.exit_code == 0, result.output
         data = _parse_init_output(result.output)
         assert data["delivery"]["telegram_configured"] is True
+
+
+class TestInitCampfireTransport:
+    def _fake_setup_github(self, config_data: dict, repo: str) -> dict:
+        """Inject github section into config_data as _setup_github would."""
+        config_data["github"] = {"repo": repo}
+        return {"repo": repo}
+
+    def test_github_transport_used_when_github_config_present(self, tmp_path: Path) -> None:
+        """When config has github.repo (set by _setup_github), cf create uses --transport github."""
+        runner = CliRunner()
+
+        fake_proc = MagicMock()
+        fake_proc.stdout = "camp-gh123\n"
+        fake_proc.returncode = 0
+
+        def inject_github(config_data: dict) -> dict:
+            config_data["github"] = {"repo": "owner/repo"}
+            return {"repo": "owner/repo"}
+
+        def fake_setup_pro(config_data: dict) -> dict:
+            config_data["pro"] = {
+                "service_token": "mallcop-sk-test",
+                "inference_url": "https://mallcop.app/api/inference",
+                "account_url": "https://mallcop.app/api/account",
+            }
+            return {"inference_url": "https://mallcop.app/api/inference"}
+
+        with runner.isolated_filesystem(temp_dir=tmp_path):
+            with patch("subprocess.run", return_value=fake_proc) as mock_run, \
+                 patch("mallcop.cli._setup_github", side_effect=inject_github), \
+                 patch("mallcop.cli._setup_pro", side_effect=fake_setup_pro):
+                result = runner.invoke(cli, ["init", "--pro"])
+
+        assert result.exit_code == 0, result.output
+        data = _parse_init_output(result.output)
+        assert data["status"] == "ok"
+        assert data["delivery"]["campfire_id"] == "camp-gh123"
+
+        # Verify cf was called with github transport flags
+        call_args = mock_run.call_args
+        cmd = call_args[0][0]
+        assert "--transport" in cmd
+        assert "github" in cmd
+        assert "--github-repo" in cmd
+        assert "owner/repo" in cmd
+        assert "--github-token-env" in cmd
+        assert "GITHUB_TOKEN" in cmd
+
+        # Verify campfire_id is stored in config
+        import yaml as _yaml
+        config_path = Path(data["config_path"])
+        with open(config_path) as f:
+            cfg = _yaml.safe_load(f)
+        assert cfg["delivery"]["campfire_id"] == "camp-gh123"
+
+    def test_no_transport_flags_without_github_config(self, tmp_path: Path) -> None:
+        """When config has no github section, cf create is called WITHOUT --transport flags."""
+        runner = CliRunner()
+
+        fake_proc = MagicMock()
+        fake_proc.stdout = "camp-fs456\n"
+        fake_proc.returncode = 0
+
+        with runner.isolated_filesystem(temp_dir=tmp_path):
+            with patch("subprocess.run", return_value=fake_proc) as mock_run:
+                result = runner.invoke(cli, ["init"])
+
+        assert result.exit_code == 0, result.output
+        data = _parse_init_output(result.output)
+        assert data["status"] == "ok"
+        assert data["delivery"]["campfire_id"] == "camp-fs456"
+
+        # Verify cf was NOT called with transport flags
+        call_args = mock_run.call_args
+        cmd = call_args[0][0]
+        assert "--transport" not in cmd
+        assert "--github-repo" not in cmd
+        assert "--github-token-env" not in cmd
+
+        # Verify campfire_id is stored in config
+        import yaml as _yaml
+        config_path = Path(data["config_path"])
+        with open(config_path) as f:
+            cfg = _yaml.safe_load(f)
+        assert cfg["delivery"]["campfire_id"] == "camp-fs456"
