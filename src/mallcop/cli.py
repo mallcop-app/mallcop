@@ -278,6 +278,83 @@ def _setup_github(config_data: dict[str, Any]) -> dict[str, Any] | None:
     }
 
 
+_GHA_WORKFLOW_TEMPLATE = """\
+name: mallcop
+on:
+  schedule:
+    - cron: '*/15 * * * *'
+  workflow_dispatch:
+jobs:
+  mallcop:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install mallcop
+        run: pip install mallcop
+      - name: Run mallcop watch
+        env:
+          GITHUB_TOKEN: ${{{{ secrets.GITHUB_TOKEN }}}}
+          MALLCOP_TELEGRAM_BOT_TOKEN: ${{{{ secrets.MALLCOP_TELEGRAM_BOT_TOKEN }}}}
+          MALLCOP_TELEGRAM_CHAT_ID: ${{{{ secrets.MALLCOP_TELEGRAM_CHAT_ID }}}}
+        run: mallcop watch --dir ${{{{ github.workspace }}}}
+"""
+
+
+def _generate_gha_workflow(config_data: dict[str, Any], cwd: Path) -> dict[str, Any]:
+    """Write .github/workflows/mallcop.yml and set GitHub Actions secrets.
+
+    Only runs when config_data["github"]["repo"] is present.
+    Returns a dict of delivery keys to merge into the output.
+    """
+    import subprocess as _subprocess
+
+    github_section = config_data.get("github", {})
+    if not isinstance(github_section, dict) or not github_section.get("repo"):
+        return {}
+
+    delivery: dict[str, Any] = {}
+
+    # Write workflow file (skip if already exists)
+    workflow_path = cwd / ".github" / "workflows" / "mallcop.yml"
+    if not workflow_path.exists():
+        workflow_path.parent.mkdir(parents=True, exist_ok=True)
+        workflow_path.write_text(_GHA_WORKFLOW_TEMPLATE)
+        delivery["workflow_written"] = True
+
+    # Set GitHub Actions secrets via gh CLI
+    delivery_section = config_data.get("delivery", {})
+    campfire_id = delivery_section.get("campfire_id", "")
+    telegram_bot_token = delivery_section.get("telegram_bot_token", "")
+    telegram_chat_id = delivery_section.get("telegram_chat_id", "")
+
+    secrets_to_set: list[tuple[str, str]] = []
+    if campfire_id:
+        secrets_to_set.append(("CAMPFIRE_ID", campfire_id))
+    if telegram_bot_token:
+        secrets_to_set.append(("MALLCOP_TELEGRAM_BOT_TOKEN", telegram_bot_token))
+    if telegram_chat_id:
+        secrets_to_set.append(("MALLCOP_TELEGRAM_CHAT_ID", telegram_chat_id))
+
+    gh_missing = False
+    for secret_name, secret_value in secrets_to_set:
+        try:
+            _subprocess.run(
+                ["gh", "secret", "set", secret_name, "--body", secret_value],
+                capture_output=True,
+                text=True,
+            )
+        except FileNotFoundError:
+            gh_missing = True
+            break  # gh not on PATH — skip remaining secrets
+        except Exception:
+            pass  # other errors are best-effort; don't fail init
+
+    if gh_missing:
+        delivery["secrets_skipped"] = "gh not found"
+
+    return delivery
+
+
 def _setup_pro(config_data: dict[str, Any]) -> dict[str, Any] | None:
     """Set up Pro managed inference after connector discovery.
 
@@ -622,6 +699,11 @@ def init(pro: bool, api_key: str | None, telegram_bot_token: str | None, telegra
     if delivery_config_data:
         config_data["delivery"] = delivery_config_data
 
+    # Generate GitHub Actions workflow and set secrets (only when github config present)
+    gha_delivery = _generate_gha_workflow(config_data, cwd)
+    if gha_delivery:
+        delivery_result.update(gha_delivery)
+
     config_path = cwd / "mallcop.yaml"
     with open(config_path, "w") as f:
         yaml.dump(config_data, f, default_flow_style=False, sort_keys=False)
@@ -935,14 +1017,23 @@ def _watch_dispatch_pass(root: Path) -> None:
         campfire_id=campfire_id,
     )
 
-    # One-shot dispatcher: no managed client needed for run_once (reads+dispatches
-    # campfire messages via cf CLI subprocess; managed_client only used inside
-    # chat_turn which is called per-message). Pass None — chat_turn will raise
-    # if invoked without a client, but run_once() itself does not require it at
-    # construction time.
+    # Build a ManagedClient when pro config is present so the dispatcher can
+    # respond to Telegram messages via inference. Non-pro users get None, which
+    # means chat_turn will log an error if called — acceptable behaviour.
+    pro = getattr(config, "pro", None)
+    managed_client = None
+    if pro and getattr(pro, "service_token", None):
+        from mallcop.managed_client import ManagedClient
+
+        managed_client = ManagedClient(
+            endpoint=getattr(pro, "inference_url", None) or "https://mallcop.app",
+            service_token=pro.service_token,
+            use_lanes=True,
+        )
+
     dispatcher = CampfireDispatcher(
         campfire_id=campfire_id,
-        managed_client=None,
+        managed_client=managed_client,
         root=root,
     )
 
