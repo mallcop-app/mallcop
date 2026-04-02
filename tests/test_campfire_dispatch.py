@@ -486,12 +486,12 @@ def test_dispatch_forwards_budget_warning(campfire_id: str, tmp_path: Path) -> N
         for msg in messages:
             # Patch chat_turn at its definition site (local import inside
             # _dispatch_message uses mallcop.chat.chat_turn).
-            with patch("mallcop.chat.chat_turn") as mock_ct:
-                mock_ct.return_value = {
-                    "response": "Analysis complete.",
-                    "tokens_used": 55,
-                    "budget_warning": budget_warning_text,
-                }
+            # chat_turn is now async — use AsyncMock so await works.
+            with patch("mallcop.chat.chat_turn", new=AsyncMock(return_value={
+                "response": "Analysis complete.",
+                "tokens_used": 55,
+                "budget_warning": budget_warning_text,
+            })):
                 await dispatcher._dispatch_message(msg)
 
     asyncio.run(run_one_poll())
@@ -514,4 +514,89 @@ def test_dispatch_forwards_budget_warning(campfire_id: str, tmp_path: Path) -> N
     payload = json.loads(warning_msg["payload"])
     assert payload.get("budget_warning") == budget_warning_text, (
         f"Expected warning text in payload, got: {payload}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Test 10 (mallcop-pro-ueq): platform-error tag on 402/503 responses
+# ---------------------------------------------------------------------------
+
+def test_dispatch_adds_platform_error_tag_on_platform_error(
+    campfire_id: str, tmp_path: Path
+) -> None:
+    """When chat_turn returns is_platform_error=True, response carries platform-error tag."""
+    session_id = str(uuid.uuid4())
+    mock_client = _make_mock_client()
+    dispatcher = CampfireDispatcher(
+        campfire_id=campfire_id,
+        managed_client=mock_client,
+        root=tmp_path,
+        poll_interval=0.1,
+    )
+
+    _send_message(
+        campfire_id,
+        json.dumps({"content": "Check balance"}),
+        tags=["chat", f"session:{session_id}", "platform:campfire"],
+    )
+
+    async def run_one_poll():
+        messages = await dispatcher._read_new_messages()
+        for msg in messages:
+            with patch("mallcop.chat.chat_turn", new=AsyncMock(return_value={
+                "response": "I received your message but can't respond right now — insufficient donut balance.",
+                "tokens_used": 0,
+                "is_platform_error": True,
+            })):
+                await dispatcher._dispatch_message(msg)
+
+    asyncio.run(run_one_poll())
+
+    all_msgs = _read_all(campfire_id, tag="response")
+    assert len(all_msgs) >= 1, "Expected at least 1 response message"
+
+    response_msg = all_msgs[0]
+    tags = response_msg.get("tags", [])
+    assert "platform-error" in tags, (
+        f"Expected 'platform-error' tag when is_platform_error=True, got: {tags}"
+    )
+
+
+def test_dispatch_no_platform_error_tag_on_normal_response(
+    campfire_id: str, tmp_path: Path
+) -> None:
+    """Normal response (is_platform_error absent/False) does NOT carry platform-error tag."""
+    session_id = str(uuid.uuid4())
+    mock_client = _make_mock_client()
+    dispatcher = CampfireDispatcher(
+        campfire_id=campfire_id,
+        managed_client=mock_client,
+        root=tmp_path,
+        poll_interval=0.1,
+    )
+
+    _send_message(
+        campfire_id,
+        json.dumps({"content": "What are my findings?"}),
+        tags=["chat", f"session:{session_id}", "platform:campfire"],
+    )
+
+    async def run_one_poll():
+        messages = await dispatcher._read_new_messages()
+        for msg in messages:
+            with patch("mallcop.chat.chat_turn", new=AsyncMock(return_value={
+                "response": "You have 3 open findings.",
+                "tokens_used": 42,
+            })):
+                await dispatcher._dispatch_message(msg)
+
+    asyncio.run(run_one_poll())
+
+    all_msgs = _read_all(campfire_id, tag="response")
+    assert len(all_msgs) >= 1, "Expected at least 1 response message"
+
+    response_msg = all_msgs[0]
+    tags = response_msg.get("tags", [])
+    assert "platform-error" not in tags, (
+        f"Expected no 'platform-error' tag on normal response, got: {tags}"
     )

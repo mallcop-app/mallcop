@@ -8,11 +8,12 @@ Three protections:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import uuid
 from pathlib import Path
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -57,6 +58,11 @@ def _make_store(tmp_path: Path) -> ConversationStore:
     return ConversationStore(tmp_path / "conversations.jsonl")
 
 
+def _run_chat_turn(**kwargs: Any) -> dict:
+    """Run async chat_turn synchronously for use in sync test methods."""
+    return asyncio.run(chat_turn(**kwargs))
+
+
 def _write_findings(tmp_path: Path, count: int, base_ts: str = "2024-01-01T00:00:00Z") -> None:
     """Write *count* findings to findings.jsonl with sequential timestamps."""
     lines = []
@@ -91,7 +97,7 @@ class TestBudgetWarning:
         cm = ContextWindowManager()
         session_id = str(uuid.uuid4())
 
-        result = chat_turn(
+        result = _run_chat_turn(
             question="Hello",
             session_id=session_id,
             managed_client=client,
@@ -113,7 +119,7 @@ class TestBudgetWarning:
         cm = ContextWindowManager()
         session_id = str(uuid.uuid4())
 
-        result = chat_turn(
+        result = _run_chat_turn(
             question="Hello",
             session_id=session_id,
             managed_client=client,
@@ -135,7 +141,7 @@ class TestBudgetWarning:
         cm = ContextWindowManager()
         session_id = str(uuid.uuid4())
 
-        result1 = chat_turn(
+        result1 = _run_chat_turn(
             question="Turn 1",
             session_id=session_id,
             managed_client=client,
@@ -143,7 +149,7 @@ class TestBudgetWarning:
             context_manager=cm,
             root=tmp_path,
         )
-        result2 = chat_turn(
+        result2 = _run_chat_turn(
             question="Turn 2",
             session_id=session_id,
             managed_client=client,
@@ -164,7 +170,7 @@ class TestBudgetWarning:
         cm = ContextWindowManager()
         session_id = str(uuid.uuid4())
 
-        result = chat_turn(
+        result = _run_chat_turn(
             question="Hello",
             session_id=session_id,
             managed_client=client,
@@ -188,7 +194,7 @@ class TestBudgetWarning:
         session_b = str(uuid.uuid4())
 
         # Session A: 4 donuts (below threshold)
-        chat_turn(
+        _run_chat_turn(
             question="Session A",
             session_id=session_a,
             managed_client=client,
@@ -198,7 +204,7 @@ class TestBudgetWarning:
         )
 
         # Session B: 4 donuts — should NOT warn (only 4, not 8)
-        result_b = chat_turn(
+        result_b = _run_chat_turn(
             question="Session B",
             session_id=session_b,
             managed_client=client,
@@ -305,7 +311,7 @@ class TestForgeErrorHandling:
         cm = ContextWindowManager()
         session_id = str(uuid.uuid4())
 
-        result = chat_turn(
+        result = _run_chat_turn(
             question="Hello",
             session_id=session_id,
             managed_client=client,
@@ -326,7 +332,7 @@ class TestForgeErrorHandling:
         cm = ContextWindowManager()
         session_id = str(uuid.uuid4())
 
-        result = chat_turn(
+        result = _run_chat_turn(
             question="Hello",
             session_id=session_id,
             managed_client=client,
@@ -348,7 +354,7 @@ class TestForgeErrorHandling:
         session_id = str(uuid.uuid4())
 
         # Should not raise.
-        result = chat_turn(
+        result = _run_chat_turn(
             question="Hello",
             session_id=session_id,
             managed_client=client,
@@ -366,7 +372,7 @@ class TestForgeErrorHandling:
         cm = ContextWindowManager()
         session_id = str(uuid.uuid4())
 
-        result = chat_turn(
+        result = _run_chat_turn(
             question="Hello",
             session_id=session_id,
             managed_client=client,
@@ -384,7 +390,7 @@ class TestForgeErrorHandling:
         cm = ContextWindowManager()
         session_id = str(uuid.uuid4())
 
-        chat_turn(
+        _run_chat_turn(
             question="Hello",
             session_id=session_id,
             managed_client=client,
@@ -407,7 +413,7 @@ class TestForgeErrorHandling:
         session_id = str(uuid.uuid4())
 
         with pytest.raises(LLMAPIError):
-            chat_turn(
+            _run_chat_turn(
                 question="Hello",
                 session_id=session_id,
                 managed_client=client,
@@ -425,7 +431,7 @@ class TestForgeErrorHandling:
         session_id = str(uuid.uuid4())
 
         with pytest.raises(RuntimeError):
-            chat_turn(
+            _run_chat_turn(
                 question="Hello",
                 session_id=session_id,
                 managed_client=client,
@@ -446,7 +452,7 @@ class TestForgeErrorHandling:
         session_id = str(uuid.uuid4())
 
         # Must not raise — store failure is swallowed.
-        result = chat_turn(
+        result = _run_chat_turn(
             question="Hello",
             session_id=session_id,
             managed_client=client,
@@ -468,7 +474,7 @@ class TestForgeErrorHandling:
         cm = ContextWindowManager()
         session_id = str(uuid.uuid4())
 
-        result = chat_turn(
+        result = _run_chat_turn(
             question="Hello",
             session_id=session_id,
             managed_client=client,
@@ -479,6 +485,62 @@ class TestForgeErrorHandling:
 
         assert "inference service unavailable" in result["response"]
         assert result["tokens_used"] == 0
+
+    def test_402_returns_is_platform_error_true(self, tmp_path: Path) -> None:
+        """402 from Forge sets is_platform_error=True in the result dict."""
+        client = MagicMock()
+        client.chat.side_effect = LLMAPIError("error", status_code=402)
+        store = _make_store(tmp_path)
+        cm = ContextWindowManager()
+        session_id = str(uuid.uuid4())
+
+        result = _run_chat_turn(
+            question="Hello",
+            session_id=session_id,
+            managed_client=client,
+            store=store,
+            context_manager=cm,
+            root=tmp_path,
+        )
+
+        assert result.get("is_platform_error") is True
+
+    def test_503_returns_is_platform_error_true(self, tmp_path: Path) -> None:
+        """503 from Forge sets is_platform_error=True in the result dict."""
+        client = MagicMock()
+        client.chat.side_effect = LLMAPIError("error", status_code=503)
+        store = _make_store(tmp_path)
+        cm = ContextWindowManager()
+        session_id = str(uuid.uuid4())
+
+        result = _run_chat_turn(
+            question="Hello",
+            session_id=session_id,
+            managed_client=client,
+            store=store,
+            context_manager=cm,
+            root=tmp_path,
+        )
+
+        assert result.get("is_platform_error") is True
+
+    def test_success_does_not_set_is_platform_error(self, tmp_path: Path) -> None:
+        """Successful turn does not set is_platform_error."""
+        client = _make_mock_client()
+        store = _make_store(tmp_path)
+        cm = ContextWindowManager()
+        session_id = str(uuid.uuid4())
+
+        result = _run_chat_turn(
+            question="Hello",
+            session_id=session_id,
+            managed_client=client,
+            store=store,
+            context_manager=cm,
+            root=tmp_path,
+        )
+
+        assert not result.get("is_platform_error")
 
 
 # ---------------------------------------------------------------------------
@@ -503,7 +565,7 @@ class TestBudgetThresholdValidation:
         cm = ContextWindowManager()
         session_id = str(uuid.uuid4())
 
-        result = chat_turn(
+        result = _run_chat_turn(
             question="Hello",
             session_id=session_id,
             managed_client=client,
@@ -525,7 +587,7 @@ class TestBudgetThresholdValidation:
         cm = ContextWindowManager()
         session_id = str(uuid.uuid4())
 
-        result = chat_turn(
+        result = _run_chat_turn(
             question="Hello",
             session_id=session_id,
             managed_client=client,
@@ -566,7 +628,7 @@ class TestReplBudgetWarningDisplay:
         def _repl_cmd():
             run_chat_repl(managed_client=client, root=tmp_path)
 
-        with patch("mallcop.chat.chat_turn", return_value=mock_result):
+        with patch("mallcop.chat.chat_turn", new=AsyncMock(return_value=mock_result)):
             runner = CliRunner()
             result = runner.invoke(_repl_cmd, input="What is 2+2?\nexit\n", catch_exceptions=False)
 
@@ -590,7 +652,7 @@ class TestReplBudgetWarningDisplay:
         def _repl_cmd():
             run_chat_repl(managed_client=client, root=tmp_path)
 
-        with patch("mallcop.chat.chat_turn", return_value=mock_result):
+        with patch("mallcop.chat.chat_turn", new=AsyncMock(return_value=mock_result)):
             runner = CliRunner()
             result = runner.invoke(_repl_cmd, input="Hello\nexit\n", catch_exceptions=False)
 
