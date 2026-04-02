@@ -39,23 +39,25 @@ async def _scan_loop(
     interval: float,
 ) -> None:
     """Periodically run scan → detect → escalate, publish new findings to campfire."""
+    loop = asyncio.get_running_loop()
     while True:
         try:
-            await asyncio.to_thread(_run_one_scan, dispatcher, root)
+            findings = await asyncio.to_thread(_run_one_scan, root)
+            for finding in findings:
+                loop.call_soon_threadsafe(
+                    lambda f=finding: asyncio.ensure_future(dispatcher.publish_finding(f))
+                )
         except Exception as exc:
             _log.error("daemon: scan failed: %s", exc)
         await asyncio.sleep(interval)
 
 
-def _run_one_scan(dispatcher: "CampfireDispatcher", root: Path) -> None:
-    """Run scan pipeline synchronously and publish any new findings."""
+def _run_one_scan(root: Path) -> list[Any]:
+    """Run scan pipeline synchronously and return new findings."""
     from mallcop.cli_pipeline import run_scan_pipeline, run_detect_pipeline
 
     run_scan_pipeline(root)
     detect_result = run_detect_pipeline(root)
-    findings: list[Any] = detect_result.get("findings", [])
-    loop = asyncio.get_event_loop()
-    for finding in findings:
-        loop.call_soon_threadsafe(
-            lambda f=finding: asyncio.ensure_future(dispatcher.publish_finding(f))
-        )
+    if not detect_result:
+        return []
+    return detect_result.get("findings", [])
