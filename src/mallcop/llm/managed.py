@@ -79,7 +79,7 @@ class ManagedClient(LLMClient):
         self,
         endpoint: str,
         service_token: str,
-        default_model: str = "claude-haiku-4-5",
+        default_model: str = "claude-haiku-4-5-20251001",
         use_lanes: bool = False,
         extra_headers: dict[str, str] | None = None,
     ) -> None:
