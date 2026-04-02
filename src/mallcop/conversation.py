@@ -9,6 +9,7 @@ implements the same append/load_session interface using ``cf`` CLI commands.
 
 from __future__ import annotations
 
+import asyncio
 import fcntl
 import json
 import logging
@@ -195,19 +196,29 @@ class CampfireConversationAdapter:
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _cf(self, *args: str) -> str:
+    async def _cf(self, *args: str) -> str:
         """Run a cf command and return stdout.  Raises on non-zero exit."""
         cmd = [self._cf_bin]
         if self._cf_home:
             cmd += ["--cf-home", self._cf_home]
         cmd += list(args)
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        if result.returncode != 0:
-            raise RuntimeError(
-                f"cf command failed (exit {result.returncode}): "
-                f"{' '.join(args)!r}\nstderr: {result.stderr.strip()}"
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
             )
-        return result.stdout.strip()
+        except OSError as exc:
+            raise RuntimeError(
+                f"cf binary not found or not executable: {exc}"
+            ) from exc
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30.0)
+        if proc.returncode != 0:
+            raise RuntimeError(
+                f"cf command failed (exit {proc.returncode}): "
+                f"{' '.join(args)!r}\nstderr: {stderr.decode(errors='replace').strip()}"
+            )
+        return stdout.decode(errors="replace").strip()
 
     @staticmethod
     def _sanitize_session_id(session_id: str) -> str:
@@ -229,7 +240,8 @@ class CampfireConversationAdapter:
         safe_session_id = self._sanitize_session_id(session_id)
         tags = [_CHAT_TAG, f"session:{safe_session_id}", f"platform:{surface}"]
         for ref in finding_refs:
-            tags.append(f"finding_ref:{ref}")
+            if ref:
+                tags.append(f"finding_ref:{ref}")
         return tags
 
     @staticmethod
@@ -237,7 +249,9 @@ class CampfireConversationAdapter:
         refs = []
         for tag in tags:
             if tag.startswith("finding_ref:"):
-                refs.append(tag[len("finding_ref:"):])
+                ref = tag[len("finding_ref:"):]
+                if ref:
+                    refs.append(ref)
         return refs
 
     @staticmethod
@@ -258,7 +272,7 @@ class CampfireConversationAdapter:
     # Public API (mirrors ConversationStore)
     # ------------------------------------------------------------------
 
-    def append(
+    async def append(
         self,
         session_id: str,
         surface: str,
@@ -293,7 +307,7 @@ class CampfireConversationAdapter:
             cmd_args += ["--tag", tag]
         cmd_args.append(payload)
         try:
-            self._cf(*cmd_args)
+            await self._cf(*cmd_args)
         except (RuntimeError, OSError) as exc:
             raise CampfireAdapterError(
                 f"CampfireConversationAdapter: append failed for session {session_id!r}: {exc}"
@@ -310,11 +324,11 @@ class CampfireConversationAdapter:
             tokens_used=tokens_used,
         )
 
-    def load_session(self, session_id: str) -> list[ConversationMessage]:
+    async def load_session(self, session_id: str) -> list[ConversationMessage]:
         """Return all messages for *session_id* in chronological order."""
         safe_session_id = self._sanitize_session_id(session_id)
         try:
-            raw = self._cf(
+            raw = await self._cf(
                 "read", self._campfire_id,
                 "--all", "--json",
                 "--tag", _CHAT_TAG,
@@ -369,11 +383,17 @@ class CampfireConversationAdapter:
             finding_refs = self._extract_finding_refs(tags)
 
             try:
+                msg_id = envelope.get("id")
+                if msg_id is None:
+                    msg_id = _new_msg_id()
+                msg_ts = envelope.get("timestamp")
+                if msg_ts is None:
+                    msg_ts = datetime.now(timezone.utc).isoformat()
                 msg = ConversationMessage(
-                    id=envelope.get("id") or _new_msg_id(),
+                    id=msg_id,
                     session_id=item_session,
                     surface=surface,
-                    timestamp=envelope.get("timestamp") or datetime.now(timezone.utc).isoformat(),
+                    timestamp=msg_ts,
                     role=role,
                     content=envelope["content"],
                     finding_refs=finding_refs,
