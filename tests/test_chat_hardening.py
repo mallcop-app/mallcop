@@ -223,6 +223,30 @@ class TestBudgetWarning:
     def test_default_threshold_is_50(self) -> None:
         assert DEFAULT_BUDGET_WARNING_THRESHOLD == 50
 
+    def test_budget_warning_includes_balance_from_get_balance(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When get_balance() returns a valid dict, the balance appears in the warning."""
+        monkeypatch.setenv("MALLCOP_BUDGET_WARNING_THRESHOLD", "2")
+        tokens = 2500  # 2.5 donuts — exceeds threshold of 2
+        client = _make_mock_client(_make_llm_response(tokens=tokens))
+        client.get_balance = MagicMock(return_value={"donuts": 42.5})
+        store = _make_store(tmp_path)
+        cm = ContextWindowManager()
+        session_id = str(uuid.uuid4())
+
+        result = _run_chat_turn(
+            question="Hello",
+            session_id=session_id,
+            managed_client=client,
+            store=store,
+            context_manager=cm,
+            root=tmp_path,
+        )
+
+        assert "budget_warning" in result
+        assert "42.5" in result["budget_warning"]
+
 
 # ---------------------------------------------------------------------------
 # Feature 2: Findings context cap (pure function — no external calls)

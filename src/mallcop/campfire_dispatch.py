@@ -33,9 +33,6 @@ from mallcop.context_window import ContextWindowManager
 
 _log = logging.getLogger(__name__)
 
-# Tag used to identify messages this dispatcher should handle.
-_CHAT_TAG = "chat"
-
 # Surface identifier stored in conversation messages.
 _SURFACE = "campfire"
 
@@ -43,15 +40,27 @@ _SURFACE = "campfire"
 _SESSION_TAG_PREFIX = "session:"
 
 
-class _SubprocessError(RuntimeError):
+class CampfireError(RuntimeError):
+    """Base exception for all campfire dispatch errors."""
+
+
+class _SubprocessError(CampfireError):
     """Raised when a cf subprocess exits non-zero."""
 
 
 # Seconds to wait for a cf subprocess before giving up.
 _CF_TIMEOUT = 30.0
 
+# Tag constants — avoids magic string literals throughout the module.
+_TAG_CHAT = "chat"
+_TAG_RESPONSE = "response"
+_TAG_PLATFORM_ERROR = "platform-error"
+_TAG_BUDGET_WARNING = "budget-warning"
+_TAG_FINDING = "finding"
+_INSTANCE_MALLCOP = "mallcop"
 
-async def _run_cf(*args: str, cf_bin: str = "cf", cf_home: str | None = None) -> str:
+
+async def _run_cf(*args: str, cf_bin: str = "cf", cf_home: str | None = None, timeout: float = _CF_TIMEOUT) -> str:
     """Run a cf command via asyncio subprocess. Returns stdout. Raises on non-zero exit.
 
     Raises
@@ -80,7 +89,7 @@ async def _run_cf(*args: str, cf_bin: str = "cf", cf_home: str | None = None) ->
             f"cf binary not found or not executable: {exc}"
         ) from exc
 
-    stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=_CF_TIMEOUT)
+    stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
 
     if proc.returncode != 0:
         raise _SubprocessError(
@@ -121,6 +130,7 @@ class CampfireDispatcher:
         poll_interval: float = 3.0,
         cf_bin: str = "cf",
         cf_home: str | None = None,
+        cf_timeout: float = _CF_TIMEOUT,
     ) -> None:
         self._campfire_id = campfire_id
         self._managed_client = managed_client
@@ -128,6 +138,7 @@ class CampfireDispatcher:
         self._poll_interval = poll_interval
         self._cf_bin = cf_bin
         self._cf_home = cf_home
+        self._cf_timeout = cf_timeout
 
         # One CampfireConversationAdapter per dispatcher; session IDs
         # are derived per-message from the sender's session tag.
@@ -147,6 +158,7 @@ class CampfireDispatcher:
             *args,
             cf_bin=self._cf_bin,
             cf_home=self._cf_home,
+            timeout=self._cf_timeout,
         )
 
     async def _read_new_messages(self) -> list[dict[str, Any]]:
@@ -155,7 +167,7 @@ class CampfireDispatcher:
             raw = await self._cf(
                 "read", self._campfire_id,
                 "--json",
-                "--tag", _CHAT_TAG,
+                "--tag", _TAG_CHAT,
             )
         except _SubprocessError as exc:
             _log.warning("campfire_dispatch: read error: %s", exc)
@@ -183,6 +195,55 @@ class CampfireDispatcher:
                 return tag[len(_SESSION_TAG_PREFIX):]
         return None
 
+    async def _post_response(self, session_id: str, result: dict[str, Any]) -> None:
+        """Post a chat_turn() result back to campfire (response + optional budget warning)."""
+        response_text = result.get("response", "")
+        if not response_text:
+            return
+
+        session_tag = f"{_SESSION_TAG_PREFIX}{session_id}"
+        payload = json.dumps({
+            "content": response_text,
+            "tokens_used": result.get("tokens_used", 0),
+        })
+
+        send_args = [
+            "send", self._campfire_id,
+            "--instance", _INSTANCE_MALLCOP,
+            "--tag", _TAG_CHAT,
+            "--tag", session_tag,
+            "--tag", f"platform:{_SURFACE}",
+            "--tag", _TAG_RESPONSE,
+        ]
+        if result.get("is_platform_error"):
+            send_args += ["--tag", _TAG_PLATFORM_ERROR]
+        send_args.append(payload)
+
+        try:
+            await self._cf(*send_args)
+        except _SubprocessError as exc:
+            _log.error("campfire_dispatch: failed to post response: %s", exc)
+
+        # Fix (mallcop-pro-6p0): forward budget_warning to campfire so
+        # clients can see it.  Without this, budget warnings returned by
+        # chat_turn() are silently dropped.
+        budget_warning = result.get("budget_warning")
+        if budget_warning:
+            warning_payload = json.dumps({"budget_warning": budget_warning})
+            try:
+                await self._cf(
+                    "send", self._campfire_id,
+                    "--instance", _INSTANCE_MALLCOP,
+                    "--tag", _TAG_CHAT,
+                    "--tag", session_tag,
+                    "--tag", _TAG_BUDGET_WARNING,
+                    warning_payload,
+                )
+            except _SubprocessError as exc:
+                _log.error(
+                    "campfire_dispatch: failed to post budget_warning: %s", exc
+                )
+
     async def _dispatch_message(self, msg: dict[str, Any]) -> None:
         """Dispatch one chat message through chat_turn() and post response."""
         # Import here to avoid circular import at module level.
@@ -192,8 +253,8 @@ class CampfireDispatcher:
         payload_raw = msg.get("payload", "")
         instance = msg.get("instance", "user")
 
-        # Skip messages sent by us (instance == "mallcop").
-        if instance == "mallcop":
+        # Skip messages sent by us (instance == _INSTANCE_MALLCOP).
+        if instance == _INSTANCE_MALLCOP:
             _log.debug("campfire_dispatch: skipping our own message %s", msg.get("id"))
             return
 
@@ -245,53 +306,7 @@ class CampfireDispatcher:
             _log.error("campfire_dispatch: chat_turn error: %s", exc)
             return
 
-        response_text = result.get("response", "")
-        if not response_text:
-            return
-
-        # Post response back to campfire as mallcop instance.
-        session_tag = f"{_SESSION_TAG_PREFIX}{session_id}"
-        payload = json.dumps({
-            "content": response_text,
-            "tokens_used": result.get("tokens_used", 0),
-        })
-
-        send_args = [
-            "send", self._campfire_id,
-            "--instance", "mallcop",
-            "--tag", _CHAT_TAG,
-            "--tag", session_tag,
-            "--tag", f"platform:{_SURFACE}",
-            "--tag", "response",
-        ]
-        if result.get("is_platform_error"):
-            send_args += ["--tag", "platform-error"]
-        send_args.append(payload)
-
-        try:
-            await self._cf(*send_args)
-        except _SubprocessError as exc:
-            _log.error("campfire_dispatch: failed to post response: %s", exc)
-
-        # Fix (mallcop-pro-6p0): forward budget_warning to campfire so
-        # clients can see it.  Without this, budget warnings returned by
-        # chat_turn() are silently dropped.
-        budget_warning = result.get("budget_warning")
-        if budget_warning:
-            warning_payload = json.dumps({"budget_warning": budget_warning})
-            try:
-                await self._cf(
-                    "send", self._campfire_id,
-                    "--instance", "mallcop",
-                    "--tag", _CHAT_TAG,
-                    "--tag", session_tag,
-                    "--tag", "budget-warning",
-                    warning_payload,
-                )
-            except _SubprocessError as exc:
-                _log.error(
-                    "campfire_dispatch: failed to post budget_warning: %s", exc
-                )
+        await self._post_response(session_id, result)
 
     # ------------------------------------------------------------------
     # Public API
@@ -365,8 +380,8 @@ class CampfireDispatcher:
         try:
             await self._cf(
                 "send", self._campfire_id,
-                "--instance", "mallcop",
-                "--tag", "finding",
+                "--instance", _INSTANCE_MALLCOP,
+                "--tag", _TAG_FINDING,
                 "--tag", f"severity:{severity_str}",
                 "--tag", f"connector:{connector_name}",
                 "--tag", f"id:{finding_id}",
