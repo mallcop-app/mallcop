@@ -664,12 +664,36 @@ def escalate(dir_path: str | None, human: bool, no_actors: bool, backend: str) -
 @click.option("--human", is_flag=True, help="Human-readable output.")
 @click.option("--backend", default="anthropic", type=click.Choice(["anthropic", "claude-code"]),
               help="LLM backend: 'anthropic' (API) or 'claude-code' (CLI, uses subscription).")
-def watch(dry_run: bool, dir_path: str | None, human: bool, backend: str) -> None:
+@click.option("--bridge", "bridge", is_flag=True, default=False,
+              help="Start bridge polling daemon (requires Pro config).")
+def watch(dry_run: bool, dir_path: str | None, human: bool, backend: str, bridge: bool) -> None:
     """Scan + detect + escalate (cron-friendly)."""
     from mallcop.escalate import run_escalate
 
     root = Path(dir_path) if dir_path else Path.cwd()
     result: dict[str, Any] = {"command": "watch", "dry_run": dry_run}
+
+    # Step -1: Start bridge polling thread if requested
+    if bridge:
+        from mallcop.bridge import start_bridge_thread
+        try:
+            config = load_config(root)
+            pro = config.pro
+            if pro and pro.service_token and pro.inference_url:
+                findings_path = root / "findings.jsonl"
+                start_bridge_thread(
+                    inference_url=pro.inference_url,
+                    service_token=pro.service_token,
+                    findings_path=findings_path,
+                )
+                click.echo("bridge: polling started", err=True)
+            else:
+                click.echo(
+                    "bridge: skipped — Pro config missing (need service_token + inference_url)",
+                    err=True,
+                )
+        except Exception as exc:
+            click.echo(f"bridge: failed to start — {exc}", err=True)
 
     # Step 0: Build and validate actor runner once (reused in Step 3)
     watch_runner = None
@@ -1247,6 +1271,49 @@ def status(costs: bool, dir_path: str | None, human: bool) -> None:
                 click.echo(f"  {e}")
     else:
         click.echo(json.dumps(result))
+
+
+# --- Chat ---
+
+
+@cli.command()
+@click.option("--dir", "dir_path", default=None, help="Deployment repo directory.", hidden=True)
+def chat(dir_path: str | None) -> None:
+    """Interactive chat REPL — ask questions about your security posture."""
+    from mallcop.chat import run_chat_repl
+    from mallcop.config import load_config
+    from mallcop.llm.managed import ManagedClient
+
+    root = Path(dir_path) if dir_path else Path.cwd()
+
+    try:
+        config = load_config(root)
+    except Exception as exc:
+        click.echo(f"ERROR: could not load config: {exc}", err=True)
+        raise SystemExit(1)
+
+    pro = config.pro
+    if pro is None or not getattr(pro, "api_key", None):
+        click.echo(
+            "ERROR: mallcop Pro not configured. Run `mallcop init --pro` first.",
+            err=True,
+        )
+        raise SystemExit(1)
+
+    import uuid
+    session_id = str(uuid.uuid4())
+
+    managed_client = ManagedClient(
+        endpoint=getattr(pro, "endpoint", "https://mallcop.app"),
+        service_token=pro.api_key,
+        use_lanes=True,
+        extra_headers={
+            "X-Mallcop-Session": session_id,
+            "X-Mallcop-Surface": "cli",
+        },
+    )
+
+    run_chat_repl(managed_client=managed_client, root=root)
 
 
 # --- Development ---

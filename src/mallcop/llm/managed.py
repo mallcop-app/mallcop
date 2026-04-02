@@ -81,11 +81,13 @@ class ManagedClient(LLMClient):
         service_token: str,
         default_model: str = "claude-haiku-4-5-20251001",
         use_lanes: bool = False,
+        extra_headers: dict[str, str] | None = None,
     ) -> None:
         self._endpoint = endpoint.rstrip("/")
         self._service_token = service_token
         self._default_model = default_model
         self._use_lanes = use_lanes
+        self._extra_headers: dict[str, str] = extra_headers or {}
 
     def chat(
         self,
@@ -93,6 +95,7 @@ class ManagedClient(LLMClient):
         system_prompt: str,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]],
+        max_tokens: int | None = None,
     ) -> LLMResponse:
         if self._use_lanes:
             resolved_model = _resolve_lane(model)
@@ -104,17 +107,18 @@ class ManagedClient(LLMClient):
 
         body: dict[str, Any] = {
             "model": resolved_model,
-            "max_tokens": _MAX_TOKENS_DEFAULT,
+            "max_tokens": max_tokens if max_tokens is not None else _MAX_TOKENS_DEFAULT,
             "system": system_prompt,
             "messages": anthropic_messages,
         }
         if anthropic_tools:
             body["tools"] = anthropic_tools
 
-        headers = {
+        headers: dict[str, str] = {
             "Authorization": f"Bearer {self._service_token}",
             "content-type": "application/json",
         }
+        headers.update(self._extra_headers)
 
         resp = requests.post(
             f"{self._endpoint}/v1/messages", headers=headers, json=body, timeout=120
