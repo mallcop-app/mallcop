@@ -14,16 +14,18 @@ from mallcop.cli import cli
 
 
 def _parse_init_output(output: str) -> dict:
-    """Extract the JSON output line from init command output.
+    """Extract the status=ok JSON line from init command output.
 
-    Background threads may write to stderr which CliRunner captures alongside
-    stdout. Find the first line that looks like JSON.
+    Init may emit a warning line before the final result (e.g. campfire
+    creation failed). Find the line with status=ok.
     """
     for line in output.splitlines():
         line = line.strip()
         if line.startswith("{"):
-            return json.loads(line)
-    raise ValueError(f"No JSON line found in output: {output!r}")
+            parsed = json.loads(line)
+            if parsed.get("status") == "ok":
+                return parsed
+    raise ValueError(f"No status=ok JSON line found in output: {output!r}")
 
 
 class TestInitCampfire:
@@ -66,11 +68,11 @@ class TestInitCampfire:
                 result = runner.invoke(cli, ["init"])
 
         assert result.exit_code == 0, result.output
-        lines = [l for l in result.output.strip().splitlines() if l.strip().startswith("{")]
-        data = json.loads(lines[-1])
+        data = _parse_init_output(result.output)
         assert data["status"] == "ok"
         delivery = data.get("delivery", {})
         assert "campfire_id" not in delivery
+        assert any("campfire" in w for w in data.get("warnings", []))
 
         config_path = Path(data["config_path"])
         with open(config_path) as f:

@@ -582,6 +582,7 @@ def init(pro: bool, api_key: str | None, telegram_bot_token: str | None, telegra
 
     delivery_result: dict[str, Any] = {}
     delivery_config_data: dict[str, Any] = {}
+    init_warnings: list[str] = []
 
     # Always create a campfire for this deployment.
     try:
@@ -595,15 +596,9 @@ def init(pro: bool, api_key: str | None, telegram_bot_token: str | None, telegra
             delivery_config_data["campfire_id"] = campfire_id
             delivery_result["campfire_id"] = campfire_id
         else:
-            click.echo(
-                json.dumps({"status": "warning", "message": "cf create returned no campfire ID"}),
-                err=True,
-            )
+            init_warnings.append("cf create returned no campfire ID")
     except Exception as exc:
-        click.echo(
-            json.dumps({"status": "warning", "message": f"campfire setup failed: {exc}"}),
-            err=True,
-        )
+        init_warnings.append(f"campfire setup failed: {exc}")
 
     # Telegram: use env vars if provided (CI/scripted), else interactive dialog on TTY.
     if not telegram_bot_token and _sys.stdin.isatty():
@@ -659,6 +654,8 @@ def init(pro: bool, api_key: str | None, telegram_bot_token: str | None, telegra
         output["pro"] = api_key_result
     if delivery_result:
         output["delivery"] = delivery_result
+    if init_warnings:
+        output["warnings"] = init_warnings
 
     click.echo(json.dumps(output))
 

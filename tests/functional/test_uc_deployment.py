@@ -126,7 +126,10 @@ class TestDeploymentInitWatchFlow:
             init_result = runner.invoke(cli, ["init"], catch_exceptions=False)
 
         assert init_result.exit_code == 0, f"init failed: {init_result.output}"
-        init_data = json.loads(init_result.output)
+        init_data = next(
+            json.loads(line) for line in init_result.output.splitlines()
+            if line.strip().startswith("{") and json.loads(line.strip()).get("status") == "ok"
+        )
         assert init_data["status"] == "ok"
 
         # Step 2: mallcop watch --dry-run
