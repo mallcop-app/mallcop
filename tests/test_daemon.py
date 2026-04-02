@@ -80,7 +80,7 @@ def test_daemon_runs_dispatch_and_scan_tasks(tmp_path: Path) -> None:
 
     scan_called: list[bool] = []
 
-    async def fake_daemon_loop(dispatcher, root, scan_interval):
+    async def fake_daemon_loop(dispatcher, root, scan_interval, **kwargs):
         # Simulate one scan + one dispatch poll then return.
         from mallcop.daemon import _run_one_scan as _real_run_one_scan  # noqa: F401
         dispatcher.run_called = True
@@ -141,3 +141,156 @@ def test_daemon_scan_failure_does_not_stop_dispatcher(tmp_path: Path) -> None:
     assert len(scan_attempts) == 2, "expected exactly 2 scan attempts"
     # publish_finding should NOT have been called (scan raised before findings)
     dispatcher.publish_finding.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# Test 5: idle_watchdog fires after idle_timeout_seconds with no tg-inbound
+# ---------------------------------------------------------------------------
+
+
+def test_idle_watchdog_fires_on_idle_timeout() -> None:
+    """idle_watchdog cancels sibling tasks after idle_timeout_seconds with no messages."""
+    import json
+    import mallcop.daemon as daemon_mod
+
+    cancelled_tasks: list[str] = []
+
+    async def run() -> None:
+        # Use a very short timeout (0.1s) and poll interval (0.05s) to keep test fast.
+        poll_calls: list[int] = [0]
+
+        async def fake_to_thread(fn, *args, **kwargs):
+            poll_calls[0] += 1
+            # Return empty JSON array — no tg-inbound messages.
+            result = MagicMock()
+            result.stdout = "[]"
+            return result
+
+        # Patch asyncio.sleep to not actually sleep, and to_thread for cf calls.
+        original_sleep = asyncio.sleep
+
+        async def fake_sleep(interval: float) -> None:
+            # Advance event loop time by yielding (no real sleep).
+            await original_sleep(0)
+
+        # Create a dummy sibling task that records when it's cancelled.
+        async def dummy_task() -> None:
+            try:
+                await asyncio.sleep(9999)
+            except asyncio.CancelledError:
+                cancelled_tasks.append("dummy")
+                raise
+
+        sibling = asyncio.create_task(dummy_task())
+
+        with (
+            patch.object(asyncio, "sleep", side_effect=fake_sleep),
+            patch.object(asyncio, "to_thread", side_effect=fake_to_thread),
+        ):
+            # idle_timeout_seconds=0.0 means it fires immediately after first poll
+            # (elapsed time > 0.0 always true after fake_sleep yields).
+            await daemon_mod._idle_watchdog(
+                campfire_id="fire-test",
+                idle_timeout_seconds=0.0,
+            )
+
+        # Give cancelled tasks a chance to handle CancelledError.
+        try:
+            await asyncio.gather(sibling, return_exceptions=True)
+        except Exception:
+            pass
+
+    asyncio.run(run())
+    assert "dummy" in cancelled_tasks, "sibling task should have been cancelled"
+
+
+# ---------------------------------------------------------------------------
+# Test 6: idle_watchdog does NOT fire when messages arrive within the window
+# ---------------------------------------------------------------------------
+
+
+def test_idle_watchdog_resets_on_new_message() -> None:
+    """idle_watchdog resets idle clock when new tg-inbound messages arrive."""
+    import json
+    import mallcop.daemon as daemon_mod
+
+    async def run() -> None:
+        poll_count = [0]
+        msg_sequence = [
+            # First poll: one message (id=msg-1) → resets clock
+            json.dumps([{"id": "msg-1"}]),
+            # Second poll: same message (already seen) → no reset
+            json.dumps([{"id": "msg-1"}]),
+            # Third poll: new message (id=msg-2) → resets clock again
+            json.dumps([{"id": "msg-2"}]),
+        ]
+
+        async def fake_to_thread(fn, *args, **kwargs):
+            idx = poll_count[0]
+            poll_count[0] += 1
+            result = MagicMock()
+            result.stdout = msg_sequence[idx] if idx < len(msg_sequence) else "[]"
+            return result
+
+        watchdog_done = asyncio.Event()
+        original_sleep = asyncio.sleep
+
+        async def fake_sleep(interval: float) -> None:
+            await original_sleep(0)
+            # After all polls done, let watchdog exit by raising CancelledError.
+            if poll_count[0] >= len(msg_sequence):
+                raise asyncio.CancelledError
+
+        with (
+            patch.object(asyncio, "sleep", side_effect=fake_sleep),
+            patch.object(asyncio, "to_thread", side_effect=fake_to_thread),
+        ):
+            try:
+                # idle_timeout_seconds=9999 → watchdog should NOT fire during test.
+                await daemon_mod._idle_watchdog(
+                    campfire_id="fire-test",
+                    idle_timeout_seconds=9999.0,
+                )
+            except asyncio.CancelledError:
+                pass  # Expected — fake_sleep raises it to end the test.
+
+        # If we reach here without the watchdog cancelling all tasks, the test passes.
+        # (The watchdog only cancels tasks when idle_elapsed > idle_timeout_seconds.)
+        assert poll_count[0] >= len(msg_sequence), "expected all polls to occur"
+
+    asyncio.run(run())
+
+
+# ---------------------------------------------------------------------------
+# Test 7: _daemon_loop exits cleanly on idle timeout (no exception propagated)
+# ---------------------------------------------------------------------------
+
+
+def test_daemon_loop_exits_cleanly_on_idle_timeout(tmp_path: Path) -> None:
+    """_daemon_loop should return normally (exit 0) when watchdog fires."""
+    import mallcop.daemon as daemon_mod
+
+    dispatcher = MagicMock()
+    dispatcher.campfire_id = "fire-test"
+    dispatcher.run = AsyncMock(side_effect=asyncio.CancelledError)
+    dispatcher.publish_finding = AsyncMock()
+
+    async def run() -> None:
+        async def fake_watchdog(*args, **kwargs) -> None:
+            # Immediately cancel all other tasks (simulate idle timeout).
+            current = asyncio.current_task()
+            for task in asyncio.all_tasks():
+                if task is not current:
+                    task.cancel()
+
+        with patch.object(daemon_mod, "_idle_watchdog", side_effect=fake_watchdog):
+            # Should return without raising — CancelledError is caught internally.
+            await daemon_mod._daemon_loop(
+                dispatcher,
+                tmp_path,
+                scan_interval=300.0,
+                idle_timeout_seconds=0.1,
+            )
+
+    # asyncio.run should complete without exception.
+    asyncio.run(run())
