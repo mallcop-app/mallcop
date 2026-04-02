@@ -6,9 +6,30 @@ on:
       - 'Dockerfile.daemon'
       - 'src/**'
       - 'pyproject.toml'
+  pull_request:
+    paths:
+      - 'Dockerfile.daemon'
+      - 'src/**'
+      - 'pyproject.toml'
 jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build (smoke test, no push)
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: Dockerfile.daemon
+          platforms: linux/amd64
+          push: false
   build-push:
     runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: build-test
     permissions:
       contents: read
       packages: write
