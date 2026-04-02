@@ -157,6 +157,14 @@ def chat_turn(
     budget_threshold = int(
         os.environ.get("MALLCOP_BUDGET_WARNING_THRESHOLD", DEFAULT_BUDGET_WARNING_THRESHOLD)
     )
+    if budget_threshold <= 0:
+        _log.warning(
+            "chat: MALLCOP_BUDGET_WARNING_THRESHOLD=%d is invalid (must be > 0); "
+            "using default %d",
+            budget_threshold,
+            DEFAULT_BUDGET_WARNING_THRESHOLD,
+        )
+        budget_threshold = DEFAULT_BUDGET_WARNING_THRESHOLD
 
     try:
         response = managed_client.chat(
@@ -178,13 +186,16 @@ def chat_turn(
                 "insufficient donut balance. "
                 "Your message is saved and I'll respond when service resumes."
             )
-            store.append(
-                session_id=session_id,
-                surface=SURFACE,
-                role="assistant",
-                content=platform_msg,
-                tokens_used=0,
-            )
+            try:
+                store.append(
+                    session_id=session_id,
+                    surface=SURFACE,
+                    role="assistant",
+                    content=platform_msg,
+                    tokens_used=0,
+                )
+            except Exception as store_exc:
+                _log.error("chat: failed to persist 402 platform message: %s", store_exc)
             return {"response": platform_msg, "tokens_used": 0, "footer": _burn_rate_footer(0)}
         elif status_code == 503:
             platform_msg = (
@@ -192,13 +203,16 @@ def chat_turn(
                 "inference service unavailable. "
                 "Your message is saved and I'll respond when service resumes."
             )
-            store.append(
-                session_id=session_id,
-                surface=SURFACE,
-                role="assistant",
-                content=platform_msg,
-                tokens_used=0,
-            )
+            try:
+                store.append(
+                    session_id=session_id,
+                    surface=SURFACE,
+                    role="assistant",
+                    content=platform_msg,
+                    tokens_used=0,
+                )
+            except Exception as store_exc:
+                _log.error("chat: failed to persist 503 platform message: %s", store_exc)
             return {"response": platform_msg, "tokens_used": 0, "footer": _burn_rate_footer(0)}
         raise
 
