@@ -667,3 +667,58 @@ def test_publish_finding_writes_to_campfire_with_correct_tags(
     assert payload.get("severity") in ("critical", Severity.CRITICAL, Severity.CRITICAL.value), (
         f"Expected payload['severity'] to represent CRITICAL, got: {payload.get('severity')!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Test 13 (mallcop-pro-cmf): run() backs off after 5+ consecutive cf errors
+# ---------------------------------------------------------------------------
+
+def test_run_backs_off_after_consecutive_cf_errors(tmp_path: Path) -> None:
+    """run() applies exponential backoff when _read_new_messages raises _SubprocessError 5+ times."""
+    from mallcop.campfire_dispatch import _SubprocessError
+
+    mock_client = _make_mock_client()
+    dispatcher = CampfireDispatcher(
+        campfire_id="fake-campfire-id",
+        managed_client=mock_client,
+        root=tmp_path,
+        poll_interval=1.0,
+    )
+
+    # _read_new_messages will raise _SubprocessError 6 times, then CancelledError.
+    call_count = 0
+
+    async def failing_read():
+        nonlocal call_count
+        call_count += 1
+        if call_count <= 6:
+            raise _SubprocessError(f"cf error #{call_count}")
+        raise asyncio.CancelledError()
+
+    sleep_calls: list[float] = []
+
+    async def recording_sleep(duration: float) -> None:
+        sleep_calls.append(duration)
+
+    async def run():
+        with (
+            patch.object(dispatcher, "_read_new_messages", side_effect=failing_read),
+            patch("asyncio.sleep", side_effect=recording_sleep),
+        ):
+            try:
+                await dispatcher.run()
+            except asyncio.CancelledError:
+                pass
+
+    asyncio.run(run())
+
+    # After 5 consecutive errors the backoff formula kicks in:
+    #   sleep = min(poll_interval * 2 ** (consecutive_errors - 5), 300)
+    # At error #5: min(1.0 * 2**0, 300) = 1.0  (same as poll_interval, no change yet)
+    # At error #6: min(1.0 * 2**1, 300) = 2.0  (> poll_interval — backoff confirmed)
+    # We assert that at least one sleep call used a value strictly greater than poll_interval.
+    backoff_sleeps = [d for d in sleep_calls if d > dispatcher._poll_interval]
+    assert backoff_sleeps, (
+        f"Expected at least one sleep > poll_interval ({dispatcher._poll_interval}s) "
+        f"after 6 consecutive errors, but sleep calls were: {sleep_calls}"
+    )
