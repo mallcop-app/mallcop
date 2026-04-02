@@ -26,6 +26,8 @@ def _make_config(
     campfire_id: str = "",
     bot_token: str = "",
     chat_id: str = "",
+    service_token: str = "",
+    inference_url: str = "",
 ) -> MagicMock:
     """Return a MagicMock that looks like a MallcopConfig."""
     config = MagicMock()
@@ -36,7 +38,14 @@ def _make_config(
     delivery.telegram_chat_id = chat_id
     config.delivery = delivery
 
-    config.pro = None
+    if service_token:
+        pro = MagicMock()
+        pro.service_token = service_token
+        pro.inference_url = inference_url or None
+        config.pro = pro
+    else:
+        config.pro = None
+
     config.github = None
 
     return config
@@ -223,3 +232,128 @@ def test_watch_dispatch_error_is_non_fatal(tmp_path: Path) -> None:
     assert result.exit_code == 0, result.output
     output = json.loads(result.output)
     assert output["status"] == "ok"
+
+
+# ---------------------------------------------------------------------------
+# Test 4: ManagedClient is instantiated from pro config when present.
+# ---------------------------------------------------------------------------
+
+
+def test_watch_dispatch_pass_creates_managed_client_from_pro_config(
+    tmp_path: Path,
+) -> None:
+    """When pro config has a service_token, ManagedClient is constructed and
+    passed to CampfireDispatcher."""
+    runner = CliRunner()
+
+    mock_bridge = MagicMock()
+    mock_bridge.run_once = AsyncMock()
+
+    mock_dispatcher = MagicMock()
+    mock_dispatcher.run_once = AsyncMock()
+
+    mock_bridge_cls = MagicMock(return_value=mock_bridge)
+    mock_dispatcher_cls = MagicMock(return_value=mock_dispatcher)
+    mock_managed_client_cls = MagicMock()
+    mock_managed_client_instance = MagicMock()
+    mock_managed_client_cls.return_value = mock_managed_client_instance
+
+    config = _make_config(
+        campfire_id="fire-abc123",
+        bot_token="tg-token",
+        chat_id="tg-chat-42",
+        service_token="mallcop-sk-test-token",
+        inference_url="https://mallcop.example.com",
+    )
+
+    with (
+        patch("mallcop.cli.load_config", return_value=config),
+        patch(
+            "mallcop.cli._run_scan_pipeline",
+            return_value=_make_scan_result(),
+        ),
+        patch(
+            "mallcop.cli._run_detect_pipeline",
+            return_value=_make_detect_result(),
+        ),
+        patch(
+            "mallcop.escalate.run_escalate",
+            return_value=_make_escalate_result(),
+        ),
+        patch("mallcop.cli.TelegramCampfireBridge", mock_bridge_cls),
+        patch("mallcop.cli.CampfireDispatcher", mock_dispatcher_cls),
+        patch("mallcop.llm.managed.ManagedClient", mock_managed_client_cls),
+    ):
+        result = runner.invoke(cli, ["watch", "--dir", str(tmp_path)])
+
+    assert result.exit_code == 0, result.output
+    output = json.loads(result.output)
+    assert output["status"] == "ok"
+
+    # ManagedClient constructed with correct params.
+    mock_managed_client_cls.assert_called_once_with(
+        endpoint="https://mallcop.example.com",
+        service_token="mallcop-sk-test-token",
+        use_lanes=True,
+    )
+
+    # CampfireDispatcher received the managed_client instance.
+    mock_dispatcher_cls.assert_called_once()
+    _, kwargs = mock_dispatcher_cls.call_args
+    assert kwargs.get("managed_client") is mock_managed_client_instance
+
+
+# ---------------------------------------------------------------------------
+# Test 5: managed_client=None when pro config is absent.
+# ---------------------------------------------------------------------------
+
+
+def test_watch_dispatch_pass_no_managed_client_when_no_pro_config(
+    tmp_path: Path,
+) -> None:
+    """When pro config is absent, managed_client=None is passed to dispatcher."""
+    runner = CliRunner()
+
+    mock_bridge = MagicMock()
+    mock_bridge.run_once = AsyncMock()
+
+    mock_dispatcher = MagicMock()
+    mock_dispatcher.run_once = AsyncMock()
+
+    mock_bridge_cls = MagicMock(return_value=mock_bridge)
+    mock_dispatcher_cls = MagicMock(return_value=mock_dispatcher)
+
+    config = _make_config(
+        campfire_id="fire-abc123",
+        bot_token="tg-token",
+        chat_id="tg-chat-42",
+        # no service_token → pro=None
+    )
+
+    with (
+        patch("mallcop.cli.load_config", return_value=config),
+        patch(
+            "mallcop.cli._run_scan_pipeline",
+            return_value=_make_scan_result(),
+        ),
+        patch(
+            "mallcop.cli._run_detect_pipeline",
+            return_value=_make_detect_result(),
+        ),
+        patch(
+            "mallcop.escalate.run_escalate",
+            return_value=_make_escalate_result(),
+        ),
+        patch("mallcop.cli.TelegramCampfireBridge", mock_bridge_cls),
+        patch("mallcop.cli.CampfireDispatcher", mock_dispatcher_cls),
+    ):
+        result = runner.invoke(cli, ["watch", "--dir", str(tmp_path)])
+
+    assert result.exit_code == 0, result.output
+    output = json.loads(result.output)
+    assert output["status"] == "ok"
+
+    # CampfireDispatcher called with managed_client=None.
+    mock_dispatcher_cls.assert_called_once()
+    _, kwargs = mock_dispatcher_cls.call_args
+    assert kwargs.get("managed_client") is None

@@ -1023,7 +1023,7 @@ def _watch_dispatch_pass(root: Path) -> None:
     pro = getattr(config, "pro", None)
     managed_client = None
     if pro and getattr(pro, "service_token", None):
-        from mallcop.managed_client import ManagedClient
+        from mallcop.llm.managed import ManagedClient
 
         managed_client = ManagedClient(
             endpoint=getattr(pro, "inference_url", None) or "https://mallcop.app",
