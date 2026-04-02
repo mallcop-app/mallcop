@@ -405,3 +405,113 @@ def test_run_raises_runtime_error_when_cf_not_found(tmp_path: Path) -> None:
 
     with pytest.raises(RuntimeError, match="cf binary not found or not executable"):
         asyncio.run(run())
+
+
+# ---------------------------------------------------------------------------
+# Test 8 (mallcop-pro-cr9): dispatcher skips messages without a session: tag
+# ---------------------------------------------------------------------------
+
+def test_dispatch_skips_message_without_session_tag(
+    campfire_id: str, tmp_path: Path
+) -> None:
+    """Dispatcher logs a warning and skips messages that have no session: tag."""
+    mock_client = _make_mock_client()
+    dispatcher = CampfireDispatcher(
+        campfire_id=campfire_id,
+        managed_client=mock_client,
+        root=tmp_path,
+        poll_interval=0.1,
+    )
+
+    # Send a chat message with NO session: tag.
+    _send_message(
+        campfire_id,
+        json.dumps({"content": "What findings do I have?"}),
+        tags=["chat", "platform:campfire"],
+    )
+
+    async def run_one_poll():
+        messages = await dispatcher._read_new_messages()
+        for msg in messages:
+            await dispatcher._dispatch_message(msg)
+
+    with patch("mallcop.campfire_dispatch._log") as mock_log:
+        asyncio.run(run_one_poll())
+
+        # chat_turn() must NOT have been called.
+        assert not mock_client.chat.called, (
+            "chat_turn() was called despite missing session: tag"
+        )
+
+        # Warning must have been logged.
+        assert mock_log.warning.called, "Expected a warning log for missing session: tag"
+        warning_text = " ".join(str(a) for a in mock_log.warning.call_args[0])
+        assert "session" in warning_text.lower(), (
+            f"Warning should mention 'session', got: {warning_text!r}"
+        )
+
+    # No response should appear on campfire.
+    all_msgs = _read_all(campfire_id, tag="response")
+    assert len(all_msgs) == 0, (
+        f"Expected no response messages, got: {all_msgs}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Test 9 (mallcop-pro-6p0): dispatcher forwards budget_warning to campfire
+# ---------------------------------------------------------------------------
+
+def test_dispatch_forwards_budget_warning(campfire_id: str, tmp_path: Path) -> None:
+    """When chat_turn returns a budget_warning, dispatcher posts a second campfire message."""
+    session_id = str(uuid.uuid4())
+    mock_client = _make_mock_client("Analysis complete.")
+    dispatcher = CampfireDispatcher(
+        campfire_id=campfire_id,
+        managed_client=mock_client,
+        root=tmp_path,
+        poll_interval=0.1,
+    )
+
+    _send_message(
+        campfire_id,
+        json.dumps({"content": "Check my security posture"}),
+        tags=["chat", f"session:{session_id}", "platform:campfire"],
+    )
+
+    # Patch chat_turn to return a budget_warning.
+    budget_warning_text = "Donut balance below 10% — purchase more to continue."
+
+    async def run_one_poll():
+        messages = await dispatcher._read_new_messages()
+        for msg in messages:
+            # Patch chat_turn at its definition site (local import inside
+            # _dispatch_message uses mallcop.chat.chat_turn).
+            with patch("mallcop.chat.chat_turn") as mock_ct:
+                mock_ct.return_value = {
+                    "response": "Analysis complete.",
+                    "tokens_used": 55,
+                    "budget_warning": budget_warning_text,
+                }
+                await dispatcher._dispatch_message(msg)
+
+    asyncio.run(run_one_poll())
+
+    # Read all campfire messages and find the budget-warning message.
+    all_msgs = _read_all(campfire_id, tag="budget-warning")
+    assert len(all_msgs) >= 1, (
+        f"Expected at least 1 budget-warning message, got 0. "
+        f"All messages: {[m.get('tags') for m in _read_all(campfire_id)]}"
+    )
+
+    warning_msg = all_msgs[0]
+    assert "budget-warning" in warning_msg.get("tags", []), (
+        f"Expected 'budget-warning' tag, got: {warning_msg.get('tags')}"
+    )
+    session_tag = f"session:{session_id}"
+    assert session_tag in warning_msg.get("tags", []), (
+        f"Expected session tag {session_tag!r}, got: {warning_msg.get('tags')}"
+    )
+    payload = json.loads(warning_msg["payload"])
+    assert payload.get("budget_warning") == budget_warning_text, (
+        f"Expected warning text in payload, got: {payload}"
+    )
