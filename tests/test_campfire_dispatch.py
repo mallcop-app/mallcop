@@ -748,8 +748,8 @@ def test_run_once_processes_pending_messages(campfire_id: str, tmp_path: Path) -
         poll_interval=0.1,
     )
 
-    # run_once() should read the pending message, dispatch it, and return.
-    asyncio.run(dispatcher.run_once())
+    # run_once() must return promptly — if it loops, this raises asyncio.TimeoutError.
+    asyncio.run(asyncio.wait_for(dispatcher.run_once(), timeout=5.0))
 
     # Verify chat_turn() was invoked (managed_client.chat was called).
     assert mock_client.chat.called, (
@@ -774,5 +774,4 @@ def test_run_once_processes_pending_messages(campfire_id: str, tmp_path: Path) -
         f"Expected session tag {session_tag!r} in response tags: {responses[0]['tags']}"
     )
 
-    # run_once() must return promptly — verify by checking it didn't loop.
-    # (If run_once looped it would block the test; reaching here is sufficient.)
+
