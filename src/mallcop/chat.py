@@ -303,6 +303,8 @@ def run_chat_repl(
             )
             click.echo(f"\nmallcop> {result['response']}")
             click.echo(result["footer"])
+            if result.get("budget_warning"):
+                click.echo(f"\n[budget] {result['budget_warning']}")
             click.echo("")
         except Exception as exc:
             click.echo(f"ERROR: {exc}", err=True)
