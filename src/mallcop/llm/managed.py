@@ -127,7 +127,8 @@ class ManagedClient(LLMClient):
         if resp.status_code != 200:
             _log.debug("Managed inference error %d: %s", resp.status_code, resp.text)
             raise LLMAPIError(
-                f"Managed inference error {resp.status_code}"
+                f"Managed inference error {resp.status_code}",
+                status_code=resp.status_code,
             )
 
         data = resp.json()
