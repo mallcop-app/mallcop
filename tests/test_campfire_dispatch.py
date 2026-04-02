@@ -365,14 +365,9 @@ def test_run_cf_raises_timeout_when_subprocess_hangs(tmp_path: Path) -> None:
             "asyncio.create_subprocess_exec",
             side_effect=_create_hanging_proc,
         ):
-            # Use a very short timeout so the test doesn't actually wait 30s.
-            import mallcop.campfire_dispatch as mod
-            original_timeout = mod._CF_TIMEOUT
-            mod._CF_TIMEOUT = 0.01
-            try:
-                await _run_cf("read", "fake-campfire-id")
-            finally:
-                mod._CF_TIMEOUT = original_timeout
+            # Pass timeout directly — mutating _CF_TIMEOUT is a no-op because
+            # the default parameter is evaluated at function definition time.
+            await _run_cf("read", "fake-campfire-id", timeout=0.01)
 
     with pytest.raises(asyncio.TimeoutError):
         asyncio.run(run())
