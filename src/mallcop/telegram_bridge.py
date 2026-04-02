@@ -67,6 +67,7 @@ class TelegramCampfireBridge:
         poll_interval: float = 3.0,
         cf_bin: str = "cf",
         cf_home: str | None = None,
+        inbound_mode: bool = False,
     ) -> None:
         self._chat_id = chat_id
         self._campfire_id = campfire_id
@@ -74,6 +75,7 @@ class TelegramCampfireBridge:
         self._cf_bin = cf_bin
         self._cf_home = cf_home
         self._update_offset: int = 0
+        self._inbound_mode = inbound_mode
         # Store token separately; construct per-call URLs at call time so the
         # token is never embedded in a persistent attribute that could appear in logs.
         self._tg_token = bot_token
@@ -140,6 +142,44 @@ class TelegramCampfireBridge:
                 await self._send_to_telegram(content)
 
         await self._persist_offset_to_campfire()
+
+    async def run_once_inbound(self) -> None:
+        """Run one poll cycle in campfire-inbound mode (pro-online webhook tier).
+
+        Used when mallcop-pro has registered a Telegram webhook — getUpdates
+        cannot be used alongside a webhook.  Instead, mallcop-pro's webhook
+        handler writes inbound Telegram messages to the customer's campfire as
+        ``tg-inbound`` tagged messages.
+
+        Steps:
+        1. Read ``tg-inbound`` tagged messages from campfire.
+        2. Forward each to campfire as ``chat`` + ``session:<chat_id>`` tagged
+           messages so CampfireDispatcher can pick them up.
+        3. Poll campfire for ``response``-tagged messages (same as run_once()).
+        4. Forward each response to Telegram via ``_send_to_telegram()``.
+
+        No getUpdates call. No offset persistence.
+        """
+        inbound = await self._poll_campfire_inbound()
+        for msg in inbound:
+            raw = msg.get("payload", "")
+            if not raw:
+                continue
+            try:
+                parsed = json.loads(raw)
+                content = parsed.get("content", "")
+                from_id = parsed.get("from", "unknown")
+            except (json.JSONDecodeError, TypeError):
+                content = raw
+                from_id = "unknown"
+            if content:
+                await self._send_to_campfire(text=content, from_id=from_id)
+
+        cf_messages = await self._poll_campfire()
+        for msg in cf_messages:
+            text = self._extract_response_text(msg)
+            if text:
+                await self._send_to_telegram(text)
 
     # ------------------------------------------------------------------
     # Telegram helpers
@@ -292,6 +332,37 @@ class TelegramCampfireBridge:
             items = json.loads(raw)
         except json.JSONDecodeError:
             _log.warning("telegram_bridge: non-JSON from cf read: %r", raw[:200])
+            return []
+
+        if not isinstance(items, list):
+            return []
+
+        return items
+
+    async def _poll_campfire_inbound(self) -> list[dict]:
+        """Fetch tg-inbound tagged messages from campfire (campfire-inbound mode).
+
+        Returns the parsed list of campfire message dicts, or an empty list on
+        error.  Each message payload is expected to be JSON with ``content`` and
+        ``from`` keys written by the mallcop-pro webhook handler.
+        """
+        try:
+            raw = await self._cf(
+                "read", self._campfire_id,
+                "--json",
+                "--tag", "tg-inbound",
+            )
+        except Exception as exc:  # noqa: BLE001
+            _log.warning("telegram_bridge: campfire inbound read error: %s", exc)
+            return []
+
+        if not raw:
+            return []
+
+        try:
+            items = json.loads(raw)
+        except json.JSONDecodeError:
+            _log.warning("telegram_bridge: non-JSON from cf read (tg-inbound): %r", raw[:200])
             return []
 
         if not isinstance(items, list):
