@@ -9,11 +9,16 @@ from __future__ import annotations
 import subprocess
 import uuid
 from typing import Generator
+from unittest.mock import patch
 
 import pytest
 
 from mallcop.context_window import ContextWindowManager
-from mallcop.conversation import CampfireConversationAdapter, ConversationMessage
+from mallcop.conversation import (
+    CampfireAdapterError,
+    CampfireConversationAdapter,
+    ConversationMessage,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -226,3 +231,88 @@ def test_context_window_manager_from_adapter(campfire_id: str) -> None:
     contents = [m["content"] for m in context["messages"]]
     assert contents[0] == "What is my security posture?"
     assert contents[2] == "Tell me more about MC-010."
+
+
+# ---------------------------------------------------------------------------
+# Test 7 (mallcop-pro-vhj): load_session returns [] when cf read returns "null"
+# ---------------------------------------------------------------------------
+
+def test_load_session_returns_empty_on_null_json() -> None:
+    """cf read --json returning 'null' must not raise TypeError."""
+    adapter = CampfireConversationAdapter("fake-campfire-id")
+
+    with patch.object(adapter, "_cf", return_value="null"):
+        result = adapter.load_session("any-session")
+
+    assert result == [], f"Expected [], got {result!r}"
+
+
+# ---------------------------------------------------------------------------
+# Test 8 (mallcop-pro-i2z): _cf() failure is handled gracefully
+# ---------------------------------------------------------------------------
+
+def test_load_session_returns_empty_on_cf_failure() -> None:
+    """RuntimeError from _cf() in load_session must not propagate -- return []."""
+    adapter = CampfireConversationAdapter("fake-campfire-id")
+
+    with patch.object(adapter, "_cf", side_effect=RuntimeError("cf: connection refused")):
+        result = adapter.load_session("any-session")
+
+    assert result == [], f"Expected [], got {result!r}"
+
+
+def test_append_raises_campfire_adapter_error_on_cf_failure() -> None:
+    """RuntimeError from _cf() in append must be re-raised as CampfireAdapterError."""
+    adapter = CampfireConversationAdapter("fake-campfire-id")
+
+    with patch.object(adapter, "_cf", side_effect=RuntimeError("cf: connection refused")):
+        with pytest.raises(CampfireAdapterError):
+            adapter.append(
+                session_id="any-session",
+                surface="cli",
+                role="user",
+                content="test content",
+            )
+
+
+# ---------------------------------------------------------------------------
+# Test 9 (mallcop-pro-cmy): session_id with colons/spaces round-trips correctly
+# ---------------------------------------------------------------------------
+
+def test_sanitize_session_id_replaces_special_chars() -> None:
+    """session_id with colons and spaces is sanitized consistently."""
+    adapter = CampfireConversationAdapter("fake-campfire-id")
+
+    raw_session_id = "abc:def ghi/jkl"
+    expected_safe = "abc_def_ghi_jkl"
+
+    safe = adapter._sanitize_session_id(raw_session_id)
+    assert safe == expected_safe, f"Expected {expected_safe!r}, got {safe!r}"
+
+    # Tags built with the raw session_id should use the sanitized form
+    tags = adapter._build_tags(raw_session_id, "cli", [])
+    assert f"session:{expected_safe}" in tags, f"Expected sanitized tag in {tags}"
+    # The raw (unsafe) form should NOT appear in any tag
+    assert not any(raw_session_id in t for t in tags), \
+        f"Raw session_id should not appear in tags: {tags}"
+
+
+def test_load_session_coloned_session_id_round_trip(campfire_id: str) -> None:
+    """session_id with a colon round-trips through append->load_session correctly."""
+    adapter = CampfireConversationAdapter(campfire_id)
+    # Use a session_id with a colon -- common in namespaced IDs like "tenant:user-uuid"
+    raw_uuid = str(uuid.uuid4())
+    session_id = f"tenant:{raw_uuid}"
+
+    msg = adapter.append(
+        session_id=session_id,
+        surface="cli",
+        role="user",
+        content="Message with colon session ID",
+    )
+    assert msg.session_id == session_id
+
+    # load_session must find the message using the same raw session_id
+    loaded = adapter.load_session(session_id)
+    assert len(loaded) == 1, f"Expected 1 message, got {len(loaded)}"
+    assert loaded[0].content == "Message with colon session ID"
