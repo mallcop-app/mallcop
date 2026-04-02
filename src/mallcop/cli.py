@@ -908,7 +908,7 @@ def watch(dry_run: bool, dir_path: str | None, human: bool, backend: str, daemon
         )
 
         try:
-            _asyncio.run(_daemon_loop(dispatcher, root, float(scan_interval)))
+            _asyncio.run(_daemon_loop(dispatcher, root, float(scan_interval), idle_timeout_seconds=300.0))
         except KeyboardInterrupt:
             click.echo("daemon stopped")
         return
