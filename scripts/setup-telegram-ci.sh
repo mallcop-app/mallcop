@@ -68,8 +68,10 @@ REPO=$(git -C "$(dirname "$0")/.." remote get-url origin 2>/dev/null \
 
 if [[ -n "$REPO" ]] && command -v gh &>/dev/null; then
     echo "Setting GitHub Actions secrets on ${REPO}..."
-    gh secret set MALLCOP_TEST_TELEGRAM_BOT_TOKEN --body "$TOKEN" --repo "$REPO"
-    gh secret set MALLCOP_TEST_TELEGRAM_CHAT_ID   --body "$CHAT_ID" --repo "$REPO"
+    gh secret set MALLCOP_TEST_TELEGRAM_BOT_TOKEN --body "$TOKEN"   --repo "$REPO"  # for tests
+    gh secret set MALLCOP_TEST_TELEGRAM_CHAT_ID   --body "$CHAT_ID" --repo "$REPO"  # for tests
+    gh secret set MALLCOP_TELEGRAM_BOT_TOKEN      --body "$TOKEN"   --repo "$REPO"  # for CLI
+    gh secret set MALLCOP_TELEGRAM_CHAT_ID        --body "$CHAT_ID" --repo "$REPO"  # for CLI
     echo "  Done."
 else
     echo "  (skipping GitHub secrets — gh not found or not in a git repo)"
@@ -79,11 +81,13 @@ fi
 echo ""
 echo "Paste these into your shell profile (~/.bashrc or ~/.zshrc):"
 echo ""
-echo "  export MALLCOP_TEST_TELEGRAM_BOT_TOKEN='${TOKEN}'"
-echo "  export MALLCOP_TEST_TELEGRAM_CHAT_ID='${CHAT_ID}'"
+echo "  export MALLCOP_TELEGRAM_BOT_TOKEN='${TOKEN}'"
+echo "  export MALLCOP_TELEGRAM_CHAT_ID='${CHAT_ID}'"
+echo "  export MALLCOP_TEST_TELEGRAM_BOT_TOKEN='${TOKEN}'  # for test suite"
+echo "  export MALLCOP_TEST_TELEGRAM_CHAT_ID='${CHAT_ID}'  # for test suite"
 echo ""
 echo "Or for this session only:"
 echo ""
-echo "  export MALLCOP_TEST_TELEGRAM_BOT_TOKEN='${TOKEN}' MALLCOP_TEST_TELEGRAM_CHAT_ID='${CHAT_ID}'"
+echo "  export MALLCOP_TELEGRAM_BOT_TOKEN='${TOKEN}' MALLCOP_TELEGRAM_CHAT_ID='${CHAT_ID}' MALLCOP_TEST_TELEGRAM_BOT_TOKEN='${TOKEN}' MALLCOP_TEST_TELEGRAM_CHAT_ID='${CHAT_ID}'"
 echo ""
 echo "Done. You can now close mallcop-pro-dl4 in rd."

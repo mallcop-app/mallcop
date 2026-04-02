@@ -13,6 +13,19 @@ from click.testing import CliRunner
 from mallcop.cli import cli
 
 
+def _parse_init_output(output: str) -> dict:
+    """Extract the JSON output line from init command output.
+
+    Background threads (e.g. bridge) may write to stderr which CliRunner
+    captures alongside stdout. Find the first line that looks like JSON.
+    """
+    for line in output.splitlines():
+        line = line.strip()
+        if line.startswith("{"):
+            return json.loads(line)
+    raise ValueError(f"No JSON line found in output: {output!r}")
+
+
 class TestInitCampfire:
     def test_init_campfire_creates_campfire_and_stores_id(self, tmp_path: Path) -> None:
         """--campfire calls cf create and stores the returned ID in config and output."""
@@ -27,7 +40,7 @@ class TestInitCampfire:
                 result = runner.invoke(cli, ["init", "--campfire"])
 
         assert result.exit_code == 0, result.output
-        data = json.loads(result.output)
+        data = _parse_init_output(result.output)
         assert data["status"] == "ok"
         assert data["delivery"]["campfire_id"] == "camp-abc123"
 
@@ -87,7 +100,7 @@ class TestInitTelegram:
             )
 
         assert result.exit_code == 0, result.output
-        data = json.loads(result.output)
+        data = _parse_init_output(result.output)
         assert data["status"] == "ok"
         assert data["delivery"]["telegram_configured"] is True
 
@@ -115,7 +128,7 @@ class TestInitTelegram:
             )
 
         assert result.exit_code == 0, result.output
-        config_path = Path(json.loads(result.output)["config_path"])
+        config_path = Path(_parse_init_output(result.output)["config_path"])
         with open(config_path) as f:
             cfg = yaml.safe_load(f)
 
@@ -123,16 +136,16 @@ class TestInitTelegram:
         assert cfg["delivery"].get("telegram_chat_id", "") == ""
 
     def test_init_telegram_accepts_env_var(self, tmp_path: Path) -> None:
-        """MALLCOP_TEST_TELEGRAM_BOT_TOKEN env var is accepted in lieu of --telegram-bot-token."""
+        """MALLCOP_TELEGRAM_BOT_TOKEN env var is accepted in lieu of --telegram-bot-token."""
         runner = CliRunner()
 
         with runner.isolated_filesystem(temp_dir=tmp_path):
             result = runner.invoke(
                 cli,
                 ["init"],
-                env={"MALLCOP_TEST_TELEGRAM_BOT_TOKEN": "botENV:TOKEN"},
+                env={"MALLCOP_TELEGRAM_BOT_TOKEN": "botENV:TOKEN"},
             )
 
         assert result.exit_code == 0, result.output
-        data = json.loads(result.output)
+        data = _parse_init_output(result.output)
         assert data["delivery"]["telegram_configured"] is True
