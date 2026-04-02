@@ -281,7 +281,6 @@ class TestFindingsContextCap:
         summaries = _load_finding_summaries(tmp_path)
 
         # The 20 most recent are findings 30..49 (highest timestamps).
-        returned_ids = [s.split(":")[0].strip("[]meduihg ").split("]")[-1].strip() for s in summaries]
         # Simpler check: find-0030..find-0049 should appear, find-0000..find-0029 should not.
         joined = "\n".join(summaries)
         # At least the last 10 findings (most recent) should be present.

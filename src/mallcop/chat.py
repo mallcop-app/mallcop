@@ -40,6 +40,52 @@ _BASE_SYSTEM_PROMPT = (
 # Maps session_id -> cumulative donuts spent (float).
 _session_donut_spend: dict[str, float] = {}
 
+# Maximum number of sessions tracked in _session_donut_spend before eviction.
+_MAX_TRACKED_SESSIONS: int = 1000
+
+# User-facing platform error messages.
+_MSG_402: str = (
+    "I received your message but can't respond right now — "
+    "insufficient donut balance. "
+    "Your message is saved and I'll respond when service resumes."
+)
+_MSG_503: str = (
+    "I received your message but can't respond right now — "
+    "inference service unavailable. "
+    "Your message is saved and I'll respond when service resumes."
+)
+
+# Budget warning threshold — resolved at module load from the env var.
+# Tests that use monkeypatch.setenv override this before calling chat_turn,
+# so we re-read the env var inside chat_turn to respect per-test overrides.
+_BUDGET_WARNING_THRESHOLD: int = DEFAULT_BUDGET_WARNING_THRESHOLD
+
+
+async def _platform_error_response(
+    session_id: str,
+    store: Any,
+    msg: str,
+) -> dict[str, Any]:
+    """Append *msg* as an assistant message and return the standard platform-error dict."""
+    try:
+        _r = store.append(
+            session_id=session_id,
+            surface=SURFACE,
+            role="assistant",
+            content=msg,
+            tokens_used=0,
+        )
+        if inspect.isawaitable(_r):
+            await _r
+    except Exception as store_exc:
+        _log.error("chat: failed to persist platform message: %s", store_exc)
+    return {
+        "response": msg,
+        "tokens_used": 0,
+        "footer": _burn_rate_footer(0),
+        "is_platform_error": True,
+    }
+
 
 def _load_finding_summaries(root: Path, max_findings: int = MAX_FINDINGS_IN_PROMPT) -> list[str]:
     """Load finding summaries from findings.jsonl in root, returning list of strings.
@@ -162,18 +208,18 @@ async def chat_turn(
 
     system_prompt = _build_system_prompt(root)
 
-    # Read budget warning threshold from env var or use default.
-    budget_threshold = int(
+    # Read budget warning threshold from env var (allows per-test override via monkeypatch).
+    _budget_threshold = int(
         os.environ.get("MALLCOP_BUDGET_WARNING_THRESHOLD", DEFAULT_BUDGET_WARNING_THRESHOLD)
     )
-    if budget_threshold <= 0:
+    if _budget_threshold <= 0:
         _log.warning(
             "chat: MALLCOP_BUDGET_WARNING_THRESHOLD=%d is invalid (must be > 0); "
             "using default %d",
-            budget_threshold,
+            _budget_threshold,
             DEFAULT_BUDGET_WARNING_THRESHOLD,
         )
-        budget_threshold = DEFAULT_BUDGET_WARNING_THRESHOLD
+        _budget_threshold = DEFAULT_BUDGET_WARNING_THRESHOLD
 
     try:
         response = managed_client.chat(
@@ -190,53 +236,9 @@ async def chat_turn(
         status_code: int | None = getattr(exc, "status_code", None)
 
         if status_code == 402:
-            platform_msg = (
-                "I received your message but can't respond right now — "
-                "insufficient donut balance. "
-                "Your message is saved and I'll respond when service resumes."
-            )
-            try:
-                _r = store.append(
-                    session_id=session_id,
-                    surface=SURFACE,
-                    role="assistant",
-                    content=platform_msg,
-                    tokens_used=0,
-                )
-                if inspect.isawaitable(_r):
-                    await _r
-            except Exception as store_exc:
-                _log.error("chat: failed to persist 402 platform message: %s", store_exc)
-            return {
-                "response": platform_msg,
-                "tokens_used": 0,
-                "footer": _burn_rate_footer(0),
-                "is_platform_error": True,
-            }
+            return await _platform_error_response(session_id, store, _MSG_402)
         elif status_code == 503:
-            platform_msg = (
-                "I received your message but can't respond right now — "
-                "inference service unavailable. "
-                "Your message is saved and I'll respond when service resumes."
-            )
-            try:
-                _r = store.append(
-                    session_id=session_id,
-                    surface=SURFACE,
-                    role="assistant",
-                    content=platform_msg,
-                    tokens_used=0,
-                )
-                if inspect.isawaitable(_r):
-                    await _r
-            except Exception as store_exc:
-                _log.error("chat: failed to persist 503 platform message: %s", store_exc)
-            return {
-                "response": platform_msg,
-                "tokens_used": 0,
-                "footer": _burn_rate_footer(0),
-                "is_platform_error": True,
-            }
+            return await _platform_error_response(session_id, store, _MSG_503)
         raise
 
     # Extract text from response.
@@ -253,6 +255,13 @@ async def chat_turn(
     _session_donut_spend[session_id] = _session_donut_spend.get(session_id, 0.0) + donuts_this_turn
     cumulative_donuts = _session_donut_spend[session_id]
 
+    # Evict tracked sessions when the dict grows too large.
+    if len(_session_donut_spend) > _MAX_TRACKED_SESSIONS:
+        keep = list(_session_donut_spend.keys())[_MAX_TRACKED_SESSIONS // 2:]
+        for k in list(_session_donut_spend.keys()):
+            if k not in keep:
+                del _session_donut_spend[k]
+
     # Append assistant response to store.
     _r = store.append(
         session_id=session_id,
@@ -268,7 +277,7 @@ async def chat_turn(
     result: dict[str, Any] = {"response": text, "tokens_used": tokens_used, "footer": footer}
 
     # Emit budget warning if cumulative spend exceeds threshold.
-    if cumulative_donuts >= budget_threshold:
+    if cumulative_donuts >= _budget_threshold:
         # Attempt to get remaining balance from client (best-effort).
         remaining: str = "unknown"
         try:
