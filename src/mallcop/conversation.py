@@ -292,6 +292,13 @@ class CampfireConversationAdapter:
         # Encode metadata not natively captured by campfire in the payload as
         # a JSON envelope so we can reconstruct the full ConversationMessage
         # on read.
+        if not isinstance(tokens_used, int):
+            try:
+                tokens_used = int(tokens_used)
+            except (TypeError, ValueError) as exc:
+                raise TypeError(
+                    f"tokens_used must be an int or int-convertible, got {type(tokens_used).__name__!r}"
+                ) from exc
         envelope: dict[str, Any] = {
             "id": msg_id,
             "timestamp": timestamp,
@@ -309,6 +316,10 @@ class CampfireConversationAdapter:
         try:
             await self._cf(*cmd_args)
         except (RuntimeError, OSError) as exc:
+            logger.error(
+                "campfire=%s session=%s append failed: %s",
+                self._campfire_id, session_id, exc,
+            )
             raise CampfireAdapterError(
                 f"CampfireConversationAdapter: append failed for session {session_id!r}: {exc}"
             ) from exc
@@ -336,9 +347,8 @@ class CampfireConversationAdapter:
             )
         except (RuntimeError, OSError) as exc:
             logger.warning(
-                "CampfireConversationAdapter: load_session failed for %r: %s",
-                session_id,
-                exc,
+                "campfire=%s session=%s load_session failed: %s",
+                self._campfire_id, session_id, exc,
             )
             return []
         if not raw:
@@ -346,23 +356,23 @@ class CampfireConversationAdapter:
         try:
             items = json.loads(raw)
         except json.JSONDecodeError:
-            logger.warning("CampfireConversationAdapter: could not parse cf read output")
+            logger.warning(
+                "campfire=%s session=%s could not parse cf read output",
+                self._campfire_id, session_id,
+            )
             return []
 
         # Guard against non-list JSON (e.g. "null", "{}", "true")
         if not isinstance(items, list):
             logger.warning(
-                "CampfireConversationAdapter: expected JSON list from cf read, got %r; returning []",
-                type(items).__name__,
+                "campfire=%s session=%s expected JSON list from cf read, got %r; returning []",
+                self._campfire_id, session_id, type(items).__name__,
             )
             return []
 
         results: list[ConversationMessage] = []
         for item in items:
             tags: list[str] = item.get("tags", [])
-            # Skip non-chat messages (e.g. convention metadata published at campfire creation)
-            if _CHAT_TAG not in tags:
-                continue
             item_session = self._extract_session_id(tags)
             if item_session != safe_session_id:
                 continue
@@ -372,8 +382,8 @@ class CampfireConversationAdapter:
                 envelope = json.loads(payload_raw)
             except (json.JSONDecodeError, TypeError):
                 logger.warning(
-                    "CampfireConversationAdapter: skipping message with non-JSON payload: %r",
-                    payload_raw,
+                    "campfire=%s session=%s skipping message with non-JSON payload: %r",
+                    self._campfire_id, session_id, payload_raw,
                 )
                 continue
 
@@ -402,7 +412,8 @@ class CampfireConversationAdapter:
                 results.append(msg)
             except (KeyError, TypeError) as exc:
                 logger.warning(
-                    "CampfireConversationAdapter: skipping malformed envelope: %s", exc
+                    "campfire=%s session=%s skipping malformed envelope: %s",
+                    self._campfire_id, session_id, exc,
                 )
                 continue
 

@@ -600,3 +600,70 @@ def test_dispatch_no_platform_error_tag_on_normal_response(
     assert "platform-error" not in tags, (
         f"Expected no 'platform-error' tag on normal response, got: {tags}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Test 12 (mallcop-pro-xvy): publish_finding dual-write — campfire side verified
+# ---------------------------------------------------------------------------
+
+def test_publish_finding_writes_to_campfire_with_correct_tags(
+    campfire_id: str, tmp_path: Path
+) -> None:
+    """publish_finding() dual-write contract: campfire receives finding with correct tags and valid JSON payload."""
+    mock_client = _make_mock_client()
+    dispatcher = CampfireDispatcher(
+        campfire_id=campfire_id,
+        managed_client=mock_client,
+        root=tmp_path,
+        poll_interval=0.1,
+    )
+
+    finding = _make_finding(
+        finding_id="MC-099",
+        severity=Severity.CRITICAL,
+        detector="s3-scanner",
+        connector_name="aws-s3",
+    )
+
+    asyncio.run(dispatcher.publish_finding(finding))
+
+    # Read all finding messages from campfire.
+    all_msgs = _read_all(campfire_id, tag="finding")
+    assert len(all_msgs) >= 1, (
+        f"Expected at least 1 finding message on campfire after publish_finding(), got 0"
+    )
+
+    finding_msg = all_msgs[0]
+    tags = finding_msg.get("tags", [])
+
+    # Verify required tags are present.
+    assert "finding" in tags, f"Expected 'finding' tag, got: {tags}"
+    assert any(t.startswith("severity:") for t in tags), (
+        f"Expected a 'severity:*' tag, got: {tags}"
+    )
+    assert any(t.startswith("connector:") for t in tags), (
+        f"Expected a 'connector:*' tag, got: {tags}"
+    )
+    assert any(t.startswith("id:") for t in tags), (
+        f"Expected an 'id:*' tag, got: {tags}"
+    )
+
+    # Verify specific tag values for this finding.
+    assert "severity:critical" in tags, f"Expected 'severity:critical' tag, got: {tags}"
+    assert "connector:aws-s3" in tags, f"Expected 'connector:aws-s3' tag, got: {tags}"
+    assert "id:MC-099" in tags, f"Expected 'id:MC-099' tag, got: {tags}"
+
+    # Verify payload is valid JSON containing the finding's fields.
+    raw_payload = finding_msg.get("payload", "")
+    assert raw_payload, "Expected non-empty payload in finding message"
+    try:
+        payload = json.loads(raw_payload)
+    except json.JSONDecodeError as exc:
+        pytest.fail(f"publish_finding() wrote non-JSON payload: {exc!r}\n  raw: {raw_payload!r}")
+
+    assert payload.get("id") == "MC-099", (
+        f"Expected payload['id'] == 'MC-099', got: {payload.get('id')!r}"
+    )
+    assert payload.get("severity") in ("critical", Severity.CRITICAL, Severity.CRITICAL.value), (
+        f"Expected payload['severity'] to represent CRITICAL, got: {payload.get('severity')!r}"
+    )
