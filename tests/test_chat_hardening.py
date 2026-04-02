@@ -26,9 +26,14 @@ from mallcop.chat import (
     _build_system_prompt,
     _load_finding_summaries,
     _session_donut_spend,
-    chat_turn,
+    chat_turn as _async_chat_turn,
     run_chat_repl,
 )
+
+
+def chat_turn(*args, **kwargs):
+    """Sync wrapper around async chat_turn for test convenience."""
+    return asyncio.run(_async_chat_turn(*args, **kwargs))
 from mallcop.conversation import ConversationStore
 from mallcop.context_window import ContextWindowManager
 from mallcop.llm_types import LLMAPIError, LLMResponse
