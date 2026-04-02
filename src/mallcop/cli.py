@@ -403,8 +403,8 @@ def _setup_pro(config_data: dict[str, Any]) -> dict[str, Any] | None:
 @click.option("--pro", is_flag=True, help="Set up Pro managed inference")
 @click.option("--api-key", "api_key", default=None, help="mallcop Pro API key (mallcop-sk-* format); stored in mallcop.yaml")
 @click.option("--campfire", "campfire", is_flag=True, default=False, help="Create a campfire for this deployment and store its ID in config")
-@click.option("--telegram-bot-token", "telegram_bot_token", default=None, envvar="MALLCOP_TEST_TELEGRAM_BOT_TOKEN", help="Telegram bot token")
-@click.option("--telegram-chat-id", "telegram_chat_id", default=None, envvar="MALLCOP_TEST_TELEGRAM_CHAT_ID", help="Telegram chat ID")
+@click.option("--telegram-bot-token", "telegram_bot_token", default=None, envvar="MALLCOP_TELEGRAM_BOT_TOKEN", help="Telegram bot token")
+@click.option("--telegram-chat-id", "telegram_chat_id", default=None, envvar="MALLCOP_TELEGRAM_CHAT_ID", help="Telegram chat ID")
 def init(pro: bool, api_key: str | None, campfire: bool, telegram_bot_token: str | None, telegram_chat_id: str | None) -> None:
     """Discover environment, write config, estimate costs."""
     cwd = Path.cwd()
@@ -551,10 +551,10 @@ def init(pro: bool, api_key: str | None, campfire: bool, telegram_bot_token: str
 
     if telegram_bot_token:
         # Store credentials as env-var references, not raw values
-        delivery_config_data["telegram_bot_token"] = "${MALLCOP_TEST_TELEGRAM_BOT_TOKEN}"
+        delivery_config_data["telegram_bot_token"] = "${MALLCOP_TELEGRAM_BOT_TOKEN}"
         delivery_result["telegram_configured"] = True
         if telegram_chat_id:
-            delivery_config_data["telegram_chat_id"] = "${MALLCOP_TEST_TELEGRAM_CHAT_ID}"
+            delivery_config_data["telegram_chat_id"] = "${MALLCOP_TELEGRAM_CHAT_ID}"
 
     if delivery_config_data:
         config_data["delivery"] = delivery_config_data
