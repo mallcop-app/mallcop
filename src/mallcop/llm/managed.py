@@ -79,7 +79,7 @@ class ManagedClient(LLMClient):
         self,
         endpoint: str,
         service_token: str,
-        default_model: str = "claude-haiku-4-5-20251001",
+        default_model: str = "claude-haiku-4-5",
         use_lanes: bool = False,
         extra_headers: dict[str, str] | None = None,
     ) -> None:
@@ -127,7 +127,8 @@ class ManagedClient(LLMClient):
         if resp.status_code != 200:
             _log.debug("Managed inference error %d: %s", resp.status_code, resp.text)
             raise LLMAPIError(
-                f"Managed inference error {resp.status_code}"
+                f"Managed inference error {resp.status_code}",
+                status_code=resp.status_code,
             )
 
         data = resp.json()
