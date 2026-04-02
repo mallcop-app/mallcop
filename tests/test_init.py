@@ -1,4 +1,4 @@
-"""Tests for mallcop init --campfire and --telegram flags."""
+"""Tests for mallcop init — campfire auto-creation and Telegram setup."""
 
 from __future__ import annotations
 
@@ -16,8 +16,8 @@ from mallcop.cli import cli
 def _parse_init_output(output: str) -> dict:
     """Extract the JSON output line from init command output.
 
-    Background threads (e.g. bridge) may write to stderr which CliRunner
-    captures alongside stdout. Find the first line that looks like JSON.
+    Background threads may write to stderr which CliRunner captures alongside
+    stdout. Find the first line that looks like JSON.
     """
     for line in output.splitlines():
         line = line.strip()
@@ -27,8 +27,8 @@ def _parse_init_output(output: str) -> dict:
 
 
 class TestInitCampfire:
-    def test_init_campfire_creates_campfire_and_stores_id(self, tmp_path: Path) -> None:
-        """--campfire calls cf create and stores the returned ID in config and output."""
+    def test_init_always_creates_campfire(self, tmp_path: Path) -> None:
+        """init always calls cf create and stores the returned ID in config and output."""
         runner = CliRunner()
 
         fake_proc = MagicMock()
@@ -37,7 +37,7 @@ class TestInitCampfire:
 
         with runner.isolated_filesystem(temp_dir=tmp_path):
             with patch("subprocess.run", return_value=fake_proc) as mock_run:
-                result = runner.invoke(cli, ["init", "--campfire"])
+                result = runner.invoke(cli, ["init"])
 
         assert result.exit_code == 0, result.output
         data = _parse_init_output(result.output)
@@ -63,19 +63,15 @@ class TestInitCampfire:
 
         with runner.isolated_filesystem(temp_dir=tmp_path):
             with patch("subprocess.run", side_effect=FileNotFoundError("cf not found")):
-                result = runner.invoke(cli, ["init", "--campfire"])
+                result = runner.invoke(cli, ["init"])
 
         assert result.exit_code == 0, result.output
-        # Output may contain a warning JSON line followed by the main output line;
-        # take the last non-empty JSON line.
         lines = [l for l in result.output.strip().splitlines() if l.strip().startswith("{")]
         data = json.loads(lines[-1])
         assert data["status"] == "ok"
-        # delivery key should be absent or campfire_id absent
         delivery = data.get("delivery", {})
         assert "campfire_id" not in delivery
 
-        # mallcop.yaml should not have delivery.campfire_id
         config_path = Path(data["config_path"])
         with open(config_path) as f:
             cfg = yaml.safe_load(f)
@@ -83,8 +79,8 @@ class TestInitCampfire:
 
 
 class TestInitTelegram:
-    def test_init_telegram_stores_credentials_as_env_refs(self, tmp_path: Path) -> None:
-        """--telegram-bot-token stores ${MALLCOP_TEST_TELEGRAM_BOT_TOKEN} (env ref), not the raw value."""
+    def test_init_telegram_stores_token_and_chat_id(self, tmp_path: Path) -> None:
+        """--telegram-bot-token stores the token value directly in config."""
         runner = CliRunner()
         raw_token = "bot12345:ABCDEF"
         raw_chat_id = "-100123456"
@@ -104,21 +100,15 @@ class TestInitTelegram:
         assert data["status"] == "ok"
         assert data["delivery"]["telegram_configured"] is True
 
-        # Config must have env-var references, not raw values
         config_path = Path(data["config_path"])
         with open(config_path) as f:
             cfg = yaml.safe_load(f)
 
-        token_in_cfg = cfg["delivery"]["telegram_bot_token"]
-        chat_in_cfg = cfg["delivery"]["telegram_chat_id"]
-
-        assert raw_token not in token_in_cfg, "Raw token must not appear in config"
-        assert raw_chat_id not in chat_in_cfg, "Raw chat ID must not appear in config"
-        assert token_in_cfg.startswith("${"), f"Expected env-ref, got: {token_in_cfg}"
-        assert chat_in_cfg.startswith("${"), f"Expected env-ref, got: {chat_in_cfg}"
+        assert cfg["delivery"]["telegram_bot_token"] == raw_token
+        assert cfg["delivery"]["telegram_chat_id"] == raw_chat_id
 
     def test_init_telegram_token_only_no_chat_id(self, tmp_path: Path) -> None:
-        """Token without chat ID: token stored as env ref, no chat_id entry."""
+        """Token without chat ID: token stored, no chat_id entry."""
         runner = CliRunner()
 
         with runner.isolated_filesystem(temp_dir=tmp_path):
@@ -132,7 +122,7 @@ class TestInitTelegram:
         with open(config_path) as f:
             cfg = yaml.safe_load(f)
 
-        assert "telegram_bot_token" in cfg["delivery"]
+        assert cfg["delivery"]["telegram_bot_token"] == "bot99:TOKEN"
         assert cfg["delivery"].get("telegram_chat_id", "") == ""
 
     def test_init_telegram_accepts_env_var(self, tmp_path: Path) -> None:

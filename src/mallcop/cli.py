@@ -399,13 +399,69 @@ def _setup_pro(config_data: dict[str, Any]) -> dict[str, Any] | None:
     return pro_result
 
 
+def _setup_telegram_interactive() -> tuple[str, str] | None:
+    """Walk the user through Telegram bot setup interactively.
+
+    Returns (bot_token, chat_id) on success, None if the user skips.
+    """
+    import sys
+    import requests as _req
+
+    click.echo("", err=True)
+    click.echo("── Telegram notifications ─────────────────────────────", err=True)
+    if not click.confirm("  Set up Telegram alerts?", default=False, err=True):
+        return None
+
+    click.echo("", err=True)
+    click.echo("  1. Open Telegram and search for @BotFather", err=True)
+    click.echo("  2. Send /newbot and follow the prompts", err=True)
+    click.echo("  3. Copy the token BotFather gives you", err=True)
+    click.echo("", err=True)
+
+    while True:
+        token = click.prompt("  Bot token", err=True).strip()
+        try:
+            resp = _req.get(
+                f"https://api.telegram.org/bot{token}/getMe",
+                timeout=10,
+            )
+            resp.raise_for_status()
+            bot_name = resp.json()["result"]["username"]
+            click.echo(f"  ✓ Connected: @{bot_name}", err=True)
+            break
+        except Exception:
+            click.echo("  ✗ Could not reach Telegram — check the token and try again.", err=True)
+
+    click.echo("", err=True)
+    click.echo(f"  Now send any message to @{bot_name} in Telegram.", err=True)
+
+    while True:
+        click.prompt("  Press Enter when done", default="", show_default=False, err=True)
+        try:
+            resp = _req.get(
+                f"https://api.telegram.org/bot{token}/getUpdates?limit=20",
+                timeout=10,
+            )
+            resp.raise_for_status()
+            results = resp.json().get("result", [])
+            if results:
+                last = results[-1]
+                msg = last.get("message") or last.get("channel_post") or {}
+                chat_id = str(msg.get("chat", {}).get("id", ""))
+                if chat_id:
+                    click.echo(f"  ✓ Chat ID: {chat_id}", err=True)
+                    return token, chat_id
+            click.echo("  No messages found yet — send a message to the bot and try again.", err=True)
+        except Exception as exc:
+            click.echo(f"  Could not read updates: {exc}", err=True)
+
+
 @cli.command()
 @click.option("--pro", is_flag=True, help="Set up Pro managed inference")
 @click.option("--api-key", "api_key", default=None, help="mallcop Pro API key (mallcop-sk-* format); stored in mallcop.yaml")
-@click.option("--campfire", "campfire", is_flag=True, default=False, help="Create a campfire for this deployment and store its ID in config")
-@click.option("--telegram-bot-token", "telegram_bot_token", default=None, envvar="MALLCOP_TELEGRAM_BOT_TOKEN", help="Telegram bot token")
-@click.option("--telegram-chat-id", "telegram_chat_id", default=None, envvar="MALLCOP_TELEGRAM_CHAT_ID", help="Telegram chat ID")
-def init(pro: bool, api_key: str | None, campfire: bool, telegram_bot_token: str | None, telegram_chat_id: str | None) -> None:
+@click.option("--telegram-bot-token", "telegram_bot_token", default=None, envvar="MALLCOP_TELEGRAM_BOT_TOKEN", hidden=True)
+@click.option("--telegram-chat-id", "telegram_chat_id", default=None, envvar="MALLCOP_TELEGRAM_CHAT_ID", hidden=True)
+def init(pro: bool, api_key: str | None, telegram_bot_token: str | None, telegram_chat_id: str | None) -> None:
     """Discover environment, write config, estimate costs."""
     cwd = Path.cwd()
     search_paths = get_search_paths(cwd)
@@ -520,41 +576,46 @@ def init(pro: bool, api_key: str | None, campfire: bool, telegram_bot_token: str
             config_data.update(config_backup)
 
     # Campfire and Telegram delivery setup
+    import subprocess as _subprocess
+    import os as _os
+    import sys as _sys
+
     delivery_result: dict[str, Any] = {}
     delivery_config_data: dict[str, Any] = {}
 
-    if campfire:
-        import subprocess as _subprocess
-        import os as _os
-        try:
-            cf_env = dict(_os.environ)
-            cf_proc = _subprocess.run(
-                ["cf", "create", "--description", f"mallcop-{cwd.name}"],
-                capture_output=True,
-                text=True,
-                env=cf_env,
-            )
-            campfire_id = cf_proc.stdout.strip()
-            if campfire_id:
-                delivery_config_data["campfire_id"] = campfire_id
-                delivery_result["campfire_id"] = campfire_id
-            else:
-                click.echo(
-                    json.dumps({"status": "warning", "message": "cf create returned no campfire ID"}),
-                    err=True,
-                )
-        except Exception as exc:
+    # Always create a campfire for this deployment.
+    try:
+        cf_proc = _subprocess.run(
+            ["cf", "create", "--description", f"mallcop-{cwd.name}"],
+            capture_output=True,
+            text=True,
+        )
+        campfire_id = cf_proc.stdout.strip()
+        if campfire_id:
+            delivery_config_data["campfire_id"] = campfire_id
+            delivery_result["campfire_id"] = campfire_id
+        else:
             click.echo(
-                json.dumps({"status": "warning", "message": f"campfire setup failed: {exc}"}),
+                json.dumps({"status": "warning", "message": "cf create returned no campfire ID"}),
                 err=True,
             )
+    except Exception as exc:
+        click.echo(
+            json.dumps({"status": "warning", "message": f"campfire setup failed: {exc}"}),
+            err=True,
+        )
+
+    # Telegram: use env vars if provided (CI/scripted), else interactive dialog on TTY.
+    if not telegram_bot_token and _sys.stdin.isatty():
+        tg = _setup_telegram_interactive()
+        if tg:
+            telegram_bot_token, telegram_chat_id = tg
 
     if telegram_bot_token:
-        # Store credentials as env-var references, not raw values
-        delivery_config_data["telegram_bot_token"] = "${MALLCOP_TELEGRAM_BOT_TOKEN}"
+        delivery_config_data["telegram_bot_token"] = telegram_bot_token
         delivery_result["telegram_configured"] = True
         if telegram_chat_id:
-            delivery_config_data["telegram_chat_id"] = "${MALLCOP_TELEGRAM_CHAT_ID}"
+            delivery_config_data["telegram_chat_id"] = telegram_chat_id
 
     if delivery_config_data:
         config_data["delivery"] = delivery_config_data
@@ -735,7 +796,7 @@ def watch(dry_run: bool, dir_path: str | None, human: bool, backend: str, daemon
         campfire_id = getattr(config.delivery, "campfire_id", "") or ""
         if not campfire_id:
             click.echo(
-                "daemon requires campfire_id in config (run: mallcop init --campfire)",
+                "daemon requires campfire_id in config (run: mallcop init)",
                 err=True,
             )
             raise SystemExit(1)
