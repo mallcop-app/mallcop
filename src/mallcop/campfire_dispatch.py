@@ -312,6 +312,20 @@ class CampfireDispatcher:
     # Public API
     # ------------------------------------------------------------------
 
+    async def run_once(self) -> None:
+        """Read all pending campfire messages in a single pass and dispatch each.
+
+        Calls ``_read_new_messages()`` exactly once, then dispatches every
+        returned message via ``_dispatch_message()``.  Returns immediately
+        after processing — no loop, no sleep, no retry.
+
+        This is useful for one-shot processing (e.g. in tests or cron-style
+        invocations) and is also the core of the :meth:`run` loop.
+        """
+        messages = await self._read_new_messages()
+        for msg in messages:
+            await self._dispatch_message(msg)
+
     async def run(self) -> None:
         """Poll campfire in a loop, dispatching chat messages indefinitely.
 
@@ -340,16 +354,13 @@ class CampfireDispatcher:
         try:
             while True:
                 try:
-                    messages = await self._read_new_messages()
+                    await self.run_once()
                     _consecutive_errors = 0
                 except _SubprocessError:
                     # _read_new_messages already logs a warning and returns [].
                     # We only reach here if it re-raises, which it currently
                     # does not — this branch is a safety net for future changes.
                     _consecutive_errors += 1
-                else:
-                    for msg in messages:
-                        await self._dispatch_message(msg)
 
                 # Backoff after 5 or more consecutive errors.
                 if _consecutive_errors >= 5:
