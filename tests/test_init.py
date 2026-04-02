@@ -144,11 +144,6 @@ class TestInitTelegram:
 
 
 class TestInitCampfireTransport:
-    def _fake_setup_github(self, config_data: dict, repo: str) -> dict:
-        """Inject github section into config_data as _setup_github would."""
-        config_data["github"] = {"repo": repo}
-        return {"repo": repo}
-
     def test_github_transport_used_when_github_config_present(self, tmp_path: Path) -> None:
         """When config has github.repo (set by _setup_github), cf create uses --transport github."""
         runner = CliRunner()
@@ -180,15 +175,12 @@ class TestInitCampfireTransport:
         assert data["status"] == "ok"
         assert data["delivery"]["campfire_id"] == "camp-gh123"
 
-        # Verify cf was called with github transport flags
+        # Verify cf was called with github transport flags in correct paired order
         call_args = mock_run.call_args
         cmd = call_args[0][0]
-        assert "--transport" in cmd
-        assert "github" in cmd
-        assert "--github-repo" in cmd
-        assert "owner/repo" in cmd
-        assert "--github-token-env" in cmd
-        assert "GITHUB_TOKEN" in cmd
+        assert cmd[cmd.index("--transport") + 1] == "github", f"--transport must be followed by 'github', got: {cmd}"
+        assert cmd[cmd.index("--github-repo") + 1] == "owner/repo", f"--github-repo must be followed by 'owner/repo', got: {cmd}"
+        assert cmd[cmd.index("--github-token-env") + 1] == "GITHUB_TOKEN", f"--github-token-env must be followed by 'GITHUB_TOKEN', got: {cmd}"
 
         # Verify campfire_id is stored in config
         import yaml as _yaml
