@@ -6,10 +6,11 @@ The campfire is disbanded after each test to keep the environment clean.
 
 from __future__ import annotations
 
+import asyncio
 import subprocess
 import uuid
 from typing import Generator
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -64,21 +65,21 @@ def test_round_trip_single_message(campfire_id: str) -> None:
     adapter = CampfireConversationAdapter(campfire_id)
     session_id = str(uuid.uuid4())
 
-    msg = adapter.append(
+    msg = asyncio.run(adapter.append(
         session_id=session_id,
         surface="cli",
         role="user",
         content="Hello from round-trip test",
         finding_refs=[],
         tokens_used=0,
-    )
+    ))
 
     assert msg.session_id == session_id
     assert msg.role == "user"
     assert msg.content == "Hello from round-trip test"
     assert msg.surface == "cli"
 
-    loaded = adapter.load_session(session_id)
+    loaded = asyncio.run(adapter.load_session(session_id))
     assert len(loaded) == 1, f"Expected 1 message, got {len(loaded)}"
     m = loaded[0]
     assert m.id == msg.id
@@ -98,10 +99,10 @@ def test_round_trip_user_and_assistant_roles(campfire_id: str) -> None:
     adapter = CampfireConversationAdapter(campfire_id)
     session_id = str(uuid.uuid4())
 
-    adapter.append(session_id=session_id, surface="cli", role="user", content="User question")
-    adapter.append(session_id=session_id, surface="cli", role="assistant", content="Mallcop answer")
+    asyncio.run(adapter.append(session_id=session_id, surface="cli", role="user", content="User question"))
+    asyncio.run(adapter.append(session_id=session_id, surface="cli", role="assistant", content="Mallcop answer"))
 
-    loaded = adapter.load_session(session_id)
+    loaded = asyncio.run(adapter.load_session(session_id))
     assert len(loaded) == 2
     assert loaded[0].role == "user"
     assert loaded[0].content == "User question"
@@ -117,16 +118,16 @@ def test_round_trip_finding_refs(campfire_id: str) -> None:
     adapter = CampfireConversationAdapter(campfire_id)
     session_id = str(uuid.uuid4())
 
-    adapter.append(
+    asyncio.run(adapter.append(
         session_id=session_id,
         surface="slack",
         role="user",
         content="Finding question",
         finding_refs=["MC-001", "MC-042"],
         tokens_used=55,
-    )
+    ))
 
-    loaded = adapter.load_session(session_id)
+    loaded = asyncio.run(adapter.load_session(session_id))
     assert len(loaded) == 1
     m = loaded[0]
     assert set(m.finding_refs) == {"MC-001", "MC-042"}
@@ -143,13 +144,13 @@ def test_load_session_isolates_by_session(campfire_id: str) -> None:
     sess_a = str(uuid.uuid4())
     sess_b = str(uuid.uuid4())
 
-    adapter.append(session_id=sess_a, surface="cli", role="user", content="Session A message")
-    adapter.append(session_id=sess_b, surface="cli", role="user", content="Session B message")
-    adapter.append(session_id=sess_a, surface="cli", role="assistant", content="Session A reply")
+    asyncio.run(adapter.append(session_id=sess_a, surface="cli", role="user", content="Session A message"))
+    asyncio.run(adapter.append(session_id=sess_b, surface="cli", role="user", content="Session B message"))
+    asyncio.run(adapter.append(session_id=sess_a, surface="cli", role="assistant", content="Session A reply"))
 
-    loaded_a = adapter.load_session(sess_a)
-    loaded_b = adapter.load_session(sess_b)
-    loaded_missing = adapter.load_session(str(uuid.uuid4()))
+    loaded_a = asyncio.run(adapter.load_session(sess_a))
+    loaded_b = asyncio.run(adapter.load_session(sess_b))
+    loaded_missing = asyncio.run(adapter.load_session(str(uuid.uuid4())))
 
     assert len(loaded_a) == 2
     assert all(m.session_id == sess_a for m in loaded_a)
@@ -167,20 +168,20 @@ def test_load_session_chronological_order(campfire_id: str) -> None:
     session_id = str(uuid.uuid4())
 
     # Append with explicit out-of-order timestamps
-    adapter.append(
+    asyncio.run(adapter.append(
         session_id=session_id, surface="cli", role="assistant", content="third",
         timestamp="2024-01-01T12:00:00+00:00",
-    )
-    adapter.append(
+    ))
+    asyncio.run(adapter.append(
         session_id=session_id, surface="cli", role="user", content="first",
         timestamp="2024-01-01T10:00:00+00:00",
-    )
-    adapter.append(
+    ))
+    asyncio.run(adapter.append(
         session_id=session_id, surface="cli", role="user", content="second",
         timestamp="2024-01-01T11:00:00+00:00",
-    )
+    ))
 
-    loaded = adapter.load_session(session_id)
+    loaded = asyncio.run(adapter.load_session(session_id))
     assert [m.content for m in loaded] == ["first", "second", "third"]
 
 
@@ -192,18 +193,18 @@ def test_context_window_manager_from_adapter(campfire_id: str) -> None:
     adapter = CampfireConversationAdapter(campfire_id)
     session_id = str(uuid.uuid4())
 
-    adapter.append(session_id=session_id, surface="cli", role="user", content="What is my security posture?")
-    adapter.append(
+    asyncio.run(adapter.append(session_id=session_id, surface="cli", role="user", content="What is my security posture?"))
+    asyncio.run(adapter.append(
         session_id=session_id,
         surface="cli",
         role="assistant",
         content="Based on your findings, there are 2 critical issues.",
         finding_refs=["MC-010"],
         tokens_used=120,
-    )
-    adapter.append(session_id=session_id, surface="cli", role="user", content="Tell me more about MC-010.")
+    ))
+    asyncio.run(adapter.append(session_id=session_id, surface="cli", role="user", content="Tell me more about MC-010."))
 
-    history = adapter.load_session(session_id)
+    history = asyncio.run(adapter.load_session(session_id))
     assert len(history) == 3
 
     # ContextWindowManager with no managed_client uses truncation fallback
@@ -241,8 +242,8 @@ def test_load_session_returns_empty_on_null_json() -> None:
     """cf read --json returning 'null' must not raise TypeError."""
     adapter = CampfireConversationAdapter("fake-campfire-id")
 
-    with patch.object(adapter, "_cf", return_value="null"):
-        result = adapter.load_session("any-session")
+    with patch.object(adapter, "_cf", new=AsyncMock(return_value="null")):
+        result = asyncio.run(adapter.load_session("any-session"))
 
     assert result == [], f"Expected [], got {result!r}"
 
@@ -255,8 +256,8 @@ def test_load_session_returns_empty_on_cf_failure() -> None:
     """RuntimeError from _cf() in load_session must not propagate -- return []."""
     adapter = CampfireConversationAdapter("fake-campfire-id")
 
-    with patch.object(adapter, "_cf", side_effect=RuntimeError("cf: connection refused")):
-        result = adapter.load_session("any-session")
+    with patch.object(adapter, "_cf", new=AsyncMock(side_effect=RuntimeError("cf: connection refused"))):
+        result = asyncio.run(adapter.load_session("any-session"))
 
     assert result == [], f"Expected [], got {result!r}"
 
@@ -265,14 +266,14 @@ def test_append_raises_campfire_adapter_error_on_cf_failure() -> None:
     """RuntimeError from _cf() in append must be re-raised as CampfireAdapterError."""
     adapter = CampfireConversationAdapter("fake-campfire-id")
 
-    with patch.object(adapter, "_cf", side_effect=RuntimeError("cf: connection refused")):
+    with patch.object(adapter, "_cf", new=AsyncMock(side_effect=RuntimeError("cf: connection refused"))):
         with pytest.raises(CampfireAdapterError):
-            adapter.append(
+            asyncio.run(adapter.append(
                 session_id="any-session",
                 surface="cli",
                 role="user",
                 content="test content",
-            )
+            ))
 
 
 # ---------------------------------------------------------------------------
@@ -304,15 +305,107 @@ def test_load_session_coloned_session_id_round_trip(campfire_id: str) -> None:
     raw_uuid = str(uuid.uuid4())
     session_id = f"tenant:{raw_uuid}"
 
-    msg = adapter.append(
+    msg = asyncio.run(adapter.append(
         session_id=session_id,
         surface="cli",
         role="user",
         content="Message with colon session ID",
-    )
+    ))
     assert msg.session_id == session_id
 
     # load_session must find the message using the same raw session_id
-    loaded = adapter.load_session(session_id)
+    loaded = asyncio.run(adapter.load_session(session_id))
     assert len(loaded) == 1, f"Expected 1 message, got {len(loaded)}"
     assert loaded[0].content == "Message with colon session ID"
+
+
+# ---------------------------------------------------------------------------
+# Test (mallcop-pro-qw5): empty-string id and timestamp are preserved, not replaced
+# ---------------------------------------------------------------------------
+
+def test_load_session_preserves_empty_string_id_and_timestamp() -> None:
+    """Envelope with id='' and timestamp='' must be preserved as-is (not replaced via 'or' fallback)."""
+    import json as _json
+
+    adapter = CampfireConversationAdapter("fake-campfire-id")
+
+    # Build a minimal cf read JSON response with id="" and timestamp=""
+    safe_session_id = adapter._sanitize_session_id("sess_empty_str")
+    envelope = {
+        "id": "",
+        "timestamp": "",
+        "tokens_used": 0,
+        "content": "test content with empty id",
+    }
+    cf_response = _json.dumps([
+        {
+            "tags": ["chat", f"session:{safe_session_id}", "platform:cli"],
+            "payload": _json.dumps(envelope),
+            "instance": "user",
+        }
+    ])
+
+    with patch.object(adapter, "_cf", new=AsyncMock(return_value=cf_response)):
+        result = asyncio.run(adapter.load_session("sess_empty_str"))
+
+    assert len(result) == 1, f"Expected 1 message, got {len(result)}"
+    # Empty string id must be preserved — not silently replaced with a new UUID
+    assert result[0].id == "", f"Expected empty string id, got {result[0].id!r}"
+    # Empty string timestamp must be preserved — not silently replaced
+    assert result[0].timestamp == "", f"Expected empty string timestamp, got {result[0].timestamp!r}"
+
+
+# ---------------------------------------------------------------------------
+# Test (mallcop-pro-a40): empty strings in finding_refs are filtered out
+# ---------------------------------------------------------------------------
+
+def test_build_tags_filters_empty_finding_refs() -> None:
+    """_build_tags must not emit a 'finding_ref:' tag for empty-string entries."""
+    adapter = CampfireConversationAdapter("fake-campfire-id")
+
+    tags = adapter._build_tags("sess_x", "cli", ["MC-001", "", "MC-002"])
+
+    finding_ref_tags = [t for t in tags if t.startswith("finding_ref:")]
+    assert "finding_ref:MC-001" in finding_ref_tags, "MC-001 should be present"
+    assert "finding_ref:MC-002" in finding_ref_tags, "MC-002 should be present"
+    assert "finding_ref:" not in finding_ref_tags, "Empty string must not produce a bare finding_ref: tag"
+    assert len(finding_ref_tags) == 2, f"Expected 2 finding_ref tags, got {finding_ref_tags}"
+
+
+def test_extract_finding_refs_filters_empty() -> None:
+    """_extract_finding_refs must skip the bare 'finding_ref:' tag (empty string value)."""
+    tags = ["mallcop:chat", "finding_ref:MC-001", "finding_ref:", "finding_ref:MC-002"]
+
+    refs = CampfireConversationAdapter._extract_finding_refs(tags)
+
+    assert refs == ["MC-001", "MC-002"], f"Expected ['MC-001', 'MC-002'], got {refs!r}"
+
+
+def test_load_session_finding_refs_empty_string_filtered() -> None:
+    """Appending finding_refs=['MC-001', ''] must load back as ['MC-001'] only."""
+    import json as _json
+
+    adapter = CampfireConversationAdapter("fake-campfire-id")
+
+    # Simulate what the campfire would return after storing tags with an empty ref filtered out
+    safe_session_id = adapter._sanitize_session_id("sess_refs_test")
+
+    # The tags as they would be stored after _build_tags filters the empty string
+    tags = adapter._build_tags("sess_refs_test", "cli", ["MC-001", ""])
+    # Confirm the empty ref was not stored
+    assert "finding_ref:" not in tags
+
+    envelope = {"id": "msg_abc", "timestamp": "2024-01-01T10:00:00+00:00", "tokens_used": 0, "content": "hi"}
+    cf_response = _json.dumps([
+        {
+            "tags": tags,
+            "payload": _json.dumps(envelope),
+            "instance": "user",
+        }
+    ])
+
+    with patch.object(adapter, "_cf", new=AsyncMock(return_value=cf_response)):
+        result = asyncio.run(adapter.load_session("sess_refs_test"))
+
+    assert len(result) == 1
+    assert result[0].finding_refs == ["MC-001"], f"Expected ['MC-001'], got {result[0].finding_refs!r}"
