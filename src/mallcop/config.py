@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -14,8 +15,12 @@ from mallcop.patrol import PatrolConfig, parse_patrols
 
 __all__ = ["load_config", "MallcopConfig", "BudgetConfig", "BaselineConfig", "LLMConfig", "RouteConfig", "ProConfig", "GitHubConfig", "ResearchConfig", "NotifyConfig", "ConfigError", "_parse_routing", "PatrolConfig", "DEFAULT_API_URL", "DEFAULT_INFERENCE_URL"]
 
-DEFAULT_API_URL = "https://mallcop.app/api/account"
-DEFAULT_INFERENCE_URL = "https://mallcop.app/api/inference"
+# MALLCOP_API_URL overrides the base URL for all mallcop.app endpoints.
+# Useful for local development / testing against a staging server.
+_MALLCOP_API_URL_BASE = os.environ.get("MALLCOP_API_URL", "https://api.mallcop.app").rstrip("/")
+
+DEFAULT_API_URL = f"{_MALLCOP_API_URL_BASE}/api/account"
+DEFAULT_INFERENCE_URL = f"{_MALLCOP_API_URL_BASE}/api/inference"
 
 # Re-export ConfigError so tests can import from mallcop.config
 ConfigError = ConfigError
@@ -255,14 +260,37 @@ def _parse_llm(raw: dict[str, Any] | None, provider: SecretProvider) -> LLMConfi
 
 
 def _parse_pro(raw: dict[str, Any] | None, provider: SecretProvider) -> ProConfig | None:
-    """Parse pro section. Returns None if section missing."""
+    """Parse pro section. Returns None if section missing.
+
+    Environment variable overrides (take precedence over mallcop.yaml values):
+      MALLCOP_API_KEY  — service token / API key (mallcop-sk-* format)
+      MALLCOP_API_URL  — base URL override (applied at module import time via
+                         DEFAULT_API_URL / DEFAULT_INFERENCE_URL)
+    """
+    # MALLCOP_API_KEY env var: bootstrap path for users who received an API key
+    # via email after signing up, without running mallcop init --pro.
+    env_api_key = os.environ.get("MALLCOP_API_KEY", "")
+
+    # Allow a bare ProConfig when MALLCOP_API_KEY is set and no pro section exists.
     if not raw or not isinstance(raw, dict):
+        if env_api_key:
+            return ProConfig(
+                account_id="",
+                service_token=env_api_key,
+                account_url=DEFAULT_API_URL,
+                inference_url=DEFAULT_INFERENCE_URL,
+            )
         return None
+
     service_token_raw = raw.get("service_token", "")
     try:
         service_token = _resolve_value(service_token_raw, provider) if service_token_raw else ""
     except ConfigError:
         service_token = ""
+    # MALLCOP_API_KEY overrides the config file service_token
+    if env_api_key:
+        service_token = env_api_key
+
     # Resolve URL fields through SecretProvider (may reference env vars)
     account_url_raw = raw.get("account_url", DEFAULT_API_URL)
     try:
