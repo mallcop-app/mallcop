@@ -84,7 +84,12 @@ class TelegramCampfireBridge:
     # ------------------------------------------------------------------
 
     async def run(self) -> None:
-        """Run bridge loop until cancelled."""
+        """Run bridge loop until cancelled.
+
+        Maintains the Telegram update offset in memory across cycles.
+        For a standalone single-cycle execution with campfire-persisted offset,
+        use ``run_once()`` instead.
+        """
         while True:
             try:
                 tg_messages = await self._poll_telegram()
@@ -106,6 +111,35 @@ class TelegramCampfireBridge:
                 _log.warning("telegram_bridge: loop error: %s", exc)
 
             await asyncio.sleep(self._poll_interval)
+
+    async def run_once(self) -> None:
+        """Run one standalone poll cycle with campfire-persisted offset.
+
+        Designed for cron/one-shot invocation (not for use inside ``run()``):
+
+        1. Restores the Telegram update offset from campfire (last tg-offset message).
+        2. Polls Telegram getUpdates using the restored offset.
+        3. Forwards each new Telegram message to campfire via ``_send_to_campfire()``.
+        4. Polls campfire for response-tagged messages.
+        5. Forwards each response to Telegram via ``_send_to_telegram()``.
+        6. Persists the new update offset back to campfire.
+        """
+        await self._restore_offset_from_campfire()
+
+        tg_messages = await self._poll_telegram()
+        for msg in tg_messages:
+            text = msg.get("message", {}).get("text", "")
+            from_id = msg.get("message", {}).get("from", {}).get("id", "unknown")
+            if text:
+                await self._send_to_campfire(text, from_id)
+
+        cf_messages = await self._poll_campfire()
+        for msg in cf_messages:
+            content = self._extract_response_text(msg)
+            if content:
+                await self._send_to_telegram(content)
+
+        await self._persist_offset_to_campfire()
 
     # ------------------------------------------------------------------
     # Telegram helpers
@@ -154,6 +188,71 @@ class TelegramCampfireBridge:
                 )
 
         await asyncio.to_thread(_post)
+
+    # ------------------------------------------------------------------
+    # Offset persistence helpers
+    # ------------------------------------------------------------------
+
+    async def _restore_offset_from_campfire(self) -> None:
+        """Restore Telegram update offset from the last tg-offset message in campfire.
+
+        Reads campfire with --tag tg-offset --json, finds the last entry, and
+        extracts the offset value from its payload.  If no prior offset is found
+        the internal offset stays at its current value (0 on first run).
+        """
+        try:
+            raw = await self._cf(
+                "read", self._campfire_id,
+                "--tag", "tg-offset",
+                "--json",
+            )
+        except Exception as exc:  # noqa: BLE001
+            _log.warning("telegram_bridge: restore offset read error: %s", exc)
+            return
+
+        if not raw:
+            return
+
+        try:
+            items = json.loads(raw)
+        except json.JSONDecodeError:
+            _log.warning("telegram_bridge: non-JSON from cf read (tg-offset): %r", raw[:200])
+            return
+
+        if not isinstance(items, list) or not items:
+            return
+
+        last = items[-1]
+        payload_raw = last.get("payload", "")
+        if not payload_raw:
+            return
+
+        try:
+            parsed = json.loads(payload_raw)
+            offset = parsed.get("offset")
+            if isinstance(offset, int):
+                self._update_offset = offset
+                _log.debug("telegram_bridge: restored offset %d from campfire", offset)
+        except (json.JSONDecodeError, TypeError):
+            _log.warning("telegram_bridge: could not parse tg-offset payload: %r", payload_raw[:200])
+
+    async def _persist_offset_to_campfire(self) -> None:
+        """Persist the current Telegram update offset to campfire.
+
+        Posts JSON ``{"offset": N}`` tagged with tg-offset and instance mallcop
+        so future sessions can restore from where this one left off.
+        """
+        payload = json.dumps({"offset": self._update_offset})
+        try:
+            await self._cf(
+                "send", self._campfire_id,
+                "--tag", "tg-offset",
+                "--instance", "mallcop",
+                payload,
+            )
+            _log.debug("telegram_bridge: persisted offset %d to campfire", self._update_offset)
+        except Exception as exc:  # noqa: BLE001
+            _log.warning("telegram_bridge: persist offset error: %s", exc)
 
     # ------------------------------------------------------------------
     # Campfire helpers

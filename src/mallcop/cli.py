@@ -586,8 +586,13 @@ def init(pro: bool, api_key: str | None, telegram_bot_token: str | None, telegra
 
     # Always create a campfire for this deployment.
     try:
+        cf_cmd = ["cf", "create", "--description", f"mallcop-{cwd.name}"]
+        github_section = config_data.get("github", {})
+        github_repo = github_section.get("repo", "") if isinstance(github_section, dict) else ""
+        if github_repo:
+            cf_cmd += ["--transport", "github", "--github-repo", github_repo, "--github-token-env", "GITHUB_TOKEN"]
         cf_proc = _subprocess.run(
-            ["cf", "create", "--description", f"mallcop-{cwd.name}"],
+            cf_cmd,
             capture_output=True,
             text=True,
         )
