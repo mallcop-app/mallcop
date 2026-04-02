@@ -305,12 +305,12 @@ def test_dispatch_skips_own_mallcop_messages(campfire_id: str, tmp_path: Path) -
 
     asyncio.run(run_one_poll())
 
-    # The mallcop-instance message should NOT have triggered chat_turn().
-    # If chat_turn() was called, it was for the non-mallcop message (first one).
-    # We verify by checking the call count: at most 1 call (for the non-mallcop message).
+    # Neither message should trigger chat_turn():
+    # - The first message (no --instance) has no session: tag → skipped with warning.
+    # - The second message has instance=mallcop → skipped as our own message.
     call_count = mock_client.chat.call_count
-    assert call_count <= 1, (
-        f"chat_turn() called {call_count} times — likely dispatched mallcop's own message"
+    assert call_count == 0, (
+        f"chat_turn() called {call_count} times — dispatcher should have skipped both messages"
     )
 
 
