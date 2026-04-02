@@ -47,19 +47,40 @@ class _SubprocessError(RuntimeError):
     """Raised when a cf subprocess exits non-zero."""
 
 
+# Seconds to wait for a cf subprocess before giving up.
+_CF_TIMEOUT = 30.0
+
+
 async def _run_cf(*args: str, cf_bin: str = "cf", cf_home: str | None = None) -> str:
-    """Run a cf command via asyncio subprocess. Returns stdout. Raises on non-zero exit."""
+    """Run a cf command via asyncio subprocess. Returns stdout. Raises on non-zero exit.
+
+    Raises
+    ------
+    RuntimeError
+        When the cf binary is not found or not executable (wraps OSError).
+    asyncio.TimeoutError
+        When the subprocess does not complete within ``_CF_TIMEOUT`` seconds.
+    _SubprocessError
+        When the subprocess exits with a non-zero return code.
+    """
     cmd = [cf_bin]
     if cf_home:
         cmd += ["--cf-home", cf_home]
     cmd += list(args)
 
-    proc = await asyncio.create_subprocess_exec(
-        *cmd,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    stdout, stderr = await proc.communicate()
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+    except OSError as exc:
+        _log.error("campfire_dispatch: cf binary not found or not executable: %s", exc)
+        raise RuntimeError(
+            f"cf binary not found or not executable: {exc}"
+        ) from exc
+
+    stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=_CF_TIMEOUT)
 
     if proc.returncode != 0:
         raise _SubprocessError(
@@ -246,6 +267,13 @@ class CampfireDispatcher:
         """Poll campfire in a loop, dispatching chat messages indefinitely.
 
         Runs until cancelled (asyncio.CancelledError).
+
+        Raises
+        ------
+        RuntimeError
+            When the cf binary is not found or not executable on the first
+            poll attempt.  The error is re-raised so the caller can surface a
+            clear message rather than a raw OSError.
         """
         _log.info(
             "campfire_dispatch: starting loop on %s (poll_interval=%.1fs)",
