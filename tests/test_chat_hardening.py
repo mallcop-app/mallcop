@@ -26,9 +26,14 @@ from mallcop.chat import (
     _build_system_prompt,
     _load_finding_summaries,
     _session_donut_spend,
-    chat_turn,
+    chat_turn as _async_chat_turn,
     run_chat_repl,
 )
+
+
+def chat_turn(*args, **kwargs):
+    """Sync wrapper around async chat_turn for test convenience."""
+    return asyncio.run(_async_chat_turn(*args, **kwargs))
 from mallcop.conversation import ConversationStore
 from mallcop.context_window import ContextWindowManager
 from mallcop.llm_types import LLMAPIError, LLMResponse
@@ -59,8 +64,8 @@ def _make_store(tmp_path: Path) -> ConversationStore:
 
 
 def _run_chat_turn(**kwargs: Any) -> dict:
-    """Run async chat_turn synchronously for use in sync test methods."""
-    return asyncio.run(chat_turn(**kwargs))
+    """Run chat_turn synchronously for use in sync test methods."""
+    return chat_turn(**kwargs)
 
 
 def _write_findings(tmp_path: Path, count: int, base_ts: str = "2024-01-01T00:00:00Z") -> None:
