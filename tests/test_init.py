@@ -175,9 +175,12 @@ class TestInitCampfireTransport:
         assert data["status"] == "ok"
         assert data["delivery"]["campfire_id"] == "camp-gh123"
 
-        # Verify cf was called with github transport flags in correct paired order
-        call_args = mock_run.call_args
-        cmd = call_args[0][0]
+        # Verify cf was called with github transport flags in correct paired order.
+        # Find the cf create call (may not be the last call since _generate_gha_workflow
+        # also calls subprocess.run for gh secret set).
+        cf_calls = [c for c in mock_run.call_args_list if c[0][0][0] == "cf"]
+        assert cf_calls, "cf was never called"
+        cmd = cf_calls[0][0][0]
         assert cmd[cmd.index("--transport") + 1] == "github", f"--transport must be followed by 'github', got: {cmd}"
         assert cmd[cmd.index("--github-repo") + 1] == "owner/repo", f"--github-repo must be followed by 'owner/repo', got: {cmd}"
         assert cmd[cmd.index("--github-token-env") + 1] == "GITHUB_TOKEN", f"--github-token-env must be followed by 'GITHUB_TOKEN', got: {cmd}"

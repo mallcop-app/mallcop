@@ -12,9 +12,11 @@ from typing import Any
 import click
 import yaml
 
+from mallcop.campfire_dispatch import CampfireDispatcher
 from mallcop.config import load_config, BudgetConfig, DEFAULT_API_URL
 from mallcop.cli_format import print_review_human, print_investigate_human, print_finding_human
 from mallcop.cli_pipeline import run_scan_pipeline, run_detect_pipeline, run_retrospective_if_transitioning
+from mallcop.telegram_bridge import TelegramCampfireBridge
 from mallcop.cost_estimator import estimate_costs
 from mallcop.patrol_cli import patrol
 from mallcop.plugins import discover_plugins, get_search_paths, instantiate_connector
@@ -274,6 +276,83 @@ def _setup_github(config_data: dict[str, Any]) -> dict[str, Any] | None:
         "repo": github_repo,
         "status": "authorized",
     }
+
+
+_GHA_WORKFLOW_TEMPLATE = """\
+name: mallcop
+on:
+  schedule:
+    - cron: '*/15 * * * *'
+  workflow_dispatch:
+jobs:
+  mallcop:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install mallcop
+        run: pip install mallcop
+      - name: Run mallcop watch
+        env:
+          GITHUB_TOKEN: ${{{{ secrets.GITHUB_TOKEN }}}}
+          MALLCOP_TELEGRAM_BOT_TOKEN: ${{{{ secrets.MALLCOP_TELEGRAM_BOT_TOKEN }}}}
+          MALLCOP_TELEGRAM_CHAT_ID: ${{{{ secrets.MALLCOP_TELEGRAM_CHAT_ID }}}}
+        run: mallcop watch --dir ${{{{ github.workspace }}}}
+"""
+
+
+def _generate_gha_workflow(config_data: dict[str, Any], cwd: Path) -> dict[str, Any]:
+    """Write .github/workflows/mallcop.yml and set GitHub Actions secrets.
+
+    Only runs when config_data["github"]["repo"] is present.
+    Returns a dict of delivery keys to merge into the output.
+    """
+    import subprocess as _subprocess
+
+    github_section = config_data.get("github", {})
+    if not isinstance(github_section, dict) or not github_section.get("repo"):
+        return {}
+
+    delivery: dict[str, Any] = {}
+
+    # Write workflow file (skip if already exists)
+    workflow_path = cwd / ".github" / "workflows" / "mallcop.yml"
+    if not workflow_path.exists():
+        workflow_path.parent.mkdir(parents=True, exist_ok=True)
+        workflow_path.write_text(_GHA_WORKFLOW_TEMPLATE)
+        delivery["workflow_written"] = True
+
+    # Set GitHub Actions secrets via gh CLI
+    delivery_section = config_data.get("delivery", {})
+    campfire_id = delivery_section.get("campfire_id", "")
+    telegram_bot_token = delivery_section.get("telegram_bot_token", "")
+    telegram_chat_id = delivery_section.get("telegram_chat_id", "")
+
+    secrets_to_set: list[tuple[str, str]] = []
+    if campfire_id:
+        secrets_to_set.append(("CAMPFIRE_ID", campfire_id))
+    if telegram_bot_token:
+        secrets_to_set.append(("MALLCOP_TELEGRAM_BOT_TOKEN", telegram_bot_token))
+    if telegram_chat_id:
+        secrets_to_set.append(("MALLCOP_TELEGRAM_CHAT_ID", telegram_chat_id))
+
+    gh_missing = False
+    for secret_name, secret_value in secrets_to_set:
+        try:
+            _subprocess.run(
+                ["gh", "secret", "set", secret_name, "--body", secret_value],
+                capture_output=True,
+                text=True,
+            )
+        except FileNotFoundError:
+            gh_missing = True
+            break  # gh not on PATH — skip remaining secrets
+        except Exception:
+            pass  # other errors are best-effort; don't fail init
+
+    if gh_missing:
+        delivery["secrets_skipped"] = "gh not found"
+
+    return delivery
 
 
 def _setup_pro(config_data: dict[str, Any]) -> dict[str, Any] | None:
@@ -620,6 +699,11 @@ def init(pro: bool, api_key: str | None, telegram_bot_token: str | None, telegra
     if delivery_config_data:
         config_data["delivery"] = delivery_config_data
 
+    # Generate GitHub Actions workflow and set secrets (only when github config present)
+    gha_delivery = _generate_gha_workflow(config_data, cwd)
+    if gha_delivery:
+        delivery_result.update(gha_delivery)
+
     config_path = cwd / "mallcop.yaml"
     with open(config_path, "w") as f:
         yaml.dump(config_data, f, default_flow_style=False, sort_keys=False)
@@ -885,12 +969,79 @@ def watch(dry_run: bool, dir_path: str | None, human: bool, backend: str, daemon
             click.echo(json.dumps(result))
             raise SystemExit(1)
 
+    # Step 4: Campfire bridge + dispatcher pass (one-shot, when campfire configured).
+    # Runs bridge.run_once() first (Telegram → campfire), then dispatcher.run_once()
+    # (campfire chat → LLM response). Silently skipped when campfire_id absent.
+    try:
+        _watch_dispatch_pass(root)
+    except Exception:
+        pass  # non-fatal: dispatch errors never fail a watch run
+
     result["status"] = "ok"
 
     if human:
         _watch_human_output(result, root)
     else:
         click.echo(json.dumps(result))
+
+
+def _watch_dispatch_pass(root: Path) -> None:
+    """Run one bridge+dispatcher pass when campfire_id is configured.
+
+    Loads config, checks for campfire_id in delivery section. If absent,
+    returns immediately (silent skip). If present, runs:
+        1. TelegramCampfireBridge.run_once()  — Telegram → campfire
+        2. CampfireDispatcher.run_once()      — campfire chat → LLM response
+
+    Both are run via asyncio.run(). Errors in either call propagate to the
+    caller, which wraps this in a try/except and treats failures as non-fatal.
+    """
+    import asyncio as _asyncio
+
+    try:
+        config = load_config(root)
+    except Exception:
+        return
+
+    campfire_id = getattr(config.delivery, "campfire_id", "") or ""
+    if not campfire_id:
+        return
+
+    delivery = config.delivery
+    bot_token = getattr(delivery, "telegram_bot_token", "") or ""
+    chat_id = getattr(delivery, "telegram_chat_id", "") or ""
+
+    bridge = TelegramCampfireBridge(
+        bot_token=bot_token,
+        chat_id=chat_id,
+        campfire_id=campfire_id,
+    )
+
+    # Build a ManagedClient when pro config is present so the dispatcher can
+    # respond to Telegram messages via inference. Non-pro users get None, which
+    # means chat_turn will log an error if called — acceptable behaviour.
+    pro = getattr(config, "pro", None)
+    managed_client = None
+    if pro and getattr(pro, "service_token", None):
+        from mallcop.llm.managed import ManagedClient
+
+        managed_client = ManagedClient(
+            endpoint=getattr(pro, "inference_url", None) or "https://mallcop.app",
+            service_token=pro.service_token,
+            use_lanes=True,
+        )
+
+    dispatcher = CampfireDispatcher(
+        campfire_id=campfire_id,
+        managed_client=managed_client,
+        root=root,
+    )
+
+    async def _run() -> None:
+        await bridge.run_once()
+        await dispatcher.run_once()
+
+    _asyncio.run(_run())
 
 
 def _watch_human_output(result: dict[str, Any], root: Path) -> None:
