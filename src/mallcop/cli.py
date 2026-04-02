@@ -12,9 +12,11 @@ from typing import Any
 import click
 import yaml
 
+from mallcop.campfire_dispatch import CampfireDispatcher
 from mallcop.config import load_config, BudgetConfig, DEFAULT_API_URL
 from mallcop.cli_format import print_review_human, print_investigate_human, print_finding_human
 from mallcop.cli_pipeline import run_scan_pipeline, run_detect_pipeline, run_retrospective_if_transitioning
+from mallcop.telegram_bridge import TelegramCampfireBridge
 from mallcop.cost_estimator import estimate_costs
 from mallcop.patrol_cli import patrol
 from mallcop.plugins import discover_plugins, get_search_paths, instantiate_connector
@@ -885,12 +887,70 @@ def watch(dry_run: bool, dir_path: str | None, human: bool, backend: str, daemon
             click.echo(json.dumps(result))
             raise SystemExit(1)
 
+    # Step 4: Campfire bridge + dispatcher pass (one-shot, when campfire configured).
+    # Runs bridge.run_once() first (Telegram → campfire), then dispatcher.run_once()
+    # (campfire chat → LLM response). Silently skipped when campfire_id absent.
+    try:
+        _watch_dispatch_pass(root)
+    except Exception:
+        pass  # non-fatal: dispatch errors never fail a watch run
+
     result["status"] = "ok"
 
     if human:
         _watch_human_output(result, root)
     else:
         click.echo(json.dumps(result))
+
+
+def _watch_dispatch_pass(root: Path) -> None:
+    """Run one bridge+dispatcher pass when campfire_id is configured.
+
+    Loads config, checks for campfire_id in delivery section. If absent,
+    returns immediately (silent skip). If present, runs:
+        1. TelegramCampfireBridge.run_once()  — Telegram → campfire
+        2. CampfireDispatcher.run_once()      — campfire chat → LLM response
+
+    Both are run via asyncio.run(). Errors in either call propagate to the
+    caller, which wraps this in a try/except and treats failures as non-fatal.
+    """
+    import asyncio as _asyncio
+
+    try:
+        config = load_config(root)
+    except Exception:
+        return
+
+    campfire_id = getattr(config.delivery, "campfire_id", "") or ""
+    if not campfire_id:
+        return
+
+    delivery = config.delivery
+    bot_token = getattr(delivery, "telegram_bot_token", "") or ""
+    chat_id = getattr(delivery, "telegram_chat_id", "") or ""
+
+    bridge = TelegramCampfireBridge(
+        bot_token=bot_token,
+        chat_id=chat_id,
+        campfire_id=campfire_id,
+    )
+
+    # One-shot dispatcher: no managed client needed for run_once (reads+dispatches
+    # campfire messages via cf CLI subprocess; managed_client only used inside
+    # chat_turn which is called per-message). Pass None — chat_turn will raise
+    # if invoked without a client, but run_once() itself does not require it at
+    # construction time.
+    dispatcher = CampfireDispatcher(
+        campfire_id=campfire_id,
+        managed_client=None,
+        root=root,
+    )
+
+    async def _run() -> None:
+        await bridge.run_once()
+        await dispatcher.run_once()
+
+    _asyncio.run(_run())
 
 
 def _watch_human_output(result: dict[str, Any], root: Path) -> None:
