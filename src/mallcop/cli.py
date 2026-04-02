@@ -666,9 +666,62 @@ def escalate(dir_path: str | None, human: bool, no_actors: bool, backend: str) -
               help="LLM backend: 'anthropic' (API) or 'claude-code' (CLI, uses subscription).")
 @click.option("--bridge", "bridge", is_flag=True, default=False,
               help="Start bridge polling daemon (requires Pro config).")
-def watch(dry_run: bool, dir_path: str | None, human: bool, backend: str, bridge: bool) -> None:
+@click.option("--daemon", "daemon", is_flag=True, default=False,
+              help="Run persistently: campfire chat dispatch + periodic scans.")
+@click.option("--scan-interval", "scan_interval", default=300, type=int,
+              help="Seconds between scans in daemon mode (default: 300).")
+def watch(dry_run: bool, dir_path: str | None, human: bool, backend: str, bridge: bool, daemon: bool, scan_interval: int) -> None:
     """Scan + detect + escalate (cron-friendly)."""
     from mallcop.escalate import run_escalate
+
+    # --daemon mode: run CampfireDispatcher + periodic scan loop persistently.
+    if daemon:
+        import asyncio as _asyncio
+        from mallcop.campfire_dispatch import CampfireDispatcher
+        from mallcop.daemon import _daemon_loop
+        from mallcop.llm.managed import ManagedClient
+
+        root = Path(dir_path) if dir_path else Path.cwd()
+
+        try:
+            config = load_config(root)
+        except Exception as exc:
+            click.echo(f"ERROR: could not load config: {exc}", err=True)
+            raise SystemExit(1)
+
+        campfire_id = getattr(config.delivery, "campfire_id", "") or ""
+        if not campfire_id:
+            click.echo(
+                "daemon requires campfire_id in config (run: mallcop init --campfire)",
+                err=True,
+            )
+            raise SystemExit(1)
+
+        pro = config.pro
+        if pro is None or not getattr(pro, "api_key", None):
+            click.echo(
+                "daemon requires Pro config (run: mallcop init --pro)",
+                err=True,
+            )
+            raise SystemExit(1)
+
+        managed_client = ManagedClient(
+            endpoint=getattr(pro, "endpoint", "https://mallcop.app"),
+            service_token=pro.api_key,
+            use_lanes=True,
+        )
+
+        dispatcher = CampfireDispatcher(
+            campfire_id=campfire_id,
+            managed_client=managed_client,
+            root=root,
+        )
+
+        try:
+            _asyncio.run(_daemon_loop(dispatcher, root, float(scan_interval)))
+        except KeyboardInterrupt:
+            click.echo("daemon stopped")
+        return
 
     root = Path(dir_path) if dir_path else Path.cwd()
     result: dict[str, Any] = {"command": "watch", "dry_run": dry_run}
