@@ -717,3 +717,62 @@ def test_run_backs_off_after_consecutive_cf_errors(tmp_path: Path) -> None:
         f"Expected at least one sleep > poll_interval ({dispatcher._poll_interval}s) "
         f"after 6 consecutive errors, but sleep calls were: {sleep_calls}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Test 14 (mallcoppro-df7): run_once() processes all pending messages in one pass
+# ---------------------------------------------------------------------------
+
+def test_run_once_processes_pending_messages(campfire_id: str, tmp_path: Path) -> None:
+    """run_once() reads all pending chat messages and posts a response for each.
+
+    Uses a real campfire (no mocking of cf subprocess).  Posts a chat-tagged
+    message before calling run_once(), then verifies a response appears on
+    campfire with --tag response --instance mallcop.
+    """
+    session_id = str(uuid.uuid4())
+    mock_client = _make_mock_client("run_once response")
+
+    # Post a chat message into the campfire before dispatching.
+    question_payload = json.dumps({"content": "Summarize my security posture."})
+    _send_message(
+        campfire_id,
+        question_payload,
+        tags=["chat", f"session:{session_id}", "platform:campfire"],
+    )
+
+    dispatcher = CampfireDispatcher(
+        campfire_id=campfire_id,
+        managed_client=mock_client,
+        root=tmp_path,
+        poll_interval=0.1,
+    )
+
+    # run_once() should read the pending message, dispatch it, and return.
+    asyncio.run(dispatcher.run_once())
+
+    # Verify chat_turn() was invoked (managed_client.chat was called).
+    assert mock_client.chat.called, (
+        "run_once() did not invoke managed_client.chat() — chat_turn() was not called"
+    )
+
+    # Verify a response was posted to campfire with the required tags.
+    all_msgs = _read_all(campfire_id, tag="response")
+    responses = [
+        m for m in all_msgs
+        if m.get("instance") == "mallcop"
+        and "response" in m.get("tags", [])
+    ]
+    assert len(responses) >= 1, (
+        f"Expected at least 1 response from mallcop instance after run_once(), "
+        f"got 0. All messages: {[m.get('tags') for m in _read_all(campfire_id)]}"
+    )
+
+    # Session tag must be present on the response.
+    session_tag = f"session:{session_id}"
+    assert session_tag in responses[0]["tags"], (
+        f"Expected session tag {session_tag!r} in response tags: {responses[0]['tags']}"
+    )
+
+    # run_once() must return promptly — verify by checking it didn't loop.
+    # (If run_once looped it would block the test; reaching here is sufficient.)
