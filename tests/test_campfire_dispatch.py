@@ -1,0 +1,337 @@
+"""Tests for CampfireDispatcher — real campfire, no mocks of cf or subprocess.
+
+The tests create real campfires, send real messages, run the dispatcher,
+and verify real campfire state. managed_client is mocked (it's an
+external inference endpoint, not cf or subprocess).
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import subprocess
+import uuid
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+from unittest.mock import MagicMock
+
+import pytest
+
+from mallcop.campfire_dispatch import CampfireDispatcher
+from mallcop.llm_types import LLMResponse
+from mallcop.schemas import Finding, FindingStatus, Severity
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _create_campfire(description: str) -> str:
+    """Create a real campfire and return its ID."""
+    result = subprocess.run(
+        ["cf", "create", "--description", description],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 0, f"cf create failed: {result.stderr}"
+    campfire_id = result.stdout.strip()
+    assert campfire_id, "cf create returned empty campfire ID"
+    return campfire_id
+
+
+def _disband_campfire(campfire_id: str) -> None:
+    """Disband a campfire (best-effort)."""
+    subprocess.run(["cf", "disband", campfire_id], capture_output=True)
+
+
+def _send_message(campfire_id: str, payload: str, tags: list[str]) -> str:
+    """Send a message to campfire via cf send. Returns message ID."""
+    cmd = ["cf", "send", campfire_id]
+    for tag in tags:
+        cmd += ["--tag", tag]
+    cmd.append(payload)
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    assert result.returncode == 0, f"cf send failed: {result.stderr}"
+    return result.stdout.strip()
+
+
+def _read_all(campfire_id: str, tag: str | None = None) -> list[dict]:
+    """Read all messages from campfire with optional tag filter."""
+    cmd = ["cf", "read", campfire_id, "--all", "--json"]
+    if tag:
+        cmd += ["--tag", tag]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    assert result.returncode == 0, f"cf read failed: {result.stderr}"
+    raw = result.stdout.strip()
+    if not raw:
+        return []
+    return json.loads(raw)
+
+
+def _make_mock_client(response_text: str = "Security analysis complete.") -> MagicMock:
+    """Return a mock ManagedClient that returns a canned response."""
+    client = MagicMock()
+    llm_resp = LLMResponse(
+        tool_calls=[],
+        resolution=None,
+        tokens_used=42,
+        raw_resolution={"content": response_text},
+        text=response_text,
+    )
+    client.chat.return_value = llm_resp
+    return client
+
+
+def _make_finding(
+    finding_id: str = "MC-001",
+    severity: Severity = Severity.CRITICAL,
+    detector: str = "test-connector",
+    connector_name: str | None = None,
+) -> Finding:
+    """Create a minimal Finding for testing."""
+    meta: dict[str, Any] = {}
+    if connector_name:
+        meta["connector"] = connector_name
+    return Finding(
+        id=finding_id,
+        timestamp=datetime(2026, 4, 2, tzinfo=timezone.utc),
+        detector=detector,
+        event_ids=["evt-001"],
+        title="Test finding title",
+        severity=severity,
+        status=FindingStatus.OPEN,
+        annotations=[],
+        metadata=meta,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Fixtures
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def campfire_id():
+    """Fresh campfire per test, disbanded after."""
+    uid = str(uuid.uuid4())[:8]
+    cf_id = _create_campfire(f"test-dispatch-{uid}")
+    yield cf_id
+    _disband_campfire(cf_id)
+
+
+# ---------------------------------------------------------------------------
+# Test 1: dispatch loop processes a chat message and posts response
+# ---------------------------------------------------------------------------
+
+def test_dispatch_loop_processes_chat_message(campfire_id: str, tmp_path: Path) -> None:
+    """Dispatcher reads a chat message, calls chat_turn, posts response back to campfire."""
+    session_id = str(uuid.uuid4())
+    mock_client = _make_mock_client("Here is my security analysis.")
+
+    # Send a chat message into the campfire before starting the dispatcher.
+    question_payload = json.dumps({"content": "What are my open findings?"})
+    _send_message(
+        campfire_id,
+        question_payload,
+        tags=["chat", f"session:{session_id}", "platform:campfire"],
+    )
+
+    dispatcher = CampfireDispatcher(
+        campfire_id=campfire_id,
+        managed_client=mock_client,
+        root=tmp_path,
+        poll_interval=0.1,
+    )
+
+    async def run_one_poll():
+        # Run exactly one poll cycle: read messages, dispatch, stop.
+        # We do this by manually calling the internal methods to avoid
+        # needing to cancel an infinite loop race.
+        messages = await dispatcher._read_new_messages()
+        for msg in messages:
+            await dispatcher._dispatch_message(msg)
+
+    asyncio.run(run_one_poll())
+
+    # Verify mock_client.chat was called — means chat_turn() ran.
+    assert mock_client.chat.called, "chat_turn() did not invoke managed_client.chat()"
+
+    # Verify a response was posted back to campfire.
+    all_msgs = _read_all(campfire_id, tag="chat")
+    # Filter to mallcop-instance response messages.
+    responses = [
+        m for m in all_msgs
+        if m.get("instance") == "mallcop"
+        and "response" in m.get("tags", [])
+    ]
+    assert len(responses) >= 1, (
+        f"Expected at least 1 response from mallcop instance on campfire, "
+        f"got 0. All messages: {[m.get('tags') for m in all_msgs]}"
+    )
+
+    # Response payload should contain the mock response text.
+    resp_payload = json.loads(responses[0]["payload"])
+    assert resp_payload["content"] == "Here is my security analysis."
+    assert resp_payload["tokens_used"] == 42
+
+    # Response should carry the session tag.
+    session_tag = f"session:{session_id}"
+    assert session_tag in responses[0]["tags"], (
+        f"Expected session tag {session_tag!r} in response tags: {responses[0]['tags']}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Test 2: publish_finding writes to campfire with correct tags
+# ---------------------------------------------------------------------------
+
+def test_publish_finding_writes_correct_tags(campfire_id: str, tmp_path: Path) -> None:
+    """publish_finding() sends a finding message with finding, severity, connector, id tags."""
+    mock_client = _make_mock_client()
+    dispatcher = CampfireDispatcher(
+        campfire_id=campfire_id,
+        managed_client=mock_client,
+        root=tmp_path,
+        poll_interval=0.1,
+    )
+
+    finding = _make_finding(
+        finding_id="MC-042",
+        severity=Severity.CRITICAL,
+        detector="github-scanner",
+        connector_name="github",
+    )
+
+    asyncio.run(dispatcher.publish_finding(finding))
+
+    # Read all messages from campfire and find the finding message.
+    all_msgs = _read_all(campfire_id, tag="finding")
+
+    assert len(all_msgs) >= 1, "Expected at least 1 finding message on campfire"
+
+    finding_msg = all_msgs[0]
+    tags = finding_msg.get("tags", [])
+
+    assert "finding" in tags, f"Expected 'finding' tag, got: {tags}"
+    assert "severity:critical" in tags, f"Expected 'severity:critical' tag, got: {tags}"
+    assert "connector:github" in tags, f"Expected 'connector:github' tag, got: {tags}"
+    assert "id:MC-042" in tags, f"Expected 'id:MC-042' tag, got: {tags}"
+    assert finding_msg.get("instance") == "mallcop", (
+        f"Expected instance='mallcop', got: {finding_msg.get('instance')}"
+    )
+
+    # Payload should be the full finding dict.
+    payload = json.loads(finding_msg["payload"])
+    assert payload["id"] == "MC-042"
+    assert payload["severity"] == "critical"
+
+
+# ---------------------------------------------------------------------------
+# Test 3: publish_finding uses detector as connector fallback
+# ---------------------------------------------------------------------------
+
+def test_publish_finding_uses_detector_as_connector_fallback(
+    campfire_id: str, tmp_path: Path
+) -> None:
+    """When metadata has no 'connector' key, finding.detector is used as connector tag."""
+    mock_client = _make_mock_client()
+    dispatcher = CampfireDispatcher(
+        campfire_id=campfire_id,
+        managed_client=mock_client,
+        root=tmp_path,
+        poll_interval=0.1,
+    )
+
+    # No connector_name in metadata — detector="aws-iam" will be used.
+    finding = _make_finding(
+        finding_id="MC-007",
+        severity=Severity.WARN,
+        detector="aws-iam",
+        connector_name=None,
+    )
+
+    asyncio.run(dispatcher.publish_finding(finding))
+
+    all_msgs = _read_all(campfire_id, tag="finding")
+    assert len(all_msgs) >= 1
+    tags = all_msgs[0].get("tags", [])
+
+    assert "connector:aws-iam" in tags, f"Expected 'connector:aws-iam', got: {tags}"
+    assert "severity:warn" in tags, f"Expected 'severity:warn', got: {tags}"
+    assert "id:MC-007" in tags, f"Expected 'id:MC-007', got: {tags}"
+
+
+# ---------------------------------------------------------------------------
+# Test 4: dispatcher ignores its own mallcop-instance responses
+# ---------------------------------------------------------------------------
+
+def test_dispatch_skips_own_mallcop_messages(campfire_id: str, tmp_path: Path) -> None:
+    """Dispatcher does not dispatch messages sent by instance='mallcop'."""
+    mock_client = _make_mock_client()
+    dispatcher = CampfireDispatcher(
+        campfire_id=campfire_id,
+        managed_client=mock_client,
+        root=tmp_path,
+        poll_interval=0.1,
+    )
+
+    # Send a message with instance=mallcop (our own response) — should be ignored.
+    _send_message(
+        campfire_id,
+        json.dumps({"content": "This is our own response"}),
+        tags=["chat", "response"],
+    )
+
+    # We need to also set instance=mallcop on the sent message.
+    # Since our helper doesn't support --instance, use subprocess directly.
+    send_cmd = [
+        "cf", "send", campfire_id,
+        "--instance", "mallcop",
+        "--tag", "chat",
+        "--tag", "response",
+        json.dumps({"content": "Our own message"}),
+    ]
+    result = subprocess.run(send_cmd, capture_output=True, text=True)
+    assert result.returncode == 0
+
+    async def run_one_poll():
+        messages = await dispatcher._read_new_messages()
+        for msg in messages:
+            await dispatcher._dispatch_message(msg)
+
+    asyncio.run(run_one_poll())
+
+    # The mallcop-instance message should NOT have triggered chat_turn().
+    # If chat_turn() was called, it was for the non-mallcop message (first one).
+    # We verify by checking the call count: at most 1 call (for the non-mallcop message).
+    call_count = mock_client.chat.call_count
+    assert call_count <= 1, (
+        f"chat_turn() called {call_count} times — likely dispatched mallcop's own message"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Test 5: run() loop cancels cleanly
+# ---------------------------------------------------------------------------
+
+def test_run_loop_cancels_cleanly(campfire_id: str, tmp_path: Path) -> None:
+    """run() loop shuts down cleanly when cancelled."""
+    mock_client = _make_mock_client()
+    dispatcher = CampfireDispatcher(
+        campfire_id=campfire_id,
+        managed_client=mock_client,
+        root=tmp_path,
+        poll_interval=0.05,
+    )
+
+    async def run_briefly():
+        task = asyncio.create_task(dispatcher.run())
+        await asyncio.sleep(0.15)  # let it run a couple of polls
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass  # expected
+
+    asyncio.run(run_briefly())
+    # If we get here without exception, the loop cancelled cleanly.
