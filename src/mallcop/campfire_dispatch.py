@@ -233,7 +233,7 @@ class CampfireDispatcher:
         )
 
         try:
-            result = chat_turn(
+            result = await chat_turn(
                 question=question,
                 session_id=session_id,
                 managed_client=self._managed_client,
