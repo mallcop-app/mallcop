@@ -28,8 +28,8 @@ def _make_config(campfire_id: str = "", has_pro: bool = True) -> MagicMock:
 
     if has_pro:
         pro = MagicMock()
-        pro.api_key = "mallcop-sk-test"
-        pro.endpoint = "https://mallcop.app"
+        pro.service_token = "mallcop-sk-test"
+        pro.inference_url = "https://mallcop.app"
         config.pro = pro
     else:
         config.pro = None

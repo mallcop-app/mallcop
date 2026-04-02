@@ -743,7 +743,7 @@ def watch(dry_run: bool, dir_path: str | None, human: bool, backend: str, bridge
             raise SystemExit(1)
 
         pro = config.pro
-        if pro is None or not getattr(pro, "api_key", None):
+        if pro is None or not pro.service_token:
             click.echo(
                 "daemon requires Pro config (run: mallcop init --pro)",
                 err=True,
@@ -751,8 +751,8 @@ def watch(dry_run: bool, dir_path: str | None, human: bool, backend: str, bridge
             raise SystemExit(1)
 
         managed_client = ManagedClient(
-            endpoint=getattr(pro, "endpoint", "https://mallcop.app"),
-            service_token=pro.api_key,
+            endpoint=pro.inference_url or "https://mallcop.app",
+            service_token=pro.service_token,
             use_lanes=True,
         )
 

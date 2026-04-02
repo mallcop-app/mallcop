@@ -148,6 +148,7 @@ class TelegramCampfireBridge:
         try:
             await self._cf(
                 "send", self._campfire_id,
+                "--instance", "mallcop",
                 "--tag", "chat",
                 "--tag", f"session:{self._chat_id}",
                 "--tag", "platform:telegram",
