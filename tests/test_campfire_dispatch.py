@@ -3,6 +3,10 @@
 The tests create real campfires, send real messages, run the dispatcher,
 and verify real campfire state. managed_client is mocked (it's an
 external inference endpoint, not cf or subprocess).
+
+Tests for subprocess error handling (timeout, OSError) mock
+asyncio.create_subprocess_exec — the subprocess is the external system
+being guarded against, not cf message semantics.
 """
 
 from __future__ import annotations
@@ -15,7 +19,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -335,3 +339,69 @@ def test_run_loop_cancels_cleanly(campfire_id: str, tmp_path: Path) -> None:
 
     asyncio.run(run_briefly())
     # If we get here without exception, the loop cancelled cleanly.
+
+
+# ---------------------------------------------------------------------------
+# Test 6 (mallcop-pro-woq): _run_cf() raises TimeoutError when subprocess hangs
+# ---------------------------------------------------------------------------
+
+def test_run_cf_raises_timeout_when_subprocess_hangs(tmp_path: Path) -> None:
+    """_run_cf() raises asyncio.TimeoutError when cf subprocess never completes."""
+    from mallcop.campfire_dispatch import _run_cf
+
+    # A mock process whose communicate() coroutine hangs forever.
+    async def _hang():
+        await asyncio.sleep(3600)  # effectively forever
+        return b"", b""
+
+    mock_proc = MagicMock()
+    mock_proc.communicate = _hang
+
+    async def _create_hanging_proc(*args, **kwargs):
+        return mock_proc
+
+    async def run():
+        with patch(
+            "asyncio.create_subprocess_exec",
+            side_effect=_create_hanging_proc,
+        ):
+            # Use a very short timeout so the test doesn't actually wait 30s.
+            import mallcop.campfire_dispatch as mod
+            original_timeout = mod._CF_TIMEOUT
+            mod._CF_TIMEOUT = 0.01
+            try:
+                await _run_cf("read", "fake-campfire-id")
+            finally:
+                mod._CF_TIMEOUT = original_timeout
+
+    with pytest.raises(asyncio.TimeoutError):
+        asyncio.run(run())
+
+
+# ---------------------------------------------------------------------------
+# Test 7 (mallcop-pro-8tg): run() raises RuntimeError when cf binary missing
+# ---------------------------------------------------------------------------
+
+def test_run_raises_runtime_error_when_cf_not_found(tmp_path: Path) -> None:
+    """run() raises RuntimeError (not raw OSError) when cf binary is not on PATH."""
+    mock_client = _make_mock_client()
+    dispatcher = CampfireDispatcher(
+        campfire_id="fake-campfire-id",
+        managed_client=mock_client,
+        root=tmp_path,
+        poll_interval=0.05,
+        cf_bin="/nonexistent/path/to/cf",
+    )
+
+    async def _raise_oserror(*args, **kwargs):
+        raise OSError("No such file or directory: '/nonexistent/path/to/cf'")
+
+    async def run():
+        with patch(
+            "asyncio.create_subprocess_exec",
+            side_effect=_raise_oserror,
+        ):
+            await dispatcher.run()
+
+    with pytest.raises(RuntimeError, match="cf binary not found or not executable"):
+        asyncio.run(run())
