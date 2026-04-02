@@ -94,12 +94,19 @@ class TestDetectRepoSignalsDependencyScan:
         combined = " ".join(signals["dependency-scan"])
         assert "package.json" in combined
 
-    def test_package_json_with_no_deps_still_triggers_dependency_scan(self, tmp_path: Path) -> None:
-        # package.json with empty dependencies still triggers (0 packages)
+    def test_package_json_with_no_deps_does_not_trigger_dependency_scan(self, tmp_path: Path) -> None:
+        # package.json with no dependencies (empty or absent keys) should NOT add a signal
         pkg = {"name": "app", "version": "1.0.0"}
         _write(tmp_path / "package.json", json.dumps(pkg))
         signals = detect_repo_signals(tmp_path)
-        assert "dependency-scan" in signals
+        assert "dependency-scan" not in signals
+
+    def test_package_json_with_empty_deps_objects_does_not_trigger_dependency_scan(self, tmp_path: Path) -> None:
+        # package.json with explicitly empty dependencies and devDependencies should NOT add a signal
+        pkg = {"name": "app", "version": "1.0.0", "dependencies": {}, "devDependencies": {}}
+        _write(tmp_path / "package.json", json.dumps(pkg))
+        signals = detect_repo_signals(tmp_path)
+        assert "dependency-scan" not in signals
 
     def test_go_mod_triggers_dependency_scan(self, tmp_path: Path) -> None:
         _write(tmp_path / "go.mod", "module example.com/myapp\n\ngo 1.21\n")

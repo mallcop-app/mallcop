@@ -369,9 +369,10 @@ def detect_repo_signals(repo_dir: Path) -> dict[str, list[str]]:
     if (repo_dir / "package.json").exists():
         node_pkgs = _read_package_json(repo_dir)
         all_node = node_pkgs["deps"] + node_pkgs["dev"]
-        signals.setdefault("dependency-scan", []).append(
-            f"package.json ({len(all_node)} packages)"
-        )
+        if all_node:
+            signals.setdefault("dependency-scan", []).append(
+                f"package.json ({len(all_node)} packages)"
+            )
 
     # ---- Go / Rust ----
     if (repo_dir / "go.mod").exists():

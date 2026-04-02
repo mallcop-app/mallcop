@@ -133,9 +133,14 @@ def build_llm_client(
             llm_config is None or llm_config.provider == "anthropic"
         ):
             inference_url = getattr(pro_config, "inference_url", None) or DEFAULT_INFERENCE_URL
+            # Lane mode: when talking to mallcop.app, send lane names as the
+            # model field so mallcop-pro controls model selection per lane.
+            use_lanes = inference_url.rstrip("/").startswith("https://mallcop.app") or \
+                getattr(pro_config, "use_lanes", False)
             return ManagedClient(
                 endpoint=inference_url,
                 service_token=service_token,
+                use_lanes=use_lanes,
             )
 
     if llm_config is None:
