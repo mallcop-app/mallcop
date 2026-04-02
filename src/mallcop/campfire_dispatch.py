@@ -211,11 +211,21 @@ class CampfireDispatcher:
             _log.debug("campfire_dispatch: empty question in message %s", msg.get("id"))
             return
 
-        # Derive session_id from tags; fall back to sender+campfire hash.
+        # Derive session_id from tags.  A session: tag is required for
+        # multi-turn history to work correctly — without it, load_session()
+        # cannot reconstruct the conversation because the original inbound
+        # message was never tagged with a stable session identifier.
+        # Decision (mallcop-pro-cr9): reject messages without a session: tag
+        # rather than falling back to sender, which would silently break
+        # multi-turn history.
         session_id = self._extract_session_id(tags)
         if not session_id:
-            # No session tag — use the message sender ID as session key.
-            session_id = msg.get("sender", "unknown")
+            _log.warning(
+                "campfire_dispatch: skipping message %s — no session: tag present. "
+                "Clients must include a session:<uuid> tag for multi-turn history.",
+                msg.get("id"),
+            )
+            return
 
         _log.debug(
             "campfire_dispatch: dispatching message %s (session %s)",
@@ -258,6 +268,26 @@ class CampfireDispatcher:
             )
         except _SubprocessError as exc:
             _log.error("campfire_dispatch: failed to post response: %s", exc)
+
+        # Fix (mallcop-pro-6p0): forward budget_warning to campfire so
+        # clients can see it.  Without this, budget warnings returned by
+        # chat_turn() are silently dropped.
+        budget_warning = result.get("budget_warning")
+        if budget_warning:
+            warning_payload = json.dumps({"budget_warning": budget_warning})
+            try:
+                await self._cf(
+                    "send", self._campfire_id,
+                    "--instance", "mallcop",
+                    "--tag", _CHAT_TAG,
+                    "--tag", session_tag,
+                    "--tag", "budget-warning",
+                    warning_payload,
+                )
+            except _SubprocessError as exc:
+                _log.error(
+                    "campfire_dispatch: failed to post budget_warning: %s", exc
+                )
 
     # ------------------------------------------------------------------
     # Public API
