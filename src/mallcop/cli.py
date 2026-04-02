@@ -402,7 +402,10 @@ def _setup_pro(config_data: dict[str, Any]) -> dict[str, Any] | None:
 @cli.command()
 @click.option("--pro", is_flag=True, help="Set up Pro managed inference")
 @click.option("--api-key", "api_key", default=None, help="mallcop Pro API key (mallcop-sk-* format); stored in mallcop.yaml")
-def init(pro: bool, api_key: str | None) -> None:
+@click.option("--campfire", "campfire", is_flag=True, default=False, help="Create a campfire for this deployment and store its ID in config")
+@click.option("--telegram-bot-token", "telegram_bot_token", default=None, envvar="MALLCOP_TEST_TELEGRAM_BOT_TOKEN", help="Telegram bot token")
+@click.option("--telegram-chat-id", "telegram_chat_id", default=None, envvar="MALLCOP_TEST_TELEGRAM_CHAT_ID", help="Telegram chat ID")
+def init(pro: bool, api_key: str | None, campfire: bool, telegram_bot_token: str | None, telegram_chat_id: str | None) -> None:
     """Discover environment, write config, estimate costs."""
     cwd = Path.cwd()
     search_paths = get_search_paths(cwd)
@@ -516,6 +519,46 @@ def init(pro: bool, api_key: str | None) -> None:
             config_data.clear()
             config_data.update(config_backup)
 
+    # Campfire and Telegram delivery setup
+    delivery_result: dict[str, Any] = {}
+    delivery_config_data: dict[str, Any] = {}
+
+    if campfire:
+        import subprocess as _subprocess
+        import os as _os
+        try:
+            cf_env = dict(_os.environ)
+            cf_proc = _subprocess.run(
+                ["cf", "create", "--description", f"mallcop-{cwd.name}"],
+                capture_output=True,
+                text=True,
+                env=cf_env,
+            )
+            campfire_id = cf_proc.stdout.strip()
+            if campfire_id:
+                delivery_config_data["campfire_id"] = campfire_id
+                delivery_result["campfire_id"] = campfire_id
+            else:
+                click.echo(
+                    json.dumps({"status": "warning", "message": "cf create returned no campfire ID"}),
+                    err=True,
+                )
+        except Exception as exc:
+            click.echo(
+                json.dumps({"status": "warning", "message": f"campfire setup failed: {exc}"}),
+                err=True,
+            )
+
+    if telegram_bot_token:
+        # Store credentials as env-var references, not raw values
+        delivery_config_data["telegram_bot_token"] = "${MALLCOP_TEST_TELEGRAM_BOT_TOKEN}"
+        delivery_result["telegram_configured"] = True
+        if telegram_chat_id:
+            delivery_config_data["telegram_chat_id"] = "${MALLCOP_TEST_TELEGRAM_CHAT_ID}"
+
+    if delivery_config_data:
+        config_data["delivery"] = delivery_config_data
+
     config_path = cwd / "mallcop.yaml"
     with open(config_path, "w") as f:
         yaml.dump(config_data, f, default_flow_style=False, sort_keys=False)
@@ -553,6 +596,8 @@ def init(pro: bool, api_key: str | None) -> None:
         output["pro"] = pro_result
     if api_key_result:
         output["pro"] = api_key_result
+    if delivery_result:
+        output["delivery"] = delivery_result
 
     click.echo(json.dumps(output))
 
@@ -666,9 +711,62 @@ def escalate(dir_path: str | None, human: bool, no_actors: bool, backend: str) -
               help="LLM backend: 'anthropic' (API) or 'claude-code' (CLI, uses subscription).")
 @click.option("--bridge", "bridge", is_flag=True, default=False,
               help="Start bridge polling daemon (requires Pro config).")
-def watch(dry_run: bool, dir_path: str | None, human: bool, backend: str, bridge: bool) -> None:
+@click.option("--daemon", "daemon", is_flag=True, default=False,
+              help="Run persistently: campfire chat dispatch + periodic scans.")
+@click.option("--scan-interval", "scan_interval", default=300, type=int,
+              help="Seconds between scans in daemon mode (default: 300).")
+def watch(dry_run: bool, dir_path: str | None, human: bool, backend: str, bridge: bool, daemon: bool, scan_interval: int) -> None:
     """Scan + detect + escalate (cron-friendly)."""
     from mallcop.escalate import run_escalate
+
+    # --daemon mode: run CampfireDispatcher + periodic scan loop persistently.
+    if daemon:
+        import asyncio as _asyncio
+        from mallcop.campfire_dispatch import CampfireDispatcher
+        from mallcop.daemon import _daemon_loop
+        from mallcop.llm.managed import ManagedClient
+
+        root = Path(dir_path) if dir_path else Path.cwd()
+
+        try:
+            config = load_config(root)
+        except Exception as exc:
+            click.echo(f"ERROR: could not load config: {exc}", err=True)
+            raise SystemExit(1)
+
+        campfire_id = getattr(config.delivery, "campfire_id", "") or ""
+        if not campfire_id:
+            click.echo(
+                "daemon requires campfire_id in config (run: mallcop init --campfire)",
+                err=True,
+            )
+            raise SystemExit(1)
+
+        pro = config.pro
+        if pro is None or not getattr(pro, "api_key", None):
+            click.echo(
+                "daemon requires Pro config (run: mallcop init --pro)",
+                err=True,
+            )
+            raise SystemExit(1)
+
+        managed_client = ManagedClient(
+            endpoint=getattr(pro, "endpoint", "https://mallcop.app"),
+            service_token=pro.api_key,
+            use_lanes=True,
+        )
+
+        dispatcher = CampfireDispatcher(
+            campfire_id=campfire_id,
+            managed_client=managed_client,
+            root=root,
+        )
+
+        try:
+            _asyncio.run(_daemon_loop(dispatcher, root, float(scan_interval)))
+        except KeyboardInterrupt:
+            click.echo("daemon stopped")
+        return
 
     root = Path(dir_path) if dir_path else Path.cwd()
     result: dict[str, Any] = {"command": "watch", "dry_run": dry_run}

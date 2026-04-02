@@ -13,7 +13,7 @@ import yaml
 from mallcop.secrets import ConfigError, SecretProvider, EnvSecretProvider
 from mallcop.patrol import PatrolConfig, parse_patrols
 
-__all__ = ["load_config", "MallcopConfig", "BudgetConfig", "BaselineConfig", "LLMConfig", "RouteConfig", "ProConfig", "GitHubConfig", "ResearchConfig", "NotifyConfig", "ConfigError", "_parse_routing", "PatrolConfig", "DEFAULT_API_URL", "DEFAULT_INFERENCE_URL"]
+__all__ = ["load_config", "MallcopConfig", "BudgetConfig", "BaselineConfig", "LLMConfig", "RouteConfig", "ProConfig", "GitHubConfig", "ResearchConfig", "NotifyConfig", "DeliveryConfig", "ConfigError", "_parse_routing", "PatrolConfig", "DEFAULT_API_URL", "DEFAULT_INFERENCE_URL"]
 
 # MALLCOP_API_URL overrides the base URL for all mallcop.app endpoints.
 # Useful for local development / testing against a staging server.
@@ -135,6 +135,14 @@ class ResearchConfig:
 
 
 @dataclass
+class DeliveryConfig:
+    """Configuration for campfire and Telegram delivery channels."""
+    campfire_id: str = ""
+    telegram_bot_token: str = ""
+    telegram_chat_id: str = ""
+
+
+@dataclass
 class MallcopConfig:
     secrets_backend: str
     connectors: dict[str, dict[str, Any]]
@@ -150,6 +158,7 @@ class MallcopConfig:
     patrols: list[PatrolConfig] = field(default_factory=list)
     notify: NotifyConfig = field(default_factory=NotifyConfig)
     research: ResearchConfig = field(default_factory=ResearchConfig)
+    delivery: DeliveryConfig = field(default_factory=DeliveryConfig)
 
 
 def _resolve_value(value: Any, provider: SecretProvider) -> Any:
@@ -354,6 +363,28 @@ def _parse_research(raw: dict[str, Any] | None) -> ResearchConfig:
     )
 
 
+def _parse_delivery(raw: dict[str, Any] | None, provider: SecretProvider) -> DeliveryConfig:
+    """Parse delivery section. Returns defaults if section missing."""
+    if raw is None or not isinstance(raw, dict):
+        return DeliveryConfig()
+    campfire_id = raw.get("campfire_id", "")
+    token_raw = raw.get("telegram_bot_token", "")
+    try:
+        telegram_bot_token = _resolve_value(token_raw, provider) if token_raw else ""
+    except ConfigError:
+        telegram_bot_token = ""
+    chat_id_raw = raw.get("telegram_chat_id", "")
+    try:
+        telegram_chat_id = _resolve_value(chat_id_raw, provider) if chat_id_raw else ""
+    except ConfigError:
+        telegram_chat_id = ""
+    return DeliveryConfig(
+        campfire_id=campfire_id,
+        telegram_bot_token=telegram_bot_token,
+        telegram_chat_id=telegram_chat_id,
+    )
+
+
 def load_config(config_dir: Path) -> MallcopConfig:
     """Load and parse mallcop.yaml from the given directory.
 
@@ -425,6 +456,9 @@ def load_config(config_dir: Path) -> MallcopConfig:
     # Research config
     research_config = _parse_research(raw.get("research"))
 
+    # Delivery config
+    delivery_config = _parse_delivery(raw.get("delivery"), provider)
+
     return MallcopConfig(
         secrets_backend=backend,
         connectors=connectors,
@@ -440,4 +474,5 @@ def load_config(config_dir: Path) -> MallcopConfig:
         notify=notify_config,
         patrols=patrols_config,
         research=research_config,
+        delivery=delivery_config,
     )
