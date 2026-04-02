@@ -68,7 +68,6 @@ class TelegramCampfireBridge:
         cf_bin: str = "cf",
         cf_home: str | None = None,
     ) -> None:
-        self._bot_token = bot_token
         self._chat_id = chat_id
         self._campfire_id = campfire_id
         self._poll_interval = poll_interval
@@ -199,15 +198,7 @@ class TelegramCampfireBridge:
         if not isinstance(items, list):
             return []
 
-        # Filter out all messages sent by mallcop (our own dispatched responses).
-        filtered = []
-        for item in items:
-            instance: str = item.get("instance", "")
-            if instance == "mallcop":
-                continue
-            filtered.append(item)
-
-        return filtered
+        return items
 
     @staticmethod
     def _extract_response_text(msg: dict[str, Any]) -> str | None:
@@ -222,7 +213,7 @@ class TelegramCampfireBridge:
         try:
             parsed = json.loads(raw)
             if isinstance(parsed, dict):
-                return parsed.get("answer") or parsed.get("text") or parsed.get("content")
+                return parsed.get("content") or parsed.get("answer") or parsed.get("text")
         except (json.JSONDecodeError, TypeError):
             pass
         return raw

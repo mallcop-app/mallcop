@@ -39,14 +39,11 @@ async def _scan_loop(
     interval: float,
 ) -> None:
     """Periodically run scan → detect → escalate, publish new findings to campfire."""
-    loop = asyncio.get_running_loop()
     while True:
         try:
             findings = await asyncio.to_thread(_run_one_scan, root)
             for finding in findings:
-                loop.call_soon_threadsafe(
-                    lambda f=finding: asyncio.ensure_future(dispatcher.publish_finding(f))
-                )
+                asyncio.create_task(dispatcher.publish_finding(finding))
         except Exception as exc:
             _log.error("daemon: scan failed: %s", exc)
         await asyncio.sleep(interval)
