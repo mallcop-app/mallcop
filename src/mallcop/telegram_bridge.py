@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from typing import Any
 
 import requests
@@ -30,6 +31,13 @@ _log = logging.getLogger(__name__)
 
 _TELEGRAM_BASE = "https://api.telegram.org/bot{token}"
 _CF_TIMEOUT = 30.0
+
+_SAFE_TAG_RE = re.compile(r"[^a-zA-Z0-9_-]")
+
+
+def _sanitize_tag(value: str) -> str:
+    """Replace characters unsafe in campfire tag values with underscores."""
+    return _SAFE_TAG_RE.sub("_", str(value))
 
 
 class TelegramCampfireBridge:
@@ -67,6 +75,9 @@ class TelegramCampfireBridge:
         self._cf_bin = cf_bin
         self._cf_home = cf_home
         self._update_offset: int = 0
+        # Store token separately; construct per-call URLs at call time so the
+        # token is never embedded in a persistent attribute that could appear in logs.
+        self._tg_token = bot_token
         self._tg_base = _TELEGRAM_BASE.format(token=bot_token)
 
     # ------------------------------------------------------------------
@@ -115,7 +126,11 @@ class TelegramCampfireBridge:
                 resp.raise_for_status()
                 data = resp.json()
             except Exception as exc:  # noqa: BLE001
-                _log.warning("telegram_bridge: getUpdates error: %s", exc)
+                # Redact token from URL that requests embeds in exception messages.
+                _log.warning(
+                    "telegram_bridge: getUpdates error: %s",
+                    str(exc).replace(self._tg_token, "***"),
+                )
                 return []
 
             updates = data.get("result", [])
@@ -134,7 +149,10 @@ class TelegramCampfireBridge:
                 resp = requests.post(url, json=payload, timeout=10)
                 resp.raise_for_status()
             except Exception as exc:  # noqa: BLE001
-                _log.warning("telegram_bridge: sendMessage error: %s", exc)
+                _log.warning(
+                    "telegram_bridge: sendMessage error: %s",
+                    str(exc).replace(self._tg_token, "***"),
+                )
 
         await asyncio.to_thread(_post)
 
@@ -150,7 +168,7 @@ class TelegramCampfireBridge:
                 "send", self._campfire_id,
                 "--instance", "mallcop",
                 "--tag", "chat",
-                "--tag", f"session:{self._chat_id}",
+                "--tag", f"session:{_sanitize_tag(str(self._chat_id))}",
                 "--tag", "platform:telegram",
                 payload,
             )
@@ -181,12 +199,11 @@ class TelegramCampfireBridge:
         if not isinstance(items, list):
             return []
 
-        # Filter out messages we sent (platform:telegram + instance:mallcop).
+        # Filter out all messages sent by mallcop (our own dispatched responses).
         filtered = []
         for item in items:
-            tags: list[str] = item.get("tags", [])
             instance: str = item.get("instance", "")
-            if "platform:telegram" in tags and instance == "mallcop":
+            if instance == "mallcop":
                 continue
             filtered.append(item)
 
