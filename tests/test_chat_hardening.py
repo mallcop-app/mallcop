@@ -16,6 +16,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from click.testing import CliRunner
+
 from mallcop.chat import (
     MAX_FINDINGS_IN_PROMPT,
     TOKENS_PER_DONUT,
@@ -24,6 +26,7 @@ from mallcop.chat import (
     _load_finding_summaries,
     _session_donut_spend,
     chat_turn,
+    run_chat_repl,
 )
 from mallcop.conversation import ConversationStore
 from mallcop.context_window import ContextWindowManager
@@ -532,3 +535,63 @@ class TestBudgetThresholdValidation:
         )
 
         assert "budget_warning" not in result
+
+
+# ---------------------------------------------------------------------------
+# Bug fix: budget_warning displayed in REPL (mallcop-pro-hic)
+# ---------------------------------------------------------------------------
+
+class TestReplBudgetWarningDisplay:
+    """run_chat_repl prints budget_warning to stdout when chat_turn returns one."""
+
+    def setup_method(self) -> None:
+        _session_donut_spend.clear()
+
+    def test_repl_shows_budget_warning(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """When chat_turn returns a budget_warning, run_chat_repl prints [budget] line."""
+        import click as _click
+        from unittest.mock import patch
+
+        warning_msg = "You have spent 5.0 donuts this session."
+        mock_result = {
+            "response": "Here is the answer.",
+            "footer": "tokens: 5000 | donuts: 5.0",
+            "budget_warning": warning_msg,
+            "tokens_used": 5000,
+        }
+
+        client = MagicMock()
+
+        @_click.command()
+        def _repl_cmd():
+            run_chat_repl(managed_client=client, root=tmp_path)
+
+        with patch("mallcop.chat.chat_turn", return_value=mock_result):
+            runner = CliRunner()
+            result = runner.invoke(_repl_cmd, input="What is 2+2?\nexit\n", catch_exceptions=False)
+
+        assert "[budget]" in result.output
+        assert warning_msg in result.output
+
+    def test_repl_no_budget_line_without_warning(self, tmp_path: Path) -> None:
+        """When chat_turn returns no budget_warning, run_chat_repl does not print [budget]."""
+        import click as _click
+        from unittest.mock import patch
+
+        mock_result = {
+            "response": "Here is the answer.",
+            "footer": "tokens: 100 | donuts: 0.1",
+            "tokens_used": 100,
+        }
+
+        client = MagicMock()
+
+        @_click.command()
+        def _repl_cmd():
+            run_chat_repl(managed_client=client, root=tmp_path)
+
+        with patch("mallcop.chat.chat_turn", return_value=mock_result):
+            runner = CliRunner()
+            result = runner.invoke(_repl_cmd, input="Hello\nexit\n", catch_exceptions=False)
+
+        assert "[budget]" not in result.output
