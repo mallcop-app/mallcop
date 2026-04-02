@@ -2,6 +2,9 @@
 
 Each line is a JSON object matching the ConversationMessage schema.
 Advisory flock on write: warn-and-proceed on lock failure (non-blocking).
+
+Also provides CampfireConversationAdapter — a campfire-backed store that
+implements the same append/load_session interface using ``cf`` CLI commands.
 """
 
 from __future__ import annotations
@@ -11,6 +14,7 @@ import json
 import logging
 import os
 import secrets
+import subprocess
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -131,5 +135,216 @@ class ConversationStore:
             if msg.session_id == session_id:
                 results.append(msg)
         # Sort chronologically by timestamp string (ISO8601 sorts lexicographically)
+        results.sort(key=lambda m: m.timestamp)
+        return results
+
+
+# ---------------------------------------------------------------------------
+# CampfireConversationAdapter
+# ---------------------------------------------------------------------------
+
+_INSTANCE_TO_ROLE = {"user": "user", "mallcop": "assistant"}
+_ROLE_TO_INSTANCE = {"user": "user", "assistant": "mallcop"}
+
+# Tag used to scope all chat messages in a campfire.
+_CHAT_TAG = "chat"
+
+
+class CampfireConversationAdapter:
+    """Campfire-backed conversation store.
+
+    Implements the same ``append`` / ``load_session`` interface as
+    :class:`ConversationStore` but persists messages to a campfire using the
+    ``cf`` CLI.
+
+    Tag mapping
+    -----------
+    - ``session_id``   → ``session:<uuid>``
+    - ``surface``      → ``platform:<name>``
+    - ``role``         → ``--instance user`` (role=="user") or ``--instance mallcop``
+    - ``finding_refs`` → ``finding_ref:<MC-ID>`` (one tag per ref)
+    - All chat messages receive the ``chat`` tag for easy filtering.
+
+    Parameters
+    ----------
+    campfire_id:
+        The campfire ID (hex string) to read/write.
+    cf_bin:
+        Path to the ``cf`` binary.  Defaults to ``cf`` (resolved via PATH).
+    cf_home:
+        Optional ``--cf-home`` override forwarded to every ``cf`` invocation.
+    """
+
+    def __init__(
+        self,
+        campfire_id: str,
+        cf_bin: str = "cf",
+        cf_home: str | None = None,
+    ) -> None:
+        self._campfire_id = campfire_id
+        self._cf_bin = cf_bin
+        self._cf_home = cf_home
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _cf(self, *args: str) -> str:
+        """Run a cf command and return stdout.  Raises on non-zero exit."""
+        cmd = [self._cf_bin]
+        if self._cf_home:
+            cmd += ["--cf-home", self._cf_home]
+        cmd += list(args)
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"cf command failed (exit {result.returncode}): "
+                f"{' '.join(args)!r}\nstderr: {result.stderr.strip()}"
+            )
+        return result.stdout.strip()
+
+    def _build_tags(
+        self,
+        session_id: str,
+        surface: str,
+        finding_refs: list[str],
+    ) -> list[str]:
+        tags = [_CHAT_TAG, f"session:{session_id}", f"platform:{surface}"]
+        for ref in finding_refs:
+            tags.append(f"finding_ref:{ref}")
+        return tags
+
+    @staticmethod
+    def _extract_finding_refs(tags: list[str]) -> list[str]:
+        refs = []
+        for tag in tags:
+            if tag.startswith("finding_ref:"):
+                refs.append(tag[len("finding_ref:"):])
+        return refs
+
+    @staticmethod
+    def _extract_surface(tags: list[str]) -> str:
+        for tag in tags:
+            if tag.startswith("platform:"):
+                return tag[len("platform:"):]
+        return "unknown"
+
+    @staticmethod
+    def _extract_session_id(tags: list[str]) -> str:
+        for tag in tags:
+            if tag.startswith("session:"):
+                return tag[len("session:"):]
+        return ""
+
+    # ------------------------------------------------------------------
+    # Public API (mirrors ConversationStore)
+    # ------------------------------------------------------------------
+
+    def append(
+        self,
+        session_id: str,
+        surface: str,
+        role: str,
+        content: str,
+        finding_refs: list[str] | None = None,
+        tokens_used: int = 0,
+        msg_id: str | None = None,
+        timestamp: str | None = None,
+    ) -> ConversationMessage:
+        """Append a message to the campfire.  Returns the written ConversationMessage."""
+        finding_refs = finding_refs or []
+        timestamp = timestamp or datetime.now(timezone.utc).isoformat()
+        msg_id = msg_id or _new_msg_id()
+
+        tags = self._build_tags(session_id, surface, finding_refs)
+        # Encode metadata not natively captured by campfire in the payload as
+        # a JSON envelope so we can reconstruct the full ConversationMessage
+        # on read.
+        envelope: dict[str, Any] = {
+            "id": msg_id,
+            "timestamp": timestamp,
+            "tokens_used": tokens_used,
+            "content": content,
+        }
+        payload = json.dumps(envelope)
+
+        instance = _ROLE_TO_INSTANCE.get(role, role)
+
+        cmd_args = ["send", self._campfire_id, "--instance", instance]
+        for tag in tags:
+            cmd_args += ["--tag", tag]
+        cmd_args.append(payload)
+        self._cf(*cmd_args)
+
+        return ConversationMessage(
+            id=msg_id,
+            session_id=session_id,
+            surface=surface,
+            timestamp=timestamp,
+            role=role,
+            content=content,
+            finding_refs=finding_refs,
+            tokens_used=tokens_used,
+        )
+
+    def load_session(self, session_id: str) -> list[ConversationMessage]:
+        """Return all messages for *session_id* in chronological order."""
+        raw = self._cf(
+            "read", self._campfire_id,
+            "--all", "--json",
+            "--tag", _CHAT_TAG,
+            "--tag", f"session:{session_id}",
+        )
+        if not raw:
+            return []
+        try:
+            items: list[dict[str, Any]] = json.loads(raw)
+        except json.JSONDecodeError:
+            logger.warning("CampfireConversationAdapter: could not parse cf read output")
+            return []
+
+        results: list[ConversationMessage] = []
+        for item in items:
+            tags: list[str] = item.get("tags", [])
+            # Skip non-chat messages (e.g. convention metadata published at campfire creation)
+            if _CHAT_TAG not in tags:
+                continue
+            item_session = self._extract_session_id(tags)
+            if item_session != session_id:
+                continue
+
+            payload_raw = item.get("payload", "")
+            try:
+                envelope = json.loads(payload_raw)
+            except (json.JSONDecodeError, TypeError):
+                logger.warning(
+                    "CampfireConversationAdapter: skipping message with non-JSON payload: %r",
+                    payload_raw,
+                )
+                continue
+
+            instance = item.get("instance", "user")
+            role = _INSTANCE_TO_ROLE.get(instance, instance)
+            surface = self._extract_surface(tags)
+            finding_refs = self._extract_finding_refs(tags)
+
+            try:
+                msg = ConversationMessage(
+                    id=envelope.get("id") or _new_msg_id(),
+                    session_id=item_session,
+                    surface=surface,
+                    timestamp=envelope.get("timestamp") or datetime.now(timezone.utc).isoformat(),
+                    role=role,
+                    content=envelope["content"],
+                    finding_refs=finding_refs,
+                    tokens_used=envelope.get("tokens_used", 0),
+                )
+                results.append(msg)
+            except (KeyError, TypeError) as exc:
+                logger.warning(
+                    "CampfireConversationAdapter: skipping malformed envelope: %s", exc
+                )
+                continue
+
         results.sort(key=lambda m: m.timestamp)
         return results
