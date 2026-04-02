@@ -64,8 +64,8 @@ def _make_store(tmp_path: Path) -> ConversationStore:
 
 
 def _run_chat_turn(**kwargs: Any) -> dict:
-    """Run async chat_turn synchronously for use in sync test methods."""
-    return asyncio.run(chat_turn(**kwargs))
+    """Run chat_turn synchronously for use in sync test methods."""
+    return chat_turn(**kwargs)
 
 
 def _write_findings(tmp_path: Path, count: int, base_ts: str = "2024-01-01T00:00:00Z") -> None:
