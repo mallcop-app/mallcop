@@ -13,6 +13,7 @@ import fcntl
 import json
 import logging
 import os
+import re
 import secrets
 import subprocess
 from dataclasses import asdict, dataclass, field
@@ -143,6 +144,11 @@ class ConversationStore:
 # CampfireConversationAdapter
 # ---------------------------------------------------------------------------
 
+
+class CampfireAdapterError(RuntimeError):
+    """Raised when a campfire operation fails in CampfireConversationAdapter."""
+
+
 _INSTANCE_TO_ROLE = {"user": "user", "mallcop": "assistant"}
 _ROLE_TO_INSTANCE = {"user": "user", "assistant": "mallcop"}
 
@@ -159,7 +165,7 @@ class CampfireConversationAdapter:
 
     Tag mapping
     -----------
-    - ``session_id``   → ``session:<uuid>``
+    - ``session_id``   → ``session:<sanitized-id>``
     - ``surface``      → ``platform:<name>``
     - ``role``         → ``--instance user`` (role=="user") or ``--instance mallcop``
     - ``finding_refs`` → ``finding_ref:<MC-ID>`` (one tag per ref)
@@ -203,13 +209,25 @@ class CampfireConversationAdapter:
             )
         return result.stdout.strip()
 
+    @staticmethod
+    def _sanitize_session_id(session_id: str) -> str:
+        """Sanitize session_id for safe embedding in tag names.
+
+        Replaces any character that is not alphanumeric, underscore, or hyphen
+        with an underscore, preventing tag namespace collisions (e.g. a colon
+        producing ``session:abc:def``) and CLI arg parsing issues from spaces
+        or slashes.
+        """
+        return re.sub(r"[^a-zA-Z0-9_-]", "_", session_id)
+
     def _build_tags(
         self,
         session_id: str,
         surface: str,
         finding_refs: list[str],
     ) -> list[str]:
-        tags = [_CHAT_TAG, f"session:{session_id}", f"platform:{surface}"]
+        safe_session_id = self._sanitize_session_id(session_id)
+        tags = [_CHAT_TAG, f"session:{safe_session_id}", f"platform:{surface}"]
         for ref in finding_refs:
             tags.append(f"finding_ref:{ref}")
         return tags
@@ -274,7 +292,12 @@ class CampfireConversationAdapter:
         for tag in tags:
             cmd_args += ["--tag", tag]
         cmd_args.append(payload)
-        self._cf(*cmd_args)
+        try:
+            self._cf(*cmd_args)
+        except (RuntimeError, OSError) as exc:
+            raise CampfireAdapterError(
+                f"CampfireConversationAdapter: append failed for session {session_id!r}: {exc}"
+            ) from exc
 
         return ConversationMessage(
             id=msg_id,
@@ -289,18 +312,35 @@ class CampfireConversationAdapter:
 
     def load_session(self, session_id: str) -> list[ConversationMessage]:
         """Return all messages for *session_id* in chronological order."""
-        raw = self._cf(
-            "read", self._campfire_id,
-            "--all", "--json",
-            "--tag", _CHAT_TAG,
-            "--tag", f"session:{session_id}",
-        )
+        safe_session_id = self._sanitize_session_id(session_id)
+        try:
+            raw = self._cf(
+                "read", self._campfire_id,
+                "--all", "--json",
+                "--tag", _CHAT_TAG,
+                "--tag", f"session:{safe_session_id}",
+            )
+        except (RuntimeError, OSError) as exc:
+            logger.warning(
+                "CampfireConversationAdapter: load_session failed for %r: %s",
+                session_id,
+                exc,
+            )
+            return []
         if not raw:
             return []
         try:
-            items: list[dict[str, Any]] = json.loads(raw)
+            items = json.loads(raw)
         except json.JSONDecodeError:
             logger.warning("CampfireConversationAdapter: could not parse cf read output")
+            return []
+
+        # Guard against non-list JSON (e.g. "null", "{}", "true")
+        if not isinstance(items, list):
+            logger.warning(
+                "CampfireConversationAdapter: expected JSON list from cf read, got %r; returning []",
+                type(items).__name__,
+            )
             return []
 
         results: list[ConversationMessage] = []
@@ -310,7 +350,7 @@ class CampfireConversationAdapter:
             if _CHAT_TAG not in tags:
                 continue
             item_session = self._extract_session_id(tags)
-            if item_session != session_id:
+            if item_session != safe_session_id:
                 continue
 
             payload_raw = item.get("payload", "")
