@@ -317,6 +317,14 @@ class CampfireDispatcher:
 
         Runs until cancelled (asyncio.CancelledError).
 
+        On consecutive poll failures (``_SubprocessError`` from
+        ``_read_new_messages``), an exponential backoff is applied starting
+        after the 5th consecutive error:
+
+            sleep = min(poll_interval * 2 ** (consecutive_errors - 5), 300)
+
+        The counter resets to zero on any successful poll.
+
         Raises
         ------
         RuntimeError
@@ -328,12 +336,35 @@ class CampfireDispatcher:
             "campfire_dispatch: starting loop on %s (poll_interval=%.1fs)",
             self._campfire_id, self._poll_interval,
         )
+        _consecutive_errors: int = 0
         try:
             while True:
-                messages = await self._read_new_messages()
-                for msg in messages:
-                    await self._dispatch_message(msg)
-                await asyncio.sleep(self._poll_interval)
+                try:
+                    messages = await self._read_new_messages()
+                    _consecutive_errors = 0
+                except _SubprocessError:
+                    # _read_new_messages already logs a warning and returns [].
+                    # We only reach here if it re-raises, which it currently
+                    # does not — this branch is a safety net for future changes.
+                    _consecutive_errors += 1
+                else:
+                    for msg in messages:
+                        await self._dispatch_message(msg)
+
+                # Backoff after 5 or more consecutive errors.
+                if _consecutive_errors >= 5:
+                    backoff = min(
+                        self._poll_interval * 2 ** (_consecutive_errors - 5),
+                        300.0,
+                    )
+                    _log.warning(
+                        "campfire_dispatch: %d consecutive cf errors — "
+                        "backing off for %.1fs",
+                        _consecutive_errors, backoff,
+                    )
+                    await asyncio.sleep(backoff)
+                else:
+                    await asyncio.sleep(self._poll_interval)
         except asyncio.CancelledError:
             _log.info("campfire_dispatch: loop cancelled — shutting down")
             raise

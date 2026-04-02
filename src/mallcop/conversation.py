@@ -401,7 +401,7 @@ class CampfireConversationAdapter:
                     msg_ts = datetime.now(timezone.utc).isoformat()
                 msg = ConversationMessage(
                     id=msg_id,
-                    session_id=item_session,
+                    session_id=session_id,
                     surface=surface,
                     timestamp=msg_ts,
                     role=role,

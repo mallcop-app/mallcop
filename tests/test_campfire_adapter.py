@@ -317,6 +317,10 @@ def test_load_session_coloned_session_id_round_trip(campfire_id: str) -> None:
     loaded = asyncio.run(adapter.load_session(session_id))
     assert len(loaded) == 1, f"Expected 1 message, got {len(loaded)}"
     assert loaded[0].content == "Message with colon session ID"
+    # Loaded messages must carry the original session_id, not the sanitized tag form.
+    assert loaded[0].session_id == session_id, (
+        f"load_session returned session_id={loaded[0].session_id!r}, expected {session_id!r}"
+    )
 
 
 # ---------------------------------------------------------------------------
