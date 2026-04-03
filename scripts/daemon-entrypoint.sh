@@ -1,29 +1,16 @@
 #!/bin/bash
 set -e
 export CF_HOME=/mnt/campfire
-# Clear stale cf state from previous containers (identity, store, aliases)
-# but preserve the campfire message directories
+# cf 0.14.3 co-locates transport at $CF_HOME/campfires/.
+# WriteInbound writes beads to $CF_HOME/<campfireID>/messages/ (share root).
+# Set CF_TRANSPORT_DIR=$CF_HOME so cf uses the same path as WriteInbound.
+export CF_TRANSPORT_DIR=/mnt/campfire
+# Clear stale cf state from previous containers
 rm -f "$CF_HOME/store.db" "$CF_HOME/identity.json" "$CF_HOME/aliases.json"
 rm -rf "$CF_HOME/center"
 cf init --force 2>&1 || true
-# Register the customer's campfire as a membership in cf's store.
-# cf join requires campfire.cbor metadata which doesn't exist for
-# WriteInbound-created campfires. Insert the membership directly.
+# Join the customer's campfire (cf 0.14.3 handles this properly now)
 if [ -n "$MALLCOP_CAMPFIRE_ID" ]; then
-    python3 -c "
-import sqlite3, time, os
-db = os.path.join(os.environ['CF_HOME'], 'store.db')
-conn = sqlite3.connect(db)
-cid = os.environ['MALLCOP_CAMPFIRE_ID']
-tdir = os.path.join(os.environ['CF_HOME'], cid)
-ts = int(time.time())
-conn.execute('''INSERT OR REPLACE INTO campfire_memberships
-    (campfire_id, transport_dir, join_protocol, role, joined_at, threshold, description, creator_pubkey, transport_type, encrypted)
-    VALUES (?, ?, 'open', 'full', ?, 1, 'pro-online', '', 'filesystem', 0)''',
-    (cid, tdir, ts))
-conn.commit()
-conn.close()
-print(f'Registered campfire {cid[:12]} in store.db')
-" 2>&1
+    cf join "$MALLCOP_CAMPFIRE_ID" 2>&1 || true
 fi
 exec mallcop watch --daemon --dir /workspace
