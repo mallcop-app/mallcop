@@ -20,6 +20,7 @@ Design notes
 from __future__ import annotations
 
 import asyncio
+import os
 import json
 import logging
 import re
@@ -76,6 +77,7 @@ class TelegramCampfireBridge:
         self._cf_home = cf_home
         self._update_offset: int = 0
         self._inbound_mode = inbound_mode
+        self._seen_inbound_beads: set[str] = set()
         # Store token separately; construct per-call URLs at call time so the
         # token is never embedded in a persistent attribute that could appear in logs.
         self._tg_token = bot_token
@@ -340,35 +342,66 @@ class TelegramCampfireBridge:
         return items
 
     async def _poll_campfire_inbound(self) -> list[dict]:
-        """Fetch tg-inbound tagged messages from campfire (campfire-inbound mode).
+        """Fetch tg-inbound tagged messages from the Azure Files bead directory.
 
-        Returns the parsed list of campfire message dicts, or an empty list on
-        error.  Each message payload is expected to be JSON with ``content`` and
-        ``from`` keys written by the mallcop-pro webhook handler.
+        mallcop-pro writes CBOR beads directly to
+        ``<CF_HOME>/<campfireID>/messages/*.cbor``.  cf's SQLite store doesn't
+        see these files, so we read them directly and track which ones we've
+        already processed via ``_seen_inbound_beads``.
+
+        Returns parsed message dicts with ``payload``, ``tags``, etc.
         """
+        import cbor2
+        from pathlib import Path as _Path
+
+        cf_home = self._cf_home or os.environ.get("CF_HOME", "")
+        if not cf_home:
+            return []
+
+        msg_dir = _Path(cf_home) / self._campfire_id / "messages"
+        if not msg_dir.is_dir():
+            return []
+
+        results: list[dict] = []
         try:
-            raw = await self._cf(
-                "read", self._campfire_id,
-                "--json",
-                "--tag", "tg-inbound",
-            )
-        except Exception as exc:  # noqa: BLE001
-            _log.warning("telegram_bridge: campfire inbound read error: %s", exc)
+            bead_files = sorted(msg_dir.glob("*.cbor"))
+        except OSError as exc:
+            _log.warning("telegram_bridge: list bead dir: %s", exc)
             return []
 
-        if not raw:
-            return []
+        for bead_path in bead_files:
+            name = bead_path.name
+            if name in self._seen_inbound_beads:
+                continue
+            self._seen_inbound_beads.add(name)
 
-        try:
-            items = json.loads(raw)
-        except json.JSONDecodeError:
-            _log.warning("telegram_bridge: non-JSON from cf read (tg-inbound): %r", raw[:200])
-            return []
+            try:
+                raw_bytes = await asyncio.to_thread(bead_path.read_bytes)
+                msg = cbor2.loads(raw_bytes)
+            except Exception as exc:
+                _log.warning("telegram_bridge: decode bead %s: %s", name, exc)
+                continue
 
-        if not isinstance(items, list):
-            return []
+            # CBOR uses integer keys (keyasint): 3=payload, 4=tags, 1=id
+            payload_bytes = msg.get(3, b"")
+            tags = msg.get(4, [])
 
-        return items
+            if "tg-inbound" not in tags:
+                continue
+
+            # Decode payload bytes to string
+            if isinstance(payload_bytes, bytes):
+                payload_str = payload_bytes.decode("utf-8", errors="replace")
+            else:
+                payload_str = str(payload_bytes)
+
+            results.append({
+                "id": msg.get(1, name),
+                "payload": payload_str,
+                "tags": tags,
+            })
+
+        return results
 
     @staticmethod
     def _extract_response_text(msg: dict[str, Any]) -> str | None:
