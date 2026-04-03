@@ -289,7 +289,7 @@ class TelegramCampfireBridge:
             await self._cf(
                 "send", self._campfire_id,
                 "--tag", "tg-offset",
-                "--instance", "mallcop",
+                "--instance", "telegram-bridge",
                 payload,
             )
             _log.debug("telegram_bridge: persisted offset %d to campfire", self._update_offset)
@@ -306,7 +306,7 @@ class TelegramCampfireBridge:
         try:
             await self._cf(
                 "send", self._campfire_id,
-                "--instance", "mallcop",
+                "--instance", "telegram-bridge",
                 "--tag", "chat",
                 "--tag", f"session:{_sanitize_tag(str(self._chat_id))}",
                 "--tag", "platform:telegram",
