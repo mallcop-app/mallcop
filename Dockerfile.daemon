@@ -28,3 +28,4 @@ USER mallcop
 ENTRYPOINT ["/app/scripts/daemon-entrypoint.sh"]
 
 
+
