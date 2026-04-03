@@ -2,8 +2,11 @@
 
 These tests are fully mocked (no real Telegram credentials, no real campfire)
 and always run regardless of environment variables.  They cover the
-``run_once_inbound()`` method and the ``_poll_campfire_inbound()`` helper added
-for the pro-online webhook tier.
+``run_once_inbound()`` method.
+
+The raw CBOR file reader (_poll_campfire_inbound) has been removed as part of
+the migration to hosted campfire (mallcop-pro-dlu). The inbound forwarding path
+is a stub until mallcop-pro-qkc lands.
 
 Mocking strategy: patch ``asyncio.create_subprocess_exec`` to intercept all cf
 subprocess calls.  Telegram HTTP (``requests.get`` / ``requests.post``) is also
@@ -75,42 +78,30 @@ def test_run_once_inbound_does_not_call_getupdates() -> None:
     mock_post.assert_not_called()
 
 
-def test_run_once_inbound_forwards_messages_to_campfire() -> None:
-    """Each tg-inbound message must be forwarded to campfire with chat+session tags."""
-    bridge = _make_bridge_inbound()
+def test_run_once_inbound_stub_no_forwarding() -> None:
+    """run_once_inbound is a stub pending mallcop-pro-qkc.
 
-    inbound_messages = [
-        {
-            "payload": json.dumps({"content": "hello from user", "from": "user-42"}),
-            "tags": ["tg-inbound"],
-        },
-    ]
+    The old CBOR file reader has been removed. Until the convention-based
+    inbound reader (mallcop-pro-qkc) is implemented, run_once_inbound does
+    not forward tg-inbound messages to campfire. This test documents that
+    stub behaviour.
+    """
+    bridge = _make_bridge_inbound()
 
     cf_calls: list[list[str]] = []
 
     async def make_proc(*args, **kwargs):
         cmd_args = list(args)
         cf_calls.append(cmd_args)
-        # tg-inbound read → return inbound messages; everything else → empty
-        if "--tag" in cmd_args and "tg-inbound" in cmd_args:
-            return _make_proc(stdout=_cf_json_bytes(inbound_messages))
         return _make_proc()
 
     with patch("asyncio.create_subprocess_exec", side_effect=make_proc):
         asyncio.run(bridge.run_once_inbound())
 
-    # There must be at least one cf send call
+    # No cf send should happen — the inbound reader is a stub (TODO: mallcop-pro-qkc)
     send_calls = [c for c in cf_calls if "send" in c]
-    assert send_calls, f"Expected at least one cf send call; all calls: {cf_calls}"
-
-    # The send must carry the 'chat' tag
-    chat_sends = [c for c in send_calls if "chat" in c]
-    assert chat_sends, f"Expected a cf send with 'chat' tag; sends: {send_calls}"
-
-    # The send must carry a session:<chat_id> tag
-    session_sends = [c for c in chat_sends if any("session:" in arg for arg in c)]
-    assert session_sends, (
-        f"Expected 'session:' tag in cf send; chat sends: {chat_sends}"
+    assert not send_calls, (
+        f"Expected no cf send calls in stub mode; got: {send_calls}"
     )
 
 
@@ -127,8 +118,6 @@ def test_run_once_inbound_forwards_responses_to_telegram() -> None:
 
     async def make_proc(*args, **kwargs):
         cmd_args = list(args)
-        if "--tag" in cmd_args and "tg-inbound" in cmd_args:
-            return _make_proc(stdout=b"[]")
         if "--tag" in cmd_args and "response" in cmd_args:
             return _make_proc(stdout=_cf_json_bytes(response_messages))
         return _make_proc()
