@@ -6,8 +6,24 @@ export CF_HOME=/mnt/campfire
 rm -f "$CF_HOME/store.db" "$CF_HOME/identity.json" "$CF_HOME/aliases.json"
 rm -rf "$CF_HOME/center"
 cf init --force 2>&1 || true
-# Join the customer's campfire so cf send works
+# Register the customer's campfire as a membership in cf's store.
+# cf join requires campfire.cbor metadata which doesn't exist for
+# WriteInbound-created campfires. Insert the membership directly.
 if [ -n "$MALLCOP_CAMPFIRE_ID" ]; then
-    cf join "$MALLCOP_CAMPFIRE_ID" 2>&1 || true
+    python3 -c "
+import sqlite3, time, os
+db = os.path.join(os.environ['CF_HOME'], 'store.db')
+conn = sqlite3.connect(db)
+cid = os.environ['MALLCOP_CAMPFIRE_ID']
+path = os.path.join(os.environ['CF_HOME'], cid)
+ts = int(time.time())
+conn.execute('''INSERT OR REPLACE INTO campfire_memberships
+    (campfire_id, path, join_protocol, role, joined_at, member_count, description, creator_pubkey, transport, is_muted)
+    VALUES (?, ?, 'open', 'full', ?, 1, 'pro-online', '', 'filesystem', 0)''',
+    (cid, path, ts))
+conn.commit()
+conn.close()
+print(f'Registered campfire {cid[:12]} in store.db')
+" 2>&1
 fi
 exec mallcop watch --daemon --dir /workspace
