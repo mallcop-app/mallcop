@@ -94,6 +94,7 @@ async def _daemon_loop(
     root: Path,
     scan_interval: float,
     idle_timeout_seconds: float = 300.0,
+    bridge=None,
 ) -> None:
     """Run campfire dispatch and periodic scan concurrently."""
     campfire_id = getattr(dispatcher, "campfire_id", "")
@@ -104,13 +105,28 @@ async def _daemon_loop(
     watchdog_task = asyncio.create_task(
         _idle_watchdog(campfire_id, idle_timeout_seconds, cf_home=cf_home)
     )
+    tasks = [scan_task, dispatch_task, watchdog_task]
+    if bridge is not None:
+        bridge_task = asyncio.create_task(_bridge_inbound_loop(bridge))
+        tasks.append(bridge_task)
     try:
-        await asyncio.gather(scan_task, dispatch_task, watchdog_task)
+        await asyncio.gather(*tasks)
     except asyncio.CancelledError:
-        scan_task.cancel()
-        dispatch_task.cancel()
-        watchdog_task.cancel()
+        for t in tasks:
+            t.cancel()
         # Suppress CancelledError — idle timeout is a clean exit, not an error.
+
+
+async def _bridge_inbound_loop(bridge, interval: float = 3.0) -> None:
+    """Poll bridge.run_once_inbound() in a loop."""
+    while True:
+        try:
+            await bridge.run_once_inbound()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            _log.warning("bridge inbound error: %s", exc)
+        await asyncio.sleep(interval)
 
 
 async def _scan_loop(

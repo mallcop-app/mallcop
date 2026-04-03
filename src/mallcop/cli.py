@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -974,6 +975,38 @@ def watch(dry_run: bool, dir_path: str | None, human: bool, backend: str, daemon
         from mallcop.llm.managed import ManagedClient
 
         root = Path(dir_path) if dir_path else Path.cwd()
+
+        campfire_id = os.environ.get('MALLCOP_CAMPFIRE_ID')
+        service_token = os.environ.get('MALLCOP_PRO_SERVICE_TOKEN')
+        inference_url = os.environ.get('MALLCOP_PRO_INFERENCE_URL', 'https://mallcop.app')
+        bot_token = os.environ.get('MALLCOP_TELEGRAM_BOT_TOKEN')
+        chat_id = os.environ.get('MALLCOP_TELEGRAM_CHAT_ID')
+        inbound_mode = os.environ.get('MALLCOP_INBOUND_MODE') == 'campfire'
+
+        if campfire_id and service_token:
+            # Container mode — skip load_config entirely
+            managed_client = ManagedClient(
+                endpoint=inference_url,
+                service_token=service_token,
+                use_lanes=True,
+            )
+            dispatcher = CampfireDispatcher(
+                campfire_id=campfire_id,
+                managed_client=managed_client,
+                root=root,
+            )
+            bridge = None
+            if inbound_mode and bot_token and chat_id:
+                from mallcop.telegram_bridge import TelegramCampfireBridge
+                bridge = TelegramCampfireBridge(
+                    bot_token=bot_token, chat_id=chat_id,
+                    campfire_id=campfire_id, inbound_mode=True,
+                )
+            try:
+                _asyncio.run(_daemon_loop(dispatcher, root, float(scan_interval), idle_timeout_seconds=300.0, bridge=bridge))
+            except KeyboardInterrupt:
+                click.echo("daemon stopped")
+            return
 
         try:
             config = load_config(root)

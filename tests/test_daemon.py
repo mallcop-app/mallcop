@@ -294,3 +294,51 @@ def test_daemon_loop_exits_cleanly_on_idle_timeout(tmp_path: Path) -> None:
 
     # asyncio.run should complete without exception.
     asyncio.run(run())
+
+
+# ---------------------------------------------------------------------------
+# Test 8: _daemon_loop creates 4 tasks when bridge is provided
+# ---------------------------------------------------------------------------
+
+
+def test_daemon_loop_creates_bridge_task_when_bridge_provided(tmp_path: Path) -> None:
+    """_daemon_loop should create 4 tasks when bridge is provided."""
+    import mallcop.daemon as daemon_mod
+
+    dispatcher = MagicMock()
+    dispatcher.campfire_id = "fire-test"
+    dispatcher.run = AsyncMock(side_effect=asyncio.CancelledError)
+    dispatcher.publish_finding = AsyncMock()
+
+    bridge = MagicMock()
+    bridge.run_once_inbound = AsyncMock(side_effect=asyncio.CancelledError)
+
+    async def run() -> None:
+        # Track how many tasks are created
+        task_count = [0]
+        real_create_task = asyncio.create_task
+
+        def counting_create_task(coro, **kwargs):
+            task_count[0] += 1
+            return real_create_task(coro, **kwargs)
+
+        async def fake_watchdog(*args, **kwargs) -> None:
+            current = asyncio.current_task()
+            for task in asyncio.all_tasks():
+                if task is not current:
+                    task.cancel()
+
+        with (
+            patch.object(daemon_mod, "_idle_watchdog", side_effect=fake_watchdog),
+            patch("asyncio.create_task", side_effect=counting_create_task),
+        ):
+            await daemon_mod._daemon_loop(
+                dispatcher,
+                tmp_path,
+                scan_interval=300.0,
+                idle_timeout_seconds=0.1,
+                bridge=bridge,
+            )
+        assert task_count[0] == 4, f"expected 4 tasks, got {task_count[0]}"
+
+    asyncio.run(run())
