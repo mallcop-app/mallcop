@@ -20,10 +20,9 @@ RUN useradd -m mallcop
 COPY . /app
 RUN pip install --no-cache-dir /app
 
-# Set CF_HOME default
-ENV CF_HOME=/tmp/cf
+COPY scripts/daemon-entrypoint.sh /app/scripts/daemon-entrypoint.sh
+RUN chmod +x /app/scripts/daemon-entrypoint.sh
 
 USER mallcop
 
-ENTRYPOINT ["mallcop", "watch", "--daemon"]
-CMD ["--dir", "/workspace"]
+ENTRYPOINT ["/app/scripts/daemon-entrypoint.sh"]
