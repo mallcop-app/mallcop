@@ -478,6 +478,96 @@ def _setup_pro(config_data: dict[str, Any]) -> dict[str, Any] | None:
     return pro_result
 
 
+def _setup_pro_online(config_data: dict[str, Any]) -> dict[str, Any] | None:
+    """Register for Pro Online hosted daemon tier.
+
+    Validates prerequisites (pro service_token + Telegram + campfire),
+    sets the Telegram webhook to mallcop.app, and registers with the
+    mallcop-pro pro-online endpoint.
+
+    Mutates config_data["delivery"] in place on success.
+    Returns a result dict for CLI output, or None if prerequisites are missing.
+    """
+    import requests as _requests
+
+    # --- prerequisite checks ---
+    pro_section = config_data.get("pro", {})
+    delivery_section = config_data.get("delivery", {})
+
+    service_token = pro_section.get("service_token", "")
+    telegram_bot_token = delivery_section.get("telegram_bot_token", "")
+    telegram_chat_id = delivery_section.get("telegram_chat_id", "")
+    campfire_id = delivery_section.get("campfire_id", "")
+
+    missing: list[str] = []
+    if not service_token:
+        missing.append("pro.service_token")
+    if not telegram_bot_token:
+        missing.append("delivery.telegram_bot_token")
+    if not telegram_chat_id:
+        missing.append("delivery.telegram_chat_id")
+    if not campfire_id:
+        missing.append("delivery.campfire_id")
+
+    if missing:
+        click.echo(
+            f"ERROR: --pro-online requires: {', '.join(missing)}",
+            err=True,
+        )
+        return None
+
+    # --- register Telegram webhook ---
+    webhook_url = f"https://mallcop.app/webhooks/telegram/{service_token}"
+    try:
+        resp = _requests.post(
+            f"https://api.telegram.org/bot{telegram_bot_token}/setWebhook",
+            json={"url": webhook_url},
+            timeout=10,
+        )
+        resp.raise_for_status()
+    except Exception as exc:
+        click.echo(f"ERROR: Telegram setWebhook failed: {exc}", err=True)
+        return None
+
+    # --- register with mallcop-pro ---
+    account_url = pro_section.get("account_url", "https://mallcop.app")
+    base_url = account_url.rsplit("/api/", 1)[0] if "/api/" in account_url else account_url
+    try:
+        resp = _requests.post(
+            f"{base_url}/api/pro-online/register",
+            json={
+                "service_token": service_token,
+                "telegram_bot_token": telegram_bot_token,
+                "telegram_chat_id": telegram_chat_id,
+                "campfire_id": campfire_id,
+            },
+            headers={"Authorization": f"Bearer {service_token}"},
+            timeout=10,
+        )
+        if resp.status_code == 404:
+            click.echo(
+                "  pro-online registration endpoint not yet deployed — skipping server registration",
+                err=True,
+            )
+        else:
+            resp.raise_for_status()
+    except _requests.HTTPError as exc:
+        click.echo(f"ERROR: pro-online registration failed: {exc}", err=True)
+        return None
+    except _requests.RequestException as exc:
+        click.echo(f"WARNING: pro-online registration request failed: {exc}", err=True)
+        # Non-fatal for connection errors — webhook was already set
+
+    # --- update config ---
+    delivery_section["pro_online"] = True
+    delivery_section["telegram_webhook_url"] = webhook_url
+
+    return {
+        "pro_online": True,
+        "webhook_url": webhook_url,
+    }
+
+
 def _setup_telegram_interactive() -> tuple[str, str] | None:
     """Walk the user through Telegram bot setup interactively.
 
@@ -538,9 +628,11 @@ def _setup_telegram_interactive() -> tuple[str, str] | None:
 @cli.command()
 @click.option("--pro", is_flag=True, help="Set up Pro managed inference")
 @click.option("--api-key", "api_key", default=None, help="mallcop Pro API key (mallcop-sk-* format); stored in mallcop.yaml")
+@click.option("--pro-online", "pro_online", is_flag=True, default=False,
+              help="Set up Pro Online hosted daemon (requires --pro + Telegram)")
 @click.option("--telegram-bot-token", "telegram_bot_token", default=None, envvar="MALLCOP_TELEGRAM_BOT_TOKEN", hidden=True)
 @click.option("--telegram-chat-id", "telegram_chat_id", default=None, envvar="MALLCOP_TELEGRAM_CHAT_ID", hidden=True)
-def init(pro: bool, api_key: str | None, telegram_bot_token: str | None, telegram_chat_id: str | None) -> None:
+def init(pro: bool, api_key: str | None, pro_online: bool, telegram_bot_token: str | None, telegram_chat_id: str | None) -> None:
     """Discover environment, write config, estimate costs."""
     cwd = Path.cwd()
     search_paths = get_search_paths(cwd)
@@ -699,6 +791,14 @@ def init(pro: bool, api_key: str | None, telegram_bot_token: str | None, telegra
     if delivery_config_data:
         config_data["delivery"] = delivery_config_data
 
+    # Pro Online hosted daemon setup (after delivery config is populated)
+    pro_online_result: dict[str, Any] | None = None
+    if pro_online:
+        if not pro and not api_key:
+            click.echo("ERROR: --pro-online requires --pro", err=True)
+            raise SystemExit(1)
+        pro_online_result = _setup_pro_online(config_data)
+
     # Generate GitHub Actions workflow and set secrets (only when github config present)
     gha_delivery = _generate_gha_workflow(config_data, cwd)
     if gha_delivery:
@@ -741,6 +841,8 @@ def init(pro: bool, api_key: str | None, telegram_bot_token: str | None, telegra
         output["pro"] = pro_result
     if api_key_result:
         output["pro"] = api_key_result
+    if pro_online_result:
+        output["pro_online"] = pro_online_result
     if delivery_result:
         output["delivery"] = delivery_result
     if init_warnings:
