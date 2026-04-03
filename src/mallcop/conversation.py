@@ -150,7 +150,7 @@ class CampfireAdapterError(RuntimeError):
     """Raised when a campfire operation fails in CampfireConversationAdapter."""
 
 
-_INSTANCE_TO_ROLE = {"user": "user", "mallcop": "assistant"}
+_INSTANCE_TO_ROLE = {"user": "user", "mallcop": "assistant", "telegram-bridge": "user"}
 _ROLE_TO_INSTANCE = {"user": "user", "assistant": "mallcop"}
 
 # Tag used to scope all chat messages in a campfire.
