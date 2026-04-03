@@ -23,6 +23,7 @@ aws = [
 ]
 dev = [
     "pytest>=8.0",
+    "responses>=0.25",
 ]
 
 [project.scripts]
