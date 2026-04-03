@@ -242,8 +242,8 @@ async def chat_turn(
         raise
 
     # Extract text from response.
-    text = ""
-    if response.raw_resolution and isinstance(response.raw_resolution, dict):
+    text = response.text or ""
+    if not text and response.raw_resolution and isinstance(response.raw_resolution, dict):
         text = response.raw_resolution.get("content", "") or ""
     if not text and response.raw_resolution:
         text = str(response.raw_resolution)

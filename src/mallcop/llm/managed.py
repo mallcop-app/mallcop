@@ -155,4 +155,5 @@ class ManagedClient(LLMClient):
             resolution=None,
             tokens_used=tokens_used,
             raw_resolution=raw_resolution,
+            text=text_content,
         )
