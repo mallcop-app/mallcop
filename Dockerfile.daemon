@@ -26,3 +26,4 @@ RUN chmod +x /app/scripts/daemon-entrypoint.sh
 USER mallcop
 
 ENTRYPOINT ["/app/scripts/daemon-entrypoint.sh"]
+
