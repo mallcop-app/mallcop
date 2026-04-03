@@ -15,12 +15,12 @@ import sqlite3, time, os
 db = os.path.join(os.environ['CF_HOME'], 'store.db')
 conn = sqlite3.connect(db)
 cid = os.environ['MALLCOP_CAMPFIRE_ID']
-path = os.path.join(os.environ['CF_HOME'], cid)
+tdir = os.path.join(os.environ['CF_HOME'], cid)
 ts = int(time.time())
 conn.execute('''INSERT OR REPLACE INTO campfire_memberships
-    (campfire_id, path, join_protocol, role, joined_at, member_count, description, creator_pubkey, transport, is_muted)
+    (campfire_id, transport_dir, join_protocol, role, joined_at, threshold, description, creator_pubkey, transport_type, encrypted)
     VALUES (?, ?, 'open', 'full', ?, 1, 'pro-online', '', 'filesystem', 0)''',
-    (cid, path, ts))
+    (cid, tdir, ts))
 conn.commit()
 conn.close()
 print(f'Registered campfire {cid[:12]} in store.db')
