@@ -20,7 +20,6 @@ Design notes
 from __future__ import annotations
 
 import asyncio
-import os
 import json
 import logging
 import re
@@ -77,7 +76,6 @@ class TelegramCampfireBridge:
         self._cf_home = cf_home
         self._update_offset: int = 0
         self._inbound_mode = inbound_mode
-        self._seen_inbound_beads: set[str] = set()
         # Store token separately; construct per-call URLs at call time so the
         # token is never embedded in a persistent attribute that could appear in logs.
         self._tg_token = bot_token
@@ -149,36 +147,27 @@ class TelegramCampfireBridge:
         """Run one poll cycle in campfire-inbound mode (pro-online webhook tier).
 
         Used when mallcop-pro has registered a Telegram webhook — getUpdates
-        cannot be used alongside a webhook.  Instead, mallcop-pro's webhook
-        handler writes inbound Telegram messages to the customer's campfire as
-        ``tg-inbound`` tagged messages.
+        cannot be used alongside a webhook.  mallcop-pro delivers inbound
+        Telegram messages to campfire via the cf convention API (relay:inbound tag).
 
         Steps:
-        1. Read ``tg-inbound`` tagged messages from campfire.
-        2. Forward each to campfire as ``chat`` + ``session:<chat_id>`` tagged
+        1. Read relay:inbound tagged messages from campfire (posted by mallcop-pro
+           via the inbound-message convention operation).
+        2. Forward each to campfire as ``chat`` + ``session:<from_id>`` tagged
            messages so CampfireDispatcher can pick them up.
-        3. Poll campfire for ``response``-tagged messages (same as run_once()).
+        3. Poll campfire for ``relay:response``-tagged messages from the dispatcher.
         4. Forward each response to Telegram via ``_send_to_telegram()``.
 
         No getUpdates call. No offset persistence.
         """
-        inbound = await self._poll_campfire_inbound()
-        for msg in inbound:
-            raw = msg.get("payload", "")
-            if not raw:
-                continue
-            try:
-                parsed = json.loads(raw)
-                content = parsed.get("content", "")
-                from_id = parsed.get("from", "unknown")
-            except (json.JSONDecodeError, TypeError):
-                content = raw
-                from_id = "unknown"
+        inbound_messages = await self._poll_campfire_inbound()
+        for msg in inbound_messages:
+            content, from_id = self._extract_inbound_fields(msg)
             if content:
-                await self._send_to_campfire(text=content, from_id=from_id)
+                await self._send_to_campfire(content, from_id, session_id=from_id)
 
-        cf_messages = await self._poll_campfire()
-        for msg in cf_messages:
+        relay_responses = await self._poll_campfire_relay_response()
+        for msg in relay_responses:
             text = self._extract_response_text(msg)
             if text:
                 await self._send_to_telegram(text)
@@ -300,15 +289,33 @@ class TelegramCampfireBridge:
     # Campfire helpers
     # ------------------------------------------------------------------
 
-    async def _send_to_campfire(self, text: str, from_id: int | str) -> None:
-        """Post a user message to campfire with chat+session tags."""
+    async def _send_to_campfire(
+        self,
+        text: str,
+        from_id: int | str,
+        session_id: str | None = None,
+    ) -> None:
+        """Post a user message to campfire with chat+session tags.
+
+        Parameters
+        ----------
+        text:
+            Message content to forward.
+        from_id:
+            Sender identity embedded in the JSON payload.
+        session_id:
+            Session tag value.  Defaults to ``self._chat_id``.  In inbound mode
+            (webhook delivery) callers pass ``from_id`` so each Telegram user
+            gets their own campfire session.
+        """
+        tag_session = _sanitize_tag(str(session_id if session_id is not None else self._chat_id))
         payload = json.dumps({"content": text, "from": str(from_id)})
         try:
             await self._cf(
                 "send", self._campfire_id,
                 "--instance", "telegram-bridge",
                 "--tag", "chat",
-                "--tag", f"session:{_sanitize_tag(str(self._chat_id))}",
+                "--tag", f"session:{tag_session}",
                 "--tag", "platform:telegram",
                 payload,
             )
@@ -342,66 +349,92 @@ class TelegramCampfireBridge:
         return items
 
     async def _poll_campfire_inbound(self) -> list[dict]:
-        """Fetch tg-inbound tagged messages from the Azure Files bead directory.
+        """Fetch relay:inbound tagged messages from campfire (convention-based inbound).
 
-        mallcop-pro writes CBOR beads directly to
-        ``<CF_HOME>/<campfireID>/messages/*.cbor``.  cf's SQLite store doesn't
-        see these files, so we read them directly and track which ones we've
-        already processed via ``_seen_inbound_beads``.
-
-        Returns parsed message dicts with ``payload``, ``tags``, etc.
+        These are messages posted by mallcop-pro via the inbound-message convention
+        operation, carrying Telegram messages delivered via webhook.
         """
-        import cbor2
-        from pathlib import Path as _Path
-
-        cf_home = self._cf_home or os.environ.get("CF_HOME", "")
-        if not cf_home:
-            return []
-
-        msg_dir = _Path(cf_home) / self._campfire_id / "messages"
-        if not msg_dir.is_dir():
-            return []
-
-        results: list[dict] = []
         try:
-            bead_files = sorted(msg_dir.glob("*.cbor"))
-        except OSError as exc:
-            _log.warning("telegram_bridge: list bead dir: %s", exc)
+            raw = await self._cf(
+                "read", self._campfire_id,
+                "--json",
+                "--tag", "relay:inbound",
+            )
+        except Exception as exc:  # noqa: BLE001
+            _log.warning("telegram_bridge: campfire inbound read error: %s", exc)
             return []
 
-        for bead_path in bead_files:
-            name = bead_path.name
-            if name in self._seen_inbound_beads:
-                continue
-            self._seen_inbound_beads.add(name)
+        if not raw:
+            return []
 
-            try:
-                raw_bytes = await asyncio.to_thread(bead_path.read_bytes)
-                msg = cbor2.loads(raw_bytes)
-            except Exception as exc:
-                _log.warning("telegram_bridge: decode bead %s: %s", name, exc)
-                continue
+        try:
+            items = json.loads(raw)
+        except json.JSONDecodeError:
+            _log.warning("telegram_bridge: non-JSON from cf read (relay:inbound): %r", raw[:200])
+            return []
 
-            # CBOR uses integer keys (keyasint): 3=payload, 4=tags, 1=id
-            payload_bytes = msg.get(3, b"")
-            tags = msg.get(4, [])
+        if not isinstance(items, list):
+            return []
 
-            if "tg-inbound" not in tags:
-                continue
+        return items
 
-            # Decode payload bytes to string
-            if isinstance(payload_bytes, bytes):
-                payload_str = payload_bytes.decode("utf-8", errors="replace")
-            else:
-                payload_str = str(payload_bytes)
+    async def _poll_campfire_relay_response(self) -> list[dict]:
+        """Fetch relay:response tagged messages from campfire (dispatcher responses).
 
-            results.append({
-                "id": msg.get(1, name),
-                "payload": payload_str,
-                "tags": tags,
-            })
+        These are responses posted by CampfireDispatcher for inbound-mode sessions.
+        """
+        try:
+            raw = await self._cf(
+                "read", self._campfire_id,
+                "--json",
+                "--tag", "relay:response",
+            )
+        except Exception as exc:  # noqa: BLE001
+            _log.warning("telegram_bridge: campfire relay:response read error: %s", exc)
+            return []
 
-        return results
+        if not raw:
+            return []
+
+        try:
+            items = json.loads(raw)
+        except json.JSONDecodeError:
+            _log.warning("telegram_bridge: non-JSON from cf read (relay:response): %r", raw[:200])
+            return []
+
+        if not isinstance(items, list):
+            return []
+
+        return items
+
+    @staticmethod
+    def _extract_inbound_fields(msg: dict[str, Any]) -> tuple[str | None, str]:
+        """Extract content and from_id from a relay:inbound convention message.
+
+        The inbound-message convention posts JSON payloads with content, from_id,
+        and platform fields.  Falls back to treating the raw payload as content.
+
+        Returns
+        -------
+        (content, from_id)
+            content is None if the message carries no usable text.
+            from_id defaults to "unknown" if not present.
+        """
+        raw = msg.get("payload", "")
+        if not raw:
+            return None, "unknown"
+
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, dict):
+                content = parsed.get("content") or parsed.get("text") or parsed.get("message")
+                from_id = str(parsed.get("from_id") or parsed.get("from") or "unknown")
+                return content, from_id
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+        # Raw string payload — treat as content with unknown sender.
+        return raw, "unknown"
 
     @staticmethod
     def _extract_response_text(msg: dict[str, Any]) -> str | None:
