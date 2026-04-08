@@ -138,8 +138,14 @@ def validate_escalation_paths(
                 break
 
             if current in manifests:
-                manifest, _ = manifests[current]
-                current = manifest.routes_to
+                # actor_chain config overrides manifest routes_to
+                actor_chain = getattr(config, "actor_chain", {}) or {}
+                chain_override = actor_chain.get(current, {})
+                if "routes_to" in chain_override:
+                    current = chain_override["routes_to"]
+                else:
+                    manifest, _ = manifests[current]
+                    current = manifest.routes_to
             else:
                 errors.append(
                     f"Routing '{severity}' \u2192 '{entry_actor}': "
