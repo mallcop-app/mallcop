@@ -6,8 +6,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# Install cf binary from campfire-net/campfire releases
-RUN curl -fsSL https://github.com/campfire-net/campfire/releases/download/v0.14.3/cf_linux_amd64.tar.gz \
+# Install cf binary from campfire-net/campfire releases (0.16.1+)
+RUN curl -fsSL https://github.com/campfire-net/campfire/releases/download/v0.16.1/cf_linux_amd64.tar.gz \
     -o /tmp/cf.tar.gz \
     && tar xzf /tmp/cf.tar.gz -C /tmp \
     && install -m 755 /tmp/cf_linux_amd64/cf /usr/local/bin/cf \
@@ -26,12 +26,3 @@ RUN chmod +x /app/scripts/daemon-entrypoint.sh
 USER mallcop
 
 ENTRYPOINT ["/app/scripts/daemon-entrypoint.sh"]
-
-
-
-# trigger
-# fix
-
-
-
-
