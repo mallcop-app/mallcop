@@ -128,10 +128,34 @@ class GitHubConnector(ConnectorBase):
         )
 
     def authenticate(self, secrets: SecretProvider) -> None:
-        self._token = secrets.resolve("GITHUB_TOKEN")
         self._org = secrets.resolve("GITHUB_ORG")
+        # Prefer saved GitHub App credentials (from device flow during init)
+        # over env-var GITHUB_TOKEN. The saved token has admin:org scope for
+        # audit log access; a bare GITHUB_TOKEN often doesn't.
+        token = self._load_app_token()
+        if token is None:
+            token = secrets.resolve("GITHUB_TOKEN")
+        self._token = token
         # Validate token by calling /user
         self._validate_token()
+
+    def _load_app_token(self) -> str | None:
+        """Load and refresh the GitHub App OAuth token from .mallcop/.github-credentials."""
+        from pathlib import Path
+        try:
+            from mallcop.github_auth import ensure_fresh_token
+        except ImportError:
+            return None
+
+        creds_path = Path.cwd() / ".mallcop" / ".github-credentials"
+        if not creds_path.exists():
+            return None
+
+        client_id = "Iv23li2NjQafyaxgyTUF"
+        tokens = ensure_fresh_token(creds_path, client_id)
+        if tokens is not None:
+            return tokens.access_token
+        return None
 
     def poll(self, checkpoint: Checkpoint | None) -> PollResult:
         raw_entries, pagination_cursor = self._fetch_audit_log(checkpoint)

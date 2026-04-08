@@ -82,10 +82,11 @@ def _parse_token_response(data: dict) -> GitHubTokenSet:
 def start_device_flow(client_id: str) -> DeviceFlowPending:
     """Initiate GitHub OAuth device flow.
 
-    POST https://github.com/login/device/code with client_id and scope="repo".
+    POST https://github.com/login/device/code with client_id.
+    Requests repo (push findings) and admin:org (read audit log) scopes.
     Returns DeviceFlowPending containing the user_code to show the user.
     """
-    data = _post_json(_DEVICE_URL, {"client_id": client_id, "scope": "repo"})
+    data = _post_json(_DEVICE_URL, {"client_id": client_id, "scope": "repo admin:org"})
     return DeviceFlowPending(
         device_code=data["device_code"],
         user_code=data["user_code"],

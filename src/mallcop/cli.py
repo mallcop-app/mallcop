@@ -717,7 +717,7 @@ def init(pro: bool, api_key: str | None, pro_online: bool, telegram_bot_token: s
 
     # GitHub setup: detect repo, auth via device flow
     github_result: dict[str, Any] | None = None
-    if pro:
+    if pro or api_key:
         github_result = _setup_github(config_data)
 
     # --api-key: direct key-injection path — store the key in config without
