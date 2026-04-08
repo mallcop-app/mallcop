@@ -622,6 +622,104 @@ class TestGitHubPollStoreRoundTrip:
         assert deserialized.value == result.checkpoint.value
 
 
+# ─── Installation token flow ─────────────────────────────────────────
+
+
+class TestGitHubInstallationTokenFlow:
+    """Tests for the mallcop-pro installation token exchange."""
+
+    def test_configure_sets_installation_id(self) -> None:
+        from mallcop.connectors.github.connector import GitHubConnector
+
+        connector = GitHubConnector()
+        connector.configure({"installation_id": 12345})
+        assert connector._installation_id == 12345
+
+    def test_configure_coerces_string_installation_id(self) -> None:
+        from mallcop.connectors.github.connector import GitHubConnector
+
+        connector = GitHubConnector()
+        connector.configure({"installation_id": "99999"})
+        assert connector._installation_id == 99999
+
+    def test_authenticate_uses_installation_token_when_configured(self) -> None:
+        from mallcop.connectors.github.connector import GitHubConnector
+
+        secrets = FakeSecretProvider({
+            "GITHUB_ORG": "acme-corp",
+            "MALLCOP_SERVICE_TOKEN": "mallcop-sk-test",
+        })
+
+        connector = GitHubConnector()
+        connector.configure({"installation_id": 12345})
+
+        fake_post_resp = MagicMock()
+        fake_post_resp.status_code = 200
+        fake_post_resp.json.return_value = {"token": "ghs_installation_token"}
+
+        with patch("mallcop.connectors.github.connector.requests.post", return_value=fake_post_resp):
+            with patch.object(connector, "_validate_token"):
+                connector.authenticate(secrets)
+
+        assert connector._token == "ghs_installation_token"
+
+    def test_authenticate_falls_back_to_github_token_on_pro_failure(self) -> None:
+        from mallcop.connectors.github.connector import GitHubConnector
+
+        secrets = FakeSecretProvider({
+            "GITHUB_ORG": "acme-corp",
+            "MALLCOP_SERVICE_TOKEN": "mallcop-sk-test",
+            "GITHUB_TOKEN": "ghp_fallback",
+        })
+
+        connector = GitHubConnector()
+        connector.configure({"installation_id": 12345})
+
+        fake_post_resp = MagicMock()
+        fake_post_resp.status_code = 502
+        fake_post_resp.text = "bad gateway"
+
+        with patch("mallcop.connectors.github.connector.requests.post", return_value=fake_post_resp):
+            with patch.object(connector, "_validate_token"):
+                connector.authenticate(secrets)
+
+        assert connector._token == "ghp_fallback"
+
+    def test_authenticate_falls_back_when_no_service_token(self) -> None:
+        from mallcop.connectors.github.connector import GitHubConnector
+
+        secrets = FakeSecretProvider({
+            "GITHUB_ORG": "acme-corp",
+            "GITHUB_TOKEN": "ghp_fallback",
+        })
+
+        connector = GitHubConnector()
+        connector.configure({"installation_id": 12345})
+
+        with patch.object(connector, "_validate_token"):
+            connector.authenticate(secrets)
+
+        assert connector._token == "ghp_fallback"
+
+    def test_validate_token_uses_org_endpoint_for_installation(self) -> None:
+        from mallcop.connectors.github.connector import GitHubConnector
+
+        connector = GitHubConnector()
+        connector._token = "ghs_test"
+        connector._org = "acme-corp"
+        connector._installation_id = 12345
+
+        fake_resp = MagicMock()
+        fake_resp.status_code = 200
+
+        with patch("mallcop.connectors.github.connector.requests.get", return_value=fake_resp) as mock_get:
+            connector._validate_token()
+
+        call_url = mock_get.call_args[0][0]
+        assert "/orgs/acme-corp" in call_url
+        assert "/user" not in call_url
+
+
 # ─── Error path tests ────────────────────────────────────────────────
 
 

@@ -102,6 +102,11 @@ class GitHubConnector(ConnectorBase):
     def __init__(self) -> None:
         self._token: str | None = None
         self._org: str | None = None
+        self._installation_id: int | None = None
+
+    def configure(self, config: dict) -> None:
+        if "installation_id" in config:
+            self._installation_id = int(config["installation_id"])
 
     def discover(self) -> DiscoveryResult:
         try:
@@ -129,15 +134,53 @@ class GitHubConnector(ConnectorBase):
 
     def authenticate(self, secrets: SecretProvider) -> None:
         self._org = secrets.resolve("GITHUB_ORG")
-        # Prefer saved GitHub App credentials (from device flow during init)
-        # over env-var GITHUB_TOKEN. The saved token has admin:org scope for
-        # audit log access; a bare GITHUB_TOKEN often doesn't.
-        token = self._load_app_token()
+        # Priority:
+        # 1. Installation token via mallcop-pro (when installation_id is set)
+        # 2. Saved GitHub App credentials (device flow from init)
+        # 3. GITHUB_TOKEN env var
+        token = None
+        if self._installation_id is not None:
+            token = self._fetch_installation_token(secrets)
+        if token is None:
+            token = self._load_app_token()
         if token is None:
             token = secrets.resolve("GITHUB_TOKEN")
         self._token = token
-        # Validate token by calling /user
         self._validate_token()
+
+    def _fetch_installation_token(self, secrets: SecretProvider) -> str | None:
+        """Get a GitHub installation token from mallcop-pro.
+
+        Calls POST /v1/github/token with the customer's service token and
+        installation_id. mallcop-pro holds the GitHub App private key server-side.
+        """
+        import os
+        from mallcop.config import DEFAULT_INFERENCE_URL
+
+        api_base = os.environ.get("MALLCOP_API_URL", DEFAULT_INFERENCE_URL).rstrip("/")
+        try:
+            service_token = secrets.resolve("MALLCOP_SERVICE_TOKEN")
+        except ConfigError:
+            _log.debug("MALLCOP_SERVICE_TOKEN not set, skipping installation token flow")
+            return None
+
+        try:
+            resp = requests.post(
+                f"{api_base}/v1/github/token",
+                headers={"Authorization": f"Bearer {service_token}"},
+                json={"installation_id": self._installation_id},
+                timeout=10,
+            )
+            if resp.status_code != 200:
+                _log.warning(
+                    "mallcop-pro /v1/github/token returned %d: %s",
+                    resp.status_code, resp.text[:200],
+                )
+                return None
+            return resp.json().get("token")
+        except Exception as e:
+            _log.warning("Failed to fetch installation token from mallcop-pro: %s", e)
+            return None
 
     def _load_app_token(self) -> str | None:
         """Load and refresh the GitHub App OAuth token from .mallcop/.github-credentials."""
@@ -226,7 +269,15 @@ class GitHubConnector(ConnectorBase):
         }
 
     def _validate_token(self) -> None:
-        resp = requests.get(f"{_API_BASE}/user", headers=self._auth_headers())
+        # Installation tokens are app tokens — /user doesn't work for them.
+        # Validate by checking org access instead.
+        if self._installation_id is not None:
+            resp = requests.get(
+                f"{_API_BASE}/orgs/{self._org}",
+                headers=self._auth_headers(),
+            )
+        else:
+            resp = requests.get(f"{_API_BASE}/user", headers=self._auth_headers())
         if resp.status_code != 200:
             raise ConfigError(
                 f"GitHub authentication failed (HTTP {resp.status_code}): {resp.text}"
