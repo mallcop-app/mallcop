@@ -580,16 +580,19 @@ class TestPatrolRunErrorPaths:
         mock_backend = _mock_crontab_backend()
 
         with patch("mallcop.patrol_cli._MALLCOP_BIN", "/nonexistent/path/mallcop"):
-            with patch("mallcop.patrol_cli.shutil.which", return_value="/usr/local/bin/mallcop"):
-                with patch("mallcop.patrol_cli.CrontabBackend", return_value=mock_backend):
-                    with patch("mallcop.patrol_cli.subprocess.run") as mock_run:
-                        mock_run.return_value = MagicMock(returncode=0, stdout=b"", stderr=b"")
-                        result = runner.invoke(
-                            cli,
-                            ["patrol", "run", "sweep"],
-                            catch_exceptions=False,
-                            env={"MALLCOP_REPO": str(tmp_path)},
-                        )
+            # Also fake sys.executable so the venv sibling check doesn't find a real binary
+            with patch("mallcop.patrol_cli.sys") as mock_sys:
+                mock_sys.executable = "/nonexistent/venv/bin/python"
+                with patch("mallcop.patrol_cli.shutil.which", return_value="/usr/local/bin/mallcop"):
+                    with patch("mallcop.patrol_cli.CrontabBackend", return_value=mock_backend):
+                        with patch("mallcop.patrol_cli.subprocess.run") as mock_run:
+                            mock_run.return_value = MagicMock(returncode=0, stdout=b"", stderr=b"")
+                            result = runner.invoke(
+                                cli,
+                                ["patrol", "run", "sweep"],
+                                catch_exceptions=False,
+                                env={"MALLCOP_REPO": str(tmp_path)},
+                            )
 
         assert result.exit_code == 0, result.output
         mock_run.assert_called_once()
@@ -603,13 +606,15 @@ class TestPatrolRunErrorPaths:
         mock_backend = _mock_crontab_backend()
 
         with patch("mallcop.patrol_cli._MALLCOP_BIN", "/nonexistent/path/mallcop"):
-            with patch("mallcop.patrol_cli.shutil.which", return_value=None):
-                with patch("mallcop.patrol_cli.CrontabBackend", return_value=mock_backend):
-                    result = runner.invoke(
-                        cli,
-                        ["patrol", "run", "sweep"],
-                        env={"MALLCOP_REPO": str(tmp_path)},
-                    )
+            with patch("mallcop.patrol_cli.sys") as mock_sys:
+                mock_sys.executable = "/nonexistent/venv/bin/python"
+                with patch("mallcop.patrol_cli.shutil.which", return_value=None):
+                    with patch("mallcop.patrol_cli.CrontabBackend", return_value=mock_backend):
+                        result = runner.invoke(
+                            cli,
+                            ["patrol", "run", "sweep"],
+                            env={"MALLCOP_REPO": str(tmp_path)},
+                        )
 
         assert result.exit_code == 1
         assert "Could not locate the mallcop binary" in result.output

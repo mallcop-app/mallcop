@@ -701,6 +701,29 @@ class TestGitHubInstallationTokenFlow:
 
         assert connector._token == "ghp_fallback"
 
+    def test_authenticate_picks_up_installation_id_from_env(self) -> None:
+        from mallcop.connectors.github.connector import GitHubConnector
+
+        secrets = FakeSecretProvider({
+            "GITHUB_ORG": "acme-corp",
+            "MALLCOP_SERVICE_TOKEN": "mallcop-sk-test",
+        })
+
+        connector = GitHubConnector()
+        # Not configured via configure() — should pick up from env
+
+        fake_post_resp = MagicMock()
+        fake_post_resp.status_code = 200
+        fake_post_resp.json.return_value = {"token": "ghs_from_env"}
+
+        with patch.dict("os.environ", {"GITHUB_INSTALLATION_ID": "77777"}):
+            with patch("mallcop.connectors.github.connector.requests.post", return_value=fake_post_resp):
+                with patch.object(connector, "_validate_token"):
+                    connector.authenticate(secrets)
+
+        assert connector._installation_id == 77777
+        assert connector._token == "ghs_from_env"
+
     def test_validate_token_uses_org_endpoint_for_installation(self) -> None:
         from mallcop.connectors.github.connector import GitHubConnector
 

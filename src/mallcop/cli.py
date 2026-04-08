@@ -167,6 +167,84 @@ def _is_git_repo() -> bool:
         return False
 
 
+def _setup_github_app_installation(
+    access_token: str, github_repo: str, interactive: bool,
+) -> int | None:
+    """Prompt user to install the mallcop GitHub App on their org.
+
+    After installation, uses the user's token to look up the installation_id
+    via the GitHub API. Returns the installation_id or None if skipped/failed.
+    """
+    import webbrowser
+
+    import requests
+
+    org = github_repo.split("/")[0] if "/" in github_repo else ""
+    if not org:
+        return None
+
+    if not interactive:
+        return None
+
+    click.echo(
+        "\nmallcop can monitor your org's audit log, secret scanning alerts,\n"
+        "and Dependabot findings — but it needs the GitHub App installed.",
+        err=True,
+    )
+    choice = click.prompt(
+        "  [1] Install mallcop GitHub App now (opens browser)\n"
+        "  [2] Skip (you can install later)\nChoice",
+        default="1", err=True,
+    )
+    if choice.strip() != "1":
+        return None
+
+    install_url = "https://github.com/apps/mallcop-app/installations/new"
+    click.echo(f"\nOpening: {install_url}", err=True)
+    webbrowser.open(install_url)
+    click.echo(
+        f"Install the app on the '{org}' org, then come back here.",
+        err=True,
+    )
+    click.prompt("Press Enter when done", default="", err=True, show_default=False)
+
+    # Look up the installation_id using the user's OAuth token
+    click.echo("Looking up installation...", err=True)
+    try:
+        resp = requests.get(
+            "https://api.github.com/user/installations",
+            headers={
+                "Authorization": f"Bearer {access_token}",
+                "Accept": "application/vnd.github+json",
+            },
+            timeout=10,
+        )
+        if resp.status_code != 200:
+            click.echo(f"Could not list installations (HTTP {resp.status_code}).", err=True)
+            return None
+
+        installations = resp.json().get("installations", [])
+        for inst in installations:
+            account = inst.get("account", {})
+            if account.get("login", "").lower() == org.lower():
+                installation_id = inst["id"]
+                click.echo(
+                    f"Found installation {installation_id} for {org}.",
+                    err=True,
+                )
+                return installation_id
+
+        click.echo(
+            f"No installation found for '{org}'. "
+            "You can install later and add installation_id to mallcop.yaml.",
+            err=True,
+        )
+        return None
+    except Exception as e:
+        click.echo(f"Failed to look up installation: {e}", err=True)
+        return None
+
+
 def _setup_github(config_data: dict[str, Any]) -> dict[str, Any] | None:
     """Detect git/GitHub state and walk user through GitHub auth via device flow.
 
@@ -266,17 +344,36 @@ def _setup_github(config_data: dict[str, Any]) -> dict[str, Any] | None:
         capture_output=True, text=True, cwd=str(cwd),
     )
 
+    # Step 4: GitHub App installation for org audit log access
+    # The device flow token gives push access but not org admin permissions.
+    # Installing the GitHub App grants audit log, secret scanning, Dependabot etc.
+    installation_id = _setup_github_app_installation(tokens.access_token, github_repo, interactive)
+
     # Write github section to config
-    config_data["github"] = {
+    github_config: dict[str, Any] = {
         "repo": github_repo,
         "credentials_path": str(credentials_path),
         "client_id": client_id,
     }
 
-    return {
+    # Write connector config with installation_id for the token exchange flow
+    org = github_repo.split("/")[0] if "/" in github_repo else ""
+    if org:
+        connectors = config_data.setdefault("connectors", {})
+        gh_connector = connectors.setdefault("github", {})
+        gh_connector["org"] = org
+        if installation_id:
+            gh_connector["installation_id"] = installation_id
+
+    config_data["github"] = github_config
+
+    result: dict[str, Any] = {
         "repo": github_repo,
         "status": "authorized",
     }
+    if installation_id:
+        result["installation_id"] = installation_id
+    return result
 
 
 _GHA_WORKFLOW_TEMPLATE = """\
@@ -295,6 +392,9 @@ jobs:
       - name: Run mallcop watch
         env:
           GITHUB_TOKEN: ${{{{ secrets.GITHUB_TOKEN }}}}
+          GITHUB_ORG: ${{{{ secrets.GITHUB_ORG }}}}
+          GITHUB_INSTALLATION_ID: ${{{{ secrets.GITHUB_INSTALLATION_ID }}}}
+          MALLCOP_SERVICE_TOKEN: ${{{{ secrets.MALLCOP_SERVICE_TOKEN }}}}
           MALLCOP_TELEGRAM_BOT_TOKEN: ${{{{ secrets.MALLCOP_TELEGRAM_BOT_TOKEN }}}}
           MALLCOP_TELEGRAM_CHAT_ID: ${{{{ secrets.MALLCOP_TELEGRAM_CHAT_ID }}}}
         run: mallcop watch --dir ${{{{ github.workspace }}}}
@@ -335,6 +435,18 @@ def _generate_gha_workflow(config_data: dict[str, Any], cwd: Path) -> dict[str, 
         secrets_to_set.append(("MALLCOP_TELEGRAM_BOT_TOKEN", telegram_bot_token))
     if telegram_chat_id:
         secrets_to_set.append(("MALLCOP_TELEGRAM_CHAT_ID", telegram_chat_id))
+
+    # GitHub connector secrets for installation token flow
+    gh_connector = config_data.get("connectors", {}).get("github", {})
+    if gh_connector.get("org"):
+        secrets_to_set.append(("GITHUB_ORG", gh_connector["org"]))
+    if gh_connector.get("installation_id"):
+        secrets_to_set.append(("GITHUB_INSTALLATION_ID", str(gh_connector["installation_id"])))
+    # Service token for mallcop-pro API calls (token exchange)
+    pro_section = config_data.get("pro", {})
+    service_token = pro_section.get("service_token", "")
+    if service_token:
+        secrets_to_set.append(("MALLCOP_SERVICE_TOKEN", service_token))
 
     gh_missing = False
     for secret_name, secret_value in secrets_to_set:

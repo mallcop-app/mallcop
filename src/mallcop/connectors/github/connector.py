@@ -134,6 +134,14 @@ class GitHubConnector(ConnectorBase):
 
     def authenticate(self, secrets: SecretProvider) -> None:
         self._org = secrets.resolve("GITHUB_ORG")
+        # Pick up installation_id from env if not already set via configure().
+        # This handles the case where authenticate() runs before configure()
+        # in the pipeline, and allows GHA workflows to set it as a secret.
+        if self._installation_id is None:
+            import os
+            env_id = os.environ.get("GITHUB_INSTALLATION_ID")
+            if env_id:
+                self._installation_id = int(env_id)
         # Priority:
         # 1. Installation token via mallcop-pro (when installation_id is set)
         # 2. Saved GitHub App credentials (device flow from init)
