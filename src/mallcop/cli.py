@@ -768,7 +768,9 @@ def init(pro: bool, api_key: str | None, pro_online: bool, telegram_bot_token: s
             capture_output=True,
             text=True,
         )
-        campfire_id = cf_proc.stdout.strip()
+        # cf create prints config path on the first line and the campfire
+        # hex ID on the last line.  Only keep the ID.
+        campfire_id = cf_proc.stdout.strip().splitlines()[-1].strip()
         if campfire_id:
             delivery_config_data["campfire_id"] = campfire_id
             delivery_result["campfire_id"] = campfire_id

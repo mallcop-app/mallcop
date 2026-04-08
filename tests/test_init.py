@@ -59,6 +59,27 @@ class TestInitCampfire:
         assert cmd[1] == "create"
         assert "--description" in cmd
 
+    def test_init_campfire_multiline_stdout(self, tmp_path: Path) -> None:
+        """cf create may print a config path before the hex ID — only the ID is stored."""
+        runner = CliRunner()
+
+        fake_proc = MagicMock()
+        fake_proc.stdout = "Wrote /tmp/.cf/config.toml\nabc123def456\n"
+        fake_proc.returncode = 0
+
+        with runner.isolated_filesystem(temp_dir=tmp_path):
+            with patch("subprocess.run", return_value=fake_proc):
+                result = runner.invoke(cli, ["init"])
+
+        assert result.exit_code == 0, result.output
+        data = _parse_init_output(result.output)
+        assert data["delivery"]["campfire_id"] == "abc123def456"
+
+        config_path = Path(data["config_path"])
+        with open(config_path) as f:
+            cfg = yaml.safe_load(f)
+        assert cfg["delivery"]["campfire_id"] == "abc123def456"
+
     def test_init_campfire_graceful_failure(self, tmp_path: Path) -> None:
         """When cf raises an exception, init still succeeds (no campfire_id written)."""
         runner = CliRunner()
