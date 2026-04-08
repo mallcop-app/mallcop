@@ -20,7 +20,7 @@ __all__ = ["load_config", "MallcopConfig", "BudgetConfig", "BaselineConfig", "LL
 _MALLCOP_API_URL_BASE = os.environ.get("MALLCOP_API_URL", "https://api.mallcop.app").rstrip("/")
 
 DEFAULT_API_URL = f"{_MALLCOP_API_URL_BASE}/api/account"
-DEFAULT_INFERENCE_URL = f"{_MALLCOP_API_URL_BASE}/api/inference"
+DEFAULT_INFERENCE_URL = _MALLCOP_API_URL_BASE
 
 # Re-export ConfigError so tests can import from mallcop.config
 ConfigError = ConfigError
