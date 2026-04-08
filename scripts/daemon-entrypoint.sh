@@ -45,26 +45,23 @@ if [ -z "$SESSION_TOKEN" ]; then
 fi
 echo "[daemon] Session established (operator key auth)"
 
-# Step 2: Join the customer's campfire.
-# With operator key auth, the session already has access to operator-created
-# campfires. The join call registers us as a member for message delivery.
+# Step 2: Verify access to the customer's campfire.
+# With operator key auth, the session creator is already a member of all
+# campfires they created. Verify by listing, skip explicit join.
 if [ -n "$MALLCOP_CAMPFIRE_ID" ]; then
-    echo "[daemon] Joining campfire ${MALLCOP_CAMPFIRE_ID:0:16}..."
-    JOIN_ARGS="{\"campfire_id\":\"${MALLCOP_CAMPFIRE_ID}\""
-    if [ -n "$CAMPFIRE_JOIN_CREDENTIAL" ]; then
-        JOIN_ARGS="${JOIN_ARGS},\"invite_code\":\"${CAMPFIRE_JOIN_CREDENTIAL}\""
-    fi
-    JOIN_ARGS="${JOIN_ARGS}}"
-
-    JOIN_RESULT=$(mcp_call "$SESSION_TOKEN" "campfire_join" "$JOIN_ARGS" 2>&1) || true
-
-    # "already a member" is success — operator key sessions share membership
-    if echo "$JOIN_RESULT" | grep -q '"already a member"' 2>/dev/null; then
-        echo "[daemon] Already a member (operator session)"
-    elif echo "$JOIN_RESULT" | python3 -c "import json,sys; r=json.load(sys.stdin); exit(1 if r.get('error') else 0)" 2>/dev/null; then
-        echo "[daemon] Joined campfire"
+    echo "[daemon] Verifying campfire access ${MALLCOP_CAMPFIRE_ID:0:16}..."
+    LS_RESULT=$(mcp_call "$SESSION_TOKEN" "campfire_ls" '{}' 2>&1) || true
+    if echo "$LS_RESULT" | grep -q "$MALLCOP_CAMPFIRE_ID" 2>/dev/null; then
+        echo "[daemon] Campfire accessible (operator member)"
     else
-        echo "[daemon] WARNING: Join issue: $(echo "$JOIN_RESULT" | head -c 300)" >&2
+        echo "[daemon] WARNING: Campfire not in member list, attempting join..." >&2
+        JOIN_ARGS="{\"campfire_id\":\"${MALLCOP_CAMPFIRE_ID}\""
+        if [ -n "$CAMPFIRE_JOIN_CREDENTIAL" ]; then
+            JOIN_ARGS="${JOIN_ARGS},\"invite_code\":\"${CAMPFIRE_JOIN_CREDENTIAL}\""
+        fi
+        JOIN_ARGS="${JOIN_ARGS}}"
+        JOIN_RESULT=$(mcp_call "$SESSION_TOKEN" "campfire_join" "$JOIN_ARGS" 2>&1) || true
+        echo "[daemon] Join result: $(echo "$JOIN_RESULT" | head -c 200)"
     fi
 fi
 
