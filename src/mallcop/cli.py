@@ -454,7 +454,7 @@ def _setup_pro(config_data: dict[str, Any]) -> dict[str, Any] | None:
         "account_id": account_id,
         "service_token": service_token,
         "account_url": account_url,
-        "inference_url": "https://mallcop.app/api/inference",
+        "inference_url": "https://api.mallcop.app",
     }
     if "llm" in config_data:
         del config_data["llm"]
@@ -725,11 +725,11 @@ def init(pro: bool, api_key: str | None, pro_online: bool, telegram_bot_token: s
     api_key_result: dict[str, Any] | None = None
     if api_key:
         import os as _os
-        _base = _os.environ.get("MALLCOP_API_URL", "https://mallcop.app").rstrip("/")
+        _base = _os.environ.get("MALLCOP_API_URL", "https://api.mallcop.app").rstrip("/")
         config_data["pro"] = {
             "service_token": api_key,
             "account_url": f"{_base}/api/account",
-            "inference_url": f"{_base}/api/inference",
+            "inference_url": _base,
         }
         if "llm" in config_data:
             del config_data["llm"]
