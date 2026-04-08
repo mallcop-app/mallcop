@@ -7,7 +7,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Install cf binary from campfire-net/campfire releases (0.16.1+)
-RUN curl -fsSL https://github.com/campfire-net/campfire/releases/download/v0.16.1/cf_linux_amd64.tar.gz \
+RUN curl -fsSL https://github.com/campfire-net/campfire/releases/download/v0.16.3/cf_linux_amd64.tar.gz \
     -o /tmp/cf.tar.gz \
     && tar xzf /tmp/cf.tar.gz -C /tmp \
     && install -m 755 /tmp/cf_linux_amd64/cf /usr/local/bin/cf \

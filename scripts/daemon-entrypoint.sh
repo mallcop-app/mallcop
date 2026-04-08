@@ -2,64 +2,73 @@
 set -e
 # Mallcop daemon entrypoint for campfire 0.16+ hosted relay
 #
-# Uses the MCP API directly for all campfire operations.
-# The cf CLI is filesystem-oriented; the hosted relay is MCP-only.
+# Authenticates with operator API key, joins the customer's campfire,
+# and runs the mallcop daemon loop.
 #
 # Required env vars:
 #   CAMPFIRE_REMOTE_URL       — hosted relay (e.g. https://mcp.getcampfire.dev)
-#   CAMPFIRE_API_KEY          — operator API key
+#   CAMPFIRE_API_KEY          — operator API key (forge-sk-*)
 #   MALLCOP_CAMPFIRE_ID       — customer's campfire ID
-#   CAMPFIRE_JOIN_CREDENTIAL  — invite code for the customer's campfire
+#
+# Optional:
+#   CAMPFIRE_JOIN_CREDENTIAL  — invite code (unused when operator key auth
+#                               gives implicit access, kept for future
+#                               invite-only enforcement)
 
 MCP_ENDPOINT="${CAMPFIRE_REMOTE_URL}/api/mcp"
 
 mcp_call() {
-    local token="$1" method="$2" args="$3"
+    local bearer="$1" tool="$2" args="$3"
     curl -sf -X POST "$MCP_ENDPOINT" \
         -H "Content-Type: application/json" \
-        -H "Authorization: Bearer ${token}" \
-        -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"${method}\",\"arguments\":${args}}}"
+        -H "Authorization: Bearer ${bearer}" \
+        -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"${tool}\",\"arguments\":${args}}}"
 }
 
-extract_text() {
-    python3 -c "import json,sys; print(json.load(sys.stdin)['result']['content'][0]['text'])"
-}
+# Step 1: Initialize session with operator API key.
+# Operator key auth (forge-sk-*) gives us a persistent session scoped to
+# the operator account. All campfires created by this operator are accessible.
+echo "[daemon] Initializing campfire session..."
+INIT_TEXT=$(mcp_call "$CAMPFIRE_API_KEY" "campfire_init" '{}' \
+    | python3 -c "import json,sys; print(json.load(sys.stdin)['result']['content'][0]['text'])")
 
-extract_session_token() {
-    python3 -c "
+SESSION_TOKEN=$(echo "$INIT_TEXT" | python3 -c "
 import sys
 for line in sys.stdin:
     if 'Session token:' in line:
-        print(line.split('Session token:')[1].strip())
-        break"
-}
-
-# Step 1: Initialize session on the hosted relay using operator API key
-echo "[daemon] Initializing campfire session..."
-INIT_RESULT=$(mcp_call "$CAMPFIRE_API_KEY" "campfire_init" '{}')
-SESSION_TOKEN=$(echo "$INIT_RESULT" | extract_text | extract_session_token)
+        print(line.split('Session token:')[1].strip()); break")
 
 if [ -z "$SESSION_TOKEN" ]; then
-    echo "[daemon] ERROR: Failed to get session token from campfire_init" >&2
-    echo "[daemon] Response: $(echo "$INIT_RESULT" | head -c 500)" >&2
+    echo "[daemon] ERROR: Failed to get session token" >&2
+    echo "[daemon] Response: ${INIT_TEXT:0:300}" >&2
     exit 1
 fi
-echo "[daemon] Session established"
+echo "[daemon] Session established (operator key auth)"
 
-# Step 2: Join the customer's invite-only campfire
-if [ -n "$MALLCOP_CAMPFIRE_ID" ] && [ -n "$CAMPFIRE_JOIN_CREDENTIAL" ]; then
-    echo "[daemon] Joining campfire ${MALLCOP_CAMPFIRE_ID:0:16}... (invite-only)"
-    JOIN_ARGS="{\"campfire_id\":\"${MALLCOP_CAMPFIRE_ID}\",\"invite_code\":\"${CAMPFIRE_JOIN_CREDENTIAL}\"}"
+# Step 2: Join the customer's campfire.
+# With operator key auth, the session already has access to operator-created
+# campfires. The join call registers us as a member for message delivery.
+if [ -n "$MALLCOP_CAMPFIRE_ID" ]; then
+    echo "[daemon] Joining campfire ${MALLCOP_CAMPFIRE_ID:0:16}..."
+    JOIN_ARGS="{\"campfire_id\":\"${MALLCOP_CAMPFIRE_ID}\""
+    if [ -n "$CAMPFIRE_JOIN_CREDENTIAL" ]; then
+        JOIN_ARGS="${JOIN_ARGS},\"invite_code\":\"${CAMPFIRE_JOIN_CREDENTIAL}\""
+    fi
+    JOIN_ARGS="${JOIN_ARGS}}"
+
     JOIN_RESULT=$(mcp_call "$SESSION_TOKEN" "campfire_join" "$JOIN_ARGS" 2>&1) || true
 
-    if echo "$JOIN_RESULT" | python3 -c "import json,sys; r=json.load(sys.stdin); exit(1 if r.get('error') else 0)" 2>/dev/null; then
+    # "already a member" is success — operator key sessions share membership
+    if echo "$JOIN_RESULT" | grep -q '"already a member"' 2>/dev/null; then
+        echo "[daemon] Already a member (operator session)"
+    elif echo "$JOIN_RESULT" | python3 -c "import json,sys; r=json.load(sys.stdin); exit(1 if r.get('error') else 0)" 2>/dev/null; then
         echo "[daemon] Joined campfire"
     else
-        echo "[daemon] WARNING: Join failed: $(echo "$JOIN_RESULT" | head -c 300)" >&2
+        echo "[daemon] WARNING: Join issue: $(echo "$JOIN_RESULT" | head -c 300)" >&2
     fi
 fi
 
-# Export the session token so mallcop can use the MCP API for campfire operations
+# Export session for mallcop daemon to use for campfire message operations
 export CAMPFIRE_SESSION_TOKEN="$SESSION_TOKEN"
 export CAMPFIRE_MCP_ENDPOINT="$MCP_ENDPOINT"
 
