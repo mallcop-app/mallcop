@@ -23,12 +23,20 @@ if [ -z "$MALLCOP_DEPLOY_REPO" ]; then
 fi
 
 echo "[daemon] Cloning deploy repo..."
-# Get a GitHub installation token for git auth via mallcop-pro
+# Get a GitHub installation token for git auth via mallcop-pro.
+# Use the Functions default hostname (always valid TLS) rather than custom domain
+# which may have cert propagation delays after infrastructure changes.
+MALLCOP_API="${MALLCOP_PRO_INFERENCE_URL:-https://mallcop-pro-api.azurewebsites.net}"
 INST_ID="${MALLCOP_INSTALLATION_ID:-0}"
-TOKEN=$(curl -sf -X POST "https://api.mallcop.app/v1/github/token" \
+echo "[daemon] Fetching GitHub token (installation_id=${INST_ID})..."
+TOKEN_RESP=$(curl -s --max-time 10 -X POST "${MALLCOP_API}/v1/github/token" \
     -H "Authorization: Bearer ${MALLCOP_PRO_SERVICE_TOKEN}" \
     -H "Content-Type: application/json" \
-    -d "{\"installation_id\":${INST_ID}}" 2>/dev/null | python3 -c "import json,sys; print(json.load(sys.stdin).get('token',''))" 2>/dev/null || true)
+    -d "{\"installation_id\":${INST_ID}}" 2>&1)
+TOKEN=$(echo "$TOKEN_RESP" | python3 -c "import json,sys; print(json.load(sys.stdin).get('token',''))" 2>/dev/null || true)
+if [ -z "$TOKEN" ]; then
+    echo "[daemon] WARNING: Token fetch failed: ${TOKEN_RESP:0:200}" >&2
+fi
 
 if [ -n "$TOKEN" ]; then
     # Inject token into clone URL: https://x-access-token:TOKEN@github.com/...
