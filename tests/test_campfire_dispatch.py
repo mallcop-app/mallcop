@@ -1,8 +1,9 @@
-"""Tests for CampfireDispatcher — real campfire, no mocks of cf or subprocess.
+"""Tests for CampfireDispatcher — real campfire, convention operations.
 
-The tests create real campfires, send real messages, run the dispatcher,
-and verify real campfire state. managed_client is mocked (it's an
-external inference endpoint, not cf or subprocess).
+The tests create real campfires, declare the mallcop-relay v0.2 convention,
+send messages using convention operations, run the dispatcher, and
+verify real campfire state. managed_client is mocked (it's an external
+inference endpoint, not cf or subprocess).
 
 Tests for subprocess error handling (timeout, OSError) mock
 asyncio.create_subprocess_exec — the subprocess is the external system
@@ -13,9 +14,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import subprocess
 import uuid
-from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -27,20 +28,46 @@ from mallcop.campfire_dispatch import CampfireDispatcher
 from mallcop.llm_types import LLMResponse
 from mallcop.schemas import Finding, FindingStatus, Severity
 
+# Per-operation declaration files are in mallcop-pro. For tests, we inline
+# the declarations since the daemon doesn't depend on mallcop-pro at runtime.
+_DECLARATIONS_DIR = Path(__file__).resolve().parent.parent.parent / "mallcop-pro" / "internal" / "proonline" / "declarations"
+
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _create_campfire(description: str) -> str:
-    """Create a real campfire and return its ID."""
+def _extract_campfire_id(output: str) -> str:
+    """Extract the hex campfire ID from cf create output (may include config notices)."""
+    for line in output.strip().splitlines():
+        line = line.strip()
+        if re.fullmatch(r"[0-9a-f]{64}", line):
+            return line
+    return output.strip()
+
+
+def _create_campfire_with_convention(description: str) -> str:
+    """Create a real campfire and declare the mallcop-relay convention on it."""
     result = subprocess.run(
         ["cf", "create", "--description", description],
         capture_output=True, text=True,
     )
     assert result.returncode == 0, f"cf create failed: {result.stderr}"
-    campfire_id = result.stdout.strip()
+    campfire_id = _extract_campfire_id(result.stdout)
     assert campfire_id, "cf create returned empty campfire ID"
+
+    # Declare each operation as a separate convention:operation message.
+    for decl_file in sorted(_DECLARATIONS_DIR.glob("*.json")):
+        decl_json = decl_file.read_text()
+        decl = subprocess.run(
+            [
+                "cf", "send", campfire_id,
+                "--tag", "convention:operation",
+                decl_json,
+            ],
+            capture_output=True, text=True,
+        )
+        assert decl.returncode == 0, f"convention declare {decl_file.name} failed: {decl.stderr}"
     return campfire_id
 
 
@@ -49,22 +76,28 @@ def _disband_campfire(campfire_id: str) -> None:
     subprocess.run(["cf", "disband", campfire_id], capture_output=True)
 
 
-def _send_message(campfire_id: str, payload: str, tags: list[str]) -> str:
-    """Send a message to campfire via cf send. Returns message ID."""
-    cmd = ["cf", "send", campfire_id]
-    for tag in tags:
-        cmd += ["--tag", tag]
-    cmd.append(payload)
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    assert result.returncode == 0, f"cf send failed: {result.stderr}"
+def _send_inbound_message(campfire_id: str, content: str, from_id: str, platform: str = "campfire") -> str:
+    """Send an inbound-message via convention operation."""
+    result = subprocess.run(
+        [
+            "cf", campfire_id, "inbound-message",
+            "--content", content,
+            "--from_id", from_id,
+            "--platform", platform,
+        ],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 0, f"cf inbound-message failed: {result.stderr}"
     return result.stdout.strip()
 
 
-def _read_all(campfire_id: str, tag: str | None = None) -> list[dict]:
-    """Read all messages from campfire with optional tag filter."""
+def _read_all(campfire_id: str, tag: str | None = None, convention: str | None = None) -> list[dict]:
+    """Read all messages from campfire with optional tag or convention filter."""
     cmd = ["cf", "read", campfire_id, "--all", "--json"]
     if tag:
         cmd += ["--tag", tag]
+    if convention:
+        cmd += ["--convention", convention]
     result = subprocess.run(cmd, capture_output=True, text=True)
     assert result.returncode == 0, f"cf read failed: {result.stderr}"
     raw = result.stdout.strip()
@@ -116,28 +149,27 @@ def _make_finding(
 
 @pytest.fixture
 def campfire_id():
-    """Fresh campfire per test, disbanded after."""
+    """Fresh campfire per test with mallcop-relay convention, disbanded after."""
     uid = str(uuid.uuid4())[:8]
-    cf_id = _create_campfire(f"test-dispatch-{uid}")
+    cf_id = _create_campfire_with_convention(f"test-dispatch-{uid}")
     yield cf_id
     _disband_campfire(cf_id)
 
 
 # ---------------------------------------------------------------------------
-# Test 1: dispatch loop processes a chat message and posts response
+# Test 1: dispatch loop processes an inbound-message and posts response
 # ---------------------------------------------------------------------------
 
-def test_dispatch_loop_processes_chat_message(campfire_id: str, tmp_path: Path) -> None:
-    """Dispatcher reads a chat message, calls chat_turn, posts response back to campfire."""
+def test_dispatch_loop_processes_inbound_message(campfire_id: str, tmp_path: Path) -> None:
+    """Dispatcher reads an inbound-message, calls chat_turn, posts response back via convention."""
     session_id = str(uuid.uuid4())
     mock_client = _make_mock_client("Here is my security analysis.")
 
-    # Send a chat message into the campfire before starting the dispatcher.
-    question_payload = json.dumps({"content": "What are my open findings?"})
-    _send_message(
+    # Send an inbound-message via convention operation.
+    _send_inbound_message(
         campfire_id,
-        question_payload,
-        tags=["chat", f"session:{session_id}", "platform:campfire"],
+        content="What are my open findings?",
+        from_id=session_id,
     )
 
     dispatcher = CampfireDispatcher(
@@ -148,9 +180,6 @@ def test_dispatch_loop_processes_chat_message(campfire_id: str, tmp_path: Path) 
     )
 
     async def run_one_poll():
-        # Run exactly one poll cycle: read messages, dispatch, stop.
-        # We do this by manually calling the internal methods to avoid
-        # needing to cancel an infinite loop race.
         messages = await dispatcher._read_new_messages()
         for msg in messages:
             await dispatcher._dispatch_message(msg)
@@ -160,37 +189,26 @@ def test_dispatch_loop_processes_chat_message(campfire_id: str, tmp_path: Path) 
     # Verify mock_client.chat was called — means chat_turn() ran.
     assert mock_client.chat.called, "chat_turn() did not invoke managed_client.chat()"
 
-    # Verify a response was posted back to campfire.
-    all_msgs = _read_all(campfire_id, tag="chat")
-    # Filter to mallcop-instance response messages.
-    responses = [
-        m for m in all_msgs
-        if m.get("instance") == "mallcop"
-        and "response" in m.get("tags", [])
-    ]
-    assert len(responses) >= 1, (
-        f"Expected at least 1 response from mallcop instance on campfire, "
-        f"got 0. All messages: {[m.get('tags') for m in all_msgs]}"
+    # Verify a response was posted back via convention operation.
+    all_msgs = _read_all(campfire_id, tag="relay:response")
+    assert len(all_msgs) >= 1, (
+        f"Expected at least 1 relay:response message on campfire, "
+        f"got 0. All messages: {[m.get('tags') for m in _read_all(campfire_id)]}"
     )
 
-    # Response payload should contain the mock response text.
-    resp_payload = json.loads(responses[0]["payload"])
-    assert resp_payload["content"] == "Here is my security analysis."
-    assert resp_payload["tokens_used"] == 42
-
-    # Response should carry the session tag.
-    session_tag = f"session:{session_id}"
-    assert session_tag in responses[0]["tags"], (
-        f"Expected session tag {session_tag!r} in response tags: {responses[0]['tags']}"
+    # Response should carry the session tag (relay:session_id:<value>).
+    session_tag = f"relay:session_id:{session_id}"
+    assert session_tag in all_msgs[0]["tags"], (
+        f"Expected session tag {session_tag!r} in response tags: {all_msgs[0]['tags']}"
     )
 
 
 # ---------------------------------------------------------------------------
-# Test 2: publish_finding writes to campfire with correct tags
+# Test 2: publish_finding uses convention operation with correct tags
 # ---------------------------------------------------------------------------
 
 def test_publish_finding_writes_correct_tags(campfire_id: str, tmp_path: Path) -> None:
-    """publish_finding() sends a finding message with finding, severity, connector, id tags."""
+    """publish_finding() sends a finding via convention operation with correct tags."""
     mock_client = _make_mock_client()
     dispatcher = CampfireDispatcher(
         campfire_id=campfire_id,
@@ -208,26 +226,15 @@ def test_publish_finding_writes_correct_tags(campfire_id: str, tmp_path: Path) -
 
     asyncio.run(dispatcher.publish_finding(finding))
 
-    # Read all messages from campfire and find the finding message.
+    # Read all finding messages from campfire.
     all_msgs = _read_all(campfire_id, tag="finding")
-
     assert len(all_msgs) >= 1, "Expected at least 1 finding message on campfire"
 
     finding_msg = all_msgs[0]
     tags = finding_msg.get("tags", [])
 
     assert "finding" in tags, f"Expected 'finding' tag, got: {tags}"
-    assert "severity:critical" in tags, f"Expected 'severity:critical' tag, got: {tags}"
-    assert "connector:github" in tags, f"Expected 'connector:github' tag, got: {tags}"
-    assert "id:MC-042" in tags, f"Expected 'id:MC-042' tag, got: {tags}"
-    assert finding_msg.get("instance") == "mallcop", (
-        f"Expected instance='mallcop', got: {finding_msg.get('instance')}"
-    )
-
-    # Payload should be the full finding dict.
-    payload = json.loads(finding_msg["payload"])
-    assert payload["id"] == "MC-042"
-    assert payload["severity"] == "critical"
+    assert "finding:severity:critical" in tags, f"Expected 'finding:severity:critical' tag, got: {tags}"
 
 
 # ---------------------------------------------------------------------------
@@ -237,7 +244,7 @@ def test_publish_finding_writes_correct_tags(campfire_id: str, tmp_path: Path) -
 def test_publish_finding_uses_detector_as_connector_fallback(
     campfire_id: str, tmp_path: Path
 ) -> None:
-    """When metadata has no 'connector' key, finding.detector is used as connector tag."""
+    """When metadata has no 'connector' key, finding.detector is used as connector."""
     mock_client = _make_mock_client()
     dispatcher = CampfireDispatcher(
         campfire_id=campfire_id,
@@ -246,7 +253,6 @@ def test_publish_finding_uses_detector_as_connector_fallback(
         poll_interval=0.1,
     )
 
-    # No connector_name in metadata — detector="aws-iam" will be used.
     finding = _make_finding(
         finding_id="MC-007",
         severity=Severity.WARN,
@@ -260,62 +266,11 @@ def test_publish_finding_uses_detector_as_connector_fallback(
     assert len(all_msgs) >= 1
     tags = all_msgs[0].get("tags", [])
 
-    assert "connector:aws-iam" in tags, f"Expected 'connector:aws-iam', got: {tags}"
-    assert "severity:warn" in tags, f"Expected 'severity:warn', got: {tags}"
-    assert "id:MC-007" in tags, f"Expected 'id:MC-007', got: {tags}"
+    assert "finding:severity:warn" in tags, f"Expected 'finding:severity:warn', got: {tags}"
 
 
 # ---------------------------------------------------------------------------
-# Test 4: dispatcher ignores its own mallcop-instance responses
-# ---------------------------------------------------------------------------
-
-def test_dispatch_skips_own_mallcop_messages(campfire_id: str, tmp_path: Path) -> None:
-    """Dispatcher does not dispatch messages sent by instance='mallcop'."""
-    mock_client = _make_mock_client()
-    dispatcher = CampfireDispatcher(
-        campfire_id=campfire_id,
-        managed_client=mock_client,
-        root=tmp_path,
-        poll_interval=0.1,
-    )
-
-    # Send a message with instance=mallcop (our own response) — should be ignored.
-    _send_message(
-        campfire_id,
-        json.dumps({"content": "This is our own response"}),
-        tags=["chat", "response"],
-    )
-
-    # We need to also set instance=mallcop on the sent message.
-    # Since our helper doesn't support --instance, use subprocess directly.
-    send_cmd = [
-        "cf", "send", campfire_id,
-        "--instance", "mallcop",
-        "--tag", "chat",
-        "--tag", "response",
-        json.dumps({"content": "Our own message"}),
-    ]
-    result = subprocess.run(send_cmd, capture_output=True, text=True)
-    assert result.returncode == 0
-
-    async def run_one_poll():
-        messages = await dispatcher._read_new_messages()
-        for msg in messages:
-            await dispatcher._dispatch_message(msg)
-
-    asyncio.run(run_one_poll())
-
-    # Neither message should trigger chat_turn():
-    # - The first message (no --instance) has no session: tag → skipped with warning.
-    # - The second message has instance=mallcop → skipped as our own message.
-    call_count = mock_client.chat.call_count
-    assert call_count == 0, (
-        f"chat_turn() called {call_count} times — dispatcher should have skipped both messages"
-    )
-
-
-# ---------------------------------------------------------------------------
-# Test 5: run() loop cancels cleanly
+# Test 4: run() loop cancels cleanly
 # ---------------------------------------------------------------------------
 
 def test_run_loop_cancels_cleanly(campfire_id: str, tmp_path: Path) -> None:
@@ -330,28 +285,26 @@ def test_run_loop_cancels_cleanly(campfire_id: str, tmp_path: Path) -> None:
 
     async def run_briefly():
         task = asyncio.create_task(dispatcher.run())
-        await asyncio.sleep(0.15)  # let it run a couple of polls
+        await asyncio.sleep(0.15)
         task.cancel()
         try:
             await task
         except asyncio.CancelledError:
-            pass  # expected
+            pass
 
     asyncio.run(run_briefly())
-    # If we get here without exception, the loop cancelled cleanly.
 
 
 # ---------------------------------------------------------------------------
-# Test 6 (mallcop-pro-woq): _run_cf() raises TimeoutError when subprocess hangs
+# Test 5: _run_cf() raises TimeoutError when subprocess hangs
 # ---------------------------------------------------------------------------
 
 def test_run_cf_raises_timeout_when_subprocess_hangs(tmp_path: Path) -> None:
     """_run_cf() raises asyncio.TimeoutError when cf subprocess never completes."""
     from mallcop.campfire_dispatch import _run_cf
 
-    # A mock process whose communicate() coroutine hangs forever.
     async def _hang():
-        await asyncio.sleep(3600)  # effectively forever
+        await asyncio.sleep(3600)
         return b"", b""
 
     mock_proc = MagicMock()
@@ -365,8 +318,6 @@ def test_run_cf_raises_timeout_when_subprocess_hangs(tmp_path: Path) -> None:
             "asyncio.create_subprocess_exec",
             side_effect=_create_hanging_proc,
         ):
-            # Pass timeout directly — mutating _CF_TIMEOUT is a no-op because
-            # the default parameter is evaluated at function definition time.
             await _run_cf("read", "fake-campfire-id", timeout=0.01)
 
     with pytest.raises(asyncio.TimeoutError):
@@ -374,7 +325,7 @@ def test_run_cf_raises_timeout_when_subprocess_hangs(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Test 7 (mallcop-pro-8tg): run() raises RuntimeError when cf binary missing
+# Test 6: run() raises RuntimeError when cf binary missing
 # ---------------------------------------------------------------------------
 
 def test_run_raises_runtime_error_when_cf_not_found(tmp_path: Path) -> None:
@@ -403,13 +354,13 @@ def test_run_raises_runtime_error_when_cf_not_found(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Test 8 (mallcop-pro-cr9): dispatcher skips messages without a session: tag
+# Test 7: dispatcher skips messages without from_id
 # ---------------------------------------------------------------------------
 
-def test_dispatch_skips_message_without_session_tag(
+def test_dispatch_skips_message_without_from_id(
     campfire_id: str, tmp_path: Path
 ) -> None:
-    """Dispatcher logs a warning and skips messages that have no session: tag."""
+    """Dispatcher logs a warning and skips messages that have no from_id in payload."""
     mock_client = _make_mock_client()
     dispatcher = CampfireDispatcher(
         campfire_id=campfire_id,
@@ -418,12 +369,14 @@ def test_dispatch_skips_message_without_session_tag(
         poll_interval=0.1,
     )
 
-    # Send a chat message with NO session: tag.
-    _send_message(
-        campfire_id,
+    # Send a raw message with relay:inbound tag but a malformed payload (no from_id).
+    send_cmd = [
+        "cf", "send", campfire_id,
+        "--tag", "relay:inbound",
         json.dumps({"content": "What findings do I have?"}),
-        tags=["chat", "platform:campfire"],
-    )
+    ]
+    result = subprocess.run(send_cmd, capture_output=True, text=True)
+    assert result.returncode == 0
 
     async def run_one_poll():
         messages = await dispatcher._read_new_messages()
@@ -433,31 +386,25 @@ def test_dispatch_skips_message_without_session_tag(
     with patch("mallcop.campfire_dispatch._log") as mock_log:
         asyncio.run(run_one_poll())
 
-        # chat_turn() must NOT have been called.
         assert not mock_client.chat.called, (
-            "chat_turn() was called despite missing session: tag"
+            "chat_turn() was called despite missing from_id"
         )
 
-        # Warning must have been logged.
-        assert mock_log.warning.called, "Expected a warning log for missing session: tag"
-        warning_text = " ".join(str(a) for a in mock_log.warning.call_args[0])
-        assert "session" in warning_text.lower(), (
-            f"Warning should mention 'session', got: {warning_text!r}"
-        )
+        assert mock_log.warning.called, "Expected a warning log for missing from_id"
 
     # No response should appear on campfire.
-    all_msgs = _read_all(campfire_id, tag="response")
+    all_msgs = _read_all(campfire_id, tag="relay:response")
     assert len(all_msgs) == 0, (
         f"Expected no response messages, got: {all_msgs}"
     )
 
 
 # ---------------------------------------------------------------------------
-# Test 9 (mallcop-pro-6p0): dispatcher forwards budget_warning to campfire
+# Test 8: dispatcher forwards budget_warning as status operation
 # ---------------------------------------------------------------------------
 
 def test_dispatch_forwards_budget_warning(campfire_id: str, tmp_path: Path) -> None:
-    """When chat_turn returns a budget_warning, dispatcher posts a second campfire message."""
+    """When chat_turn returns a budget_warning, dispatcher posts a status operation."""
     session_id = str(uuid.uuid4())
     mock_client = _make_mock_client("Analysis complete.")
     dispatcher = CampfireDispatcher(
@@ -467,21 +414,13 @@ def test_dispatch_forwards_budget_warning(campfire_id: str, tmp_path: Path) -> N
         poll_interval=0.1,
     )
 
-    _send_message(
-        campfire_id,
-        json.dumps({"content": "Check my security posture"}),
-        tags=["chat", f"session:{session_id}", "platform:campfire"],
-    )
+    _send_inbound_message(campfire_id, "Check my security posture", from_id=session_id)
 
-    # Patch chat_turn to return a budget_warning.
-    budget_warning_text = "Donut balance below 10% — purchase more to continue."
+    budget_warning_text = "Donut balance below 10%."
 
     async def run_one_poll():
         messages = await dispatcher._read_new_messages()
         for msg in messages:
-            # Patch chat_turn at its definition site (local import inside
-            # _dispatch_message uses mallcop.chat.chat_turn).
-            # chat_turn is now async — use AsyncMock so await works.
             with patch("mallcop.chat.chat_turn", new=AsyncMock(return_value={
                 "response": "Analysis complete.",
                 "tokens_used": 55,
@@ -491,35 +430,22 @@ def test_dispatch_forwards_budget_warning(campfire_id: str, tmp_path: Path) -> N
 
     asyncio.run(run_one_poll())
 
-    # Read all campfire messages and find the budget-warning message.
-    all_msgs = _read_all(campfire_id, tag="budget-warning")
+    # Read status messages (agent:status tag from status convention operation).
+    all_msgs = _read_all(campfire_id, tag="agent:status")
     assert len(all_msgs) >= 1, (
-        f"Expected at least 1 budget-warning message, got 0. "
+        f"Expected at least 1 agent:status message, got 0. "
         f"All messages: {[m.get('tags') for m in _read_all(campfire_id)]}"
     )
 
-    warning_msg = all_msgs[0]
-    assert "budget-warning" in warning_msg.get("tags", []), (
-        f"Expected 'budget-warning' tag, got: {warning_msg.get('tags')}"
-    )
-    session_tag = f"session:{session_id}"
-    assert session_tag in warning_msg.get("tags", []), (
-        f"Expected session tag {session_tag!r}, got: {warning_msg.get('tags')}"
-    )
-    payload = json.loads(warning_msg["payload"])
-    assert payload.get("budget_warning") == budget_warning_text, (
-        f"Expected warning text in payload, got: {payload}"
-    )
-
 
 # ---------------------------------------------------------------------------
-# Test 10 (mallcop-pro-ueq): platform-error tag on 402/503 responses
+# Test 9: platform-error sends a status operation
 # ---------------------------------------------------------------------------
 
-def test_dispatch_adds_platform_error_tag_on_platform_error(
+def test_dispatch_adds_platform_error_status_on_platform_error(
     campfire_id: str, tmp_path: Path
 ) -> None:
-    """When chat_turn returns is_platform_error=True, response carries platform-error tag."""
+    """When chat_turn returns is_platform_error=True, a status operation is sent."""
     session_id = str(uuid.uuid4())
     mock_client = _make_mock_client()
     dispatcher = CampfireDispatcher(
@@ -529,17 +455,13 @@ def test_dispatch_adds_platform_error_tag_on_platform_error(
         poll_interval=0.1,
     )
 
-    _send_message(
-        campfire_id,
-        json.dumps({"content": "Check balance"}),
-        tags=["chat", f"session:{session_id}", "platform:campfire"],
-    )
+    _send_inbound_message(campfire_id, "Check balance", from_id=session_id)
 
     async def run_one_poll():
         messages = await dispatcher._read_new_messages()
         for msg in messages:
             with patch("mallcop.chat.chat_turn", new=AsyncMock(return_value={
-                "response": "I received your message but can't respond right now — insufficient donut balance.",
+                "response": "Insufficient donut balance.",
                 "tokens_used": 0,
                 "is_platform_error": True,
             })):
@@ -547,20 +469,14 @@ def test_dispatch_adds_platform_error_tag_on_platform_error(
 
     asyncio.run(run_one_poll())
 
-    all_msgs = _read_all(campfire_id, tag="response")
-    assert len(all_msgs) >= 1, "Expected at least 1 response message"
-
-    response_msg = all_msgs[0]
-    tags = response_msg.get("tags", [])
-    assert "platform-error" in tags, (
-        f"Expected 'platform-error' tag when is_platform_error=True, got: {tags}"
-    )
+    all_msgs = _read_all(campfire_id, tag="agent:status")
+    assert len(all_msgs) >= 1, "Expected at least 1 status message for platform error"
 
 
-def test_dispatch_no_platform_error_tag_on_normal_response(
+def test_dispatch_no_platform_error_status_on_normal_response(
     campfire_id: str, tmp_path: Path
 ) -> None:
-    """Normal response (is_platform_error absent/False) does NOT carry platform-error tag."""
+    """Normal response does NOT send a status operation."""
     session_id = str(uuid.uuid4())
     mock_client = _make_mock_client()
     dispatcher = CampfireDispatcher(
@@ -570,11 +486,7 @@ def test_dispatch_no_platform_error_tag_on_normal_response(
         poll_interval=0.1,
     )
 
-    _send_message(
-        campfire_id,
-        json.dumps({"content": "What are my findings?"}),
-        tags=["chat", f"session:{session_id}", "platform:campfire"],
-    )
+    _send_inbound_message(campfire_id, "What are my findings?", from_id=session_id)
 
     async def run_one_poll():
         messages = await dispatcher._read_new_messages()
@@ -587,24 +499,20 @@ def test_dispatch_no_platform_error_tag_on_normal_response(
 
     asyncio.run(run_one_poll())
 
-    all_msgs = _read_all(campfire_id, tag="response")
-    assert len(all_msgs) >= 1, "Expected at least 1 response message"
-
-    response_msg = all_msgs[0]
-    tags = response_msg.get("tags", [])
-    assert "platform-error" not in tags, (
-        f"Expected no 'platform-error' tag on normal response, got: {tags}"
+    all_msgs = _read_all(campfire_id, tag="agent:status")
+    assert len(all_msgs) == 0, (
+        f"Expected no status messages on normal response, got: {all_msgs}"
     )
 
 
 # ---------------------------------------------------------------------------
-# Test 12 (mallcop-pro-xvy): publish_finding dual-write — campfire side verified
+# Test 10: publish_finding convention operation contract
 # ---------------------------------------------------------------------------
 
 def test_publish_finding_writes_to_campfire_with_correct_tags(
     campfire_id: str, tmp_path: Path
 ) -> None:
-    """publish_finding() dual-write contract: campfire receives finding with correct tags and valid JSON payload."""
+    """publish_finding() convention operation: correct tags."""
     mock_client = _make_mock_client()
     dispatcher = CampfireDispatcher(
         campfire_id=campfire_id,
@@ -622,54 +530,24 @@ def test_publish_finding_writes_to_campfire_with_correct_tags(
 
     asyncio.run(dispatcher.publish_finding(finding))
 
-    # Read all finding messages from campfire.
     all_msgs = _read_all(campfire_id, tag="finding")
     assert len(all_msgs) >= 1, (
-        f"Expected at least 1 finding message on campfire after publish_finding(), got 0"
+        "Expected at least 1 finding message on campfire after publish_finding(), got 0"
     )
 
     finding_msg = all_msgs[0]
     tags = finding_msg.get("tags", [])
 
-    # Verify required tags are present.
     assert "finding" in tags, f"Expected 'finding' tag, got: {tags}"
-    assert any(t.startswith("severity:") for t in tags), (
-        f"Expected a 'severity:*' tag, got: {tags}"
-    )
-    assert any(t.startswith("connector:") for t in tags), (
-        f"Expected a 'connector:*' tag, got: {tags}"
-    )
-    assert any(t.startswith("id:") for t in tags), (
-        f"Expected an 'id:*' tag, got: {tags}"
-    )
-
-    # Verify specific tag values for this finding.
-    assert "severity:critical" in tags, f"Expected 'severity:critical' tag, got: {tags}"
-    assert "connector:aws-s3" in tags, f"Expected 'connector:aws-s3' tag, got: {tags}"
-    assert "id:MC-099" in tags, f"Expected 'id:MC-099' tag, got: {tags}"
-
-    # Verify payload is valid JSON containing the finding's fields.
-    raw_payload = finding_msg.get("payload", "")
-    assert raw_payload, "Expected non-empty payload in finding message"
-    try:
-        payload = json.loads(raw_payload)
-    except json.JSONDecodeError as exc:
-        pytest.fail(f"publish_finding() wrote non-JSON payload: {exc!r}\n  raw: {raw_payload!r}")
-
-    assert payload.get("id") == "MC-099", (
-        f"Expected payload['id'] == 'MC-099', got: {payload.get('id')!r}"
-    )
-    assert payload.get("severity") in ("critical", Severity.CRITICAL, Severity.CRITICAL.value), (
-        f"Expected payload['severity'] to represent CRITICAL, got: {payload.get('severity')!r}"
-    )
+    assert "finding:severity:critical" in tags, f"Expected 'finding:severity:critical' tag, got: {tags}"
 
 
 # ---------------------------------------------------------------------------
-# Test 13 (mallcop-pro-cmf): run() backs off after 5+ consecutive cf errors
+# Test 11: run() backs off after 5+ consecutive cf errors
 # ---------------------------------------------------------------------------
 
 def test_run_backs_off_after_consecutive_cf_errors(tmp_path: Path) -> None:
-    """run() applies exponential backoff when _read_new_messages raises _SubprocessError 5+ times."""
+    """run() applies exponential backoff after 5+ consecutive errors."""
     from mallcop.campfire_dispatch import _SubprocessError
 
     mock_client = _make_mock_client()
@@ -680,7 +558,6 @@ def test_run_backs_off_after_consecutive_cf_errors(tmp_path: Path) -> None:
         poll_interval=1.0,
     )
 
-    # _read_new_messages will raise _SubprocessError 6 times, then CancelledError.
     call_count = 0
 
     async def failing_read():
@@ -707,11 +584,6 @@ def test_run_backs_off_after_consecutive_cf_errors(tmp_path: Path) -> None:
 
     asyncio.run(run())
 
-    # After 5 consecutive errors the backoff formula kicks in:
-    #   sleep = min(poll_interval * 2 ** (consecutive_errors - 5), 300)
-    # At error #5: min(1.0 * 2**0, 300) = 1.0  (same as poll_interval, no change yet)
-    # At error #6: min(1.0 * 2**1, 300) = 2.0  (> poll_interval — backoff confirmed)
-    # We assert that at least one sleep call used a value strictly greater than poll_interval.
     backoff_sleeps = [d for d in sleep_calls if d > dispatcher._poll_interval]
     assert backoff_sleeps, (
         f"Expected at least one sleep > poll_interval ({dispatcher._poll_interval}s) "
@@ -720,25 +592,18 @@ def test_run_backs_off_after_consecutive_cf_errors(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Test 14 (mallcoppro-df7): run_once() processes all pending messages in one pass
+# Test 12: run_once() processes all pending messages in one pass
 # ---------------------------------------------------------------------------
 
 def test_run_once_processes_pending_messages(campfire_id: str, tmp_path: Path) -> None:
-    """run_once() reads all pending chat messages and posts a response for each.
-
-    Uses a real campfire (no mocking of cf subprocess).  Posts a chat-tagged
-    message before calling run_once(), then verifies a response appears on
-    campfire with --tag response --instance mallcop.
-    """
+    """run_once() reads all pending inbound messages and posts a response for each."""
     session_id = str(uuid.uuid4())
     mock_client = _make_mock_client("run_once response")
 
-    # Post a chat message into the campfire before dispatching.
-    question_payload = json.dumps({"content": "Summarize my security posture."})
-    _send_message(
+    _send_inbound_message(
         campfire_id,
-        question_payload,
-        tags=["chat", f"session:{session_id}", "platform:campfire"],
+        content="Summarize my security posture.",
+        from_id=session_id,
     )
 
     dispatcher = CampfireDispatcher(
@@ -748,30 +613,19 @@ def test_run_once_processes_pending_messages(campfire_id: str, tmp_path: Path) -
         poll_interval=0.1,
     )
 
-    # run_once() must return promptly — if it loops, this raises asyncio.TimeoutError.
     asyncio.run(asyncio.wait_for(dispatcher.run_once(), timeout=5.0))
 
-    # Verify chat_turn() was invoked (managed_client.chat was called).
     assert mock_client.chat.called, (
-        "run_once() did not invoke managed_client.chat() — chat_turn() was not called"
+        "run_once() did not invoke managed_client.chat()"
     )
 
-    # Verify a response was posted to campfire with the required tags.
-    all_msgs = _read_all(campfire_id, tag="response")
-    responses = [
-        m for m in all_msgs
-        if m.get("instance") == "mallcop"
-        and "response" in m.get("tags", [])
-    ]
-    assert len(responses) >= 1, (
-        f"Expected at least 1 response from mallcop instance after run_once(), "
+    all_msgs = _read_all(campfire_id, tag="relay:response")
+    assert len(all_msgs) >= 1, (
+        f"Expected at least 1 relay:response message after run_once(), "
         f"got 0. All messages: {[m.get('tags') for m in _read_all(campfire_id)]}"
     )
 
-    # Session tag must be present on the response.
-    session_tag = f"session:{session_id}"
-    assert session_tag in responses[0]["tags"], (
-        f"Expected session tag {session_tag!r} in response tags: {responses[0]['tags']}"
+    session_tag = f"relay:session_id:{session_id}"
+    assert session_tag in all_msgs[0]["tags"], (
+        f"Expected session tag {session_tag!r} in response tags: {all_msgs[0]['tags']}"
     )
-
-

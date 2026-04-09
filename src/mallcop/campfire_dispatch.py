@@ -1,8 +1,8 @@
 """campfire_dispatch — async campfire dispatch loop for mallcop.
 
-Polls a campfire for chat-tagged messages, dispatches them through
-chat_turn(), and publishes findings to campfire as a secondary channel
-(findings.jsonl remains the primary store).
+Polls a campfire for inbound messages (via the mallcop-relay convention),
+dispatches them through chat_turn(), and publishes findings and responses
+back using convention operations.
 
 Design notes
 ------------
@@ -18,6 +18,20 @@ Design notes
                 context_manager, root) -> dict
 
   where ``store`` is any object implementing append()/load_session().
+
+Convention operations (mallcop-relay v0.2)
+------------------------------------------
+All messaging uses the ``mallcop-relay`` convention declared on the
+campfire at registration time.  Operations:
+
+- ``inbound-message`` — relayed Telegram messages (read by daemon)
+  tags: relay:inbound, relay:from_id:<from_id>
+- ``response``        — daemon posts inference response
+  tags: relay:response, relay:session_id:<session_id>
+- ``finding``         — daemon posts a security finding
+  tags: finding, finding:severity:<severity>
+- ``status``          — daemon lifecycle events (budget-warning, platform-error)
+  tags: agent:status
 """
 
 from __future__ import annotations
@@ -36,8 +50,8 @@ _log = logging.getLogger(__name__)
 # Surface identifier stored in conversation messages.
 _SURFACE = "campfire"
 
-# Tag prefix for the sender's session identity.
-_SESSION_TAG_PREFIX = "session:"
+# Tag for filtering inbound messages from the mallcop-relay convention.
+_TAG_RELAY_INBOUND = "relay:inbound"
 
 
 class CampfireError(RuntimeError):
@@ -50,14 +64,6 @@ class _SubprocessError(CampfireError):
 
 # Seconds to wait for a cf subprocess before giving up.
 _CF_TIMEOUT = 30.0
-
-# Tag constants — avoids magic string literals throughout the module.
-_TAG_CHAT = "chat"
-_TAG_RESPONSE = "response"
-_TAG_PLATFORM_ERROR = "platform-error"
-_TAG_BUDGET_WARNING = "budget-warning"
-_TAG_FINDING = "finding"
-_INSTANCE_MALLCOP = "mallcop"
 
 
 async def _run_cf(*args: str, cf_bin: str = "cf", cf_home: str | None = None, timeout: float = _CF_TIMEOUT) -> str:
@@ -100,11 +106,12 @@ async def _run_cf(*args: str, cf_bin: str = "cf", cf_home: str | None = None, ti
 
 
 class CampfireDispatcher:
-    """Async campfire dispatch loop.
+    """Async campfire dispatch loop using mallcop-relay convention operations.
 
-    Polls *campfire_id* for ``chat``-tagged messages, dispatches each
-    through :func:`mallcop.chat.chat_turn`, and posts the response back
-    to campfire.
+    Polls *campfire_id* for ``relay:inbound``-tagged messages (convention
+    operation: inbound-message), dispatches each through
+    :func:`mallcop.chat.chat_turn`, and posts the response back using the
+    ``response`` convention operation.
 
     Parameters
     ----------
@@ -162,12 +169,12 @@ class CampfireDispatcher:
         )
 
     async def _read_new_messages(self) -> list[dict[str, Any]]:
-        """Poll campfire for new chat-tagged messages (advances cursor)."""
+        """Poll campfire for new inbound messages via mallcop-relay convention."""
         try:
             raw = await self._cf(
                 "read", self._campfire_id,
                 "--json",
-                "--tag", _TAG_CHAT,
+                "--tag", _TAG_RELAY_INBOUND,
             )
         except _SubprocessError as exc:
             _log.warning("campfire_dispatch: read error: %s", exc)
@@ -188,78 +195,86 @@ class CampfireDispatcher:
         return items
 
     @staticmethod
-    def _extract_session_id(tags: list[str]) -> str | None:
-        """Extract session:<uuid> from message tags."""
-        for tag in tags:
-            if tag.startswith(_SESSION_TAG_PREFIX):
-                return tag[len(_SESSION_TAG_PREFIX):]
+    def _extract_session_id(msg: dict[str, Any]) -> str | None:
+        """Extract session ID from an inbound-message convention payload.
+
+        Convention operations pack args as a JSON payload. The inbound-message
+        operation includes from_id which serves as the session identifier.
+        Also checks tags for relay:from_id:<value> as a fallback.
+        """
+        # Primary: parse from convention payload args.
+        payload_raw = msg.get("payload", "")
+        try:
+            envelope = json.loads(payload_raw)
+            if isinstance(envelope, dict):
+                from_id = envelope.get("from_id")
+                if from_id:
+                    return str(from_id)
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+        # Fallback: extract from relay:from_id:* tag.
+        for tag in msg.get("tags", []):
+            if tag.startswith("relay:from_id:"):
+                return tag[len("relay:from_id:"):]
+
         return None
 
     async def _post_response(self, session_id: str, result: dict[str, Any]) -> None:
-        """Post a chat_turn() result back to campfire (response + optional budget warning)."""
+        """Post a chat_turn() result back to campfire via response convention operation."""
         response_text = result.get("response", "")
         if not response_text:
             return
 
-        session_tag = f"{_SESSION_TAG_PREFIX}{session_id}"
-        payload = json.dumps({
-            "content": response_text,
-            "tokens_used": result.get("tokens_used", 0),
-        })
-
-        send_args = [
-            "send", self._campfire_id,
-            "--instance", _INSTANCE_MALLCOP,
-            "--tag", _TAG_CHAT,
-            "--tag", session_tag,
-            "--tag", f"platform:{_SURFACE}",
-            "--tag", _TAG_RESPONSE,
+        # Use the response convention operation.
+        op_args = [
+            self._campfire_id, "response",
+            "--content", response_text,
+            "--session_id", session_id,
         ]
-        if result.get("is_platform_error"):
-            send_args += ["--tag", _TAG_PLATFORM_ERROR]
-        send_args.append(payload)
+        tokens_used = result.get("tokens_used", 0)
+        if tokens_used:
+            op_args += ["--tokens_used", str(tokens_used)]
 
         try:
-            await self._cf(*send_args)
+            await self._cf(*op_args)
         except _SubprocessError as exc:
             _log.error("campfire_dispatch: failed to post response: %s", exc)
 
-        # Fix (mallcop-pro-6p0): forward budget_warning to campfire so
-        # clients can see it.  Without this, budget warnings returned by
-        # chat_turn() are silently dropped.
-        budget_warning = result.get("budget_warning")
-        if budget_warning:
-            warning_payload = json.dumps({"budget_warning": budget_warning})
+        # Platform error: send a status operation so clients can filter.
+        if result.get("is_platform_error"):
             try:
                 await self._cf(
-                    "send", self._campfire_id,
-                    "--instance", _INSTANCE_MALLCOP,
-                    "--tag", _TAG_CHAT,
-                    "--tag", session_tag,
-                    "--tag", _TAG_BUDGET_WARNING,
-                    warning_payload,
+                    self._campfire_id, "status",
+                    "--state", "platform-error",
+                    "--reason", response_text,
+                )
+            except _SubprocessError as exc:
+                _log.error("campfire_dispatch: failed to post platform-error status: %s", exc)
+
+        # Budget warning: send a status operation.
+        budget_warning = result.get("budget_warning")
+        if budget_warning:
+            try:
+                await self._cf(
+                    self._campfire_id, "status",
+                    "--state", "budget-warning",
+                    "--reason", budget_warning,
                 )
             except _SubprocessError as exc:
                 _log.error(
-                    "campfire_dispatch: failed to post budget_warning: %s", exc
+                    "campfire_dispatch: failed to post budget_warning status: %s",
+                    exc,
                 )
 
     async def _dispatch_message(self, msg: dict[str, Any]) -> None:
-        """Dispatch one chat message through chat_turn() and post response."""
+        """Dispatch one inbound message through chat_turn() and post response."""
         # Import here to avoid circular import at module level.
         from mallcop.chat import chat_turn
 
-        tags: list[str] = msg.get("tags", [])
         payload_raw = msg.get("payload", "")
-        instance = msg.get("instance", "user")
 
-        # Skip messages sent by us (instance == _INSTANCE_MALLCOP).
-        if instance == _INSTANCE_MALLCOP:
-            _log.debug("campfire_dispatch: skipping our own message %s", msg.get("id"))
-            return
-
-        # Extract question text. Payload may be a JSON envelope (if
-        # written by CampfireConversationAdapter) or plain text.
+        # Extract question text from convention payload.
         question: str = payload_raw
         try:
             envelope = json.loads(payload_raw)
@@ -272,18 +287,12 @@ class CampfireDispatcher:
             _log.debug("campfire_dispatch: empty question in message %s", msg.get("id"))
             return
 
-        # Derive session_id from tags.  A session: tag is required for
-        # multi-turn history to work correctly — without it, load_session()
-        # cannot reconstruct the conversation because the original inbound
-        # message was never tagged with a stable session identifier.
-        # Decision (mallcop-pro-cr9): reject messages without a session: tag
-        # rather than falling back to sender, which would silently break
-        # multi-turn history.
-        session_id = self._extract_session_id(tags)
+        # Derive session_id from the convention payload's from_id.
+        session_id = self._extract_session_id(msg)
         if not session_id:
             _log.warning(
-                "campfire_dispatch: skipping message %s — no session: tag present. "
-                "Clients must include a session:<uuid> tag for multi-turn history.",
+                "campfire_dispatch: skipping message %s — no from_id in payload or relay:from_id tag. "
+                "Convention inbound-message must include from_id.",
                 msg.get("id"),
             )
             return
@@ -327,7 +336,7 @@ class CampfireDispatcher:
             await self._dispatch_message(msg)
 
     async def run(self) -> None:
-        """Poll campfire in a loop, dispatching chat messages indefinitely.
+        """Poll campfire in a loop, dispatching inbound messages indefinitely.
 
         Runs until cancelled (asyncio.CancelledError).
 
@@ -357,9 +366,6 @@ class CampfireDispatcher:
                     await self.run_once()
                     _consecutive_errors = 0
                 except _SubprocessError:
-                    # _read_new_messages already logs a warning and returns [].
-                    # We only reach here if it re-raises, which it currently
-                    # does not — this branch is a safety net for future changes.
                     _consecutive_errors += 1
 
                 # Backoff after 5 or more consecutive errors.
@@ -381,16 +387,16 @@ class CampfireDispatcher:
             raise
 
     async def publish_finding(self, finding: Any) -> None:
-        """Publish a finding to campfire as a secondary channel.
+        """Publish a finding to campfire via the finding convention operation.
 
         findings.jsonl is the primary store. This method writes to campfire
         in addition to whatever the caller already wrote to findings.jsonl.
 
-        Tags written:
-            finding
-            severity:<level>     (e.g. severity:critical)
-            connector:<name>     (from finding.detector or finding.metadata)
-            id:<MC-ID>           (finding.id)
+        Uses the ``finding`` operation from the mallcop-relay convention:
+            - finding_id (required)
+            - severity (required)
+            - summary (required)
+            - connector (optional)
 
         Parameters
         ----------
@@ -408,27 +414,25 @@ class CampfireDispatcher:
         metadata = getattr(finding, "metadata", {}) or {}
         connector_name = metadata.get("connector") or getattr(finding, "detector", "unknown")
 
-        # Payload: full finding dict as JSON.
-        try:
-            payload = json.dumps(finding.to_dict())
-        except Exception:
-            payload = json.dumps({"id": finding_id, "severity": severity_str})
+        # Summary: use finding title.
+        summary = getattr(finding, "title", finding_id)
 
         _log.debug(
             "campfire_dispatch: publishing finding %s (severity=%s, connector=%s)",
             finding_id, severity_str, connector_name,
         )
 
+        op_args = [
+            self._campfire_id, "finding",
+            "--finding_id", finding_id,
+            "--severity", severity_str,
+            "--summary", summary,
+        ]
+        if connector_name and connector_name != "unknown":
+            op_args += ["--connector", connector_name]
+
         try:
-            await self._cf(
-                "send", self._campfire_id,
-                "--instance", _INSTANCE_MALLCOP,
-                "--tag", _TAG_FINDING,
-                "--tag", f"severity:{severity_str}",
-                "--tag", f"connector:{connector_name}",
-                "--tag", f"id:{finding_id}",
-                payload,
-            )
+            await self._cf(*op_args)
         except _SubprocessError as exc:
             _log.error(
                 "campfire_dispatch: failed to publish finding %s: %s",

@@ -1,0 +1,18 @@
+{
+  "convention": "mallcop-relay",
+  "version": "0.2",
+  "operation": "finding",
+  "description": "User agent posts a security finding",
+  "args": [
+    {"name": "finding_id", "type": "string", "required": true, "max_length": 64},
+    {"name": "severity", "type": "string", "required": true, "max_length": 16},
+    {"name": "summary", "type": "string", "required": true, "max_length": 1024},
+    {"name": "connector", "type": "string", "required": false, "max_length": 64}
+  ],
+  "produces_tags": [
+    {"tag": "finding", "cardinality": "exactly_one"},
+    {"tag": "finding:severity:*", "cardinality": "exactly_one"}
+  ],
+  "antecedents": "none",
+  "signing": "member_key"
+}

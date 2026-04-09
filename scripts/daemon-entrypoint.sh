@@ -51,11 +51,17 @@ git config user.name "mallcop[bot]"
 git config user.email "mallcop[bot]@users.noreply.github.com"
 echo "[daemon] Workspace ready: $(ls mallcop.yaml 2>/dev/null && echo 'mallcop.yaml found' || echo 'no mallcop.yaml')"
 
-# Step 2: Create persistent identity (idempotent)
+# Step 2: Create persistent identity and adopt conventions
 if [ ! -f "$CF_HOME/identity.json" ]; then
     echo "[daemon] Creating persistent identity..."
     mkdir -p "$(dirname "$CF_HOME")"
     cf init --name mallcop-daemon --cf-home "$(dirname "$CF_HOME")"
+fi
+
+# Adopt mallcop-relay convention declarations (idempotent — skips if already adopted)
+if [ -d /app/conventions/mallcop-relay ]; then
+    echo "[daemon] Adopting mallcop-relay convention..."
+    cf convention adopt /app/conventions/mallcop-relay/ --cf-home "$CF_HOME" 2>&1 || echo "[daemon] WARNING: Convention adopt failed" >&2
 fi
 
 # Step 3: Join campfire via relay with invite code
