@@ -155,8 +155,13 @@ async def _gha_scan_loop(
 
     api_base = os.environ.get("MALLCOP_PRO_INFERENCE_URL", "https://api.mallcop.app")
     service_token = os.environ.get("MALLCOP_PRO_SERVICE_TOKEN", "")
-    deploy_repo = os.environ.get("MALLCOP_DEPLOY_REPO", "")
-    installation_id = os.environ.get("GITHUB_INSTALLATION_ID", "")
+    deploy_repo_raw = os.environ.get("MALLCOP_DEPLOY_REPO", "")
+    installation_id = os.environ.get("MALLCOP_INSTALLATION_ID", "") or os.environ.get("GITHUB_INSTALLATION_ID", "")
+
+    # Extract owner/repo from git URL (https://github.com/org/repo.git → org/repo)
+    deploy_repo = deploy_repo_raw
+    if deploy_repo.startswith("https://github.com/"):
+        deploy_repo = deploy_repo.removeprefix("https://github.com/").removesuffix(".git")
 
     if not deploy_repo:
         _log.info("daemon: MALLCOP_DEPLOY_REPO not set, skipping GHA scan dispatch")
