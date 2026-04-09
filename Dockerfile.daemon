@@ -14,8 +14,8 @@ RUN curl -fsSL https://github.com/campfire-net/campfire/releases/download/v0.16.
     && install -m 755 /tmp/cf_linux_amd64/cf /usr/local/bin/cf \
     && rm -rf /tmp/cf.tar.gz /tmp/cf_linux_amd64
 
-# Create non-root user
-RUN useradd -m mallcop
+# Create non-root user and workspace directory
+RUN useradd -m mallcop && mkdir -p /workspace && chown mallcop:mallcop /workspace
 
 # Copy source and install mallcop
 COPY . /app
