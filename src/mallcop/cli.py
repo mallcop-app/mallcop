@@ -1104,10 +1104,12 @@ def watch(dry_run: bool, dir_path: str | None, human: bool, backend: str, daemon
                 service_token=service_token,
                 use_lanes=True,
             )
+            cf_home = os.environ.get('CF_HOME')
             dispatcher = CampfireDispatcher(
                 campfire_id=campfire_id,
                 managed_client=managed_client,
                 root=root,
+                cf_home=cf_home,
             )
             bridge = None
             if inbound_mode and bot_token and chat_id:
