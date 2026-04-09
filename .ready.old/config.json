@@ -1,0 +1,11 @@
+{
+  "campfire_id": "833e45b5861f9f1bf707e497d201bd319984c6823d8740c9f07a4e4bc0b01890",
+  "durability": {
+    "meets_minimum": false,
+    "weight": "minimal",
+    "warnings": [
+      "no durability tags declared — retention is unknown",
+      "operator is unverified — do not commit irreplaceable state regardless of durability claims"
+    ]
+  }
+}
