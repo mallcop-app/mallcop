@@ -4,13 +4,16 @@ on:
     branches: [main]
     paths:
       - 'Dockerfile.daemon'
+      - 'scripts/**'
       - 'src/**'
       - 'pyproject.toml'
   pull_request:
     paths:
       - 'Dockerfile.daemon'
+      - 'scripts/**'
       - 'src/**'
       - 'pyproject.toml'
+  workflow_dispatch:
 jobs:
   build-test:
     runs-on: ubuntu-latest
