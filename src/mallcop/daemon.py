@@ -134,7 +134,84 @@ async def _scan_loop(
     root: Path,
     interval: float,
 ) -> None:
-    """Periodically run scan → detect → escalate, publish new findings to campfire."""
+    """Periodically trigger scans and publish new findings to campfire.
+
+    In container mode (MALLCOP_PRO_SERVICE_TOKEN set), dispatches scans to
+    GitHub Actions on the deploy repo. Otherwise runs scans locally.
+    """
+    service_token = os.environ.get("MALLCOP_PRO_SERVICE_TOKEN")
+    if service_token:
+        await _gha_scan_loop(dispatcher, interval)
+    else:
+        await _local_scan_loop(dispatcher, root, interval)
+
+
+async def _gha_scan_loop(
+    dispatcher: "CampfireDispatcher",
+    interval: float,
+) -> None:
+    """Dispatch scans to GitHub Actions on the deploy repo."""
+    import requests
+
+    api_base = os.environ.get("MALLCOP_PRO_INFERENCE_URL", "https://api.mallcop.app")
+    service_token = os.environ.get("MALLCOP_PRO_SERVICE_TOKEN", "")
+    deploy_repo = os.environ.get("MALLCOP_DEPLOY_REPO", "")
+    installation_id = os.environ.get("GITHUB_INSTALLATION_ID", "")
+
+    if not deploy_repo:
+        _log.info("daemon: MALLCOP_DEPLOY_REPO not set, skipping GHA scan dispatch")
+        # Just sleep forever — chat dispatch still runs
+        while True:
+            await asyncio.sleep(interval)
+        return
+
+    while True:
+        try:
+            # Get a GitHub installation token from mallcop-pro
+            token_resp = await asyncio.to_thread(
+                requests.post,
+                f"{api_base}/v1/github/token",
+                headers={"Authorization": f"Bearer {service_token}"},
+                json={"installation_id": int(installation_id)} if installation_id else {},
+                timeout=10,
+            )
+            if token_resp.status_code != 200:
+                _log.warning("daemon: failed to get GitHub token: %d", token_resp.status_code)
+                await asyncio.sleep(interval)
+                continue
+
+            gh_token = token_resp.json().get("token", "")
+
+            # Trigger workflow_dispatch on the deploy repo
+            dispatch_resp = await asyncio.to_thread(
+                requests.post,
+                f"https://api.github.com/repos/{deploy_repo}/actions/workflows/mallcop.yml/dispatches",
+                headers={
+                    "Authorization": f"Bearer {gh_token}",
+                    "Accept": "application/vnd.github+json",
+                },
+                json={"ref": "main"},
+                timeout=10,
+            )
+            if dispatch_resp.status_code == 204:
+                _log.info("daemon: triggered scan on %s", deploy_repo)
+            else:
+                _log.warning(
+                    "daemon: GHA dispatch failed: %d %s",
+                    dispatch_resp.status_code,
+                    dispatch_resp.text[:200],
+                )
+        except Exception as exc:
+            _log.error("daemon: GHA scan dispatch failed: %s", exc)
+        await asyncio.sleep(interval)
+
+
+async def _local_scan_loop(
+    dispatcher: "CampfireDispatcher",
+    root: Path,
+    interval: float,
+) -> None:
+    """Run scan pipeline locally and publish findings to campfire."""
     while True:
         try:
             findings = await asyncio.to_thread(_run_one_scan, root)
