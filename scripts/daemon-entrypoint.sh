@@ -24,10 +24,11 @@ fi
 
 echo "[daemon] Cloning deploy repo..."
 # Get a GitHub installation token for git auth via mallcop-pro
+INST_ID="${MALLCOP_INSTALLATION_ID:-0}"
 TOKEN=$(curl -sf -X POST "https://api.mallcop.app/v1/github/token" \
     -H "Authorization: Bearer ${MALLCOP_PRO_SERVICE_TOKEN}" \
     -H "Content-Type: application/json" \
-    -d '{"installation_id":0}' 2>/dev/null | python3 -c "import json,sys; print(json.load(sys.stdin).get('token',''))" 2>/dev/null || true)
+    -d "{\"installation_id\":${INST_ID}}" 2>/dev/null | python3 -c "import json,sys; print(json.load(sys.stdin).get('token',''))" 2>/dev/null || true)
 
 if [ -n "$TOKEN" ]; then
     # Inject token into clone URL: https://x-access-token:TOKEN@github.com/...
