@@ -49,6 +49,22 @@ def _build_actor_runner(root: Path, backend: str = "anthropic"):
     )
 
 
+def _build_interactive_runner(root: Path, managed_client: Any) -> Any:
+    """Build an InteractiveRuntime from a deployment root and ManagedClient."""
+    from mallcop.actors.interactive_runtime import build_interactive_runtime
+    from mallcop.actors.runtime import build_actor_runner
+    config = load_config(root)
+    store = JsonlStore(root)
+    actor_runner = build_actor_runner(
+        root=root, store=store, config=config, llm=managed_client,
+        validate_paths=False,
+    )
+    return build_interactive_runtime(
+        root=root, store=store, config=config,
+        llm=managed_client, actor_runner=actor_runner,
+    )
+
+
 def _warn_escalation_health(root: Path) -> None:
     """Check escalation paths and warn to stderr if broken.
 
@@ -1105,12 +1121,6 @@ def watch(dry_run: bool, dir_path: str | None, human: bool, backend: str, daemon
                 use_lanes=True,
             )
             cf_home = os.environ.get('CF_HOME')
-            dispatcher = CampfireDispatcher(
-                campfire_id=campfire_id,
-                interactive_runner=None,  # TODO: wire InteractiveRuntime for daemon chat
-                root=root,
-                cf_home=cf_home,
-            )
             bridge = None
             if inbound_mode and bot_token and chat_id:
                 from mallcop.telegram_bridge import TelegramCampfireBridge
@@ -1118,6 +1128,17 @@ def watch(dry_run: bool, dir_path: str | None, human: bool, backend: str, daemon
                     bot_token=bot_token, chat_id=chat_id,
                     campfire_id=campfire_id, inbound_mode=True,
                 )
+            try:
+                interactive_runner = _build_interactive_runner(root, managed_client)
+            except Exception:
+                interactive_runner = None  # non-fatal — chat returns platform error
+            dispatcher = CampfireDispatcher(
+                campfire_id=campfire_id,
+                interactive_runner=interactive_runner,
+                root=root,
+                cf_home=cf_home,
+                bridge=bridge,
+            )
             try:
                 _asyncio.run(_daemon_loop(dispatcher, root, float(scan_interval), idle_timeout_seconds=300.0, bridge=bridge))
             except KeyboardInterrupt:
@@ -1152,9 +1173,13 @@ def watch(dry_run: bool, dir_path: str | None, human: bool, backend: str, daemon
             use_lanes=True,
         )
 
+        try:
+            interactive_runner = _build_interactive_runner(root, managed_client)
+        except Exception:
+            interactive_runner = None
         dispatcher = CampfireDispatcher(
             campfire_id=campfire_id,
-            interactive_runner=None,  # TODO: wire InteractiveRuntime for daemon chat
+            interactive_runner=interactive_runner,
             root=root,
         )
 
@@ -1268,10 +1293,26 @@ def _watch_dispatch_pass(root: Path) -> None:
         campfire_id=campfire_id,
     )
 
+    # Build interactive_runner if pro is configured
+    interactive_runner = None
+    pro = getattr(config, "pro", None)
+    if pro is not None and getattr(pro, "service_token", None):
+        from mallcop.llm.managed import ManagedClient
+        _mc = ManagedClient(
+            endpoint=getattr(pro, "inference_url", None) or "https://mallcop.app",
+            service_token=pro.service_token,
+            use_lanes=True,
+        )
+        try:
+            interactive_runner = _build_interactive_runner(root, _mc)
+        except Exception:
+            interactive_runner = None
+
     dispatcher = CampfireDispatcher(
         campfire_id=campfire_id,
-        interactive_runner=None,  # TODO: wire InteractiveRuntime for daemon chat
+        interactive_runner=interactive_runner,
         root=root,
+        bridge=bridge,
     )
 
     async def _run() -> None:
@@ -1828,7 +1869,16 @@ def chat(dir_path: str | None) -> None:
     import uuid
     session_id = str(uuid.uuid4())
 
-    run_chat_repl(interactive_runner=None, root=root)  # TODO: wire InteractiveRuntime
+    try:
+        managed_client = ManagedClient(
+            endpoint=getattr(pro, "inference_url", None) or "https://mallcop.app",
+            service_token=pro.service_token,
+            use_lanes=True,
+        )
+        interactive_runner = _build_interactive_runner(root, managed_client)
+    except Exception:
+        interactive_runner = None
+    run_chat_repl(interactive_runner=interactive_runner, root=root)
 
 
 # --- Development ---

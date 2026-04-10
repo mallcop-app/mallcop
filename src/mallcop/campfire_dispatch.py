@@ -147,6 +147,7 @@ class CampfireDispatcher:
         cf_bin: str = "cf",
         cf_home: str | None = None,
         cf_timeout: float = _CF_TIMEOUT,
+        bridge: Optional[Any] = None,
     ) -> None:
         self._campfire_id = campfire_id
         self._interactive_runner = interactive_runner
@@ -155,6 +156,7 @@ class CampfireDispatcher:
         self._cf_bin = cf_bin
         self._cf_home = cf_home
         self._cf_timeout = cf_timeout
+        self._bridge = bridge
 
         # One CampfireConversationAdapter per dispatcher; session IDs
         # are derived per-message from the sender's session tag.
@@ -358,7 +360,7 @@ class CampfireDispatcher:
         """
         messages = await self._read_new_messages()
         for msg in messages:
-            await self._dispatch_message(msg)
+            await self._dispatch_message(msg, bridge=self._bridge)
 
     async def run(self) -> None:
         """Poll campfire in a loop, dispatching inbound messages indefinitely.
