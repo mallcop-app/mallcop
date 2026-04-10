@@ -109,40 +109,24 @@ def test_run_once_inbound_does_not_read_relay_inbound() -> None:
 # Tests: relay:response → Telegram forwarding
 # ---------------------------------------------------------------------------
 
-def test_run_once_inbound_forwards_relay_responses_to_telegram() -> None:
-    """relay:response tagged messages must be forwarded to Telegram sendMessage."""
+def test_run_once_inbound_is_noop() -> None:
+    """run_once_inbound is a no-op — no cf calls and no Telegram sends."""
     bridge = _make_bridge_inbound()
 
-    relay_responses = [
-        {
-            "payload": json.dumps({"content": "agent reply here"}),
-            "tags": ["relay:response"],
-        },
-    ]
+    cf_calls: list[list[str]] = []
 
     async def make_proc(*args, **kwargs):
-        cmd_args = list(args)
-        if "relay:response" in cmd_args:
-            return _make_proc(stdout=_cf_json_bytes(relay_responses))
+        cf_calls.append(list(args))
         return _make_proc()
-
-    mock_post_resp = MagicMock()
-    mock_post_resp.raise_for_status.return_value = None
 
     with (
         patch("asyncio.create_subprocess_exec", side_effect=make_proc),
-        patch("requests.post", return_value=mock_post_resp) as mock_post,
+        patch("requests.post") as mock_post,
     ):
         asyncio.run(bridge.run_once_inbound())
 
-    mock_post.assert_called_once()
-    call_kwargs = mock_post.call_args
-    payload = call_kwargs.kwargs.get("json") or (
-        call_kwargs.args[1] if len(call_kwargs.args) > 1 else {}
-    )
-    assert payload.get("text") == "agent reply here", (
-        f"Expected Telegram sendMessage text='agent reply here', got payload: {payload}"
-    )
+    assert not cf_calls, f"run_once_inbound must make no cf calls; got: {cf_calls}"
+    mock_post.assert_not_called()
 
 
 def test_run_once_inbound_no_relay_response_no_telegram_send() -> None:
