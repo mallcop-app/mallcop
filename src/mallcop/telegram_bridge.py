@@ -148,24 +148,20 @@ class TelegramCampfireBridge:
 
         Used when mallcop-pro has registered a Telegram webhook — getUpdates
         cannot be used alongside a webhook.  mallcop-pro delivers inbound
-        Telegram messages to campfire via the cf convention API (relay:inbound tag).
+        Telegram messages to campfire via raw cf send with the relay:inbound tag.
+
+        The CampfireDispatcher reads relay:inbound directly and posts responses
+        with the relay:response tag.  This bridge ONLY needs to forward those
+        responses back to Telegram — it must NOT also read relay:inbound, or it
+        will race with the dispatcher for the same cursor and steal messages.
 
         Steps:
-        1. Read relay:inbound tagged messages from campfire (posted by mallcop-pro
-           via the inbound-message convention operation).
-        2. Forward each to campfire as ``chat`` + ``session:<from_id>`` tagged
-           messages so CampfireDispatcher can pick them up.
-        3. Poll campfire for ``relay:response``-tagged messages from the dispatcher.
-        4. Forward each response to Telegram via ``_send_to_telegram()``.
+        1. Poll campfire for ``relay:response``-tagged messages from the dispatcher.
+        2. Forward each response to Telegram via ``_send_to_telegram()``.
 
-        No getUpdates call. No offset persistence.
+        No getUpdates call. No offset persistence. No relay:inbound read —
+        that's the dispatcher's job.
         """
-        inbound_messages = await self._poll_campfire_inbound()
-        for msg in inbound_messages:
-            content, from_id = self._extract_inbound_fields(msg)
-            if content:
-                await self._send_to_campfire(content, from_id, session_id=from_id)
-
         relay_responses = await self._poll_campfire_relay_response()
         for msg in relay_responses:
             text = self._extract_response_text(msg)

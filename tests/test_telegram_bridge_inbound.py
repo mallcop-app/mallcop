@@ -78,48 +78,14 @@ def test_run_once_inbound_does_not_call_getupdates() -> None:
 # Tests: relay:inbound forwarding to campfire
 # ---------------------------------------------------------------------------
 
-def test_run_once_inbound_forwards_inbound_messages_to_campfire() -> None:
-    """relay:inbound messages from campfire must be forwarded as chat+session tags."""
-    bridge = _make_bridge_inbound()
+def test_run_once_inbound_does_not_read_relay_inbound() -> None:
+    """The bridge MUST NOT read relay:inbound — that's the dispatcher's job.
 
-    inbound_messages = [
-        {
-            "payload": json.dumps({
-                "content": "hello from telegram",
-                "from_id": "456",
-                "platform": "telegram",
-            }),
-            "tags": ["relay:inbound", "session:456"],
-        },
-    ]
-
-    cf_calls: list[list[str]] = []
-
-    async def make_proc(*args, **kwargs):
-        cmd_args = list(args)
-        cf_calls.append(cmd_args)
-        if "relay:inbound" in cmd_args:
-            return _make_proc(stdout=_cf_json_bytes(inbound_messages))
-        return _make_proc()
-
-    with patch("asyncio.create_subprocess_exec", side_effect=make_proc):
-        asyncio.run(bridge.run_once_inbound())
-
-    send_calls = [c for c in cf_calls if "send" in c]
-    assert len(send_calls) == 1, f"Expected exactly one cf send call, got: {send_calls}"
-    send_args = send_calls[0]
-    assert "--tag" in send_args
-    tag_idx = send_args.index("--tag")
-    # chat tag must be present
-    assert "chat" in send_args[tag_idx:], f"Expected 'chat' tag in send args: {send_args}"
-    # session:<from_id> tag must be present
-    session_tags = [a for a in send_args if str(a).startswith("session:")]
-    assert session_tags, f"Expected session:<id> tag in send args: {send_args}"
-    assert "456" in session_tags[0], f"Expected session:456 tag, got: {session_tags}"
-
-
-def test_run_once_inbound_no_inbound_messages_no_cf_send() -> None:
-    """No relay:inbound messages → no cf send calls."""
+    Regression test: previously the bridge read relay:inbound and re-wrote
+    each message as chat+session tagged, racing with the dispatcher for the
+    same cursor and causing a feedback loop where chat history compounded
+    on every poll cycle, generating hundreds of duplicate Telegram replies.
+    """
     bridge = _make_bridge_inbound()
 
     cf_calls: list[list[str]] = []
@@ -131,66 +97,12 @@ def test_run_once_inbound_no_inbound_messages_no_cf_send() -> None:
     with patch("asyncio.create_subprocess_exec", side_effect=make_proc):
         asyncio.run(bridge.run_once_inbound())
 
+    # No cf read with --tag relay:inbound
+    inbound_reads = [c for c in cf_calls if "read" in c and "relay:inbound" in c]
+    assert not inbound_reads, f"Bridge must not read relay:inbound; got: {inbound_reads}"
+    # No cf send at all (the bridge only reads responses, no writes)
     send_calls = [c for c in cf_calls if "send" in c]
-    assert not send_calls, f"Expected no cf send calls; got: {send_calls}"
-
-
-def test_run_once_inbound_multiple_inbound_messages() -> None:
-    """Multiple relay:inbound messages are each forwarded as separate cf send calls."""
-    bridge = _make_bridge_inbound()
-
-    inbound_messages = [
-        {
-            "payload": json.dumps({"content": "msg one", "from_id": "111"}),
-            "tags": ["relay:inbound", "session:111"],
-        },
-        {
-            "payload": json.dumps({"content": "msg two", "from_id": "222"}),
-            "tags": ["relay:inbound", "session:222"],
-        },
-    ]
-
-    cf_calls: list[list[str]] = []
-
-    async def make_proc(*args, **kwargs):
-        cmd_args = list(args)
-        cf_calls.append(cmd_args)
-        if "relay:inbound" in cmd_args:
-            return _make_proc(stdout=_cf_json_bytes(inbound_messages))
-        return _make_proc()
-
-    with patch("asyncio.create_subprocess_exec", side_effect=make_proc):
-        asyncio.run(bridge.run_once_inbound())
-
-    send_calls = [c for c in cf_calls if "send" in c]
-    assert len(send_calls) == 2, f"Expected 2 cf send calls, got: {send_calls}"
-
-
-def test_run_once_inbound_skips_empty_content() -> None:
-    """relay:inbound messages with empty/missing content are silently skipped."""
-    bridge = _make_bridge_inbound()
-
-    inbound_messages = [
-        {
-            "payload": json.dumps({"content": "", "from_id": "789"}),
-            "tags": ["relay:inbound"],
-        },
-    ]
-
-    cf_calls: list[list[str]] = []
-
-    async def make_proc(*args, **kwargs):
-        cmd_args = list(args)
-        cf_calls.append(cmd_args)
-        if "relay:inbound" in cmd_args:
-            return _make_proc(stdout=_cf_json_bytes(inbound_messages))
-        return _make_proc()
-
-    with patch("asyncio.create_subprocess_exec", side_effect=make_proc):
-        asyncio.run(bridge.run_once_inbound())
-
-    send_calls = [c for c in cf_calls if "send" in c]
-    assert not send_calls, f"Expected no cf send for empty content; got: {send_calls}"
+    assert not send_calls, f"Bridge must not write to campfire; got: {send_calls}"
 
 
 # ---------------------------------------------------------------------------
