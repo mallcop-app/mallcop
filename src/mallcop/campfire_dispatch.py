@@ -36,8 +36,10 @@ campfire at registration time.  Operations:
 from __future__ import annotations
 
 import asyncio
+import datetime as _dt
 import json
 import logging
+import re
 from pathlib import Path
 from typing import Any, Optional
 
@@ -50,6 +52,44 @@ _SURFACE = "campfire"
 
 # Tag for filtering inbound messages from the mallcop-relay convention.
 _TAG_RELAY_INBOUND = "relay:inbound"
+
+
+def _parse_cf_timestamp(ts_str: str) -> _dt.datetime | None:
+    """Parse a cf message timestamp into a timezone-aware datetime, or None on failure.
+
+    Handles common cf timestamp formats:
+    - ISO 8601 with/without Z suffix (Python 3.11+ fromisoformat handles both)
+    - Nanosecond fractional seconds (9 digits) truncated to microseconds (6 digits)
+    - Unix nanoseconds as an all-digit string
+    """
+    if not ts_str:
+        return None
+    # Direct fromisoformat — handles Z, +00:00, and up to microsecond precision
+    try:
+        return _dt.datetime.fromisoformat(ts_str)
+    except (ValueError, TypeError):
+        pass
+    # Z → +00:00 fallback (for Python < 3.11 compatibility and edge cases)
+    if ts_str.endswith("Z"):
+        try:
+            return _dt.datetime.fromisoformat(ts_str[:-1] + "+00:00")
+        except (ValueError, TypeError):
+            pass
+    # Truncate fractional seconds beyond 6 digits (nanosecond precision → microsecond)
+    m = re.match(r"^(.*\.\d{6})\d*(.*)$", ts_str)
+    if m:
+        truncated = m.group(1) + m.group(2)
+        try:
+            return _dt.datetime.fromisoformat(truncated)
+        except (ValueError, TypeError):
+            pass
+    # Unix nanoseconds as all-digit string
+    if ts_str.isdigit():
+        try:
+            return _dt.datetime.fromtimestamp(int(ts_str) / 1e9, tz=_dt.timezone.utc)
+        except (ValueError, OverflowError, TypeError):
+            pass
+    return None
 
 
 async def _typing_heartbeat(bridge: Any, chat_id: str) -> None:
@@ -368,17 +408,20 @@ class CampfireDispatcher:
             if not isinstance(items, list):
                 return
             # Filter to recent messages only
-            import datetime as _dt
             cutoff = _dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(seconds=keep_recent_seconds)
             recent = []
             for item in items:
                 ts_str = item.get("timestamp", "")
-                try:
-                    ts = _dt.datetime.fromisoformat(ts_str)
-                    if ts >= cutoff:
-                        recent.append(item)
-                except (ValueError, TypeError):
-                    pass
+                ts = _parse_cf_timestamp(ts_str)
+                if ts is None:
+                    # Unparseable timestamp — keep the message rather than silently drop it.
+                    _log.warning(
+                        "campfire_dispatch: drain_cursor could not parse timestamp %r — keeping message",
+                        ts_str,
+                    )
+                    recent.append(item)
+                elif ts >= cutoff:
+                    recent.append(item)
             _log.info(
                 "campfire_dispatch: drained %d historical, kept %d recent inbound messages",
                 len(items) - len(recent), len(recent),

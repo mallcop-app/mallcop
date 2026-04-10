@@ -634,3 +634,217 @@ def test_run_once_processes_pending_messages(campfire_id: str, tmp_path: Path) -
     assert session_tag in all_msgs[0]["tags"], (
         f"Expected session tag {session_tag!r} in response tags: {all_msgs[0]['tags']}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Tests 13-18: _parse_cf_timestamp and drain_cursor timestamp handling
+# ---------------------------------------------------------------------------
+
+from datetime import timedelta as _dt_timedelta  # noqa: E402
+
+
+def test_drain_cursor_keeps_message_on_unparseable_timestamp(tmp_path: Path) -> None:
+    """drain_cursor keeps a message with an unparseable timestamp and logs a warning."""
+    mock_client = _make_mock_client()
+    dispatcher = CampfireDispatcher(
+        campfire_id="fake-campfire-id",
+        interactive_runner=mock_client,
+        root=tmp_path,
+        poll_interval=0.1,
+    )
+
+    items = [
+        {"timestamp": "garbage-not-a-date", "body": json.dumps({"from_id": "u1", "content": "hi"})},
+    ]
+
+    dispatched: list[dict] = []
+
+    async def _noop_dispatch(m, **kw):
+        dispatched.append(m)
+
+    async def run():
+        with (
+            patch.object(dispatcher, "_cf", new=AsyncMock(return_value=json.dumps(items))),
+            patch.object(dispatcher, "_dispatch_message", side_effect=_noop_dispatch),
+            patch("mallcop.campfire_dispatch._log") as mock_log,
+        ):
+            await dispatcher.drain_cursor(keep_recent_seconds=120)
+            assert mock_log.warning.called, "Expected warning log for unparseable timestamp"
+            warning_calls = [str(c) for c in mock_log.warning.call_args_list]
+            assert any("garbage-not-a-date" in w for w in warning_calls), (
+                f"Expected raw ts_str in warning, got: {warning_calls}"
+            )
+
+    asyncio.run(run())
+    assert len(dispatched) == 1, (
+        f"Expected message with unparseable timestamp to be kept, got {len(dispatched)} dispatched"
+    )
+
+
+def test_drain_cursor_handles_nanosecond_iso(tmp_path: Path) -> None:
+    """drain_cursor parses nanosecond-precision ISO timestamps (9 fractional digits)."""
+    mock_client = _make_mock_client()
+    dispatcher = CampfireDispatcher(
+        campfire_id="fake-campfire-id",
+        interactive_runner=mock_client,
+        root=tmp_path,
+        poll_interval=0.1,
+    )
+
+    # 30 seconds ago — should be within 120s window
+    recent_dt = datetime.now(timezone.utc) - _dt_timedelta(seconds=30)
+    # Format with nanoseconds (9 fractional digits)
+    ts_nano = recent_dt.strftime("%Y-%m-%dT%H:%M:%S") + ".123456789Z"
+    items = [{"timestamp": ts_nano, "body": json.dumps({"from_id": "u1", "content": "hi"})}]
+
+    dispatched: list[dict] = []
+
+    async def _noop_dispatch(m, **kw):
+        dispatched.append(m)
+
+    async def run():
+        with (
+            patch.object(dispatcher, "_cf", new=AsyncMock(return_value=json.dumps(items))),
+            patch.object(dispatcher, "_dispatch_message", side_effect=_noop_dispatch),
+        ):
+            await dispatcher.drain_cursor(keep_recent_seconds=120)
+
+    asyncio.run(run())
+    assert len(dispatched) == 1, (
+        f"Expected nanosecond timestamp message to be kept (30s old, 120s window), "
+        f"got {len(dispatched)} dispatched"
+    )
+
+
+def test_drain_cursor_handles_z_suffix(tmp_path: Path) -> None:
+    """drain_cursor parses ISO timestamps with Z suffix (no fractional seconds)."""
+    mock_client = _make_mock_client()
+    dispatcher = CampfireDispatcher(
+        campfire_id="fake-campfire-id",
+        interactive_runner=mock_client,
+        root=tmp_path,
+        poll_interval=0.1,
+    )
+
+    recent_dt = datetime.now(timezone.utc) - _dt_timedelta(seconds=10)
+    ts_z = recent_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+    items = [{"timestamp": ts_z, "body": json.dumps({"from_id": "u1", "content": "hi"})}]
+
+    dispatched: list[dict] = []
+
+    async def _noop_dispatch(m, **kw):
+        dispatched.append(m)
+
+    async def run():
+        with (
+            patch.object(dispatcher, "_cf", new=AsyncMock(return_value=json.dumps(items))),
+            patch.object(dispatcher, "_dispatch_message", side_effect=_noop_dispatch),
+        ):
+            await dispatcher.drain_cursor(keep_recent_seconds=120)
+
+    asyncio.run(run())
+    assert len(dispatched) == 1, (
+        f"Expected Z-suffix timestamp message to be kept (10s old, 120s window), "
+        f"got {len(dispatched)} dispatched"
+    )
+
+
+def test_drain_cursor_handles_unix_nanos(tmp_path: Path) -> None:
+    """drain_cursor parses unix nanosecond timestamps (all-digit string)."""
+    import time
+
+    mock_client = _make_mock_client()
+    dispatcher = CampfireDispatcher(
+        campfire_id="fake-campfire-id",
+        interactive_runner=mock_client,
+        root=tmp_path,
+        poll_interval=0.1,
+    )
+
+    # 5 seconds ago in nanoseconds
+    ns = int((time.time() - 5) * 1e9)
+    items = [{"timestamp": str(ns), "body": json.dumps({"from_id": "u1", "content": "hi"})}]
+
+    dispatched: list[dict] = []
+
+    async def _noop_dispatch(m, **kw):
+        dispatched.append(m)
+
+    async def run():
+        with (
+            patch.object(dispatcher, "_cf", new=AsyncMock(return_value=json.dumps(items))),
+            patch.object(dispatcher, "_dispatch_message", side_effect=_noop_dispatch),
+        ):
+            await dispatcher.drain_cursor(keep_recent_seconds=120)
+
+    asyncio.run(run())
+    assert len(dispatched) == 1, (
+        f"Expected unix-nanos timestamp message to be kept (5s old, 120s window), "
+        f"got {len(dispatched)} dispatched"
+    )
+
+
+def test_drain_cursor_discards_genuinely_old(tmp_path: Path) -> None:
+    """drain_cursor discards a message with a timestamp 5 minutes in the past."""
+    mock_client = _make_mock_client()
+    dispatcher = CampfireDispatcher(
+        campfire_id="fake-campfire-id",
+        interactive_runner=mock_client,
+        root=tmp_path,
+        poll_interval=0.1,
+    )
+
+    old_dt = datetime.now(timezone.utc) - _dt_timedelta(minutes=5)
+    ts_old = old_dt.isoformat()
+    items = [{"timestamp": ts_old, "body": json.dumps({"from_id": "u1", "content": "old"})}]
+
+    dispatched: list[dict] = []
+
+    async def _noop_dispatch(m, **kw):
+        dispatched.append(m)
+
+    async def run():
+        with (
+            patch.object(dispatcher, "_cf", new=AsyncMock(return_value=json.dumps(items))),
+            patch.object(dispatcher, "_dispatch_message", side_effect=_noop_dispatch),
+        ):
+            await dispatcher.drain_cursor(keep_recent_seconds=120)
+
+    asyncio.run(run())
+    assert len(dispatched) == 0, (
+        f"Expected 5-minute-old message to be discarded (120s window), "
+        f"got {len(dispatched)} dispatched"
+    )
+
+
+def test_drain_cursor_keeps_recent(tmp_path: Path) -> None:
+    """drain_cursor keeps a message with a timestamp 30 seconds ago."""
+    mock_client = _make_mock_client()
+    dispatcher = CampfireDispatcher(
+        campfire_id="fake-campfire-id",
+        interactive_runner=mock_client,
+        root=tmp_path,
+        poll_interval=0.1,
+    )
+
+    recent_dt = datetime.now(timezone.utc) - _dt_timedelta(seconds=30)
+    ts_recent = recent_dt.isoformat()
+    items = [{"timestamp": ts_recent, "body": json.dumps({"from_id": "u1", "content": "recent"})}]
+
+    dispatched: list[dict] = []
+
+    async def _noop_dispatch(m, **kw):
+        dispatched.append(m)
+
+    async def run():
+        with (
+            patch.object(dispatcher, "_cf", new=AsyncMock(return_value=json.dumps(items))),
+            patch.object(dispatcher, "_dispatch_message", side_effect=_noop_dispatch),
+        ):
+            await dispatcher.drain_cursor(keep_recent_seconds=120)
+
+    asyncio.run(run())
+    assert len(dispatched) == 1, (
+        f"Expected 30s-old message to be kept (120s window), "
+        f"got {len(dispatched)} dispatched"
+    )
