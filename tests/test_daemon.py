@@ -274,6 +274,7 @@ def test_daemon_loop_exits_cleanly_on_idle_timeout(tmp_path: Path) -> None:
     dispatcher.campfire_id = "fire-test"
     dispatcher.run = AsyncMock(side_effect=asyncio.CancelledError)
     dispatcher.publish_finding = AsyncMock()
+    dispatcher.drain_cursor = AsyncMock()
 
     async def run() -> None:
         async def fake_watchdog(*args, **kwargs) -> None:
@@ -297,21 +298,25 @@ def test_daemon_loop_exits_cleanly_on_idle_timeout(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Test 8: _daemon_loop creates 4 tasks when bridge is provided
+# Test 8: _daemon_loop always creates 3 tasks (bridge no longer polled)
 # ---------------------------------------------------------------------------
 
 
-def test_daemon_loop_creates_bridge_task_when_bridge_provided(tmp_path: Path) -> None:
-    """_daemon_loop should create 4 tasks when bridge is provided."""
+def test_daemon_loop_always_creates_3_tasks(tmp_path: Path) -> None:
+    """_daemon_loop creates 3 tasks (scan, dispatch, watchdog).
+
+    The bridge is no longer polled in a separate task — relay:response delivery
+    is handled by the Go bridge in mallcop-pro. Passing a bridge does not add a task.
+    """
     import mallcop.daemon as daemon_mod
 
     dispatcher = MagicMock()
     dispatcher.campfire_id = "fire-test"
     dispatcher.run = AsyncMock(side_effect=asyncio.CancelledError)
     dispatcher.publish_finding = AsyncMock()
+    dispatcher.drain_cursor = AsyncMock()
 
     bridge = MagicMock()
-    bridge.run_once_inbound = AsyncMock(side_effect=asyncio.CancelledError)
 
     async def run() -> None:
         # Track how many tasks are created
@@ -339,6 +344,6 @@ def test_daemon_loop_creates_bridge_task_when_bridge_provided(tmp_path: Path) ->
                 idle_timeout_seconds=0.1,
                 bridge=bridge,
             )
-        assert task_count[0] == 4, f"expected 4 tasks, got {task_count[0]}"
+        assert task_count[0] == 3, f"expected 3 tasks, got {task_count[0]}"
 
     asyncio.run(run())
