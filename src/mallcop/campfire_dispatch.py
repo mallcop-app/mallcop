@@ -40,7 +40,7 @@ import asyncio
 import json
 import logging
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 from mallcop.conversation import CampfireConversationAdapter
 from mallcop.context_window import ContextWindowManager
@@ -52,6 +52,16 @@ _SURFACE = "campfire"
 
 # Tag for filtering inbound messages from the mallcop-relay convention.
 _TAG_RELAY_INBOUND = "relay:inbound"
+
+
+async def _typing_heartbeat(bridge: Any, chat_id: str) -> None:
+    """Send typing indicator every 4s until cancelled."""
+    while True:
+        try:
+            await bridge.notify_typing(chat_id)
+        except Exception:  # noqa: BLE001
+            pass
+        await asyncio.sleep(4)
 
 
 class CampfireError(RuntimeError):
@@ -267,7 +277,11 @@ class CampfireDispatcher:
                     exc,
                 )
 
-    async def _dispatch_message(self, msg: dict[str, Any]) -> None:
+    async def _dispatch_message(
+        self,
+        msg: dict[str, Any],
+        bridge: Optional[Any] = None,
+    ) -> None:
         """Dispatch one inbound message through chat_turn() and post response."""
         # Import here to avoid circular import at module level.
         from mallcop.chat import chat_turn
@@ -302,6 +316,13 @@ class CampfireDispatcher:
             msg.get("id"), session_id,
         )
 
+        # Start typing heartbeat if a bridge is provided.
+        heartbeat_task: Optional[asyncio.Task] = None
+        if bridge is not None:
+            heartbeat_task = asyncio.create_task(
+                _typing_heartbeat(bridge, session_id)
+            )
+
         try:
             result = await chat_turn(
                 question=question,
@@ -314,6 +335,13 @@ class CampfireDispatcher:
         except Exception as exc:
             _log.error("campfire_dispatch: chat_turn error: %s", exc)
             return
+        finally:
+            if heartbeat_task is not None:
+                heartbeat_task.cancel()
+                try:
+                    await heartbeat_task
+                except asyncio.CancelledError:
+                    pass
 
         await self._post_response(session_id, result)
 
