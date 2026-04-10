@@ -76,7 +76,6 @@ class TelegramCampfireBridge:
         self._cf_home = cf_home
         self._update_offset: int = 0
         self._inbound_mode = inbound_mode
-        self._cursor_drained = False
         # Store token separately; construct per-call URLs at call time so the
         # token is never embedded in a persistent attribute that could appear in logs.
         self._tg_token = bot_token
@@ -145,39 +144,12 @@ class TelegramCampfireBridge:
         await self._persist_offset_to_campfire()
 
     async def run_once_inbound(self) -> None:
-        """Run one poll cycle in campfire-inbound mode (pro-online webhook tier).
+        """No-op — relay:response reading has been removed.
 
-        Used when mallcop-pro has registered a Telegram webhook — getUpdates
-        cannot be used alongside a webhook.  mallcop-pro delivers inbound
-        Telegram messages to campfire via raw cf send with the relay:inbound tag.
-
-        The CampfireDispatcher reads relay:inbound directly and posts responses
-        with the relay:response tag.  This bridge ONLY needs to forward those
-        responses back to Telegram — it must NOT also read relay:inbound, or it
-        will race with the dispatcher for the same cursor and steal messages.
-
-        Steps:
-        1. Poll campfire for ``relay:response``-tagged messages from the dispatcher.
-        2. Forward each response to Telegram via ``_send_to_telegram()``.
-
-        No getUpdates call. No offset persistence. No relay:inbound read —
-        that's the dispatcher's job.
+        The CampfireDispatcher now delivers responses directly via the typing
+        heartbeat and Telegram send path.  This bridge no longer polls
+        relay:response or manages a separate read cursor.
         """
-        # On first call, drain the cursor to skip historical messages.
-        # A fresh cf identity reads ALL messages from the campfire's beginning.
-        # Without this drain, every daemon boot floods Telegram with every
-        # relay:response ever posted.
-        if not self._cursor_drained:
-            self._cursor_drained = True
-            _log.info("telegram_bridge: draining relay:response cursor (skipping historical messages)")
-            await self._poll_campfire_relay_response()  # read and discard
-            return
-
-        relay_responses = await self._poll_campfire_relay_response()
-        for msg in relay_responses:
-            text = self._extract_response_text(msg)
-            if text:
-                await self._send_to_telegram(text)
 
     # ------------------------------------------------------------------
     # Telegram helpers
@@ -395,35 +367,6 @@ class TelegramCampfireBridge:
             items = json.loads(raw)
         except json.JSONDecodeError:
             _log.warning("telegram_bridge: non-JSON from cf read (relay:inbound): %r", raw[:200])
-            return []
-
-        if not isinstance(items, list):
-            return []
-
-        return items
-
-    async def _poll_campfire_relay_response(self) -> list[dict]:
-        """Fetch relay:response tagged messages from campfire (dispatcher responses).
-
-        These are responses posted by CampfireDispatcher for inbound-mode sessions.
-        """
-        try:
-            raw = await self._cf(
-                "read", self._campfire_id,
-                "--json",
-                "--tag", "relay:response",
-            )
-        except Exception as exc:  # noqa: BLE001
-            _log.warning("telegram_bridge: campfire relay:response read error: %s", exc)
-            return []
-
-        if not raw:
-            return []
-
-        try:
-            items = json.loads(raw)
-        except json.JSONDecodeError:
-            _log.warning("telegram_bridge: non-JSON from cf read (relay:response): %r", raw[:200])
             return []
 
         if not isinstance(items, list):
