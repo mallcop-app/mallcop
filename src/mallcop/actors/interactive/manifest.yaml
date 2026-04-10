@@ -1,0 +1,23 @@
+name: interactive
+type: agent
+description: Human-app edge agent — answers operator questions over real environment data
+version: 0.1.0
+
+model: detective    # mid-tier lane in mallcop-pro lane routing
+
+tools:
+  - read-finding
+  - list-findings
+  - search-findings
+  - read-events
+  - search-events
+  - check-baseline
+  - baseline-stats
+  - read-config
+  - read-recent-chat
+  - search-chat-history
+  - annotate-finding
+  - escalate-to-investigator
+permissions:
+  - read
+  - write
