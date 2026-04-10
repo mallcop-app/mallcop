@@ -38,6 +38,7 @@ class ToolContext:
     tool_registry: Any = None  # ToolRegistry for skill tool registration
     trust_store: Any = None  # Optional TrustStore for skill signature verification
     skill_lockfile: Any = None  # Optional dict (from load_lockfile) for hash checks
+    actor_runner: Any = None  # Optional actor_runner closure for recursive dispatch
 
 
 @dataclass
