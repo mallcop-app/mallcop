@@ -1106,9 +1106,12 @@ def watch(dry_run: bool, dir_path: str | None, human: bool, backend: str, daemon
     # --daemon mode: run CampfireDispatcher + periodic scan loop persistently.
     if daemon:
         import asyncio as _asyncio
+        import logging as _logging
         from mallcop.campfire_dispatch import CampfireDispatcher
         from mallcop.daemon import _daemon_loop
         from mallcop.llm.managed import ManagedClient
+
+        _logging.basicConfig(level=_logging.INFO, format="%(name)s: %(message)s")
 
         root = Path(dir_path) if dir_path else Path.cwd()
 
