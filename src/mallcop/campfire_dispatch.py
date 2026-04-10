@@ -348,19 +348,46 @@ class CampfireDispatcher:
     # Public API
     # ------------------------------------------------------------------
 
-    async def drain_cursor(self) -> None:
-        """Advance the campfire read cursor past all existing messages.
+    async def drain_cursor(self, keep_recent_seconds: int = 120) -> None:
+        """Advance the read cursor, keeping only recent messages.
 
-        Call this once before :meth:`run` when the identity is ephemeral
-        (e.g. container daemon mode).  A fresh cf identity starts with its
-        cursor at 0, so the first ``cf read`` returns ALL historical messages.
-        Without draining, every daemon boot re-processes every inbound message.
+        A fresh cf identity starts at cursor 0 and would re-process every
+        historical inbound message.  This reads all messages via ``--all``,
+        filters to those within ``keep_recent_seconds``, and re-queues only
+        those for processing.  The cursor advances to the end.
         """
         _log.info("campfire_dispatch: draining relay:inbound cursor (skipping history)")
         try:
-            await self._read_new_messages()  # read and discard
-        except Exception:
-            pass  # best-effort
+            raw = await self._cf(
+                "read", self._campfire_id, "--all", "--json",
+                "--tag", _TAG_RELAY_INBOUND,
+            )
+            if not raw:
+                return
+            items = json.loads(raw)
+            if not isinstance(items, list):
+                return
+            # Filter to recent messages only
+            import datetime as _dt
+            cutoff = _dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(seconds=keep_recent_seconds)
+            recent = []
+            for item in items:
+                ts_str = item.get("timestamp", "")
+                try:
+                    ts = _dt.datetime.fromisoformat(ts_str)
+                    if ts >= cutoff:
+                        recent.append(item)
+                except (ValueError, TypeError):
+                    pass
+            _log.info(
+                "campfire_dispatch: drained %d historical, kept %d recent inbound messages",
+                len(items) - len(recent), len(recent),
+            )
+            # Process the recent ones immediately
+            for msg in recent:
+                await self._dispatch_message(msg, bridge=self._bridge)
+        except Exception as exc:
+            _log.warning("campfire_dispatch: drain_cursor failed: %s", exc)
 
     async def run_once(self) -> None:
         """Read all pending campfire messages in a single pass and dispatch each.
