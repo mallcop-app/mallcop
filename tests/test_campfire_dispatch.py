@@ -848,3 +848,63 @@ def test_drain_cursor_keeps_recent(tmp_path: Path) -> None:
         f"Expected 30s-old message to be kept (120s window), "
         f"got {len(dispatched)} dispatched"
     )
+
+
+# ---------------------------------------------------------------------------
+# Tests 19-21: int timestamp handling (cf v0.17.4 emits unix nanos as int)
+# ---------------------------------------------------------------------------
+
+from mallcop.campfire_dispatch import _parse_cf_timestamp  # noqa: E402
+import time as _time  # noqa: E402
+
+
+def test_parse_cf_timestamp_int_nanos() -> None:
+    """_parse_cf_timestamp handles int unix nanoseconds (cf v0.17.4 format)."""
+    # 1775740851063043456 ns ≈ 2026-04-07
+    ns = 1775740851063043456
+    result = _parse_cf_timestamp(ns)
+    assert result is not None, "Expected a valid datetime from int nanoseconds"
+    assert result.tzinfo is not None, "Expected timezone-aware datetime"
+    # Rough sanity: year should be around 2026
+    assert result.year == 2026, f"Expected year 2026, got {result.year}"
+
+
+def test_parse_cf_timestamp_int_zero() -> None:
+    """_parse_cf_timestamp handles int 0 (unix epoch)."""
+    result = _parse_cf_timestamp(0)
+    assert result is not None, "Expected a valid datetime for epoch (0)"
+    assert result.year == 1970
+    assert result.tzinfo is not None
+
+
+def test_drain_cursor_handles_int_timestamps(tmp_path: Path) -> None:
+    """drain_cursor doesn't crash when cf returns int timestamps (cf v0.17.4)."""
+    mock_client = _make_mock_client()
+    dispatcher = CampfireDispatcher(
+        campfire_id="fake-campfire-id",
+        interactive_runner=mock_client,
+        root=tmp_path,
+        poll_interval=0.1,
+    )
+
+    # 5 seconds ago as int nanoseconds (what cf v0.17.4 emits)
+    ns = int((_time.time() - 5) * 1e9)
+    items = [{"timestamp": ns, "payload": json.dumps({"from_id": "u1", "content": "hi"})}]
+
+    dispatched: list[dict] = []
+
+    async def _noop_dispatch(m, **kw):
+        dispatched.append(m)
+
+    async def run():
+        with (
+            patch.object(dispatcher, "_cf", new=AsyncMock(return_value=json.dumps(items))),
+            patch.object(dispatcher, "_dispatch_message", side_effect=_noop_dispatch),
+        ):
+            await dispatcher.drain_cursor(keep_recent_seconds=120)
+
+    asyncio.run(run())
+    assert len(dispatched) == 1, (
+        f"Expected int-timestamp message to be kept (5s old, 120s window), "
+        f"got {len(dispatched)} dispatched"
+    )
