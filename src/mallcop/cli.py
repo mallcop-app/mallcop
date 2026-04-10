@@ -49,11 +49,17 @@ def _build_actor_runner(root: Path, backend: str = "anthropic"):
     )
 
 
-def _build_interactive_runner(root: Path, managed_client: Any) -> Any:
-    """Build an InteractiveRuntime from a deployment root and ManagedClient."""
+def _build_interactive_runner(root: Path, managed_client: Any, config: Any = None) -> Any:
+    """Build an InteractiveRuntime from a deployment root and ManagedClient.
+
+    ``config`` may be passed by container-mode callers that skip load_config
+    because there is no mallcop.yaml on disk.  When omitted, config is loaded
+    from the deployment root as usual.
+    """
     from mallcop.actors.interactive_runtime import build_interactive_runtime
     from mallcop.actors.runtime import build_actor_runner
-    config = load_config(root)
+    if config is None:
+        config = load_config(root)
     store = JsonlStore(root)
     actor_runner = build_actor_runner(
         root=root, store=store, config=config, llm=managed_client,
@@ -1128,8 +1134,20 @@ def watch(dry_run: bool, dir_path: str | None, human: bool, backend: str, daemon
                     bot_token=bot_token, chat_id=chat_id,
                     campfire_id=campfire_id, inbound_mode=True,
                 )
+            # Build a minimal config for container mode — no mallcop.yaml on disk.
+            from mallcop.config import MallcopConfig, BudgetConfig, DeliveryConfig
+            _container_config = MallcopConfig(
+                secrets_backend="env",
+                connectors={},
+                routing={},
+                actor_chain={},
+                budget=BudgetConfig(),
+                delivery=DeliveryConfig(campfire_id=campfire_id or ""),
+            )
             try:
-                interactive_runner = _build_interactive_runner(root, managed_client)
+                interactive_runner = _build_interactive_runner(
+                    root, managed_client, config=_container_config
+                )
             except Exception:
                 interactive_runner = None  # non-fatal — chat returns platform error
             dispatcher = CampfireDispatcher(
