@@ -42,6 +42,7 @@ def test_daemon_envvar_creates_bridge_when_inbound_mode(tmp_path: Path) -> None:
     MockBridge.assert_called_once_with(
         bot_token='bot123', chat_id='456',
         campfire_id='fire-abc', inbound_mode=True,
+        cf_home=None,
     )
     assert daemon_loop_args.get('bridge') is not None
 
