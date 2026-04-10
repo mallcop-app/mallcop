@@ -1148,7 +1148,9 @@ def watch(dry_run: bool, dir_path: str | None, human: bool, backend: str, daemon
                 interactive_runner = _build_interactive_runner(
                     root, managed_client, config=_container_config
                 )
-            except Exception:
+                click.echo(f"[daemon] InteractiveRuntime built: {type(interactive_runner).__name__}", err=True)
+            except Exception as exc:
+                click.echo(f"[daemon] InteractiveRuntime build FAILED: {exc}", err=True)
                 interactive_runner = None  # non-fatal — chat returns platform error
             dispatcher = CampfireDispatcher(
                 campfire_id=campfire_id,
