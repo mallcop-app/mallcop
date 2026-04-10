@@ -49,6 +49,65 @@ def _build_actor_runner(root: Path, backend: str = "anthropic"):
     )
 
 
+def _create_bridge_identity(dispatcher_cf_home: str | None, campfire_id: str) -> str | None:
+    """Create a separate cf identity for the Telegram bridge.
+
+    The bridge needs its own read cursor so it doesn't race with the
+    dispatcher.  Uses ``cf init --name mallcop-bridge`` under the same
+    parent as the dispatcher identity, then joins the campfire.
+
+    Returns the bridge's CF_HOME path, or None on failure.
+    """
+    import subprocess as _sp
+    if not dispatcher_cf_home:
+        return None
+    parent = str(Path(dispatcher_cf_home).parent)
+    try:
+        result = _sp.run(
+            ["cf", "init", "--name", "mallcop-bridge", "--cf-home", parent],
+            capture_output=True, text=True,
+        )
+        bridge_home = str(Path(parent) / "mallcop-bridge")
+        if not Path(bridge_home).exists():
+            click.echo(f"[daemon] bridge identity init failed: {result.stderr[:200]}", err=True)
+            return None
+        # Join the campfire via relay so cf read works.
+        # The bridge also needs admission — request it via mallcop-pro API.
+        relay = os.environ.get("CAMPFIRE_REMOTE_URL", "")
+        join_cmd = ["cf", "join", campfire_id, "--cf-home", bridge_home]
+        if relay:
+            join_cmd += ["--via", f"{relay}/api"]
+        # Get pubkey for admission
+        id_result = _sp.run(
+            ["cf", "id", "--cf-home", bridge_home, "--json"],
+            capture_output=True, text=True,
+        )
+        import json as _json
+        pubkey = ""
+        try:
+            pubkey = _json.loads(id_result.stdout).get("public_key", "")
+        except Exception:
+            pass
+        if pubkey:
+            api_url = os.environ.get("MALLCOP_PRO_INFERENCE_URL", "https://mallcop-pro-api.azurewebsites.net")
+            svc_token = os.environ.get("MALLCOP_PRO_SERVICE_TOKEN", "")
+            import requests as _requests
+            try:
+                _requests.post(
+                    f"{api_url}/api/pro-online/admit",
+                    headers={"Authorization": f"Bearer {svc_token}", "Content-Type": "application/json"},
+                    json={"pubkey": pubkey},
+                    timeout=10,
+                )
+            except Exception:
+                pass  # best-effort
+        _sp.run(join_cmd, capture_output=True, text=True)
+        click.echo(f"[daemon] bridge identity ready: {bridge_home}", err=True)
+        return bridge_home
+    except Exception as exc:
+        click.echo(f"[daemon] bridge identity creation failed: {exc}", err=True)
+        return None
+
 
 def _build_interactive_runner(root: Path, managed_client: Any, config: Any = None) -> Any:
     """Build an InteractiveRuntime from a deployment root and ManagedClient.
@@ -1134,9 +1193,15 @@ def watch(dry_run: bool, dir_path: str | None, human: bool, backend: str, daemon
             bridge = None
             if inbound_mode and bot_token and chat_id:
                 from mallcop.telegram_bridge import TelegramCampfireBridge
+                # Bridge needs its own cf identity so its read cursor is
+                # independent from the dispatcher's.  cf cursors are global
+                # per-identity — two readers on the same CF_HOME steal each
+                # other's messages.
+                bridge_cf_home = _create_bridge_identity(cf_home, campfire_id)
                 bridge = TelegramCampfireBridge(
                     bot_token=bot_token, chat_id=chat_id,
                     campfire_id=campfire_id, inbound_mode=True,
+                    cf_home=bridge_cf_home,
                 )
             # Build a minimal config for container mode — no mallcop.yaml on disk.
             from mallcop.config import MallcopConfig, BudgetConfig, DeliveryConfig
