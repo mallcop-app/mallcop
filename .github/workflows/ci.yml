@@ -28,7 +28,7 @@ jobs:
             && tar xzf /tmp/cf.tar.gz -C /tmp \
             && sudo install -m 755 /tmp/cf_linux_amd64/cf /usr/local/bin/cf \
             && rm -rf /tmp/cf.tar.gz /tmp/cf_linux_amd64
-          cf identity init
+          cf init
           cf --version
 
       - name: Install dependencies
