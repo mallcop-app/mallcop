@@ -216,6 +216,23 @@ class TelegramCampfireBridge:
 
         await asyncio.to_thread(_post)
 
+    async def notify_typing(self, chat_id: str | int) -> None:
+        """Send a typing indicator to Telegram (lasts ~5s; heartbeat every 4s)."""
+        def _post() -> None:
+            url = f"{self._tg_base}/sendChatAction"
+            payload = {"chat_id": chat_id, "action": "typing"}
+            try:
+                resp = requests.post(url, json=payload, timeout=10)
+                if not resp.ok:
+                    _log.debug("notify_typing failed: %s", resp.text)
+            except Exception as exc:  # noqa: BLE001
+                _log.debug(
+                    "notify_typing error: %s",
+                    str(exc).replace(self._tg_token, "***"),
+                )
+
+        await asyncio.to_thread(_post)
+
     # ------------------------------------------------------------------
     # Offset persistence helpers
     # ------------------------------------------------------------------
