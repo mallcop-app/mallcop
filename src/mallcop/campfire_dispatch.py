@@ -54,16 +54,29 @@ _SURFACE = "campfire"
 _TAG_RELAY_INBOUND = "relay:inbound"
 
 
-def _parse_cf_timestamp(ts_str: str) -> _dt.datetime | None:
-    """Parse a cf message timestamp into a timezone-aware datetime, or None on failure.
+def _parse_cf_timestamp(ts_str) -> _dt.datetime | None:
+    """Parse a cf message timestamp (string ISO or int nanoseconds) into a datetime, or None on failure.
 
     Handles common cf timestamp formats:
+    - int unix nanoseconds (cf v0.17.4+ emits timestamps as int)
     - ISO 8601 with/without Z suffix (Python 3.11+ fromisoformat handles both)
     - Nanosecond fractional seconds (9 digits) truncated to microseconds (6 digits)
     - Unix nanoseconds as an all-digit string
     """
-    if not ts_str:
+    if ts_str is None or ts_str == "":
         return None
+
+    # Normalize int input (cf may return unix nanoseconds as int).
+    if isinstance(ts_str, int):
+        try:
+            return _dt.datetime.fromtimestamp(ts_str / 1e9, tz=_dt.timezone.utc)
+        except (ValueError, OverflowError, TypeError):
+            return None
+
+    # Must be a string from here on.
+    if not isinstance(ts_str, str):
+        return None
+
     # Direct fromisoformat — handles Z, +00:00, and up to microsecond precision
     try:
         return _dt.datetime.fromisoformat(ts_str)
@@ -338,7 +351,7 @@ class CampfireDispatcher:
             pass  # treat raw payload as the question
 
         if not question:
-            _log.debug("campfire_dispatch: empty question in message %s", msg.get("id"))
+            _log.info("campfire_dispatch: skipping msg %s (empty question)", (msg.get("id") or "?")[:8])
             return
 
         # Derive session_id from the convention payload's from_id.
@@ -351,9 +364,9 @@ class CampfireDispatcher:
             )
             return
 
-        _log.debug(
-            "campfire_dispatch: dispatching message %s (session %s)",
-            msg.get("id"), session_id,
+        _log.info(
+            "campfire_dispatch: dispatching msg %s tags=%s session=%s",
+            (msg.get("id") or "?")[:8], msg.get("tags", []), session_id,
         )
 
         # Start typing heartbeat if a bridge is provided.
@@ -443,7 +456,12 @@ class CampfireDispatcher:
         invocations) and is also the core of the :meth:`run` loop.
         """
         messages = await self._read_new_messages()
+        _log.info("campfire_dispatch: poll cycle: read %d new messages from cursor", len(messages))
         for msg in messages:
+            msg_id = (msg.get("id") or "?")[:8]
+            tags = msg.get("tags", [])
+            sender = (msg.get("sender") or "?")[:8]
+            _log.info("campfire_dispatch: poll dispatched msg %s tags=%s sender=%s", msg_id, tags, sender)
             await self._dispatch_message(msg, bridge=self._bridge)
 
     async def run(self) -> None:
