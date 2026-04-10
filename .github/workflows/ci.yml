@@ -21,6 +21,16 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
+      - name: Install cf
+        run: |
+          curl -fsSL https://github.com/campfire-net/campfire/releases/download/v0.17.6/cf_linux_amd64.tar.gz \
+            -o /tmp/cf.tar.gz \
+            && tar xzf /tmp/cf.tar.gz -C /tmp \
+            && sudo install -m 755 /tmp/cf_linux_amd64/cf /usr/local/bin/cf \
+            && rm -rf /tmp/cf.tar.gz /tmp/cf_linux_amd64
+          cf identity init
+          cf --version
+
       - name: Install dependencies
         run: pip install -e ".[dev]"
 
