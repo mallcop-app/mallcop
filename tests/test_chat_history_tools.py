@@ -29,7 +29,7 @@ from mallcop.tools.chat_history import read_recent_chat, search_chat_history
 def _create_campfire(description: str) -> str:
     """Create a real campfire, return its ID."""
     result = subprocess.run(
-        ["cf", "create", "--description", description, "--json"],
+        ["cf", "create", "--description", description, "--transport", "filesystem", "--no-config", "--json"],
         capture_output=True, text=True,
     )
     assert result.returncode == 0, f"cf create failed: {result.stderr}"

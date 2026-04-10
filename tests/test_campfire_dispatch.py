@@ -49,7 +49,7 @@ def _extract_campfire_id(output: str) -> str:
 def _create_campfire_with_convention(description: str) -> str:
     """Create a real campfire and declare the mallcop-relay convention on it."""
     result = subprocess.run(
-        ["cf", "create", "--description", description, "--json"],
+        ["cf", "create", "--description", description, "--transport", "filesystem", "--no-config", "--json"],
         capture_output=True, text=True,
     )
     assert result.returncode == 0, f"cf create failed: {result.stderr}"

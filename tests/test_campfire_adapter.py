@@ -29,7 +29,7 @@ from mallcop.conversation import (
 def _create_campfire(description: str) -> str:
     """Create a real campfire and return its ID."""
     result = subprocess.run(
-        ["cf", "create", "--description", description],
+        ["cf", "create", "--description", description, "--transport", "filesystem", "--no-config"],
         capture_output=True,
         text=True,
     )
