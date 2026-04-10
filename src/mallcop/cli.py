@@ -71,11 +71,37 @@ def _create_bridge_identity(dispatcher_cf_home: str | None, campfire_id: str) ->
         if not Path(bridge_home).exists():
             click.echo(f"[daemon] bridge identity init failed: {result.stderr[:200]}", err=True)
             return None
-        # Join the campfire so cf read works
-        _sp.run(
-            ["cf", "join", campfire_id, "--cf-home", bridge_home],
+        # Join the campfire via relay so cf read works.
+        # The bridge also needs admission — request it via mallcop-pro API.
+        relay = os.environ.get("CAMPFIRE_REMOTE_URL", "")
+        join_cmd = ["cf", "join", campfire_id, "--cf-home", bridge_home]
+        if relay:
+            join_cmd += ["--via", f"{relay}/api"]
+        # Get pubkey for admission
+        id_result = _sp.run(
+            ["cf", "id", "--cf-home", bridge_home, "--json"],
             capture_output=True, text=True,
         )
+        import json as _json
+        pubkey = ""
+        try:
+            pubkey = _json.loads(id_result.stdout).get("public_key", "")
+        except Exception:
+            pass
+        if pubkey:
+            api_url = os.environ.get("MALLCOP_PRO_INFERENCE_URL", "https://mallcop-pro-api.azurewebsites.net")
+            svc_token = os.environ.get("MALLCOP_PRO_SERVICE_TOKEN", "")
+            import requests as _requests
+            try:
+                _requests.post(
+                    f"{api_url}/api/pro-online/admit",
+                    headers={"Authorization": f"Bearer {svc_token}", "Content-Type": "application/json"},
+                    json={"pubkey": pubkey},
+                    timeout=10,
+                )
+            except Exception:
+                pass  # best-effort
+        _sp.run(join_cmd, capture_output=True, text=True)
         click.echo(f"[daemon] bridge identity ready: {bridge_home}", err=True)
         return bridge_home
     except Exception as exc:

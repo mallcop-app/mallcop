@@ -33,7 +33,7 @@ mallcop = "mallcop.cli:cli"
 where = ["src"]
 
 [tool.setuptools.package-data]
-mallcop = ["models.yaml"]
+mallcop = ["models.yaml", "actors/*/manifest.yaml", "actors/*/POST.md"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
