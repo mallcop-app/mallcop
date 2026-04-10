@@ -64,13 +64,29 @@ if [ -d /app/conventions/mallcop-relay ]; then
     cf convention adopt /app/conventions/mallcop-relay/ --cf-home "$CF_HOME" 2>&1 || echo "[daemon] WARNING: Convention adopt failed" >&2
 fi
 
-# Step 3: Join campfire via relay with invite code
-if [ -n "$MALLCOP_CAMPFIRE_ID" ] && [ -n "$CAMPFIRE_JOIN_CREDENTIAL" ]; then
+# Step 3: Admit daemon identity to the customer's campfire, then join.
+if [ -n "$MALLCOP_CAMPFIRE_ID" ]; then
     if [ ! -d "$CF_HOME/campfires/$MALLCOP_CAMPFIRE_ID" ]; then
+        # Get our public key and submit it to the admit endpoint so the
+        # campfire owner (mallcop-pro) can grant us entry before we join.
+        PUBKEY=$(cf id --cf-home "$CF_HOME" --json | python3 -c "import json,sys; print(json.load(sys.stdin).get('public_key',''))" 2>/dev/null || true)
+        if [ -n "$PUBKEY" ] && [ -n "$MALLCOP_PRO_SERVICE_TOKEN" ]; then
+            echo "[daemon] Requesting campfire admission..."
+            ADMIT_RESP=$(curl -s --max-time 10 -X POST "${MALLCOP_API}/api/pro-online/admit" \
+                -H "Authorization: Bearer ${MALLCOP_PRO_SERVICE_TOKEN}" \
+                -H "Content-Type: application/json" \
+                -d "{\"pubkey\":\"$PUBKEY\"}" 2>&1)
+            ADMIT_STATUS=$(echo "$ADMIT_RESP" | python3 -c "import json,sys; print(json.load(sys.stdin).get('status',''))" 2>/dev/null || true)
+            if [ "$ADMIT_STATUS" != "ok" ]; then
+                echo "[daemon] WARNING: Admit failed: ${ADMIT_RESP:0:200}" >&2
+            fi
+        else
+            echo "[daemon] WARNING: Could not get pubkey or service token not set — skipping admit" >&2
+        fi
+
         echo "[daemon] Joining campfire ${MALLCOP_CAMPFIRE_ID:0:16}..."
-        cf join --via "$RELAY_ENDPOINT" \
-            --invite-code "$CAMPFIRE_JOIN_CREDENTIAL" \
-            "$MALLCOP_CAMPFIRE_ID" \
+        cf join "$MALLCOP_CAMPFIRE_ID" \
+            --via "$RELAY_ENDPOINT" \
             --cf-home "$CF_HOME" || echo "[daemon] WARNING: Join failed" >&2
     fi
 fi
