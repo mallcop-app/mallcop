@@ -76,6 +76,7 @@ class TelegramCampfireBridge:
         self._cf_home = cf_home
         self._update_offset: int = 0
         self._inbound_mode = inbound_mode
+        self._cursor_drained = False
         # Store token separately; construct per-call URLs at call time so the
         # token is never embedded in a persistent attribute that could appear in logs.
         self._tg_token = bot_token
@@ -162,6 +163,16 @@ class TelegramCampfireBridge:
         No getUpdates call. No offset persistence. No relay:inbound read —
         that's the dispatcher's job.
         """
+        # On first call, drain the cursor to skip historical messages.
+        # A fresh cf identity reads ALL messages from the campfire's beginning.
+        # Without this drain, every daemon boot floods Telegram with every
+        # relay:response ever posted.
+        if not self._cursor_drained:
+            self._cursor_drained = True
+            _log.info("telegram_bridge: draining relay:response cursor (skipping historical messages)")
+            await self._poll_campfire_relay_response()  # read and discard
+            return
+
         relay_responses = await self._poll_campfire_relay_response()
         for msg in relay_responses:
             text = self._extract_response_text(msg)

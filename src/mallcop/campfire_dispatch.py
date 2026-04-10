@@ -348,6 +348,20 @@ class CampfireDispatcher:
     # Public API
     # ------------------------------------------------------------------
 
+    async def drain_cursor(self) -> None:
+        """Advance the campfire read cursor past all existing messages.
+
+        Call this once before :meth:`run` when the identity is ephemeral
+        (e.g. container daemon mode).  A fresh cf identity starts with its
+        cursor at 0, so the first ``cf read`` returns ALL historical messages.
+        Without draining, every daemon boot re-processes every inbound message.
+        """
+        _log.info("campfire_dispatch: draining relay:inbound cursor (skipping history)")
+        try:
+            await self._read_new_messages()  # read and discard
+        except Exception:
+            pass  # best-effort
+
     async def run_once(self) -> None:
         """Read all pending campfire messages in a single pass and dispatch each.
 
@@ -386,6 +400,7 @@ class CampfireDispatcher:
             "campfire_dispatch: starting loop on %s (poll_interval=%.1fs)",
             self._campfire_id, self._poll_interval,
         )
+
         _consecutive_errors: int = 0
         try:
             while True:

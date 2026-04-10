@@ -100,6 +100,11 @@ async def _daemon_loop(
     campfire_id = getattr(dispatcher, "campfire_id", "")
     cf_home = os.environ.get("CF_HOME")
 
+    # Drain cursors before starting the poll loops.  Ephemeral identities
+    # (container mode) start at cursor 0 and would re-process every historical
+    # message without this.
+    await dispatcher.drain_cursor()
+
     scan_task = asyncio.create_task(_scan_loop(dispatcher, root, scan_interval))
     dispatch_task = asyncio.create_task(dispatcher.run())
     watchdog_task = asyncio.create_task(
