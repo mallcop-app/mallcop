@@ -1,0 +1,17 @@
+{
+  "convention": "mallcop-relay",
+  "version": "0.2",
+  "operation": "response",
+  "description": "Cloud agent posts inference response",
+  "args": [
+    {"name": "content", "type": "string", "required": true, "max_length": 65536},
+    {"name": "session_id", "type": "string", "required": true, "max_length": 64},
+    {"name": "tokens_used", "type": "integer", "required": false, "min": 0}
+  ],
+  "produces_tags": [
+    {"tag": "relay:response", "cardinality": "exactly_one"},
+    {"tag": "relay:session_id:*", "cardinality": "exactly_one"}
+  ],
+  "antecedents": "none",
+  "signing": "member_key"
+}

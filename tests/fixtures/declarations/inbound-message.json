@@ -1,0 +1,17 @@
+{
+  "convention": "mallcop-relay",
+  "version": "0.2",
+  "operation": "inbound-message",
+  "description": "Relay an inbound Telegram message into the campfire",
+  "args": [
+    {"name": "content", "type": "string", "required": true, "max_length": 4096},
+    {"name": "from_id", "type": "string", "required": true, "max_length": 64},
+    {"name": "platform", "type": "string", "required": true, "max_length": 32}
+  ],
+  "produces_tags": [
+    {"tag": "relay:inbound", "cardinality": "exactly_one"},
+    {"tag": "relay:from_id:*", "cardinality": "exactly_one"}
+  ],
+  "antecedents": "none",
+  "signing": "member_key"
+}

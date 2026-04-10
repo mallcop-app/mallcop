@@ -1,0 +1,15 @@
+{
+  "convention": "mallcop-relay",
+  "version": "0.2",
+  "operation": "status",
+  "description": "Cloud agent lifecycle event",
+  "args": [
+    {"name": "state", "type": "string", "required": true, "max_length": 32},
+    {"name": "reason", "type": "string", "required": false, "max_length": 1024}
+  ],
+  "produces_tags": [
+    {"tag": "agent:status", "cardinality": "exactly_one"}
+  ],
+  "antecedents": "none",
+  "signing": "member_key"
+}

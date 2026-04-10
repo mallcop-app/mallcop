@@ -28,9 +28,9 @@ from mallcop.campfire_dispatch import CampfireDispatcher
 from mallcop.llm_types import LLMResponse
 from mallcop.schemas import Finding, FindingStatus, Severity
 
-# Per-operation declaration files are in mallcop-pro. For tests, we inline
-# the declarations since the daemon doesn't depend on mallcop-pro at runtime.
-_DECLARATIONS_DIR = Path(__file__).resolve().parent.parent.parent / "mallcop-pro" / "internal" / "proonline" / "declarations"
+# Per-operation declaration files are bundled in tests/fixtures/declarations/
+# (copied from mallcop-pro) so CI doesn't need the sibling repo checked out.
+_DECLARATIONS_DIR = Path(__file__).resolve().parent / "fixtures" / "declarations"
 
 
 # ---------------------------------------------------------------------------
