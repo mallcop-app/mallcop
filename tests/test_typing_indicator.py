@@ -94,10 +94,9 @@ def test_heartbeat_cancelled_after_dispatch():
     """Verify the heartbeat task is cancelled in the finally block."""
     from mallcop.campfire_dispatch import CampfireDispatcher
 
-    mock_managed_client = MagicMock()
     dispatcher = CampfireDispatcher(
         campfire_id="test-campfire",
-        managed_client=mock_managed_client,
+        interactive_runner=MagicMock(),
         root=Path("/tmp"),
     )
 
@@ -126,10 +125,9 @@ def test_heartbeat_not_started_without_bridge():
     """Existing behavior preserved: no bridge → no heartbeat task."""
     from mallcop.campfire_dispatch import CampfireDispatcher
 
-    mock_managed_client = MagicMock()
     dispatcher = CampfireDispatcher(
         campfire_id="test-campfire",
-        managed_client=mock_managed_client,
+        interactive_runner=MagicMock(),
         root=Path("/tmp"),
     )
 
@@ -149,10 +147,9 @@ def test_heartbeat_cancelled_on_chat_turn_exception():
     """Heartbeat is cancelled even when chat_turn raises."""
     from mallcop.campfire_dispatch import CampfireDispatcher
 
-    mock_managed_client = MagicMock()
     dispatcher = CampfireDispatcher(
         campfire_id="test-campfire",
-        managed_client=mock_managed_client,
+        interactive_runner=MagicMock(),
         root=Path("/tmp"),
     )
 

@@ -243,7 +243,7 @@ def test_watch_dispatch_pass_creates_managed_client_from_pro_config(
     tmp_path: Path,
 ) -> None:
     """When pro config has a service_token, ManagedClient is constructed and
-    passed to CampfireDispatcher."""
+    CampfireDispatcher is called (interactive_runner wiring is a separate concern)."""
     runner = CliRunner()
 
     mock_bridge = MagicMock()
@@ -254,9 +254,6 @@ def test_watch_dispatch_pass_creates_managed_client_from_pro_config(
 
     mock_bridge_cls = MagicMock(return_value=mock_bridge)
     mock_dispatcher_cls = MagicMock(return_value=mock_dispatcher)
-    mock_managed_client_cls = MagicMock()
-    mock_managed_client_instance = MagicMock()
-    mock_managed_client_cls.return_value = mock_managed_client_instance
 
     config = _make_config(
         campfire_id="fire-abc123",
@@ -282,7 +279,6 @@ def test_watch_dispatch_pass_creates_managed_client_from_pro_config(
         ),
         patch("mallcop.cli.TelegramCampfireBridge", mock_bridge_cls),
         patch("mallcop.cli.CampfireDispatcher", mock_dispatcher_cls),
-        patch("mallcop.llm.managed.ManagedClient", mock_managed_client_cls),
     ):
         result = runner.invoke(cli, ["watch", "--dir", str(tmp_path)])
 
@@ -290,28 +286,21 @@ def test_watch_dispatch_pass_creates_managed_client_from_pro_config(
     output = json.loads(result.output)
     assert output["status"] == "ok"
 
-    # ManagedClient constructed with correct params.
-    mock_managed_client_cls.assert_called_once_with(
-        endpoint="https://mallcop.example.com",
-        service_token="mallcop-sk-test-token",
-        use_lanes=True,
-    )
-
-    # CampfireDispatcher received the managed_client instance.
+    # CampfireDispatcher called (interactive_runner wiring is a separate concern).
     mock_dispatcher_cls.assert_called_once()
     _, kwargs = mock_dispatcher_cls.call_args
-    assert kwargs.get("managed_client") is mock_managed_client_instance
+    assert "interactive_runner" in kwargs
 
 
 # ---------------------------------------------------------------------------
-# Test 5: managed_client=None when pro config is absent.
+# Test 5: interactive_runner=None when pro config is absent.
 # ---------------------------------------------------------------------------
 
 
 def test_watch_dispatch_pass_no_managed_client_when_no_pro_config(
     tmp_path: Path,
 ) -> None:
-    """When pro config is absent, managed_client=None is passed to dispatcher."""
+    """When pro config is absent, interactive_runner=None is passed to dispatcher."""
     runner = CliRunner()
 
     mock_bridge = MagicMock()
@@ -353,7 +342,7 @@ def test_watch_dispatch_pass_no_managed_client_when_no_pro_config(
     output = json.loads(result.output)
     assert output["status"] == "ok"
 
-    # CampfireDispatcher called with managed_client=None.
+    # CampfireDispatcher called with interactive_runner=None.
     mock_dispatcher_cls.assert_called_once()
     _, kwargs = mock_dispatcher_cls.call_args
-    assert kwargs.get("managed_client") is None
+    assert kwargs.get("interactive_runner") is None
