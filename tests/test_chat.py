@@ -1,23 +1,27 @@
 """Tests for mallcop chat CLI subcommand (chat.py).
 
-TDD sequence:
-1. chat_turn() sends correct payload to ManagedClient with session headers
-2. chat_turn() appends user msg + agent response to ConversationStore
-3. system prompt includes finding summaries from findings.jsonl
-4. context window manager invoked to trim history
-5. X-Mallcop-Session and X-Mallcop-Surface headers set on ManagedClient requests
-6. token cost footer displayed (e.g. '[1.2 donuts]')
-7. max_tokens=2000 enforced on each turn
+Rewritten for InteractiveRuntime-based chat_turn signature (mallcoppro-edc).
+
+Required test invariants:
+1. chat_turn calls interactive_runner.run_turn with messages containing the
+   appended user message + at most 4 prior messages (5-msg window total).
+2. chat_turn early-returns platform error when interactive_runner is None —
+   user message NOT appended to store.
+3. LLMAPIError(status_code=402) from run_turn -> _platform_error_response with _MSG_402.
+4. LLMAPIError(status_code=503) from run_turn -> _platform_error_response with _MSG_503.
+5. Assistant message appended to store with the runtime's text.
+6. Donut accumulation correct across multiple chat_turn calls.
+7. Budget warning fires when cumulative donuts exceed threshold.
+8. session_id passed through to run_turn.
 """
 
 from __future__ import annotations
 
 import asyncio
-import json
 import uuid
 from pathlib import Path
 from typing import Any
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock, call
 
 import pytest
 
@@ -26,8 +30,7 @@ from mallcop.chat import (
     SURFACE,
     TOKENS_PER_DONUT,
     _burn_rate_footer,
-    _build_system_prompt,
-    _load_finding_summaries,
+    _session_donut_spend,
     chat_turn as _async_chat_turn,
 )
 
@@ -35,149 +38,289 @@ from mallcop.chat import (
 def chat_turn(*args: Any, **kwargs: Any) -> Any:
     """Sync wrapper around async chat_turn for test convenience."""
     return asyncio.run(_async_chat_turn(*args, **kwargs))
+
+
+from mallcop.actors.interactive_runtime import TurnResult
 from mallcop.conversation import ConversationStore
-from mallcop.context_window import ContextWindowManager
-from mallcop.llm_types import LLMResponse, ToolCall
+from mallcop.llm_types import LLMAPIError
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _make_llm_response(text: str = "Here is your answer.", tokens: int = 100) -> LLMResponse:
-    return LLMResponse(
-        tool_calls=[],
-        resolution=None,
-        tokens_used=tokens,
-        raw_resolution={"content": text},
+def _make_turn_result(text: str = "Here is your answer.", tokens: int = 100) -> TurnResult:
+    return TurnResult(
         text=text,
+        tokens_used=tokens,
+        iterations=1,
+        tool_calls=0,
+        tool_call_log=[],
     )
 
 
-def _make_mock_client(response: LLMResponse | None = None) -> MagicMock:
-    client = MagicMock()
-    client.chat.return_value = response or _make_llm_response()
-    return client
+def _make_mock_runner(result: TurnResult | None = None) -> MagicMock:
+    runner = MagicMock()
+    runner.run_turn.return_value = result or _make_turn_result()
+    return runner
 
 
 def _make_store(tmp_path: Path) -> ConversationStore:
     return ConversationStore(tmp_path / "conversations.jsonl")
 
 
-def _make_context_manager(store_messages: list | None = None) -> ContextWindowManager:
-    """Return a ContextWindowManager that returns a simple context from history."""
-    cm = ContextWindowManager()
-    return cm
-
-
 # ---------------------------------------------------------------------------
-# Test 1: chat_turn() sends correct payload to ManagedClient
+# Invariant 1: run_turn called with correct messages (5-msg window)
 # ---------------------------------------------------------------------------
 
-class TestChatTurnSendsCorrectPayload:
-    """chat_turn() sends correct payload to ManagedClient."""
+class TestRunTurnMessages:
+    """chat_turn calls run_turn with the user message in messages, up to 5 total."""
 
-    def test_chat_sends_user_question_in_messages(self, tmp_path: Path) -> None:
-        client = _make_mock_client()
+    def setup_method(self) -> None:
+        _session_donut_spend.clear()
+
+    def test_run_turn_called_with_user_message(self, tmp_path: Path) -> None:
+        runner = _make_mock_runner()
         store = _make_store(tmp_path)
-        cm = ContextWindowManager()
         session_id = str(uuid.uuid4())
 
         chat_turn(
             question="What threats do I have?",
             session_id=session_id,
-            managed_client=client,
+            interactive_runner=runner,
             store=store,
-            context_manager=cm,
             root=tmp_path,
         )
 
-        client.chat.assert_called_once()
-        _, kwargs = client.chat.call_args
-        messages = kwargs.get("messages", client.chat.call_args[0][2] if len(client.chat.call_args[0]) > 2 else [])
-        # Last message should be user role with the question
-        user_messages = [m for m in messages if m.get("role") == "user"]
-        assert any("What threats do I have?" in m.get("content", "") for m in user_messages)
+        runner.run_turn.assert_called_once()
+        call_kwargs = runner.run_turn.call_args[1]
+        messages = call_kwargs.get("messages", runner.run_turn.call_args[0][0] if runner.run_turn.call_args[0] else [])
+        user_msgs = [m for m in messages if m.get("role") == "user"]
+        assert any("What threats do I have?" in m.get("content", "") for m in user_msgs)
 
-    def test_chat_sends_system_prompt(self, tmp_path: Path) -> None:
-        client = _make_mock_client()
+    def test_5_message_window_includes_recent_history(self, tmp_path: Path) -> None:
+        """With 6 prior messages, run_turn gets only the last 5 (4 prior + just-appended user)."""
         store = _make_store(tmp_path)
-        cm = ContextWindowManager()
+        session_id = str(uuid.uuid4())
+
+        # Pre-populate 6 messages (3 turns)
+        for i in range(3):
+            store.append(session_id=session_id, surface="cli", role="user", content=f"Prior Q{i}")
+            store.append(session_id=session_id, surface="cli", role="assistant", content=f"Prior A{i}")
+
+        runner = _make_mock_runner()
+        chat_turn(
+            question="New question",
+            session_id=session_id,
+            interactive_runner=runner,
+            store=store,
+            root=tmp_path,
+        )
+
+        call_kwargs = runner.run_turn.call_args[1]
+        messages = call_kwargs.get("messages", [])
+        # Should have at most 5 messages
+        assert len(messages) <= 5
+        # Last message is the newly appended user message
+        assert messages[-1]["role"] == "user"
+        assert messages[-1]["content"] == "New question"
+
+    def test_fewer_than_5_messages_all_included(self, tmp_path: Path) -> None:
+        """With only 2 prior messages + 1 new, all 3 are passed to run_turn."""
+        store = _make_store(tmp_path)
+        session_id = str(uuid.uuid4())
+
+        store.append(session_id=session_id, surface="cli", role="user", content="Prior Q")
+        store.append(session_id=session_id, surface="cli", role="assistant", content="Prior A")
+
+        runner = _make_mock_runner()
+        chat_turn(
+            question="New question",
+            session_id=session_id,
+            interactive_runner=runner,
+            store=store,
+            root=tmp_path,
+        )
+
+        call_kwargs = runner.run_turn.call_args[1]
+        messages = call_kwargs.get("messages", [])
+        assert len(messages) == 3
+
+
+# ---------------------------------------------------------------------------
+# Invariant 2: None interactive_runner -> platform error, no store append
+# ---------------------------------------------------------------------------
+
+class TestNoneRunnerEarlyReturn:
+    """interactive_runner=None returns platform error without appending user message."""
+
+    def setup_method(self) -> None:
+        _session_donut_spend.clear()
+
+    def test_none_runner_returns_platform_error(self, tmp_path: Path) -> None:
+        store = _make_store(tmp_path)
+        session_id = str(uuid.uuid4())
+
+        result = chat_turn(
+            question="Hello",
+            session_id=session_id,
+            interactive_runner=None,
+            store=store,
+            root=tmp_path,
+        )
+
+        assert result.get("is_platform_error") is True
+        assert "Pro subscription required" in result["response"]
+
+    def test_none_runner_does_not_append_user_message(self, tmp_path: Path) -> None:
+        """User message is NOT appended when interactive_runner is None."""
+        store = _make_store(tmp_path)
         session_id = str(uuid.uuid4())
 
         chat_turn(
             question="Hello",
             session_id=session_id,
-            managed_client=client,
+            interactive_runner=None,
             store=store,
-            context_manager=cm,
-            root=tmp_path,
-        )
-
-        _, kwargs = client.chat.call_args
-        system_prompt = kwargs.get("system_prompt", client.chat.call_args[0][1] if len(client.chat.call_args[0]) > 1 else "")
-        assert "security" in system_prompt.lower()
-
-    def test_chat_uses_detective_model(self, tmp_path: Path) -> None:
-        client = _make_mock_client()
-        store = _make_store(tmp_path)
-        cm = ContextWindowManager()
-        session_id = str(uuid.uuid4())
-
-        chat_turn(
-            question="Hello",
-            session_id=session_id,
-            managed_client=client,
-            store=store,
-            context_manager=cm,
-            root=tmp_path,
-        )
-
-        args, kwargs = client.chat.call_args
-        model = kwargs.get("model", args[0] if args else "")
-        assert model == "detective"
-
-
-# ---------------------------------------------------------------------------
-# Test 2: chat_turn() appends user msg + agent response to ConversationStore
-# ---------------------------------------------------------------------------
-
-class TestChatTurnStoresMessages:
-    """chat_turn() persists user and assistant messages."""
-
-    def test_user_message_stored(self, tmp_path: Path) -> None:
-        client = _make_mock_client()
-        store = _make_store(tmp_path)
-        cm = ContextWindowManager()
-        session_id = str(uuid.uuid4())
-
-        chat_turn(
-            question="What's my risk?",
-            session_id=session_id,
-            managed_client=client,
-            store=store,
-            context_manager=cm,
             root=tmp_path,
         )
 
         msgs = store.load_session(session_id)
         user_msgs = [m for m in msgs if m.role == "user"]
-        assert len(user_msgs) == 1
-        assert user_msgs[0].content == "What's my risk?"
+        assert len(user_msgs) == 0
+
+    def test_none_runner_appends_assistant_error_message(self, tmp_path: Path) -> None:
+        """Platform error message is persisted as assistant message."""
+        store = _make_store(tmp_path)
+        session_id = str(uuid.uuid4())
+
+        chat_turn(
+            question="Hello",
+            session_id=session_id,
+            interactive_runner=None,
+            store=store,
+            root=tmp_path,
+        )
+
+        msgs = store.load_session(session_id)
+        assistant_msgs = [m for m in msgs if m.role == "assistant"]
+        assert len(assistant_msgs) == 1
+        assert "Pro subscription required" in assistant_msgs[0].content
+
+
+# ---------------------------------------------------------------------------
+# Invariant 3 & 4: LLMAPIError 402/503 handling
+# ---------------------------------------------------------------------------
+
+class TestLLMAPIErrorHandling:
+    """LLMAPIError 402/503 from run_turn returns platform message."""
+
+    def setup_method(self) -> None:
+        _session_donut_spend.clear()
+
+    def test_402_returns_platform_message(self, tmp_path: Path) -> None:
+        runner = MagicMock()
+        runner.run_turn.side_effect = LLMAPIError("Managed inference error 402", status_code=402)
+        store = _make_store(tmp_path)
+        session_id = str(uuid.uuid4())
+
+        result = chat_turn(
+            question="Hello",
+            session_id=session_id,
+            interactive_runner=runner,
+            store=store,
+            root=tmp_path,
+        )
+
+        assert "insufficient donut balance" in result["response"]
+        assert "I received your message" in result["response"]
+        assert result.get("is_platform_error") is True
+
+    def test_503_returns_platform_message(self, tmp_path: Path) -> None:
+        runner = MagicMock()
+        runner.run_turn.side_effect = LLMAPIError("Managed inference error 503", status_code=503)
+        store = _make_store(tmp_path)
+        session_id = str(uuid.uuid4())
+
+        result = chat_turn(
+            question="Hello",
+            session_id=session_id,
+            interactive_runner=runner,
+            store=store,
+            root=tmp_path,
+        )
+
+        assert "inference service unavailable" in result["response"]
+        assert "I received your message" in result["response"]
+        assert result.get("is_platform_error") is True
+
+    def test_402_does_not_raise(self, tmp_path: Path) -> None:
+        runner = MagicMock()
+        runner.run_turn.side_effect = LLMAPIError("error", status_code=402)
+        store = _make_store(tmp_path)
+        session_id = str(uuid.uuid4())
+
+        result = chat_turn(
+            question="Hello",
+            session_id=session_id,
+            interactive_runner=runner,
+            store=store,
+            root=tmp_path,
+        )
+        assert result["tokens_used"] == 0
+
+    def test_503_does_not_raise(self, tmp_path: Path) -> None:
+        runner = MagicMock()
+        runner.run_turn.side_effect = LLMAPIError("error", status_code=503)
+        store = _make_store(tmp_path)
+        session_id = str(uuid.uuid4())
+
+        result = chat_turn(
+            question="Hello",
+            session_id=session_id,
+            interactive_runner=runner,
+            store=store,
+            root=tmp_path,
+        )
+        assert result["tokens_used"] == 0
+
+    def test_other_llmapierror_raises(self, tmp_path: Path) -> None:
+        runner = MagicMock()
+        runner.run_turn.side_effect = LLMAPIError("error", status_code=500)
+        store = _make_store(tmp_path)
+        session_id = str(uuid.uuid4())
+
+        with pytest.raises(LLMAPIError):
+            chat_turn(
+                question="Hello",
+                session_id=session_id,
+                interactive_runner=runner,
+                store=store,
+                root=tmp_path,
+            )
+
+
+# ---------------------------------------------------------------------------
+# Invariant 5: Assistant message appended with runtime's text
+# ---------------------------------------------------------------------------
+
+class TestAssistantMessageStored:
+    """Assistant message from TurnResult is persisted to store."""
+
+    def setup_method(self) -> None:
+        _session_donut_spend.clear()
 
     def test_assistant_message_stored(self, tmp_path: Path) -> None:
         response_text = "Your risk level is moderate."
-        client = _make_mock_client(_make_llm_response(text=response_text, tokens=200))
+        runner = _make_mock_runner(_make_turn_result(text=response_text, tokens=200))
         store = _make_store(tmp_path)
-        cm = ContextWindowManager()
         session_id = str(uuid.uuid4())
 
         chat_turn(
             question="What's my risk?",
             session_id=session_id,
-            managed_client=client,
+            interactive_runner=runner,
             store=store,
-            context_manager=cm,
             root=tmp_path,
         )
 
@@ -186,18 +329,16 @@ class TestChatTurnStoresMessages:
         assert len(assistant_msgs) == 1
         assert assistant_msgs[0].content == response_text
 
-    def test_both_messages_in_session(self, tmp_path: Path) -> None:
-        client = _make_mock_client()
+    def test_user_and_assistant_messages_stored(self, tmp_path: Path) -> None:
+        runner = _make_mock_runner()
         store = _make_store(tmp_path)
-        cm = ContextWindowManager()
         session_id = str(uuid.uuid4())
 
         chat_turn(
             question="Hello",
             session_id=session_id,
-            managed_client=client,
+            interactive_runner=runner,
             store=store,
-            context_manager=cm,
             root=tmp_path,
         )
 
@@ -208,17 +349,15 @@ class TestChatTurnStoresMessages:
         assert "assistant" in roles
 
     def test_messages_use_correct_session_id(self, tmp_path: Path) -> None:
-        client = _make_mock_client()
+        runner = _make_mock_runner()
         store = _make_store(tmp_path)
-        cm = ContextWindowManager()
         session_id = str(uuid.uuid4())
 
         chat_turn(
             question="Hi",
             session_id=session_id,
-            managed_client=client,
+            interactive_runner=runner,
             store=store,
-            context_manager=cm,
             root=tmp_path,
         )
 
@@ -226,17 +365,15 @@ class TestChatTurnStoresMessages:
         assert all(m.session_id == session_id for m in msgs)
 
     def test_messages_use_correct_surface(self, tmp_path: Path) -> None:
-        client = _make_mock_client()
+        runner = _make_mock_runner()
         store = _make_store(tmp_path)
-        cm = ContextWindowManager()
         session_id = str(uuid.uuid4())
 
         chat_turn(
             question="Hi",
             session_id=session_id,
-            managed_client=client,
+            interactive_runner=runner,
             store=store,
-            context_manager=cm,
             root=tmp_path,
         )
 
@@ -245,236 +382,166 @@ class TestChatTurnStoresMessages:
 
 
 # ---------------------------------------------------------------------------
-# Test 3: system prompt includes finding summaries from findings.jsonl
+# Invariant 6: Donut accumulation across multiple turns
 # ---------------------------------------------------------------------------
 
-class TestSystemPromptFindingSummaries:
-    """System prompt includes finding summaries from findings.jsonl."""
+class TestDonutAccumulation:
+    """Donut spend accumulates correctly across multiple chat_turn calls."""
 
-    def test_system_prompt_includes_finding_title(self, tmp_path: Path) -> None:
-        findings = [
-            {"id": "find-001", "severity": "high", "title": "Overly permissive S3 bucket"},
-            {"id": "find-002", "severity": "medium", "title": "Unused IAM credentials"},
-        ]
-        findings_path = tmp_path / "findings.jsonl"
-        findings_path.write_text("\n".join(json.dumps(f) for f in findings) + "\n")
+    def setup_method(self) -> None:
+        _session_donut_spend.clear()
 
-        prompt = _build_system_prompt(tmp_path)
-
-        assert "Overly permissive S3 bucket" in prompt
-        assert "Unused IAM credentials" in prompt
-
-    def test_system_prompt_includes_severity(self, tmp_path: Path) -> None:
-        findings = [{"id": "f-1", "severity": "critical", "title": "Exposed secrets"}]
-        (tmp_path / "findings.jsonl").write_text(json.dumps(findings[0]) + "\n")
-
-        prompt = _build_system_prompt(tmp_path)
-
-        assert "critical" in prompt.lower()
-
-    def test_system_prompt_no_findings_file(self, tmp_path: Path) -> None:
-        # No findings.jsonl — should use base prompt without crashing
-        prompt = _build_system_prompt(tmp_path)
-
-        assert "security" in prompt.lower()
-        assert "Current findings" not in prompt
-
-    def test_load_finding_summaries_returns_empty_for_missing_file(self, tmp_path: Path) -> None:
-        summaries = _load_finding_summaries(tmp_path)
-        assert summaries == []
-
-    def test_load_finding_summaries_returns_list_of_strings(self, tmp_path: Path) -> None:
-        findings = [{"id": "f-1", "severity": "high", "title": "Test finding"}]
-        (tmp_path / "findings.jsonl").write_text(json.dumps(findings[0]) + "\n")
-
-        summaries = _load_finding_summaries(tmp_path)
-
-        assert len(summaries) == 1
-        assert isinstance(summaries[0], str)
-        assert "Test finding" in summaries[0]
-
-    def test_chat_turn_system_prompt_passed_to_client(self, tmp_path: Path) -> None:
-        findings = [{"id": "f-1", "severity": "high", "title": "Exposed credentials"}]
-        (tmp_path / "findings.jsonl").write_text(json.dumps(findings[0]) + "\n")
-
-        client = _make_mock_client()
+    def test_single_turn_donut_count(self, tmp_path: Path) -> None:
+        tokens = 2000
+        runner = _make_mock_runner(_make_turn_result(tokens=tokens))
         store = _make_store(tmp_path)
-        cm = ContextWindowManager()
-        session_id = str(uuid.uuid4())
-
-        chat_turn(
-            question="Tell me about my findings",
-            session_id=session_id,
-            managed_client=client,
-            store=store,
-            context_manager=cm,
-            root=tmp_path,
-        )
-
-        _, kwargs = client.chat.call_args
-        system_prompt = kwargs.get("system_prompt", "")
-        assert "Exposed credentials" in system_prompt
-
-
-# ---------------------------------------------------------------------------
-# Test 4: context window manager invoked to trim history
-# ---------------------------------------------------------------------------
-
-class TestContextWindowManagerInvoked:
-    """ContextWindowManager.build_context() is called to trim history."""
-
-    def test_context_manager_build_context_called(self, tmp_path: Path) -> None:
-        client = _make_mock_client()
-        store = _make_store(tmp_path)
-        cm = MagicMock(spec=ContextWindowManager)
-        cm.build_context.return_value = {
-            "messages": [{"role": "user", "content": "Hello", "id": "x", "session_id": "s",
-                          "surface": "cli", "timestamp": "", "finding_refs": [], "tokens_used": 0}],
-            "summary": None,
-            "finding_refs": [],
-            "total_tokens": 5,
-        }
         session_id = str(uuid.uuid4())
 
         chat_turn(
             question="Hello",
             session_id=session_id,
-            managed_client=client,
+            interactive_runner=runner,
             store=store,
-            context_manager=cm,
             root=tmp_path,
         )
 
-        cm.build_context.assert_called_once()
+        assert _session_donut_spend[session_id] == tokens / TOKENS_PER_DONUT
 
-    def test_context_manager_receives_session_history(self, tmp_path: Path) -> None:
-        """build_context() receives the full session history."""
-        client = _make_mock_client()
+    def test_accumulates_across_turns(self, tmp_path: Path) -> None:
+        tokens_per_turn = 1000
+        runner = _make_mock_runner(_make_turn_result(tokens=tokens_per_turn))
         store = _make_store(tmp_path)
         session_id = str(uuid.uuid4())
 
-        # Pre-populate with a prior turn
-        store.append(session_id=session_id, surface="cli", role="user", content="Prior question")
-        store.append(session_id=session_id, surface="cli", role="assistant", content="Prior answer")
+        chat_turn(question="Turn 1", session_id=session_id, interactive_runner=runner, store=store, root=tmp_path)
+        chat_turn(question="Turn 2", session_id=session_id, interactive_runner=runner, store=store, root=tmp_path)
+        chat_turn(question="Turn 3", session_id=session_id, interactive_runner=runner, store=store, root=tmp_path)
 
-        cm = MagicMock(spec=ContextWindowManager)
-        cm.build_context.return_value = {
-            "messages": [],
-            "summary": None,
-            "finding_refs": [],
-            "total_tokens": 0,
-        }
+        expected = 3 * tokens_per_turn / TOKENS_PER_DONUT
+        assert _session_donut_spend[session_id] == expected
 
-        chat_turn(
-            question="New question",
-            session_id=session_id,
-            managed_client=client,
-            store=store,
-            context_manager=cm,
-            root=tmp_path,
-        )
+    def test_different_sessions_tracked_independently(self, tmp_path: Path) -> None:
+        tokens = 1500
+        runner = _make_mock_runner(_make_turn_result(tokens=tokens))
+        store = _make_store(tmp_path)
+        session_a = str(uuid.uuid4())
+        session_b = str(uuid.uuid4())
 
-        cm.build_context.assert_called_once()
-        history_arg = cm.build_context.call_args[0][0]
-        # Should include the prior 2 messages plus the new user message (3 total)
-        assert len(history_arg) == 3
+        chat_turn(question="A", session_id=session_a, interactive_runner=runner, store=store, root=tmp_path)
+        chat_turn(question="B", session_id=session_b, interactive_runner=runner, store=store, root=tmp_path)
 
-    def test_summary_injected_into_messages_when_present(self, tmp_path: Path) -> None:
-        """When context manager returns a summary, it's prepended to messages."""
-        client = _make_mock_client()
+        assert _session_donut_spend[session_a] == tokens / TOKENS_PER_DONUT
+        assert _session_donut_spend[session_b] == tokens / TOKENS_PER_DONUT
+
+
+# ---------------------------------------------------------------------------
+# Invariant 7: Budget warning fires at threshold
+# ---------------------------------------------------------------------------
+
+class TestBudgetWarning:
+    """Budget warning fires when cumulative donuts exceed threshold."""
+
+    def setup_method(self) -> None:
+        _session_donut_spend.clear()
+
+    def test_no_warning_below_threshold(self, tmp_path: Path) -> None:
+        tokens = 100  # 0.1 donuts — well below 50
+        runner = _make_mock_runner(_make_turn_result(tokens=tokens))
         store = _make_store(tmp_path)
         session_id = str(uuid.uuid4())
-        cm = MagicMock(spec=ContextWindowManager)
-        cm.build_context.return_value = {
-            "messages": [{"role": "user", "content": "Current question", "id": "x",
-                          "session_id": session_id, "surface": "cli", "timestamp": "",
-                          "finding_refs": [], "tokens_used": 0}],
-            "summary": "Earlier we discussed S3 bucket exposure.",
-            "finding_refs": [],
-            "total_tokens": 20,
-        }
 
-        chat_turn(
-            question="Current question",
+        result = chat_turn(
+            question="Hello",
             session_id=session_id,
-            managed_client=client,
+            interactive_runner=runner,
             store=store,
-            context_manager=cm,
             root=tmp_path,
         )
 
-        args, kwargs = client.chat.call_args
-        messages = kwargs.get("messages", args[2] if len(args) > 2 else [])
-        summary_msgs = [m for m in messages if "Earlier we discussed" in m.get("content", "")]
-        assert len(summary_msgs) == 1
+        assert "budget_warning" not in result
 
+    def test_warning_fires_at_threshold(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("MALLCOP_BUDGET_WARNING_THRESHOLD", "5")
+        tokens = 5000  # 5 donuts — exactly at threshold
+        runner = _make_mock_runner(_make_turn_result(tokens=tokens))
+        store = _make_store(tmp_path)
+        session_id = str(uuid.uuid4())
 
-# ---------------------------------------------------------------------------
-# Test 5: X-Mallcop-Session and X-Mallcop-Surface headers set on ManagedClient
-# ---------------------------------------------------------------------------
-
-class TestManagedClientHeaders:
-    """ManagedClient supports extra_headers for X-Mallcop-Session and X-Mallcop-Surface."""
-
-    def test_managed_client_accepts_extra_headers(self) -> None:
-        from mallcop.llm.managed import ManagedClient
-
-        client = ManagedClient(
-            endpoint="https://mallcop.app",
-            service_token="mallcop-sk-test",
-            extra_headers={
-                "X-Mallcop-Session": "sess-abc",
-                "X-Mallcop-Surface": "cli",
-            },
+        result = chat_turn(
+            question="Hello",
+            session_id=session_id,
+            interactive_runner=runner,
+            store=store,
+            root=tmp_path,
         )
 
-        assert client._extra_headers["X-Mallcop-Session"] == "sess-abc"
-        assert client._extra_headers["X-Mallcop-Surface"] == "cli"
+        assert "budget_warning" in result
+        assert "5.0 donuts" in result["budget_warning"]
 
-    def test_managed_client_sends_extra_headers_in_request(self, tmp_path: Path) -> None:
-        from mallcop.llm.managed import ManagedClient
-        import requests
+    def test_warning_accumulates_across_turns(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("MALLCOP_BUDGET_WARNING_THRESHOLD", "5")
+        tokens_per_turn = 3000  # 3 donuts each
+        runner = _make_mock_runner(_make_turn_result(tokens=tokens_per_turn))
+        store = _make_store(tmp_path)
+        session_id = str(uuid.uuid4())
 
-        session_id = "test-session-id"
-        client = ManagedClient(
-            endpoint="https://mallcop.app",
-            service_token="mallcop-sk-test",
-            use_lanes=True,
-            extra_headers={
-                "X-Mallcop-Session": session_id,
-                "X-Mallcop-Surface": "cli",
-            },
-        )
+        result1 = chat_turn(question="Turn 1", session_id=session_id, interactive_runner=runner, store=store, root=tmp_path)
+        result2 = chat_turn(question="Turn 2", session_id=session_id, interactive_runner=runner, store=store, root=tmp_path)
 
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_resp.json.return_value = {
-            "content": [{"type": "text", "text": "Hello"}],
-            "usage": {"input_tokens": 10, "output_tokens": 5},
-        }
+        assert "budget_warning" not in result1
+        assert "budget_warning" in result2
 
-        with patch("requests.post", return_value=mock_resp) as mock_post:
-            client.chat(
-                model="detective",
-                system_prompt="You are an assistant.",
-                messages=[{"role": "user", "content": "Hi"}],
-                tools=[],
-            )
+    def test_warning_does_not_cross_sessions(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("MALLCOP_BUDGET_WARNING_THRESHOLD", "5")
+        tokens = 4000  # 4 donuts — below threshold alone
+        runner = _make_mock_runner(_make_turn_result(tokens=tokens))
+        store = _make_store(tmp_path)
 
-            called_headers = mock_post.call_args[1]["headers"]
-            assert called_headers["X-Mallcop-Session"] == session_id
-            assert called_headers["X-Mallcop-Surface"] == "cli"
+        session_a = str(uuid.uuid4())
+        session_b = str(uuid.uuid4())
 
-    def test_surface_constant_is_cli(self) -> None:
-        assert SURFACE == "cli"
+        chat_turn(question="Session A", session_id=session_a, interactive_runner=runner, store=store, root=tmp_path)
+        result_b = chat_turn(question="Session B", session_id=session_b, interactive_runner=runner, store=store, root=tmp_path)
+
+        assert "budget_warning" not in result_b
 
 
 # ---------------------------------------------------------------------------
-# Test 6: token cost footer displayed (e.g. '[1.2 donuts]')
+# Invariant 8: session_id passed through to run_turn
+# ---------------------------------------------------------------------------
+
+class TestSessionIdPassthrough:
+    """session_id is forwarded to interactive_runner.run_turn."""
+
+    def setup_method(self) -> None:
+        _session_donut_spend.clear()
+
+    def test_session_id_passed_to_run_turn(self, tmp_path: Path) -> None:
+        runner = _make_mock_runner()
+        store = _make_store(tmp_path)
+        session_id = str(uuid.uuid4())
+
+        chat_turn(
+            question="Hello",
+            session_id=session_id,
+            interactive_runner=runner,
+            store=store,
+            root=tmp_path,
+        )
+
+        call_kwargs = runner.run_turn.call_args[1]
+        assert call_kwargs.get("session_id") == session_id
+
+
+# ---------------------------------------------------------------------------
+# Burn-rate footer
 # ---------------------------------------------------------------------------
 
 class TestBurnRateFooter:
     """chat_turn() returns a burn-rate footer like '[1.2 donuts]'."""
+
+    def setup_method(self) -> None:
+        _session_donut_spend.clear()
 
     def test_footer_format(self) -> None:
         footer = _burn_rate_footer(1200)
@@ -489,17 +556,15 @@ class TestBurnRateFooter:
         assert footer == "[1.0 donuts]"
 
     def test_chat_turn_returns_footer(self, tmp_path: Path) -> None:
-        client = _make_mock_client(_make_llm_response(tokens=2000))
+        runner = _make_mock_runner(_make_turn_result(tokens=2000))
         store = _make_store(tmp_path)
-        cm = ContextWindowManager()
         session_id = str(uuid.uuid4())
 
         result = chat_turn(
             question="Hi",
             session_id=session_id,
-            managed_client=client,
+            interactive_runner=runner,
             store=store,
-            context_manager=cm,
             root=tmp_path,
         )
 
@@ -509,17 +574,15 @@ class TestBurnRateFooter:
 
     def test_chat_turn_footer_reflects_tokens_used(self, tmp_path: Path) -> None:
         tokens = 1500
-        client = _make_mock_client(_make_llm_response(tokens=tokens))
+        runner = _make_mock_runner(_make_turn_result(tokens=tokens))
         store = _make_store(tmp_path)
-        cm = ContextWindowManager()
         session_id = str(uuid.uuid4())
 
         result = chat_turn(
             question="Hi",
             session_id=session_id,
-            managed_client=client,
+            interactive_runner=runner,
             store=store,
-            context_manager=cm,
             root=tmp_path,
         )
 
@@ -528,62 +591,12 @@ class TestBurnRateFooter:
 
 
 # ---------------------------------------------------------------------------
-# Test 7: max_tokens=2000 enforced on each turn
+# Surface constant
 # ---------------------------------------------------------------------------
 
-class TestMaxTokensEnforced:
-    """chat_turn() sends max_tokens=2000 to ManagedClient.chat()."""
-
-    def test_max_tokens_2000_sent(self, tmp_path: Path) -> None:
-        client = _make_mock_client()
-        store = _make_store(tmp_path)
-        cm = ContextWindowManager()
-        session_id = str(uuid.uuid4())
-
-        chat_turn(
-            question="Hello",
-            session_id=session_id,
-            managed_client=client,
-            store=store,
-            context_manager=cm,
-            root=tmp_path,
-        )
-
-        args, kwargs = client.chat.call_args
-        max_tokens = kwargs.get("max_tokens")
-        assert max_tokens == MAX_TOKENS_PER_TURN
-
-    def test_max_tokens_constant_is_2000(self) -> None:
-        assert MAX_TOKENS_PER_TURN == 2000
-
-    def test_managed_client_uses_max_tokens_param(self) -> None:
-        """ManagedClient.chat() passes max_tokens to request body."""
-        from mallcop.llm.managed import ManagedClient
-
-        client = ManagedClient(
-            endpoint="https://mallcop.app",
-            service_token="mallcop-sk-test",
-            use_lanes=True,
-        )
-
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_resp.json.return_value = {
-            "content": [{"type": "text", "text": "Answer"}],
-            "usage": {"input_tokens": 10, "output_tokens": 5},
-        }
-
-        with patch("requests.post", return_value=mock_resp) as mock_post:
-            client.chat(
-                model="detective",
-                system_prompt="System",
-                messages=[{"role": "user", "content": "Hi"}],
-                tools=[],
-                max_tokens=2000,
-            )
-
-            body = mock_post.call_args[1]["json"]
-            assert body["max_tokens"] == 2000
+class TestSurfaceConstant:
+    def test_surface_constant_is_cli(self) -> None:
+        assert SURFACE == "cli"
 
 
 # ---------------------------------------------------------------------------

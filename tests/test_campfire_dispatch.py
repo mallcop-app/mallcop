@@ -24,8 +24,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from mallcop.actors.interactive_runtime import TurnResult
 from mallcop.campfire_dispatch import CampfireDispatcher
-from mallcop.llm_types import LLMResponse
 from mallcop.schemas import Finding, FindingStatus, Severity
 
 # Per-operation declaration files are bundled in tests/fixtures/declarations/
@@ -106,18 +106,23 @@ def _read_all(campfire_id: str, tag: str | None = None, convention: str | None =
     return json.loads(raw)
 
 
-def _make_mock_client(response_text: str = "Security analysis complete.") -> MagicMock:
-    """Return a mock ManagedClient that returns a canned response."""
-    client = MagicMock()
-    llm_resp = LLMResponse(
-        tool_calls=[],
-        resolution=None,
-        tokens_used=42,
-        raw_resolution={"content": response_text},
+def _make_mock_runner(response_text: str = "Security analysis complete.") -> MagicMock:
+    """Return a mock InteractiveRuntime that returns a canned TurnResult."""
+    runner = MagicMock()
+    runner.run_turn.return_value = TurnResult(
         text=response_text,
+        tokens_used=42,
+        iterations=1,
+        tool_calls=0,
+        tool_call_log=[],
     )
-    client.chat.return_value = llm_resp
-    return client
+    return runner
+
+
+# Keep legacy alias so existing test call sites can be updated incrementally.
+def _make_mock_client(response_text: str = "Security analysis complete.") -> MagicMock:
+    """Alias for _make_mock_runner — kept for backward compatibility within this file."""
+    return _make_mock_runner(response_text)
 
 
 def _make_finding(
@@ -174,7 +179,7 @@ def test_dispatch_loop_processes_inbound_message(campfire_id: str, tmp_path: Pat
 
     dispatcher = CampfireDispatcher(
         campfire_id=campfire_id,
-        managed_client=mock_client,
+        interactive_runner=mock_client,
         root=tmp_path,
         poll_interval=0.1,
     )
@@ -186,8 +191,8 @@ def test_dispatch_loop_processes_inbound_message(campfire_id: str, tmp_path: Pat
 
     asyncio.run(run_one_poll())
 
-    # Verify mock_client.chat was called — means chat_turn() ran.
-    assert mock_client.chat.called, "chat_turn() did not invoke managed_client.chat()"
+    # Verify run_turn was called — means chat_turn() ran.
+    assert mock_client.run_turn.called, "chat_turn() did not invoke interactive_runner.run_turn()"
 
     # Verify a response was posted back via convention operation.
     all_msgs = _read_all(campfire_id, tag="relay:response")
@@ -212,7 +217,7 @@ def test_publish_finding_writes_correct_tags(campfire_id: str, tmp_path: Path) -
     mock_client = _make_mock_client()
     dispatcher = CampfireDispatcher(
         campfire_id=campfire_id,
-        managed_client=mock_client,
+        interactive_runner=mock_client,
         root=tmp_path,
         poll_interval=0.1,
     )
@@ -248,7 +253,7 @@ def test_publish_finding_uses_detector_as_connector_fallback(
     mock_client = _make_mock_client()
     dispatcher = CampfireDispatcher(
         campfire_id=campfire_id,
-        managed_client=mock_client,
+        interactive_runner=mock_client,
         root=tmp_path,
         poll_interval=0.1,
     )
@@ -278,7 +283,7 @@ def test_run_loop_cancels_cleanly(campfire_id: str, tmp_path: Path) -> None:
     mock_client = _make_mock_client()
     dispatcher = CampfireDispatcher(
         campfire_id=campfire_id,
-        managed_client=mock_client,
+        interactive_runner=mock_client,
         root=tmp_path,
         poll_interval=0.05,
     )
@@ -333,7 +338,7 @@ def test_run_raises_runtime_error_when_cf_not_found(tmp_path: Path) -> None:
     mock_client = _make_mock_client()
     dispatcher = CampfireDispatcher(
         campfire_id="fake-campfire-id",
-        managed_client=mock_client,
+        interactive_runner=mock_client,
         root=tmp_path,
         poll_interval=0.05,
         cf_bin="/nonexistent/path/to/cf",
@@ -364,7 +369,7 @@ def test_dispatch_skips_message_without_from_id(
     mock_client = _make_mock_client()
     dispatcher = CampfireDispatcher(
         campfire_id=campfire_id,
-        managed_client=mock_client,
+        interactive_runner=mock_client,
         root=tmp_path,
         poll_interval=0.1,
     )
@@ -386,7 +391,7 @@ def test_dispatch_skips_message_without_from_id(
     with patch("mallcop.campfire_dispatch._log") as mock_log:
         asyncio.run(run_one_poll())
 
-        assert not mock_client.chat.called, (
+        assert not mock_client.run_turn.called, (
             "chat_turn() was called despite missing from_id"
         )
 
@@ -409,7 +414,7 @@ def test_dispatch_forwards_budget_warning(campfire_id: str, tmp_path: Path) -> N
     mock_client = _make_mock_client("Analysis complete.")
     dispatcher = CampfireDispatcher(
         campfire_id=campfire_id,
-        managed_client=mock_client,
+        interactive_runner=mock_client,
         root=tmp_path,
         poll_interval=0.1,
     )
@@ -450,7 +455,7 @@ def test_dispatch_adds_platform_error_status_on_platform_error(
     mock_client = _make_mock_client()
     dispatcher = CampfireDispatcher(
         campfire_id=campfire_id,
-        managed_client=mock_client,
+        interactive_runner=mock_client,
         root=tmp_path,
         poll_interval=0.1,
     )
@@ -481,7 +486,7 @@ def test_dispatch_no_platform_error_status_on_normal_response(
     mock_client = _make_mock_client()
     dispatcher = CampfireDispatcher(
         campfire_id=campfire_id,
-        managed_client=mock_client,
+        interactive_runner=mock_client,
         root=tmp_path,
         poll_interval=0.1,
     )
@@ -516,7 +521,7 @@ def test_publish_finding_writes_to_campfire_with_correct_tags(
     mock_client = _make_mock_client()
     dispatcher = CampfireDispatcher(
         campfire_id=campfire_id,
-        managed_client=mock_client,
+        interactive_runner=mock_client,
         root=tmp_path,
         poll_interval=0.1,
     )
@@ -553,7 +558,7 @@ def test_run_backs_off_after_consecutive_cf_errors(tmp_path: Path) -> None:
     mock_client = _make_mock_client()
     dispatcher = CampfireDispatcher(
         campfire_id="fake-campfire-id",
-        managed_client=mock_client,
+        interactive_runner=mock_client,
         root=tmp_path,
         poll_interval=1.0,
     )
@@ -608,15 +613,15 @@ def test_run_once_processes_pending_messages(campfire_id: str, tmp_path: Path) -
 
     dispatcher = CampfireDispatcher(
         campfire_id=campfire_id,
-        managed_client=mock_client,
+        interactive_runner=mock_client,
         root=tmp_path,
         poll_interval=0.1,
     )
 
     asyncio.run(asyncio.wait_for(dispatcher.run_once(), timeout=5.0))
 
-    assert mock_client.chat.called, (
-        "run_once() did not invoke managed_client.chat()"
+    assert mock_client.run_turn.called, (
+        "run_once() did not invoke interactive_runner.run_turn()"
     )
 
     all_msgs = _read_all(campfire_id, tag="relay:response")

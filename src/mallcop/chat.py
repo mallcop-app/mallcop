@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-import json
 import logging
 import os
 import uuid
@@ -23,18 +22,8 @@ MAX_TOKENS_PER_TURN: int = 2000
 # Surface identifier sent as X-Mallcop-Surface header.
 SURFACE: str = "cli"
 
-# Maximum findings loaded into the system prompt.
-MAX_FINDINGS_IN_PROMPT: int = 20
-
 # Default donut budget warning threshold per session.
 DEFAULT_BUDGET_WARNING_THRESHOLD: int = 50
-
-# System prompt base.
-_BASE_SYSTEM_PROMPT = (
-    "You are a security analyst assistant for mallcop. "
-    "Help the operator understand security findings, events, and posture. "
-    "Be concise, actionable, and grounded in the findings provided."
-)
 
 # Per-session cumulative donut spend tracker.
 # Maps session_id -> cumulative donuts spent (float).
@@ -87,51 +76,6 @@ async def _platform_error_response(
     }
 
 
-def _load_finding_summaries(root: Path, max_findings: int = MAX_FINDINGS_IN_PROMPT) -> list[str]:
-    """Load finding summaries from findings.jsonl in root, returning list of strings.
-
-    Returns at most *max_findings* entries, selecting the most recent by timestamp.
-    """
-    findings_path = root / "findings.jsonl"
-    if not findings_path.exists():
-        return []
-    findings: list[tuple[str, str]] = []  # (timestamp, formatted_summary)
-    try:
-        for line in findings_path.read_text().splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                obj = json.loads(line)
-                finding_id = obj.get("id", "")
-                severity = obj.get("severity", "")
-                title = obj.get("title", obj.get("summary", ""))
-                timestamp = obj.get("timestamp", obj.get("created_at", ""))
-                if title:
-                    findings.append((str(timestamp), f"[{severity}] {finding_id}: {title}"))
-            except Exception:
-                pass
-    except Exception as exc:
-        _log.debug("chat: could not load findings.jsonl: %s", exc)
-        return []
-
-    # Sort descending by timestamp, take most recent max_findings.
-    findings.sort(key=lambda x: x[0], reverse=True)
-    return [summary for _, summary in findings[:max_findings]]
-
-
-def _build_system_prompt(root: Path) -> str:
-    """Build the system prompt, including current finding summaries."""
-    summaries = _load_finding_summaries(root)
-    if not summaries:
-        return _BASE_SYSTEM_PROMPT
-    findings_block = "\n".join(summaries)
-    return (
-        f"{_BASE_SYSTEM_PROMPT}\n\n"
-        f"Current findings:\n{findings_block}"
-    )
-
-
 def _burn_rate_footer(tokens_used: int) -> str:
     """Return a burn-rate footer string like '[1.2 donuts]'."""
     donuts = tokens_used / TOKENS_PER_DONUT
@@ -141,12 +85,11 @@ def _burn_rate_footer(tokens_used: int) -> str:
 async def chat_turn(
     question: str,
     session_id: str,
-    managed_client: Any,
+    interactive_runner: Any,
     store: Any,
-    context_manager: Any,
     root: Path,
 ) -> dict[str, Any]:
-    """Execute one chat turn: send question to managed inference, store result.
+    """Execute one chat turn using InteractiveRuntime, store result.
 
     Parameters
     ----------
@@ -154,14 +97,12 @@ async def chat_turn(
         The user's question text.
     session_id:
         UUID4 session identifier (generated once at REPL start).
-    managed_client:
-        ManagedClient instance with X-Mallcop-Session and X-Mallcop-Surface headers set.
+    interactive_runner:
+        InteractiveRuntime instance, or None for non-pro users.
     store:
         ConversationStore for persisting messages.
-    context_manager:
-        ContextWindowManager for building trimmed history.
     root:
-        Deployment root directory (for loading findings.jsonl).
+        Deployment root directory (unused; kept for interface compatibility).
 
     Returns
     -------
@@ -170,43 +111,31 @@ async def chat_turn(
         tokens_used: int — total tokens used this turn
         footer: str — burn-rate footer string
     """
+    from mallcop.llm_types import LLMAPIError
+
+    # Early-return for non-pro users (BEFORE appending user message).
+    if interactive_runner is None:
+        return await _platform_error_response(
+            session_id, store,
+            "Pro subscription required for interactive chat. Run: mallcop init --pro"
+        )
+
     # Append user message to store.
     # Support both sync (ConversationStore) and async (CampfireConversationAdapter) stores.
-    _append_result = store.append(
+    _r = store.append(
         session_id=session_id,
         surface=SURFACE,
         role="user",
         content=question,
     )
-    if inspect.isawaitable(_append_result):
-        await _append_result
+    if inspect.isawaitable(_r):
+        await _r
 
-    # Load full session history and build context.
-    _load_result = store.load_session(session_id)
-    if inspect.isawaitable(_load_result):
-        history = await _load_result
-    else:
-        history = _load_result
-    context = context_manager.build_context(history)
-
-    # Build messages list for inference from context.
-    messages = [
-        {"role": m["role"], "content": m["content"]}
-        for m in context["messages"]
-    ]
-
-    # Prepend summary if context manager summarized older messages.
-    if context.get("summary"):
-        summary_msg = {
-            "role": "user",
-            "content": f"[Earlier conversation summary]: {context['summary']}",
-        }
-        messages = [summary_msg] + messages
-
-    # Ensure the current user question is at the end (it was just appended).
-    # The history already includes it, so messages should end with user role.
-
-    system_prompt = _build_system_prompt(root)
+    # Load last 5 messages (inline, no ContextWindowManager).
+    _l = store.load_session(session_id)
+    history = await _l if inspect.isawaitable(_l) else _l
+    recent = history[-5:]
+    messages = [{"role": m.role, "content": m.content} for m in recent]
 
     # Read budget warning threshold from env var (allows per-test override via monkeypatch).
     _budget_threshold = int(
@@ -222,33 +151,20 @@ async def chat_turn(
         _budget_threshold = DEFAULT_BUDGET_WARNING_THRESHOLD
 
     try:
-        response = managed_client.chat(
-            model="detective",
-            system_prompt=system_prompt,
+        turn_result = interactive_runner.run_turn(
             messages=messages,
-            tools=[],
-            max_tokens=MAX_TOKENS_PER_TURN,
+            turn_budget_donuts=12,
+            session_id=session_id,
         )
-    except Exception as exc:
-        # Check if this is a Forge HTTP error (402 or 503).
-        # LLMAPIError carries status_code directly; fall back to inspecting
-        # any .status_code attribute for other HTTP client exceptions.
-        status_code: int | None = getattr(exc, "status_code", None)
-
-        if status_code == 402:
+    except LLMAPIError as exc:
+        if exc.status_code == 402:
             return await _platform_error_response(session_id, store, _MSG_402)
-        elif status_code == 503:
+        if exc.status_code == 503:
             return await _platform_error_response(session_id, store, _MSG_503)
         raise
 
-    # Extract text from response.
-    text = response.text or ""
-    if not text and response.raw_resolution and isinstance(response.raw_resolution, dict):
-        text = response.raw_resolution.get("content", "") or ""
-    if not text and response.raw_resolution:
-        text = str(response.raw_resolution)
-
-    tokens_used = response.tokens_used
+    text = turn_result.text
+    tokens_used = turn_result.tokens_used
 
     # Track cumulative donut spend for this session.
     donuts_this_turn = tokens_used / TOKENS_PER_DONUT
@@ -278,24 +194,16 @@ async def chat_turn(
 
     # Emit budget warning if cumulative spend exceeds threshold.
     if cumulative_donuts >= _budget_threshold:
-        # Attempt to get remaining balance from client (best-effort).
-        remaining: str = "unknown"
-        try:
-            balance_info = managed_client.get_balance()
-            if isinstance(balance_info, dict):
-                remaining = str(balance_info.get("donuts", balance_info.get("balance", "unknown")))
-        except Exception:
-            pass
         result["budget_warning"] = (
             f"This conversation has used {cumulative_donuts:.1f} donuts. "
-            f"Your remaining balance is {remaining}."
+            f"Your remaining balance is unknown."
         )
 
     return result
 
 
 def run_chat_repl(
-    managed_client: Any,
+    interactive_runner: Any,
     root: Path,
 ) -> None:
     """Run the interactive chat REPL.
@@ -305,11 +213,9 @@ def run_chat_repl(
     """
     import click
     from mallcop.conversation import ConversationStore
-    from mallcop.context_window import ContextWindowManager
 
     session_id = str(uuid.uuid4())
     store = ConversationStore(root / "conversations.jsonl")
-    context_manager = ContextWindowManager(managed_client=managed_client)
 
     click.echo(f"mallcop chat  (session {session_id[:8]}...)  type 'exit' to quit")
     click.echo("")
@@ -330,9 +236,8 @@ def run_chat_repl(
             result = asyncio.run(chat_turn(
                 question=question,
                 session_id=session_id,
-                managed_client=managed_client,
+                interactive_runner=interactive_runner,
                 store=store,
-                context_manager=context_manager,
                 root=root,
             ))
             click.echo(f"\nmallcop> {result['response']}")

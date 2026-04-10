@@ -1,15 +1,16 @@
 """Tests for chat.py hardening features.
 
-Three protections:
+Updated for InteractiveRuntime-based chat_turn (mallcoppro-edc).
+
+Two remaining protections tested here (third — findings context cap — moved
+to InteractiveRuntime's system prompt, not chat_turn's concern):
 1. Per-session donut budget warning (fires when cumulative spend >= threshold).
-2. Findings context cap: _build_system_prompt loads at most 20 most-recent findings.
-3. Forge 402/503 error handling: returns platform message, no re-raise.
+2. Forge 402/503 error handling: returns platform message, no re-raise.
 """
 
 from __future__ import annotations
 
 import asyncio
-import json
 import uuid
 from pathlib import Path
 from typing import Any
@@ -20,11 +21,8 @@ import pytest
 from click.testing import CliRunner
 
 from mallcop.chat import (
-    MAX_FINDINGS_IN_PROMPT,
     TOKENS_PER_DONUT,
     DEFAULT_BUDGET_WARNING_THRESHOLD,
-    _build_system_prompt,
-    _load_finding_summaries,
     _session_donut_spend,
     chat_turn as _async_chat_turn,
     run_chat_repl,
@@ -34,29 +32,31 @@ from mallcop.chat import (
 def chat_turn(*args, **kwargs):
     """Sync wrapper around async chat_turn for test convenience."""
     return asyncio.run(_async_chat_turn(*args, **kwargs))
+
+
+from mallcop.actors.interactive_runtime import TurnResult
 from mallcop.conversation import ConversationStore
-from mallcop.context_window import ContextWindowManager
-from mallcop.llm_types import LLMAPIError, LLMResponse
+from mallcop.llm_types import LLMAPIError
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _make_llm_response(text: str = "Answer.", tokens: int = 100) -> LLMResponse:
-    return LLMResponse(
-        tool_calls=[],
-        resolution=None,
-        tokens_used=tokens,
-        raw_resolution={"content": text},
+def _make_turn_result(text: str = "Answer.", tokens: int = 100) -> TurnResult:
+    return TurnResult(
         text=text,
+        tokens_used=tokens,
+        iterations=1,
+        tool_calls=0,
+        tool_call_log=[],
     )
 
 
-def _make_mock_client(response: LLMResponse | None = None) -> MagicMock:
-    client = MagicMock()
-    client.chat.return_value = response or _make_llm_response()
-    return client
+def _make_mock_runner(result: TurnResult | None = None) -> MagicMock:
+    runner = MagicMock()
+    runner.run_turn.return_value = result or _make_turn_result()
+    return runner
 
 
 def _make_store(tmp_path: Path) -> ConversationStore:
@@ -66,20 +66,6 @@ def _make_store(tmp_path: Path) -> ConversationStore:
 def _run_chat_turn(**kwargs: Any) -> dict:
     """Run chat_turn synchronously for use in sync test methods."""
     return chat_turn(**kwargs)
-
-
-def _write_findings(tmp_path: Path, count: int, base_ts: str = "2024-01-01T00:00:00Z") -> None:
-    """Write *count* findings to findings.jsonl with sequential timestamps."""
-    lines = []
-    for i in range(count):
-        ts = f"2024-01-{(i % 28) + 1:02d}T{(i % 24):02d}:00:00Z"
-        lines.append(json.dumps({
-            "id": f"find-{i:04d}",
-            "severity": "medium",
-            "title": f"Finding number {i}",
-            "timestamp": ts,
-        }))
-    (tmp_path / "findings.jsonl").write_text("\n".join(lines) + "\n")
 
 
 # ---------------------------------------------------------------------------
@@ -97,17 +83,15 @@ class TestBudgetWarning:
         """No budget_warning key in result when spend is below threshold."""
         # threshold=50, tokens_per_donut=1000 → need <50000 tokens
         tokens = 100  # 0.1 donuts — well below 50
-        client = _make_mock_client(_make_llm_response(tokens=tokens))
+        runner = _make_mock_runner(_make_turn_result(tokens=tokens))
         store = _make_store(tmp_path)
-        cm = ContextWindowManager()
         session_id = str(uuid.uuid4())
 
         result = _run_chat_turn(
             question="Hello",
             session_id=session_id,
-            managed_client=client,
+            interactive_runner=runner,
             store=store,
-            context_manager=cm,
             root=tmp_path,
         )
 
@@ -119,17 +103,15 @@ class TestBudgetWarning:
         monkeypatch.setenv("MALLCOP_BUDGET_WARNING_THRESHOLD", "5")
         # Use tokens that put us at exactly 5 donuts (5000 tokens).
         tokens = 5000  # = 5 donuts
-        client = _make_mock_client(_make_llm_response(tokens=tokens))
+        runner = _make_mock_runner(_make_turn_result(tokens=tokens))
         store = _make_store(tmp_path)
-        cm = ContextWindowManager()
         session_id = str(uuid.uuid4())
 
         result = _run_chat_turn(
             question="Hello",
             session_id=session_id,
-            managed_client=client,
+            interactive_runner=runner,
             store=store,
-            context_manager=cm,
             root=tmp_path,
         )
 
@@ -141,25 +123,22 @@ class TestBudgetWarning:
         monkeypatch.setenv("MALLCOP_BUDGET_WARNING_THRESHOLD", "5")
         # 3 donuts per turn → warning fires on second turn (6 cumulative)
         tokens_per_turn = 3000  # 3 donuts
-        client = _make_mock_client(_make_llm_response(tokens=tokens_per_turn))
+        runner = _make_mock_runner(_make_turn_result(tokens=tokens_per_turn))
         store = _make_store(tmp_path)
-        cm = ContextWindowManager()
         session_id = str(uuid.uuid4())
 
         result1 = _run_chat_turn(
             question="Turn 1",
             session_id=session_id,
-            managed_client=client,
+            interactive_runner=runner,
             store=store,
-            context_manager=cm,
             root=tmp_path,
         )
         result2 = _run_chat_turn(
             question="Turn 2",
             session_id=session_id,
-            managed_client=client,
+            interactive_runner=runner,
             store=store,
-            context_manager=cm,
             root=tmp_path,
         )
 
@@ -170,17 +149,15 @@ class TestBudgetWarning:
         """Warning message names the cumulative donut count."""
         monkeypatch.setenv("MALLCOP_BUDGET_WARNING_THRESHOLD", "2")
         tokens = 2500  # 2.5 donuts
-        client = _make_mock_client(_make_llm_response(tokens=tokens))
+        runner = _make_mock_runner(_make_turn_result(tokens=tokens))
         store = _make_store(tmp_path)
-        cm = ContextWindowManager()
         session_id = str(uuid.uuid4())
 
         result = _run_chat_turn(
             question="Hello",
             session_id=session_id,
-            managed_client=client,
+            interactive_runner=runner,
             store=store,
-            context_manager=cm,
             root=tmp_path,
         )
 
@@ -191,9 +168,8 @@ class TestBudgetWarning:
         """Spend from one session does not count toward another session's budget."""
         monkeypatch.setenv("MALLCOP_BUDGET_WARNING_THRESHOLD", "5")
         tokens = 4000  # 4 donuts — below threshold alone
-        client = _make_mock_client(_make_llm_response(tokens=tokens))
+        runner = _make_mock_runner(_make_turn_result(tokens=tokens))
         store = _make_store(tmp_path)
-        cm = ContextWindowManager()
 
         session_a = str(uuid.uuid4())
         session_b = str(uuid.uuid4())
@@ -202,9 +178,8 @@ class TestBudgetWarning:
         _run_chat_turn(
             question="Session A",
             session_id=session_a,
-            managed_client=client,
+            interactive_runner=runner,
             store=store,
-            context_manager=cm,
             root=tmp_path,
         )
 
@@ -212,9 +187,8 @@ class TestBudgetWarning:
         result_b = _run_chat_turn(
             question="Session B",
             session_id=session_b,
-            managed_client=client,
+            interactive_runner=runner,
             store=store,
-            context_manager=cm,
             root=tmp_path,
         )
 
@@ -223,106 +197,9 @@ class TestBudgetWarning:
     def test_default_threshold_is_50(self) -> None:
         assert DEFAULT_BUDGET_WARNING_THRESHOLD == 50
 
-    def test_budget_warning_includes_balance_from_get_balance(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """When get_balance() returns a valid dict, the balance appears in the warning."""
-        monkeypatch.setenv("MALLCOP_BUDGET_WARNING_THRESHOLD", "2")
-        tokens = 2500  # 2.5 donuts — exceeds threshold of 2
-        client = _make_mock_client(_make_llm_response(tokens=tokens))
-        client.get_balance = MagicMock(return_value={"donuts": 42.5})
-        store = _make_store(tmp_path)
-        cm = ContextWindowManager()
-        session_id = str(uuid.uuid4())
-
-        result = _run_chat_turn(
-            question="Hello",
-            session_id=session_id,
-            managed_client=client,
-            store=store,
-            context_manager=cm,
-            root=tmp_path,
-        )
-
-        assert "budget_warning" in result
-        assert "42.5" in result["budget_warning"]
-
 
 # ---------------------------------------------------------------------------
-# Feature 2: Findings context cap (pure function — no external calls)
-# ---------------------------------------------------------------------------
-
-class TestFindingsContextCap:
-    """_build_system_prompt caps findings at MAX_FINDINGS_IN_PROMPT (20)."""
-
-    def test_max_findings_constant_is_20(self) -> None:
-        assert MAX_FINDINGS_IN_PROMPT == 20
-
-    def test_exactly_20_findings_when_50_exist(self, tmp_path: Path) -> None:
-        """System prompt contains exactly 20 finding entries when 50 exist."""
-        _write_findings(tmp_path, 50)
-
-        prompt = _build_system_prompt(tmp_path)
-
-        # Count occurrences of "find-" ID prefix in prompt.
-        finding_count = prompt.count("find-")
-        assert finding_count == 20
-
-    def test_fewer_than_20_findings_all_included(self, tmp_path: Path) -> None:
-        """When fewer than 20 findings exist, all are included."""
-        _write_findings(tmp_path, 5)
-
-        prompt = _build_system_prompt(tmp_path)
-
-        finding_count = prompt.count("find-")
-        assert finding_count == 5
-
-    def test_load_finding_summaries_caps_at_20(self, tmp_path: Path) -> None:
-        """_load_finding_summaries returns at most 20 entries."""
-        _write_findings(tmp_path, 100)
-
-        summaries = _load_finding_summaries(tmp_path)
-
-        assert len(summaries) == 20
-
-    def test_load_finding_summaries_returns_most_recent(self, tmp_path: Path) -> None:
-        """With 50 findings, the 20 most-recent by timestamp are returned."""
-        # Write 50 findings with timestamps 2024-01-01 through 2024-02-19.
-        lines = []
-        for i in range(50):
-            # Day 1..50 (approximately)
-            month = 1 + (i // 28)
-            day = (i % 28) + 1
-            ts = f"2024-{month:02d}-{day:02d}T00:00:00Z"
-            lines.append(json.dumps({
-                "id": f"find-{i:04d}",
-                "severity": "medium",
-                "title": f"Finding {i}",
-                "timestamp": ts,
-            }))
-        (tmp_path / "findings.jsonl").write_text("\n".join(lines) + "\n")
-
-        summaries = _load_finding_summaries(tmp_path)
-
-        # The 20 most recent are findings 30..49 (highest timestamps).
-        # Simpler check: find-0030..find-0049 should appear, find-0000..find-0029 should not.
-        joined = "\n".join(summaries)
-        # At least the last 10 findings (most recent) should be present.
-        for i in range(40, 50):
-            assert f"find-{i:04d}" in joined, f"find-{i:04d} should be in the 20 most recent"
-        # Early findings should NOT be present.
-        for i in range(0, 10):
-            assert f"find-{i:04d}" not in joined, f"find-{i:04d} should be excluded (too old)"
-
-    def test_zero_findings_returns_base_prompt(self, tmp_path: Path) -> None:
-        """No findings.jsonl returns the base system prompt."""
-        prompt = _build_system_prompt(tmp_path)
-        assert "Current findings" not in prompt
-        assert "security" in prompt.lower()
-
-
-# ---------------------------------------------------------------------------
-# Feature 3: Forge 402/503 error handling
+# Feature 2: Forge 402/503 error handling
 # ---------------------------------------------------------------------------
 
 class TestForgeErrorHandling:
@@ -332,19 +209,17 @@ class TestForgeErrorHandling:
         _session_donut_spend.clear()
 
     def test_402_returns_platform_message(self, tmp_path: Path) -> None:
-        """402 from Forge → 'insufficient donut balance' message."""
-        client = MagicMock()
-        client.chat.side_effect = LLMAPIError("Managed inference error 402", status_code=402)
+        """402 from run_turn → 'insufficient donut balance' message."""
+        runner = MagicMock()
+        runner.run_turn.side_effect = LLMAPIError("Managed inference error 402", status_code=402)
         store = _make_store(tmp_path)
-        cm = ContextWindowManager()
         session_id = str(uuid.uuid4())
 
         result = _run_chat_turn(
             question="Hello",
             session_id=session_id,
-            managed_client=client,
+            interactive_runner=runner,
             store=store,
-            context_manager=cm,
             root=tmp_path,
         )
 
@@ -353,19 +228,17 @@ class TestForgeErrorHandling:
         assert "Your message is saved" in result["response"]
 
     def test_503_returns_platform_message(self, tmp_path: Path) -> None:
-        """503 from Forge → 'inference service unavailable' message."""
-        client = MagicMock()
-        client.chat.side_effect = LLMAPIError("Managed inference error 503", status_code=503)
+        """503 from run_turn → 'inference service unavailable' message."""
+        runner = MagicMock()
+        runner.run_turn.side_effect = LLMAPIError("Managed inference error 503", status_code=503)
         store = _make_store(tmp_path)
-        cm = ContextWindowManager()
         session_id = str(uuid.uuid4())
 
         result = _run_chat_turn(
             question="Hello",
             session_id=session_id,
-            managed_client=client,
+            interactive_runner=runner,
             store=store,
-            context_manager=cm,
             root=tmp_path,
         )
 
@@ -375,55 +248,49 @@ class TestForgeErrorHandling:
 
     def test_402_does_not_raise(self, tmp_path: Path) -> None:
         """402 error does not propagate — chat_turn returns normally."""
-        client = MagicMock()
-        client.chat.side_effect = LLMAPIError("error", status_code=402)
+        runner = MagicMock()
+        runner.run_turn.side_effect = LLMAPIError("error", status_code=402)
         store = _make_store(tmp_path)
-        cm = ContextWindowManager()
         session_id = str(uuid.uuid4())
 
         # Should not raise.
         result = _run_chat_turn(
             question="Hello",
             session_id=session_id,
-            managed_client=client,
+            interactive_runner=runner,
             store=store,
-            context_manager=cm,
             root=tmp_path,
         )
         assert result["tokens_used"] == 0
 
     def test_503_does_not_raise(self, tmp_path: Path) -> None:
         """503 error does not propagate — chat_turn returns normally."""
-        client = MagicMock()
-        client.chat.side_effect = LLMAPIError("error", status_code=503)
+        runner = MagicMock()
+        runner.run_turn.side_effect = LLMAPIError("error", status_code=503)
         store = _make_store(tmp_path)
-        cm = ContextWindowManager()
         session_id = str(uuid.uuid4())
 
         result = _run_chat_turn(
             question="Hello",
             session_id=session_id,
-            managed_client=client,
+            interactive_runner=runner,
             store=store,
-            context_manager=cm,
             root=tmp_path,
         )
         assert result["tokens_used"] == 0
 
     def test_402_message_saved_to_store(self, tmp_path: Path) -> None:
         """Platform message is persisted to conversation store on 402."""
-        client = MagicMock()
-        client.chat.side_effect = LLMAPIError("error", status_code=402)
+        runner = MagicMock()
+        runner.run_turn.side_effect = LLMAPIError("error", status_code=402)
         store = _make_store(tmp_path)
-        cm = ContextWindowManager()
         session_id = str(uuid.uuid4())
 
         _run_chat_turn(
             question="Hello",
             session_id=session_id,
-            managed_client=client,
+            interactive_runner=runner,
             store=store,
-            context_manager=cm,
             root=tmp_path,
         )
 
@@ -434,58 +301,52 @@ class TestForgeErrorHandling:
 
     def test_other_errors_still_raise(self, tmp_path: Path) -> None:
         """Non-402/503 errors propagate normally."""
-        client = MagicMock()
-        client.chat.side_effect = LLMAPIError("error", status_code=500)
+        runner = MagicMock()
+        runner.run_turn.side_effect = LLMAPIError("error", status_code=500)
         store = _make_store(tmp_path)
-        cm = ContextWindowManager()
         session_id = str(uuid.uuid4())
 
         with pytest.raises(LLMAPIError):
             _run_chat_turn(
                 question="Hello",
                 session_id=session_id,
-                managed_client=client,
+                interactive_runner=runner,
                 store=store,
-                context_manager=cm,
                 root=tmp_path,
             )
 
     def test_generic_exception_still_raises(self, tmp_path: Path) -> None:
         """Generic exceptions (no status_code) propagate normally."""
-        client = MagicMock()
-        client.chat.side_effect = RuntimeError("network failure")
+        runner = MagicMock()
+        runner.run_turn.side_effect = RuntimeError("network failure")
         store = _make_store(tmp_path)
-        cm = ContextWindowManager()
         session_id = str(uuid.uuid4())
 
         with pytest.raises(RuntimeError):
             _run_chat_turn(
                 question="Hello",
                 session_id=session_id,
-                managed_client=client,
+                interactive_runner=runner,
                 store=store,
-                context_manager=cm,
                 root=tmp_path,
             )
 
     def test_402_store_append_raises_still_returns_platform_msg(self, tmp_path: Path) -> None:
         """If store.append raises inside the 402 handler, chat_turn still returns the platform message."""
-        client = MagicMock()
-        client.chat.side_effect = LLMAPIError("error", status_code=402)
+        runner = MagicMock()
+        runner.run_turn.side_effect = LLMAPIError("error", status_code=402)
         store = MagicMock()
         # First call (user message) succeeds; second call (platform message) raises.
         store.append.side_effect = [None, IOError("disk full")]
         store.load_session.return_value = []
-        cm = ContextWindowManager()
         session_id = str(uuid.uuid4())
 
         # Must not raise — store failure is swallowed.
         result = _run_chat_turn(
             question="Hello",
             session_id=session_id,
-            managed_client=client,
+            interactive_runner=runner,
             store=store,
-            context_manager=cm,
             root=tmp_path,
         )
 
@@ -494,20 +355,18 @@ class TestForgeErrorHandling:
 
     def test_503_store_append_raises_still_returns_platform_msg(self, tmp_path: Path) -> None:
         """If store.append raises inside the 503 handler, chat_turn still returns the platform message."""
-        client = MagicMock()
-        client.chat.side_effect = LLMAPIError("error", status_code=503)
+        runner = MagicMock()
+        runner.run_turn.side_effect = LLMAPIError("error", status_code=503)
         store = MagicMock()
         store.append.side_effect = [None, IOError("disk full")]
         store.load_session.return_value = []
-        cm = ContextWindowManager()
         session_id = str(uuid.uuid4())
 
         result = _run_chat_turn(
             question="Hello",
             session_id=session_id,
-            managed_client=client,
+            interactive_runner=runner,
             store=store,
-            context_manager=cm,
             root=tmp_path,
         )
 
@@ -515,38 +374,34 @@ class TestForgeErrorHandling:
         assert result["tokens_used"] == 0
 
     def test_402_returns_is_platform_error_true(self, tmp_path: Path) -> None:
-        """402 from Forge sets is_platform_error=True in the result dict."""
-        client = MagicMock()
-        client.chat.side_effect = LLMAPIError("error", status_code=402)
+        """402 from run_turn sets is_platform_error=True in the result dict."""
+        runner = MagicMock()
+        runner.run_turn.side_effect = LLMAPIError("error", status_code=402)
         store = _make_store(tmp_path)
-        cm = ContextWindowManager()
         session_id = str(uuid.uuid4())
 
         result = _run_chat_turn(
             question="Hello",
             session_id=session_id,
-            managed_client=client,
+            interactive_runner=runner,
             store=store,
-            context_manager=cm,
             root=tmp_path,
         )
 
         assert result.get("is_platform_error") is True
 
     def test_503_returns_is_platform_error_true(self, tmp_path: Path) -> None:
-        """503 from Forge sets is_platform_error=True in the result dict."""
-        client = MagicMock()
-        client.chat.side_effect = LLMAPIError("error", status_code=503)
+        """503 from run_turn sets is_platform_error=True in the result dict."""
+        runner = MagicMock()
+        runner.run_turn.side_effect = LLMAPIError("error", status_code=503)
         store = _make_store(tmp_path)
-        cm = ContextWindowManager()
         session_id = str(uuid.uuid4())
 
         result = _run_chat_turn(
             question="Hello",
             session_id=session_id,
-            managed_client=client,
+            interactive_runner=runner,
             store=store,
-            context_manager=cm,
             root=tmp_path,
         )
 
@@ -554,17 +409,15 @@ class TestForgeErrorHandling:
 
     def test_success_does_not_set_is_platform_error(self, tmp_path: Path) -> None:
         """Successful turn does not set is_platform_error."""
-        client = _make_mock_client()
+        runner = _make_mock_runner()
         store = _make_store(tmp_path)
-        cm = ContextWindowManager()
         session_id = str(uuid.uuid4())
 
         result = _run_chat_turn(
             question="Hello",
             session_id=session_id,
-            managed_client=client,
+            interactive_runner=runner,
             store=store,
-            context_manager=cm,
             root=tmp_path,
         )
 
@@ -586,19 +439,16 @@ class TestBudgetThresholdValidation:
     ) -> None:
         """With MALLCOP_BUDGET_WARNING_THRESHOLD=0, warning does NOT fire on first turn."""
         monkeypatch.setenv("MALLCOP_BUDGET_WARNING_THRESHOLD", "0")
-        # Any token count: if threshold were truly 0, cumulative_donuts >= 0 is always True.
         tokens = 100  # 0.1 donuts — well below the default 50
-        client = _make_mock_client(_make_llm_response(tokens=tokens))
+        runner = _make_mock_runner(_make_turn_result(tokens=tokens))
         store = _make_store(tmp_path)
-        cm = ContextWindowManager()
         session_id = str(uuid.uuid4())
 
         result = _run_chat_turn(
             question="Hello",
             session_id=session_id,
-            managed_client=client,
+            interactive_runner=runner,
             store=store,
-            context_manager=cm,
             root=tmp_path,
         )
 
@@ -610,17 +460,15 @@ class TestBudgetThresholdValidation:
         """Negative MALLCOP_BUDGET_WARNING_THRESHOLD falls back to default — no spurious warning."""
         monkeypatch.setenv("MALLCOP_BUDGET_WARNING_THRESHOLD", "-10")
         tokens = 100
-        client = _make_mock_client(_make_llm_response(tokens=tokens))
+        runner = _make_mock_runner(_make_turn_result(tokens=tokens))
         store = _make_store(tmp_path)
-        cm = ContextWindowManager()
         session_id = str(uuid.uuid4())
 
         result = _run_chat_turn(
             question="Hello",
             session_id=session_id,
-            managed_client=client,
+            interactive_runner=runner,
             store=store,
-            context_manager=cm,
             root=tmp_path,
         )
 
@@ -650,11 +498,11 @@ class TestReplBudgetWarningDisplay:
             "tokens_used": 5000,
         }
 
-        client = MagicMock()
+        interactive_runner = MagicMock()
 
         @_click.command()
         def _repl_cmd():
-            run_chat_repl(managed_client=client, root=tmp_path)
+            run_chat_repl(interactive_runner=interactive_runner, root=tmp_path)
 
         with patch("mallcop.chat.chat_turn", new=AsyncMock(return_value=mock_result)):
             runner = CliRunner()
@@ -674,11 +522,11 @@ class TestReplBudgetWarningDisplay:
             "tokens_used": 100,
         }
 
-        client = MagicMock()
+        interactive_runner = MagicMock()
 
         @_click.command()
         def _repl_cmd():
-            run_chat_repl(managed_client=client, root=tmp_path)
+            run_chat_repl(interactive_runner=interactive_runner, root=tmp_path)
 
         with patch("mallcop.chat.chat_turn", new=AsyncMock(return_value=mock_result)):
             runner = CliRunner()

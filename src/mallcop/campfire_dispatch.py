@@ -14,8 +14,7 @@ Design notes
   for chat state so the session lives in campfire.
 - chat_turn() is called without modification — its signature is:
 
-      chat_turn(question, session_id, managed_client, store,
-                context_manager, root) -> dict
+      chat_turn(question, session_id, interactive_runner, store, root) -> dict
 
   where ``store`` is any object implementing append()/load_session().
 
@@ -43,7 +42,6 @@ from pathlib import Path
 from typing import Any, Optional
 
 from mallcop.conversation import CampfireConversationAdapter
-from mallcop.context_window import ContextWindowManager
 
 _log = logging.getLogger(__name__)
 
@@ -127,10 +125,11 @@ class CampfireDispatcher:
     ----------
     campfire_id:
         The campfire to poll and respond on.
-    managed_client:
-        ManagedClient instance forwarded to chat_turn().
+    interactive_runner:
+        InteractiveRuntime instance forwarded to chat_turn(), or None for
+        non-pro deployments (chat_turn returns a platform error in that case).
     root:
-        Deployment root directory (findings.jsonl lives here).
+        Deployment root directory.
     poll_interval:
         Seconds between polls (default 3).
     cf_bin:
@@ -142,7 +141,7 @@ class CampfireDispatcher:
     def __init__(
         self,
         campfire_id: str,
-        managed_client: Any,
+        interactive_runner: Any,
         root: Path,
         poll_interval: float = 3.0,
         cf_bin: str = "cf",
@@ -150,7 +149,7 @@ class CampfireDispatcher:
         cf_timeout: float = _CF_TIMEOUT,
     ) -> None:
         self._campfire_id = campfire_id
-        self._managed_client = managed_client
+        self._interactive_runner = interactive_runner
         self._root = Path(root)
         self._poll_interval = poll_interval
         self._cf_bin = cf_bin
@@ -164,7 +163,6 @@ class CampfireDispatcher:
             cf_bin=cf_bin,
             cf_home=cf_home,
         )
-        self._context_manager = ContextWindowManager(managed_client=managed_client)
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -327,9 +325,8 @@ class CampfireDispatcher:
             result = await chat_turn(
                 question=question,
                 session_id=session_id,
-                managed_client=self._managed_client,
+                interactive_runner=self._interactive_runner,
                 store=self._adapter,
-                context_manager=self._context_manager,
                 root=self._root,
             )
         except Exception as exc:

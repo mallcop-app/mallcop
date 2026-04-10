@@ -1107,7 +1107,7 @@ def watch(dry_run: bool, dir_path: str | None, human: bool, backend: str, daemon
             cf_home = os.environ.get('CF_HOME')
             dispatcher = CampfireDispatcher(
                 campfire_id=campfire_id,
-                managed_client=managed_client,
+                interactive_runner=None,  # TODO: wire InteractiveRuntime for daemon chat
                 root=root,
                 cf_home=cf_home,
             )
@@ -1154,7 +1154,7 @@ def watch(dry_run: bool, dir_path: str | None, human: bool, backend: str, daemon
 
         dispatcher = CampfireDispatcher(
             campfire_id=campfire_id,
-            managed_client=managed_client,
+            interactive_runner=None,  # TODO: wire InteractiveRuntime for daemon chat
             root=root,
         )
 
@@ -1268,23 +1268,9 @@ def _watch_dispatch_pass(root: Path) -> None:
         campfire_id=campfire_id,
     )
 
-    # Build a ManagedClient when pro config is present so the dispatcher can
-    # respond to Telegram messages via inference. Non-pro users get None, which
-    # means chat_turn will log an error if called — acceptable behaviour.
-    pro = getattr(config, "pro", None)
-    managed_client = None
-    if pro and getattr(pro, "service_token", None):
-        from mallcop.llm.managed import ManagedClient
-
-        managed_client = ManagedClient(
-            endpoint=getattr(pro, "inference_url", None) or "https://mallcop.app",
-            service_token=pro.service_token,
-            use_lanes=True,
-        )
-
     dispatcher = CampfireDispatcher(
         campfire_id=campfire_id,
-        managed_client=managed_client,
+        interactive_runner=None,  # TODO: wire InteractiveRuntime for daemon chat
         root=root,
     )
 
@@ -1842,17 +1828,7 @@ def chat(dir_path: str | None) -> None:
     import uuid
     session_id = str(uuid.uuid4())
 
-    managed_client = ManagedClient(
-        endpoint=getattr(pro, "endpoint", "https://mallcop.app"),
-        service_token=pro.api_key,
-        use_lanes=True,
-        extra_headers={
-            "X-Mallcop-Session": session_id,
-            "X-Mallcop-Surface": "cli",
-        },
-    )
-
-    run_chat_repl(managed_client=managed_client, root=root)
+    run_chat_repl(interactive_runner=None, root=root)  # TODO: wire InteractiveRuntime
 
 
 # --- Development ---
