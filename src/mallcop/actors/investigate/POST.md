@@ -172,3 +172,64 @@ When calling resolve-finding, include a confidence score (1-5):
 - 1: Guessing — insufficient evidence to decide
 
 If your confidence is 1-2, escalate instead of resolving.
+
+## Fan-out on Uncertainty
+
+If the pre_bead_close confidence hook determines your confidence is below the threshold (0.55), you do NOT resolve. Instead, you emit parallel work items for deeper investigation.
+
+### When Fan-out Triggers
+
+The hook evaluates your investigation using a structural scoring algorithm:
+
+| Signal | Weight | Cap |
+|--------|--------|-----|
+| Tool calls made | 0.04 per call | 8 calls (0.32 max) |
+| Distinct tools used | 0.08 per tool | 4 tools (0.32 max) |
+| Evidence citations in reason | 0.04 per citation | 5 citations (0.20 max) |
+| Iteration penalty | -0.02 per iteration over 3 | unbounded |
+
+Score range: [0.0, 1.0]. Threshold: 0.55. If your score < 0.55, the hook blocks your close and forces the fan-out path.
+
+You cannot override this. The hook runs before your close attempt. If it blocks, you proceed to emit items instead.
+
+### What to Emit
+
+When the hook blocks close, emit exactly 4 items in this order:
+
+1. **Partial transcript**: Write your investigation work so far to `exams/transcripts/<run>/<id>-partial.md`. Include:
+   - All tool calls you made and their results
+   - All evidence you gathered
+   - Your partial reasoning — what you were investigating and why
+   - What you were uncertain about and why you couldn't reach confidence
+
+2. **Three deep-investigate items**: Create task:deep-investigate items, one for each hypothesis. Each item includes metadata specifying the hypothesis:
+   - `task:deep-investigate` with metadata `hypothesis:benign` — "Assume legitimate. Find confirming evidence. If you can't confirm benign within budget, that's signal."
+   - `task:deep-investigate` with metadata `hypothesis:malicious` — "Assume compromised. Find confirming evidence. What's the attack vector? What else would be true if this is an attack?"
+   - `task:deep-investigate` with metadata `hypothesis:incomplete` — "The parent investigation couldn't resolve because data is missing. What additional data sources would disambiguate? What observable would flip the verdict?"
+
+3. **Investigate-merge item**: Create one `task:investigate-merge` item with dependencies on all 3 deep-investigate items (blocked until all 3 close).
+
+### How It Works
+
+The dispatcher claims all 3 deep-investigate items as parallel workers. Each sees:
+- Your partial transcript (read-only, via sandbox `extra_ro`)
+- A directed hypothesis in the item metadata
+- The same tools as investigate (bash, read, check-baseline, search-events, search-findings, load-skill)
+- The same model tier
+
+Each deep-investigator runs independently, building evidence for or against their hypothesis. When all 3 close, the merge item unblocks and is claimed.
+
+The merge step reads all 3 deep-investigate transcripts and produces a single verdict via evidence aggregation (not majority vote):
+- If all 3 agree: that's the verdict, confidence = max of the three
+- If 2 agree, 1 disagrees: verdict = majority, dissent's evidence addressed in reason, confidence penalized by 0.1
+- If all 3 disagree: escalate to heal with all evidence compiled (system is genuinely uncertain)
+
+### Do NOT Change Existing Logic
+
+The fan-out is a NEW exit path, not a replacement. Your existing resolve/escalate/remediate decision framework is unchanged:
+- You still dismiss findings by resolving as benign
+- You still escalate findings to a human analyst
+- You still emit remediate items when a write action is needed
+- You still run before heal in the chain
+
+The fan-out only triggers when the hook blocks close due to low confidence. It's a structural gate, not a decision you make.
