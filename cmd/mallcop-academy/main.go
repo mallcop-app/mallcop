@@ -157,16 +157,22 @@ type ChainEntry struct {
 
 // ScenarioRecord is the per-scenario JSON artifact written to output-dir.
 type ScenarioRecord struct {
-	ScenarioID      string       `json:"scenario_id"`
-	FindingID       string       `json:"finding_id"`
-	RunID           string       `json:"run_id"`
-	TargetCampfire  string       `json:"target_campfire"`
-	PostedAt        time.Time    `json:"posted_at"`
-	TerminalAt      *time.Time   `json:"terminal_at,omitempty"`
-	WallSeconds     float64      `json:"wall_seconds,omitempty"`
-	TerminalAction  string       `json:"terminal_action,omitempty"`
-	TerminalItemID  string       `json:"terminal_item_id,omitempty"`
-	FullChain       []ChainEntry `json:"full_chain"`
+	ScenarioID      string          `json:"scenario_id"`
+	FindingID       string          `json:"finding_id"`
+	RunID           string          `json:"run_id"`
+	TargetCampfire  string          `json:"target_campfire"`
+	PostedAt        time.Time       `json:"posted_at"`
+	TerminalAt      *time.Time      `json:"terminal_at,omitempty"`
+	WallSeconds     float64         `json:"wall_seconds,omitempty"`
+	TerminalAction  string          `json:"terminal_action,omitempty"`
+	TerminalItemID  string          `json:"terminal_item_id,omitempty"`
+	FullChain       []ChainEntry    `json:"full_chain"`
+
+	// F4B structural grading block (nil if no expected: block in scenario yaml).
+	Structural *StructuralGrade `json:"structural,omitempty"`
+
+	// F4C rubric block (nil if judge not run or unavailable).
+	Rubric *JudgeResult `json:"rubric,omitempty"`
 }
 
 // RunRecord is the run-level metadata written to run.json.
@@ -196,6 +202,16 @@ type trackedScenario struct {
 	terminalAt     time.Time
 	terminalAction string
 	terminalItemID string
+
+	// F4B grading inputs — accumulated during the watch loop.
+	terminalReason      string // reason field from the terminal close payload
+	triageCloseAction   string // action from the first task:triage close
+	toolsUsedInInvest   bool   // true if any investigate step had tool calls
+	maxInvestIterations int    // highest iteration count seen across investigate workers
+
+	// F4B/F4C wiring — set after judge runs (single-pass write).
+	scenario        interface{} // *exam.Scenario, stored as interface{} to avoid circular import issues
+	judgeResult     *JudgeResult
 }
 
 // ---- Close payload parsing ----------------------------------------------------
@@ -358,6 +374,7 @@ func academy(sender Sender, args runArgs) error {
 		ts := &trackedScenario{
 			scenarioID: s.ID,
 			findingID:  findingTrackingID(args.runID, s.ID),
+			scenario:   s, // stored for F4B grading
 		}
 		tracked[s.ID] = ts
 	}
@@ -486,6 +503,16 @@ func academy(sender Sender, args runArgs) error {
 				ts.chain = append(ts.chain, entry)
 			}
 
+			// F4B: capture triage close action (first task:triage close seen).
+			if ts.triageCloseAction == "" && isTriageSkill(cp.Skill) {
+				ts.triageCloseAction = cp.Action
+			}
+
+			// F4B: capture reason from close payload for mention/no-mention checks.
+			if terminalActions[cp.Action] && ts.terminalReason == "" {
+				ts.terminalReason = extractTerminalReason(msg.Payload)
+			}
+
 			// Classify as terminal: terminal action AND no follow-on work:create
 			// from this close observed yet.
 			if !ts.terminal && terminalActions[cp.Action] {
@@ -540,6 +567,11 @@ func academy(sender Sender, args runArgs) error {
 				}
 			}
 		}
+	}
+
+	// Write aggregate report.md.
+	if err := writeAggregateReport(args.runID, args.outputDir, scenarios, tracked); err != nil {
+		fmt.Fprintf(os.Stderr, "WARN: write aggregate report: %v\n", err)
 	}
 
 	fmt.Fprintf(os.Stderr, "academy run %s complete: %d scenarios posted\n", args.runID, len(scenarios))
@@ -615,10 +647,26 @@ func filterAcademyMetadata(m exam.FindingMetadata) map[string]interface{} {
 	return out
 }
 
+// ---- Watch-loop helpers (grading) --------------------------------------------
+
+// isTriageSkill returns true if the skill name maps to a triage skill.
+func isTriageSkill(skill string) bool {
+	return skill == "task:triage" || skill == "exam:scenario"
+}
+
+// isInvestigateSkill returns true if the skill name maps to an investigate skill.
+func isInvestigateSkill(skill string) bool {
+	return skill == "task:investigate" || skill == "task:deep-investigate" ||
+		skill == "task:investigate-merge"
+}
+
 // ---- JSON output helpers ------------------------------------------------------
 
 // writeScenarioRecord writes a ScenarioRecord to
 // <outputDir>/<scenarioID>.json.
+// F4B: computes structural grading from the scenario's expected: block.
+// F4C: includes the judge rubric if already collected (single-pass: judge runs
+// before this function is called on the terminal close path).
 func writeScenarioRecord(ts *trackedScenario, runID, targetCampfire, outputDir string) error {
 	ts.mu.Lock()
 	defer ts.mu.Unlock()
@@ -637,6 +685,27 @@ func writeScenarioRecord(ts *trackedScenario, runID, targetCampfire, outputDir s
 		rec.WallSeconds = ts.terminalAt.Sub(ts.postedAt).Seconds()
 		rec.TerminalAction = ts.terminalAction
 		rec.TerminalItemID = ts.terminalItemID
+	}
+
+	// F4C: attach rubric if collected.
+	rec.Rubric = ts.judgeResult
+
+	// F4B: compute structural grade if the scenario has an expected: block.
+	if s, ok := ts.scenario.(*exam.Scenario); ok && s != nil && s.ExpectedResolution != nil {
+		rubricScore := 0
+		if ts.judgeResult != nil {
+			rubricScore = ts.judgeResult.Rubric.InvestigationThoroughness
+		}
+		grade := computeStructuralGrade(
+			s.ExpectedResolution,
+			ts.terminalAction,
+			ts.terminalReason,
+			ts.triageCloseAction,
+			ts.toolsUsedInInvest,
+			ts.maxInvestIterations,
+			rubricScore,
+		)
+		rec.Structural = &grade
 	}
 
 	return writeJSON(filepath.Join(outputDir, ts.scenarioID+".json"), rec)
