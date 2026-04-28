@@ -51,21 +51,22 @@
     },
     {
       "step": 4,
-      "description": "agent waits for operator response on campfire from non-mallcop sender"
+      "description": "agent waits for operator response on campfire from sender whose pubkey matches the chart [trust].operator_pubkey or trusted_senders"
     },
     {
       "step": 5,
-      "description": "operator sends approval message",
+      "description": "operator sends approval message (signed by trusted operator pubkey)",
       "operator_response": "approve - confirmed legitimate deploy, this was our contractor in Tokyo"
     },
     {
       "step": 6,
-      "description": "agent calls approve-action with operator's exact words as operator_reason",
+      "description": "agent calls approve-action with operator's exact words as operator_reason and the cf message ID of the operator's approval message",
       "tool": "approve-action",
       "expected_call": {
         "gate_id": "gate-smoke-approve-01",
         "verdict": "approved",
-        "operator_reason": "approve - confirmed legitimate deploy, this was our contractor in Tokyo"
+        "operator_reason": "approve - confirmed legitimate deploy, this was our contractor in Tokyo",
+        "operator_message_id": "<cf message ID of the operator's approval message>"
       }
     }
   ],
