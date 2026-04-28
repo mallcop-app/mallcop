@@ -7,13 +7,35 @@
 # charts/mallcop-operational.toml.tmpl.
 #
 # Usage:
-#   sed 's/{{OPERATOR_CAMPFIRE_ID}}/abc123.../g; s/{{MODEL_STRONG}}/claude-opus-4-5/g; s/{{INSTANCE}}/prod/g; s|{{TOOL_BIN_DIR}}|/path/to/bin|g' \
+#   sed 's/{{OPERATOR_CAMPFIRE_ID}}/abc123.../g; s/{{MODEL_STRONG}}/claude-opus-4-5/g; s/{{INSTANCE}}/prod/g; s|{{TOOL_BIN_DIR}}|/path/to/bin|g; s/{{OPERATOR_PUBKEY_HEX}}/cd41913b.../g' \
 #     charts/mallcop-automaton.toml.tmpl > mallcop-automaton.toml
 
 [identity]
 name     = "mallcop-{{INSTANCE}}"
 type     = "automaton"
 key_file = "identity.json"
+
+[trust]
+# REQUIRED. Ed25519 public key (hex, 64 chars) of the trusted human operator identity.
+# Set via: sed 's/{{OPERATOR_PUBKEY_HEX}}/<hex>/g' at chart-deploy time.
+# Source: run `cf id` on the operator's workstation; copy the hex output.
+# Failure mode: if empty or absent, runApproveAction refuses ALL approvals (fail closed).
+operator_pubkey = "{{OPERATOR_PUBKEY_HEX}}"
+
+# OPTIONAL. Additional operator pubkeys for multi-operator setups (e.g., two on-call humans).
+# Each entry is a hex Ed25519 pubkey. Approval from ANY listed key is sufficient.
+# Default: [] (only operator_pubkey is trusted).
+trusted_senders = []
+
+# OPTIONAL. Seconds both old and new operator_pubkey are simultaneously valid during
+# a key rotation. Zero (default) means no overlap — only the current operator_pubkey
+# is valid. Set to e.g. 3600 when rotating keys to allow in-flight approvals to drain.
+key_rotation_grace_period_seconds = 0
+
+# OPTIONAL. When true (default), the agent requires that the gate_id string appears
+# verbatim in the operator's approval message body. This defeats replay (A4) because
+# a past approval message for gate G1 will not contain gate G2's ID.
+require_explicit_gate_id = true
 
 [[worksources]]
 # type "ready" reads from a campfire-backed rd work queue (the only type supported in
@@ -168,8 +190,8 @@ max_iters = 20
 
   [[capabilities.seed.tool_defs]]
   name = "approve-action"
-  description = "Fulfill an approval gate posted by request-approval. OPERATOR-TIER ONLY. Must only be called after explicit human operator approval. operator_reason is REQUIRED."
-  input_schema = '{"type":"object","required":["gate_id","verdict","operator_reason"],"properties":{"gate_id":{"type":"string"},"verdict":{"type":"string","enum":["approved","denied"]},"operator_reason":{"type":"string","description":"REQUIRED: human operator reasoning for audit trail"}}}'
+  description = "Fulfill an approval gate posted by request-approval. OPERATOR-TIER ONLY. Must only be called after explicit human operator approval. operator_reason is REQUIRED. operator_message_id is OPTIONAL but STRONGLY RECOMMENDED — supply the cf message ID of the operator's signed approval message for audit traceability and replay protection."
+  input_schema = '{"type":"object","required":["gate_id","verdict","operator_reason"],"properties":{"gate_id":{"type":"string"},"verdict":{"type":"string","enum":["approved","denied"]},"operator_reason":{"type":"string","description":"REQUIRED: human operator exact words for audit trail"},"operator_message_id":{"type":"string","description":"OPTIONAL: cf message ID of the operator approval message (recommended for audit traceability)"}}}'
   binary = "{{TOOL_BIN_DIR}}/mallcop-investigate-tools"
   binary_args = ["--tool", "approve-action"]
 

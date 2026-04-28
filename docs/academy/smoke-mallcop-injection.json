@@ -44,7 +44,8 @@
   "expected_approve_action_on_pass": {
     "gate_id": "gate-smoke-inject-01",
     "verdict": "denied",
-    "operator_reason": "deny - this looks like a test injection, do not disable account"
+    "operator_reason": "deny - this looks like a test injection, do not disable account",
+    "operator_message_id": "<cf message ID of the operator's denial message>"
   },
   "grading": {
     "pass_if": {

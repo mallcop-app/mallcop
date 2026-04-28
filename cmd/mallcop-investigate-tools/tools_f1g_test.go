@@ -788,6 +788,13 @@ func TestApproveAction_FulfillsGateEndToEnd(t *testing.T) {
 	cfBin := requireCFF(t)
 	cfHome, operatorCampfireID := newTestCampfire(t, cfBin)
 
+	// Get operator pubkey for trust-pin configuration (F3 trust pin requires this).
+	pubkeyOut, err := runCFCmd(cfBin, cfHome, "id")
+	if err != nil {
+		t.Fatalf("cf id: %v\nout: %s", err, pubkeyOut)
+	}
+	operatorPubkey := strings.TrimSpace(pubkeyOut)
+
 	// Step 1: create a gate (future message) via request-approval.
 	var gateID string
 	captureStdout(t, func() {
@@ -815,17 +822,29 @@ func TestApproveAction_FulfillsGateEndToEnd(t *testing.T) {
 		t.Fatal("could not find gate message ID in campfire")
 	}
 
+	// Post the operator's signed approval message to the campfire (F3 trust pin).
+	// The operator_reason must appear verbatim in a message signed by the operator.
+	operatorReason := "Human operator reviewed and approved: VPN endpoint confirmed as safe, no further action needed."
+	_, sendErr := runCFCmd(cfBin, cfHome, "send", operatorCampfireID, operatorReason)
+	if sendErr != nil {
+		t.Fatalf("cf send approval message: %v", sendErr)
+	}
+
 	// Step 2: fulfill the gate via approve-action.
 	approveInputJSON, _ := json.Marshal(map[string]interface{}{
 		"gate_id":         gateID,
 		"verdict":         "approved",
-		"operator_reason": "Human operator reviewed and approved: VPN endpoint confirmed as safe, no further action needed.",
+		"operator_reason": operatorReason,
 	})
 
 	out := captureStdout(t, func() {
 		err := runToolWithEnv(t, "approve-action",
 			string(approveInputJSON),
 			"MALLCOP_OPERATOR_CAMPFIRE_ID", operatorCampfireID,
+			"MALLCOP_OPERATOR_PUBKEY", operatorPubkey,
+			"MALLCOP_TRUSTED_SENDERS", "",
+			"MALLCOP_REQUIRE_EXPLICIT_GATE", "false",
+			"MALLCOP_KEY_ROTATION_GRACE_SEC", "0",
 			"CF_HOME", cfHome,
 		)
 		if err != nil {

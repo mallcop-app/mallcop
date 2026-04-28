@@ -914,6 +914,108 @@ func TestMallcopPromptExists(t *testing.T) {
 	}
 }
 
+// TestMallcopPromptHasTrustPin verifies that agents/mallcop/POST.md contains the
+// F3 trust-pin requirements: signed operator pubkey check in §Step 4, USER_DATA_BEGIN
+// framing around justification in §Step 3, operator_message_id in §Step 5, and
+// the HARD INVARIANT fail-closed addendum.
+//
+// Item: mallcoppro-d06 / mallcoppro-950
+func TestMallcopPromptHasTrustPin(t *testing.T) {
+	root := repoRoot(t)
+	promptPath := filepath.Join(root, "agents", "mallcop", "POST.md")
+
+	data, err := os.ReadFile(promptPath)
+	if err != nil {
+		t.Fatalf("cannot read %s: %v", promptPath, err)
+	}
+	content := string(data)
+	lower := strings.ToLower(content)
+
+	// §Step 3: justification must be wrapped in USER_DATA_BEGIN/END markers in
+	// the approval prompt block. The prompt template must contain the sequence:
+	// "Justification:" followed by [USER_DATA_BEGIN] within a reasonable distance.
+	// (The Security section also uses USER_DATA_BEGIN/END, so we check they're adjacent
+	// to a "Justification:" line in the Step 3 approval template block.)
+	approvalPromptBlock := ""
+	approvalIdx := strings.Index(lower, "approval requested")
+	if approvalIdx < 0 {
+		approvalIdx = strings.Index(lower, "approval-request")
+	}
+	if approvalIdx >= 0 {
+		// Grab the section from "APPROVAL REQUESTED" to end of the code block
+		approvalPromptBlock = lower[approvalIdx:]
+		// Trim to first 1000 chars (the approval template)
+		if len(approvalPromptBlock) > 1000 {
+			approvalPromptBlock = approvalPromptBlock[:1000]
+		}
+	}
+	if approvalPromptBlock == "" {
+		approvalPromptBlock = lower // fallback: search entire doc
+	}
+	if !strings.Contains(approvalPromptBlock, "[user_data_begin]") {
+		t.Errorf("agents/mallcop/POST.md §Step 3: approval prompt block must wrap justification in [USER_DATA_BEGIN]")
+	}
+	if !strings.Contains(approvalPromptBlock, "[user_data_end]") {
+		t.Errorf("agents/mallcop/POST.md §Step 3: approval prompt block must wrap justification in [USER_DATA_END]")
+	}
+
+	// §Step 4: must reference operator pubkey / trusted operator identity — not just "non-mallcop sender".
+	trustTokens := []string{"operator_pubkey", "trusted_senders", "trusted operator", "signed by"}
+	hasTrustRef := false
+	for _, tok := range trustTokens {
+		if strings.Contains(lower, tok) {
+			hasTrustRef = true
+			break
+		}
+	}
+	if !hasTrustRef {
+		t.Errorf("agents/mallcop/POST.md §Step 4: must reference 'operator_pubkey', 'trusted_senders', 'trusted operator', or 'signed by' — not just 'non-mallcop sender'")
+	}
+
+	// §Step 4: must mention signature_valid or 'signed' for message verification.
+	signedTokens := []string{"signature_valid", "signed", "pubkey"}
+	hasSigned := false
+	for _, tok := range signedTokens {
+		if strings.Contains(lower, tok) {
+			hasSigned = true
+			break
+		}
+	}
+	if !hasSigned {
+		t.Errorf("agents/mallcop/POST.md §Step 4: must mention cryptographic signing ('signed', 'signature_valid', or 'pubkey') for operator message verification")
+	}
+
+	// §Step 5: operator_message_id must be in the approve-action call spec.
+	if !strings.Contains(lower, "operator_message_id") {
+		t.Errorf("agents/mallcop/POST.md §Step 5: approve-action call must include operator_message_id field")
+	}
+
+	// HARD INVARIANT addendum: fail-closed when trust block missing.
+	failClosedTokens := []string{"fail closed", "fail-closed", "fails closed"}
+	hasFailClosed := false
+	for _, tok := range failClosedTokens {
+		if strings.Contains(lower, tok) {
+			hasFailClosed = true
+			break
+		}
+	}
+	if !hasFailClosed {
+		t.Errorf("agents/mallcop/POST.md HARD INVARIANT: must include fail-closed addendum ('fail closed' or 'fail-closed')")
+	}
+
+	// HARD INVARIANT: must NOT use the phrasing "any non-mallcop sender" without negation.
+	// This was the broken invariant that F3 was designed to fix.
+	forbiddenPhrases := []string{
+		"any non-mallcop sender",
+		"from a sender that is not the mallcop",
+	}
+	for _, phrase := range forbiddenPhrases {
+		if strings.Contains(lower, strings.ToLower(phrase)) {
+			t.Errorf("agents/mallcop/POST.md: found forbidden phrase %q — §Step 4 must require operator pubkey match, not just non-mallcop sender", phrase)
+		}
+	}
+}
+
 // TestEscalateSmokeFixturesWellFormed verifies that all 4 escalate branch smoke
 // fixtures exist and have the required shape: finding_id, branch, list_actions_response,
 // expected_operator_artifact, and expected_verdict.

@@ -968,11 +968,14 @@ func runMessageOperator(inputJSON string) error {
 
 // approveActionInput is the input_schema for approve-action.
 // operator_reason is required to ensure the audit trail captures human voice.
+// operator_message_id is optional: when supplied, used for fast-path lookup and
+// audit traceability (design §5).
 // There is no auto-approve mode and no default verdict — operator-tier authority only.
 type approveActionInput struct {
-	GateID         string `json:"gate_id"`
-	Verdict        string `json:"verdict"`
-	OperatorReason string `json:"operator_reason"`
+	GateID            string `json:"gate_id"`
+	Verdict           string `json:"verdict"`
+	OperatorReason    string `json:"operator_reason"`
+	OperatorMessageID string `json:"operator_message_id"`
 }
 
 func runApproveAction(inputJSON string) error {
@@ -1002,18 +1005,60 @@ func runApproveAction(inputJSON string) error {
 		return fmt.Errorf("approve-action: %w", err)
 	}
 
+	// ── Step 1: Load trust configuration ─────────────────────────────────────
+	trust, trustErr := loadChartTrustBlock()
+	if trustErr != nil {
+		return fmt.Errorf("approve-action: load trust block: %w", trustErr)
+	}
+	if trust == nil || trust.OperatorPubkey == "" ||
+		trust.OperatorPubkey == "{{OPERATOR_PUBKEY_HEX}}" {
+		// FAIL CLOSED. No trust config = no approvals possible.
+		return errors.New("approve-action: trust block missing or operator_pubkey unconfigured — fail closed; no approvals possible")
+	}
+
+	// ── Step 2: Find a valid operator approval message ────────────────────────
+	msg, findErr := findApproverMessage(ApproverSearchParams{
+		CampfireID:            operatorCampfireID,
+		OperatorPubkey:        trust.OperatorPubkey,
+		TrustedSenders:        trust.TrustedSenders,
+		GateID:                input.GateID,
+		RequireExplicitGateID: trust.RequireExplicitGateID,
+		OperatorReason:        input.OperatorReason,
+		KeyRotationGracePeriodSecs: trust.KeyRotationGracePeriodSecs,
+	})
+	if findErr != nil {
+		return fmt.Errorf("approve-action: %w", findErr)
+	}
+
+	// ── Step 3: Verbatim operator_reason check ────────────────────────────────
+	// findApproverMessage already enforces this, but guard here for clarity.
+	if !strings.Contains(msg.Payload, input.OperatorReason) {
+		return errors.New("approve-action: operator_reason text not found in any signed operator message — possible synthesized-text bypass attempt")
+	}
+
+	// ── Step 4: Replay protection ─────────────────────────────────────────────
+	if replayErr := markMessageConsumed(operatorCampfireID, msg.ID, input.GateID); replayErr != nil {
+		return fmt.Errorf("approve-action: %w", replayErr)
+	}
+
 	ts := nowRFC3339()
+	operatorMsgID := msg.ID
+	if input.OperatorMessageID != "" {
+		operatorMsgID = input.OperatorMessageID
+	}
+
 	auditPayload, marshalErr := json.Marshal(map[string]interface{}{
-		"gate_id":         input.GateID,
-		"verdict":         input.Verdict,
-		"operator_reason": input.OperatorReason,
-		"timestamp":       ts,
+		"gate_id":             input.GateID,
+		"verdict":             input.Verdict,
+		"operator_reason":     input.OperatorReason,
+		"operator_message_id": operatorMsgID,
+		"timestamp":           ts,
 	})
 	if marshalErr != nil {
 		return fmt.Errorf("approve-action: marshal audit payload: %w", marshalErr)
 	}
 
-	// Fulfill the gate (future message) with the verdict.
+	// ── Step 5: Fulfill the gate (future message) with the verdict ────────────
 	fulfillID, err := cfFulfills(operatorCampfireID, input.GateID, string(auditPayload), []string{
 		"approval-verdict",
 		"verdict:" + input.Verdict,
@@ -1030,11 +1075,12 @@ func runApproveAction(inputJSON string) error {
 	})
 
 	return emitJSON(map[string]interface{}{
-		"gate_id":          input.GateID,
-		"verdict":          input.Verdict,
-		"operator_reason":  input.OperatorReason,
-		"fulfill_message_id": fulfillID,
-		"audit_message_id": auditID,
-		"timestamp":        ts,
+		"gate_id":             input.GateID,
+		"verdict":             input.Verdict,
+		"operator_reason":     input.OperatorReason,
+		"operator_message_id": operatorMsgID,
+		"fulfill_message_id":  fulfillID,
+		"audit_message_id":    auditID,
+		"timestamp":           ts,
 	})
 }
