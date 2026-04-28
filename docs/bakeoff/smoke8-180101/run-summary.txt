@@ -1,0 +1,9 @@
+Bakeoff run: smoke8-180101
+Slate: exams/slates/dryrun.yaml (1 models)
+Scenarios dir: exams/scenarios/auth
+Scenario filter: AF-01-fat-finger-benign
+Max concurrent: 1
+Budget cap: $1.00 (pre-flight enforced)
+
+Per-model results:
+  glm-4.7                  wall=31s scenarios=1 pass=0 fail=1 pass_rate=0.00 exit=ok

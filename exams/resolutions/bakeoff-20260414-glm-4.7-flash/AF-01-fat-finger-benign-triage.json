@@ -1,0 +1,1 @@
+{"finding_id": "fnd_shk_210", "action": "escalate", "reason": "admin-user had 3 login failures (evt_001, evt_002, evt_003) within 54 seconds followed by success (evt_004), all from IP 203.0.113.10. While the same-IP pattern suggests benign fat-finger, no upstream trigger (deploy, onboarding) was found to confirm routine context — escalating for deeper investigation."}
