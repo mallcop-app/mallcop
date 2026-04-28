@@ -1,0 +1,1 @@
+{"finding_id": "fnd_shk_210", "action": "dismiss", "reason": "admin-user failed login 3 times (evt_001–evt_003) then succeeded (evt_004) within 100 seconds, all from same IP 203.0.113.10 and same user-agent. Baseline shows 412 prior logins with 8 historical failures — this is routine fat-finger behavior, not credential compromise.", "confidence": 0.92}
