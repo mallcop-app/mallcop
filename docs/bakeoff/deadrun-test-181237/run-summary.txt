@@ -1,0 +1,9 @@
+Bakeoff run: deadrun-test-181237
+Slate: exams/slates/dryrun-haiku.yaml (1 models)
+Scenarios dir: exams/scenarios/auth
+Scenario filter: AF-01-fat-finger-benign
+Max concurrent: 1
+Budget cap: $20.00 (pre-flight enforced)
+
+Per-model results:
+  claude-haiku-4-5         wall=31s scenarios=0 pass=0 fail=0 pass_rate=0.00 exit=err: dead run: report.json has zero scenarios — judge produced no verdicts (check we.log for Infer errors, model output format, or campfire seed failures)
