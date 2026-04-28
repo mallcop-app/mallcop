@@ -42,3 +42,23 @@ Thumbs.db
 # Agent identity files — per-machine, managed by `cf init --name <type>`.
 # Symlinked into agents/<type>/identity.json at runtime; see test/budget helpers.
 agents/*/identity.json
+
+# Compiled binaries built at the repo root by `go build` / `go test -c`.
+# These should never be committed — the wrapper at bin/we is the only tracked
+# binary path, all other binaries are produced into bin/ or t.TempDir().
+/baseline
+/detector-*
+/mallcop
+/mallcop-academy
+/mallcop-finding-context
+/mallcop-investigate-tools
+
+# Runtime state — created by `cf` / `we` / `mallcop-academy` smoke runs.
+# These are per-run scratch; never commit them.
+/.cf/
+/.run/
+
+# Smoke / dev scripts that may contain credentials. Add committed scripts
+# explicitly (allowlist) once they are scrubbed of secrets.
+/run-smoke.sh
+/run-smoke-*.sh
