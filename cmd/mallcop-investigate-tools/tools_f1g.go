@@ -425,11 +425,13 @@ func cfWorkCreate(workCampfireID, skill, title, context string) (string, error) 
 		return "", fmt.Errorf("cfWorkCreate: %w", err)
 	}
 
-	// Post work:create to the work campfire for observability.
+	// Post work:create to the work campfire. Use "id" (not "item_id") so that
+	// the legion ReadyWorkSource can parse this as a claimable work item.
 	payload, marshalErr := json.Marshal(map[string]interface{}{
-		"skill":    skill,
-		"item_id":  itemID,
-		"title":    title,
+		"id":        itemID,
+		"skill":     skill,
+		"title":     title,
+		"context":   context,
 		"timestamp": nowRFC3339(),
 	})
 	if marshalErr != nil {
