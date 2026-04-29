@@ -86,6 +86,17 @@ func seedToolUseMsgs(t *testing.T, cfBin, cfHome, campfireID string, toolNames [
 	}
 }
 
+// seedToolResultMsg posts a tool result message to campfireID containing the
+// given payload (arbitrary JSON). The message is tagged "tool:result" so that
+// extractRetrievedIDs picks up any IDs embedded in the payload.
+func seedToolResultMsg(t *testing.T, cfBin, cfHome, campfireID, resultPayload string) {
+	t.Helper()
+	_, err := runCFCmd(cfBin, cfHome, "send", campfireID, resultPayload, "--tag", "tool:result")
+	if err != nil {
+		t.Fatalf("seed tool result msg: %v", err)
+	}
+}
+
 // gateEnvPairs returns the env key=value pairs for the confidence gate config.
 func gateEnvPairs(enabled bool, scoreFloor float64) []string {
 	enabledStr := "false"
@@ -206,15 +217,21 @@ func TestConfidenceGate_OtherSkill_PassesThrough(t *testing.T) {
 func TestConfidenceGate_HighScore_PassesThrough(t *testing.T) {
 	cfBin, cfHome, campfireID, workCampfireID := newTestCampfirePair(t)
 
-	// High score: 8 tool calls (cap=8), 4 distinct tools, citation in reason.
-	// Expected score: 0.04*8 + 0.08*4 + 0.04*1 = 0.32 + 0.32 + 0.04 = 0.68 ≥ 0.55
+	// High score: 8 tool calls (cap=8), 4 distinct tools, 1 valid citation.
+	// evt_001 must be seeded in a tool result payload so the cross-check passes.
+	// Score: 0.04*8 + 0.08*4 + 0.04*1 - 0.02*max(8-3,0)
+	//      = 0.32  + 0.32  + 0.04  - 0.10 = 0.58 ≥ 0.55 ✓
 	toolNames := []string{
 		"check-baseline", "search-events", "search-findings", "read-config",
 		"check-baseline", "search-events", "search-findings", "read-config",
 	}
 	seedToolUseMsgs(t, cfBin, cfHome, campfireID, toolNames)
 
-	// Reason with event ID citation.
+	// Seed a tool result payload containing evt_001 so the cross-check passes.
+	seedToolResultMsg(t, cfBin, cfHome, campfireID,
+		`{"tool_result":true,"tool":"search-events","events":[{"id":"evt_001","actor":"alice@example.com"}]}`)
+
+	// Reason cites evt_001 — which IS in the tool result payload (valid citation).
 	reason := "Investigation complete: found event evt_001 confirms normal activity. No anomaly."
 
 	envPairs := append(gateEnvPairs(true, 0.55),
