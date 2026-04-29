@@ -86,6 +86,19 @@ func seedToolUseMsgs(t *testing.T, cfBin, cfHome, campfireID string, toolNames [
 	}
 }
 
+// seedToolResultMsg posts a single tool result message to campfireID.
+// The payload is free-form content that may contain event/finding IDs.
+// These IDs become part of the retrievedIDs set used by countCitations,
+// so only IDs that appear in seeded result payloads (or tool_use payloads)
+// are counted as valid citations in the reason field.
+func seedToolResultMsg(t *testing.T, cfBin, cfHome, campfireID, resultPayload string) {
+	t.Helper()
+	_, err := runCFCmd(cfBin, cfHome, "send", campfireID, resultPayload, "--tag", "tool:result")
+	if err != nil {
+		t.Fatalf("seed tool result msg: %v", err)
+	}
+}
+
 // gateEnvPairs returns the env key=value pairs for the confidence gate config.
 func gateEnvPairs(enabled bool, scoreFloor float64) []string {
 	enabledStr := "false"
@@ -207,14 +220,21 @@ func TestConfidenceGate_HighScore_PassesThrough(t *testing.T) {
 	cfBin, cfHome, campfireID, workCampfireID := newTestCampfirePair(t)
 
 	// High score: 8 tool calls (cap=8), 4 distinct tools, citation in reason.
-	// Expected score: 0.04*8 + 0.08*4 + 0.04*1 = 0.32 + 0.32 + 0.04 = 0.68 ≥ 0.55
+	// Expected score: 0.04*8 + 0.08*4 + 0.04*1 = 0.32 + 0.32 + 0.04 = 0.68
+	// Minus iteration penalty for 8 turns: -0.02*5 = -0.10 → 0.58 ≥ 0.55
 	toolNames := []string{
 		"check-baseline", "search-events", "search-findings", "read-config",
 		"check-baseline", "search-events", "search-findings", "read-config",
 	}
 	seedToolUseMsgs(t, cfBin, cfHome, campfireID, toolNames)
 
-	// Reason with event ID citation.
+	// Seed a tool result message that contains evt_001 so the citation is verified.
+	// countCitations cross-checks reason citations against IDs found in campfire
+	// payloads; without this, evt_001 would be a pseudo-ID and not counted.
+	seedToolResultMsg(t, cfBin, cfHome, campfireID,
+		`{"tool_result":true,"tool":"search-events","events":[{"id":"evt_001","actor":"alice@example.com"}]}`)
+
+	// Reason with event ID citation that actually appeared in the search-events result.
 	reason := "Investigation complete: found event evt_001 confirms normal activity. No anomaly."
 
 	envPairs := append(gateEnvPairs(true, 0.55),
@@ -516,5 +536,119 @@ func TestConfidenceGate_IterationPenalty(t *testing.T) {
 	workMsgs := readCampfireMessages(t, cfBin, cfHome, workCampfireID)
 	if !hasTagInMessages(workMsgs, "work:create") {
 		t.Errorf("expected work:create in work campfire after iteration penalty gate fires; got %d messages", len(workMsgs))
+	}
+}
+
+// ---- TestConfidenceGate_FailClosed_OnTranscriptError --------------------------
+//
+// Verifies fail-closed semantics: when the engagement campfire cannot be read
+// (simulated by pointing MALLCOP_CAMPFIRE_ID at a campfire the worker is not a
+// member of, causing cf read to exit non-zero), the gate must fire and emit
+// fan-out work:create messages. work:output must NOT be emitted.
+//
+// This exercises the path fixed by mallcoppro-971: previously, a transcript read
+// error caused the gate to return Fired=false (fail-open), allowing gate bypass.
+func TestConfidenceGate_FailClosed_OnTranscriptError(t *testing.T) {
+	cfBin, cfHome, _, workCampfireID := newTestCampfirePair(t)
+
+	// Use a syntactically valid but non-existent campfire ID as the engagement
+	// campfire. cf read will exit non-zero (not a member), triggering the error path.
+	badCampfireID := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+	// Verify precondition: cf read on this ID must fail.
+	_, cfReadErr := runCFCmd(cfBin, cfHome, "read", badCampfireID, "--json", "--all")
+	if cfReadErr == nil {
+		t.Skip("precondition failed: cf read succeeded on unknown campfire ID — test environment may differ")
+	}
+
+	envPairs := append(gateEnvPairs(true, 0.55),
+		"MALLCOP_SKILL", "task:investigate",
+		"MALLCOP_CAMPFIRE_ID", badCampfireID,       // triggers cf read error
+		"MALLCOP_WORK_CAMPFIRE_ID", workCampfireID, // real campfire for fan-out
+		"CF_HOME", cfHome,
+		// MALLCOP_GATE_ALLOW_NO_CF is intentionally NOT set — fail-closed must apply.
+	)
+
+	out := captureStdout(t, func() {
+		input, _ := json.Marshal(map[string]interface{}{
+			"finding_id": "fnd-gate-fc-001",
+			"action":     "resolved",
+			"reason":     "Seems fine, nothing unusual spotted.",
+		})
+		err := runToolWithEnv(t, "resolve-finding", string(input), envPairs...)
+		// An error from fan-out internal steps is acceptable — what must NOT happen
+		// is a silent work:output emission that bypasses the gate.
+		if err != nil {
+			t.Logf("resolve-finding returned error (acceptable in fail-closed path): %v", err)
+		}
+	})
+
+	// If output is non-empty JSON, gate_fired must be true.
+	if out != "" {
+		var result map[string]interface{}
+		if parseErr := json.Unmarshal([]byte(out), &result); parseErr == nil {
+			gf, hasFired := result["gate_fired"]
+			if !hasFired || gf != true {
+				t.Errorf("fail-closed: expected gate_fired=true when transcript unreadable, got result=%v", result)
+			}
+			// Score must be 0 (no transcript data available).
+			score, _ := result["score"].(float64)
+			if score != 0 {
+				t.Errorf("fail-closed: expected score=0 on transcript error, got score=%.4f", score)
+			}
+		}
+	}
+
+	// work:output must NOT be in the work campfire (gate intercepts the close).
+	workMsgs := readCampfireMessages(t, cfBin, cfHome, workCampfireID)
+	if hasTagInMessages(workMsgs, "work:output") {
+		t.Errorf("fail-closed: work:output was emitted to work campfire — gate bypass detected")
+	}
+}
+
+// ---- TestConfidenceGate_AllowNoCF_Bypass --------------------------------------
+//
+// Verifies that MALLCOP_GATE_ALLOW_NO_CF=1 disables the fail-closed behaviour and
+// allows the gate to pass through when the transcript is unreadable. This is the
+// test-environment escape hatch; it must never be set in production worker jails.
+func TestConfidenceGate_AllowNoCF_Bypass(t *testing.T) {
+	cfBin, cfHome, _, workCampfireID := newTestCampfirePair(t)
+
+	// Same bad campfire ID — would normally trigger fail-closed.
+	badCampfireID := "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+	// Confirm precondition: cf read on this ID fails.
+	_, cfReadErr := runCFCmd(cfBin, cfHome, "read", badCampfireID, "--json", "--all")
+	if cfReadErr == nil {
+		t.Skip("precondition: cf read on unknown campfire did not fail — skipping")
+	}
+
+	envPairs := append(gateEnvPairs(true, 0.55),
+		"MALLCOP_SKILL", "task:investigate",
+		"MALLCOP_CAMPFIRE_ID", badCampfireID,
+		"MALLCOP_WORK_CAMPFIRE_ID", workCampfireID,
+		"CF_HOME", cfHome,
+		"MALLCOP_GATE_ALLOW_NO_CF", "1", // bypass enabled
+	)
+
+	// With the bypass, resolve-finding will proceed past the gate check.
+	// The final work:output send to the bad campfire will fail, so we expect
+	// an error from the tool — but gate_fired must NOT be in the output.
+	out := captureStdout(t, func() {
+		input, _ := json.Marshal(map[string]interface{}{
+			"finding_id": "fnd-gate-bypass-001",
+			"action":     "resolved",
+			"reason":     "Unit test bypass path.",
+		})
+		_ = runToolWithEnv(t, "resolve-finding", string(input), envPairs...)
+	})
+
+	if out != "" {
+		var result map[string]interface{}
+		if parseErr := json.Unmarshal([]byte(out), &result); parseErr == nil {
+			if gf, _ := result["gate_fired"].(bool); gf {
+				t.Errorf("MALLCOP_GATE_ALLOW_NO_CF=1 should bypass fail-closed, but gate_fired=true: %v", result)
+			}
+		}
 	}
 }
