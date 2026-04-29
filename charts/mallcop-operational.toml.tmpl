@@ -52,6 +52,8 @@ tool_allowlist = [
   "list-actions", "remediate-action", "request-approval", "message-operator",
   # F1G-d: approve-action
   "approve-action",
+  # F2B: engagement-campfire watcher (mallcoppro-753)
+  "watch-engagement-campfire",
 ]
 
 [[capabilities.seed]]
@@ -119,6 +121,8 @@ tools = [
   "load-skill",
   "escalate-to-stage-c", "write-partial-transcript",
   "escalate-to-deep", "create-investigate-merge",
+  # F2B: engagement-campfire watcher — detects direct cf-send bypass of F2A gate
+  "watch-engagement-campfire",
 ]
 model     = "{{MODEL}}"
 max_iters = 10
@@ -225,6 +229,14 @@ max_iters = 10
   input_schema = '{"type":"object","required":["finding_id","content"],"properties":{"finding_id":{"type":"string"},"content":{"type":"string","description":"partial transcript markdown content"}}}'
   binary = "{{TOOL_BIN_DIR}}/mallcop-investigate-tools"
   binary_args = ["--tool", "write-partial-transcript"]
+
+  # F2B: Engagement-campfire watcher (mallcoppro-753)
+  [[capabilities.seed.tool_defs]]
+  name = "watch-engagement-campfire"
+  description = "Scan the engagement campfire for work:output messages that were posted directly via cf send (lacking gate:checked). Posts bypass:intercepted for each unsolicited message detected. Returns JSON: work_output_total, unsolicited, intercepted counts and message IDs. Call periodically as a self-audit or at task close."
+  input_schema = '{"type":"object","properties":{"campfire_id":{"type":"string","description":"engagement campfire ID (defaults to MALLCOP_CAMPFIRE_ID)"}}}'
+  binary = "{{TOOL_BIN_DIR}}/mallcop-investigate-tools"
+  binary_args = ["--tool", "watch-engagement-campfire"]
 
 # task:deep-investigate capability seed — F1D: hypothesis-directed investigation
 [[capabilities.seed]]
