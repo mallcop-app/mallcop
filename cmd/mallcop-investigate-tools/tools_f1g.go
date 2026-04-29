@@ -288,6 +288,22 @@ func runResolveFinding(inputJSON string) error {
 		return fmt.Errorf("resolve-finding: %w", err)
 	}
 
+	// ── F2A confidence-gate (task:investigate only) ────────────────────────────
+	// The gate lives here in binary code — the agent CANNOT skip it from a prompt.
+	// For non-investigate skills or disabled config, checkConfidenceGate returns
+	// gateResult{Fired: false} immediately with no campfire I/O.
+	gr, gateErr := checkConfidenceGate(campfireID, input.Reason)
+	if gateErr != nil {
+		// Fail open: log to stderr but do not block the worker.
+		fmt.Fprintf(os.Stderr, "resolve-finding: confidence gate check failed (failing open): %v\n", gateErr)
+	}
+	if gr.Fired {
+		// Gate fired: emit 4 fan-out work:create messages instead of work:output.
+		// Worker exits 0 (still a successful tool call from the agent's POV).
+		return runConfidenceGateFanOut(input.FindingID, input.Reason, gr)
+	}
+	// Gate did not fire (or was not applicable): fall through to normal close.
+
 	output := resolveOutput{
 		FindingID:  input.FindingID,
 		Action:     input.Action,
