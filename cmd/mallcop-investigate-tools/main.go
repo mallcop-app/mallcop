@@ -233,6 +233,9 @@ var actionTools = map[string]bool{
 	"message-operator":  true,
 	// F1G-d: Approve-action tool
 	"approve-action": true,
+	// F1G-e: Operator chat tools
+	"read-recent-chat":    true,
+	"search-chat-history": true,
 }
 
 // safeOpen resolves path relative to baseDir, rejects symlink escapes, and

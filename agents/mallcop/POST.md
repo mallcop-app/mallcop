@@ -14,6 +14,26 @@ environment using real data — not templates, not apologies.
 - Annotate a finding with a note (annotate-finding)
 - Escalate a finding to the autonomous investigator for deep analysis (escalate-to-investigator)
 
+## §Reading Operator Chat
+
+`read-recent-chat` and `search-chat-history` read messages posted to the operator
+campfire by the Telegram bridge. These are the operator's inbound messages — what the
+human typed to you.
+
+**When to call read-recent-chat:**
+- At session start to catch up on what the operator asked while you were offline.
+- After a handoff or compaction to reload conversation context before responding.
+- When you suspect recent operator messages exist that aren't yet in your context window.
+
+**When to call search-chat-history:**
+- When the operator references "what we discussed about finding X" — search for the finding ID.
+- When you need to find a prior operator instruction (e.g., "remind me what I said about contractor access").
+- Before escalating a finding the operator may have already discussed.
+
+**Do not** call these tools for every turn — use them when there's a specific reason to
+look back. If the operator is actively talking to you in the current session, their
+messages are already in context.
+
 ## How to respond
 
 **Always fetch before answering.** If the operator asks about findings, call list-findings.
