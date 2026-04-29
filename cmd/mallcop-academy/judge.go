@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -190,6 +191,129 @@ func (j *judicator) pollForVerdict(scenarioID string) (*JudgeResult, error) {
 		}, nil
 	}
 	return nil, nil
+}
+
+// buildJudicator constructs a judicator for the given run, or returns nil if
+// the judge prerequisites (we binary, cf binary, chart template) are not met.
+//
+// Failure is non-fatal: the caller logs a warning and proceeds without a judge,
+// leaving quality_floor as "n/a" (no min_investigation_quality in scenario) or
+// "unavailable" (min set but judge couldn't run).
+func buildJudicator(args runArgs) *judicator {
+	// Require we binary.
+	weBin, err := exec.LookPath("we")
+	if err != nil {
+		// Also check bin/ relative to cwd.
+		if p, err2 := exec.LookPath("bin/we"); err2 == nil {
+			weBin = p
+		} else {
+			fmt.Fprintf(os.Stderr, "INFO: judge skipped — we binary not found on PATH (F4C disabled)\n")
+			return nil
+		}
+	}
+
+	// Require cf binary.
+	cfBin, err := exec.LookPath("cf")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "INFO: judge skipped — cf binary not found on PATH\n")
+		return nil
+	}
+
+	// Resolve repo root for chart template.
+	repoRoot, err := repoRootFromExec()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "INFO: judge skipped — cannot resolve repo root: %v\n", err)
+		return nil
+	}
+
+	tmplPath := filepath.Join(repoRoot, "charts", "exam.toml.tmpl")
+	if _, err := os.Stat(tmplPath); err != nil {
+		fmt.Fprintf(os.Stderr, "INFO: judge skipped — chart template not found at %s\n", tmplPath)
+		return nil
+	}
+
+	// Create per-run academy campfire in output dir.
+	judgeCFHome := filepath.Join(args.outputDir, ".judge-cf-"+args.runID)
+	if err := os.MkdirAll(judgeCFHome, 0o755); err != nil {
+		fmt.Fprintf(os.Stderr, "INFO: judge skipped — cannot create judge CF_HOME: %v\n", err)
+		return nil
+	}
+
+	// cf init
+	initCmd := exec.Command(cfBin, "init")
+	initCmd.Env = setEnv(os.Environ(), "CF_HOME", judgeCFHome)
+	if out, err := initCmd.CombinedOutput(); err != nil {
+		fmt.Fprintf(os.Stderr, "INFO: judge skipped — cf init failed: %v\n%s\n", err, out)
+		return nil
+	}
+
+	// cf create → get campfire ID
+	createCmd := exec.Command(cfBin, "create", "--description", "academy-judge-"+args.runID)
+	createCmd.Env = setEnv(os.Environ(), "CF_HOME", judgeCFHome)
+	createOut, err := createCmd.CombinedOutput()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "INFO: judge skipped — cf create failed: %v\n%s\n", err, createOut)
+		return nil
+	}
+	academyCampfireID := extractCampfireID(string(createOut))
+	if academyCampfireID == "" {
+		fmt.Fprintf(os.Stderr, "INFO: judge skipped — could not parse campfire ID from cf create output: %s\n", createOut)
+		return nil
+	}
+
+	// Render judge chart.
+	judgeChartPath := filepath.Join(args.outputDir, "judge-chart-"+args.runID+".toml")
+	forgeAPIURL := os.Getenv("FORGE_API_URL")
+	if forgeAPIURL == "" {
+		forgeAPIURL = "http://localhost:8080"
+	}
+	forgeAPIKey := os.Getenv("FORGE_API_KEY")
+	chartVars := map[string]string{
+		"RUN_ID":        args.runID,
+		"FORGE_API_URL": forgeAPIURL,
+		"FORGE_API_KEY": forgeAPIKey,
+	}
+	if err := renderJudgeChart(tmplPath, judgeChartPath, chartVars); err != nil {
+		fmt.Fprintf(os.Stderr, "INFO: judge skipped — render chart: %v\n", err)
+		return nil
+	}
+
+	judgeTimeout := args.timeout
+	if judgeTimeout <= 0 {
+		judgeTimeout = 5 * time.Minute
+	}
+
+	fmt.Fprintf(os.Stderr, "INFO: judge enabled — academy campfire %s\n", academyCampfireID)
+	return &judicator{
+		weBin:             weBin,
+		cfBin:             cfBin,
+		judgeChartPath:    judgeChartPath,
+		academyCampfireID: academyCampfireID,
+		academyCFHome:     judgeCFHome,
+		repoRoot:          repoRoot,
+		timeout:           judgeTimeout,
+	}
+}
+
+// extractCampfireID scans cf create output for a 64-char hex campfire ID.
+func extractCampfireID(output string) string {
+	for _, line := range strings.Split(strings.TrimSpace(output), "\n") {
+		line = strings.TrimSpace(line)
+		if len(line) == 64 && isAllHex(line) {
+			return line
+		}
+	}
+	return ""
+}
+
+// isAllHex returns true if all characters in s are hex digits.
+func isAllHex(s string) bool {
+	for _, c := range s {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+			return false
+		}
+	}
+	return true
 }
 
 // judgeUnavailable returns a zero JudgeResult with all axes at 0 (not scored).
