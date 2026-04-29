@@ -15,7 +15,7 @@ import (
 // ---- Unit tests: per-axis pass/fail/n/a -----------------------------------------
 
 func TestGrading_NilExpected_AllNA(t *testing.T) {
-	g := computeStructuralGrade(nil, "resolved", "some reason", "resolved", false, 0, 0)
+	g := computeStructuralGrade(nil, "resolved", "some reason", "resolved", false, 0, 0, false)
 	if g.ChainAction != AxisNA {
 		t.Errorf("chain_action: want n/a, got %q", g.ChainAction)
 	}
@@ -43,7 +43,7 @@ func TestGrading_NilExpected_AllNA(t *testing.T) {
 
 func TestGrading_ChainAction_Pass(t *testing.T) {
 	exp := &exam.ExpectedResolution{ChainAction: "escalated"}
-	g := computeStructuralGrade(exp, "escalated", "", "", false, 0, 0)
+	g := computeStructuralGrade(exp, "escalated", "", "", false, 0, 0, false)
 	if g.ChainAction != AxisPass {
 		t.Errorf("chain_action: want pass, got %q", g.ChainAction)
 	}
@@ -51,7 +51,7 @@ func TestGrading_ChainAction_Pass(t *testing.T) {
 
 func TestGrading_ChainAction_PassCaseInsensitive(t *testing.T) {
 	exp := &exam.ExpectedResolution{ChainAction: "Resolved"}
-	g := computeStructuralGrade(exp, "resolved", "", "", false, 0, 0)
+	g := computeStructuralGrade(exp, "resolved", "", "", false, 0, 0, false)
 	if g.ChainAction != AxisPass {
 		t.Errorf("chain_action: want pass (case-insensitive), got %q", g.ChainAction)
 	}
@@ -59,7 +59,7 @@ func TestGrading_ChainAction_PassCaseInsensitive(t *testing.T) {
 
 func TestGrading_ChainAction_Fail(t *testing.T) {
 	exp := &exam.ExpectedResolution{ChainAction: "escalated"}
-	g := computeStructuralGrade(exp, "resolved", "", "", false, 0, 0)
+	g := computeStructuralGrade(exp, "resolved", "", "", false, 0, 0, false)
 	if g.ChainAction != AxisFail {
 		t.Errorf("chain_action: want fail, got %q", g.ChainAction)
 	}
@@ -67,7 +67,7 @@ func TestGrading_ChainAction_Fail(t *testing.T) {
 
 func TestGrading_ChainAction_NA_WhenEmpty(t *testing.T) {
 	exp := &exam.ExpectedResolution{}
-	g := computeStructuralGrade(exp, "resolved", "", "", false, 0, 0)
+	g := computeStructuralGrade(exp, "resolved", "", "", false, 0, 0, false)
 	if g.ChainAction != AxisNA {
 		t.Errorf("chain_action: want n/a when expected empty, got %q", g.ChainAction)
 	}
@@ -77,7 +77,7 @@ func TestGrading_ChainAction_NA_WhenEmpty(t *testing.T) {
 
 func TestGrading_TriageAction_Pass(t *testing.T) {
 	exp := &exam.ExpectedResolution{TriageAction: "escalated"}
-	g := computeStructuralGrade(exp, "", "", "escalated", false, 0, 0)
+	g := computeStructuralGrade(exp, "", "", "escalated", false, 0, 0, false)
 	if g.TriageAction != AxisPass {
 		t.Errorf("triage_action: want pass, got %q", g.TriageAction)
 	}
@@ -85,7 +85,7 @@ func TestGrading_TriageAction_Pass(t *testing.T) {
 
 func TestGrading_TriageAction_Fail(t *testing.T) {
 	exp := &exam.ExpectedResolution{TriageAction: "escalated"}
-	g := computeStructuralGrade(exp, "", "", "resolved", false, 0, 0)
+	g := computeStructuralGrade(exp, "", "", "resolved", false, 0, 0, false)
 	if g.TriageAction != AxisFail {
 		t.Errorf("triage_action: want fail, got %q", g.TriageAction)
 	}
@@ -94,7 +94,7 @@ func TestGrading_TriageAction_Fail(t *testing.T) {
 func TestGrading_TriageAction_NA_WhenNoClose(t *testing.T) {
 	exp := &exam.ExpectedResolution{TriageAction: "escalated"}
 	// triageCloseAction empty → no triage close observed
-	g := computeStructuralGrade(exp, "", "", "", false, 0, 0)
+	g := computeStructuralGrade(exp, "", "", "", false, 0, 0, false)
 	if g.TriageAction != AxisNA {
 		t.Errorf("triage_action: want n/a when no triage close, got %q", g.TriageAction)
 	}
@@ -102,7 +102,7 @@ func TestGrading_TriageAction_NA_WhenNoClose(t *testing.T) {
 
 func TestGrading_TriageAction_NA_WhenExpectedEmpty(t *testing.T) {
 	exp := &exam.ExpectedResolution{}
-	g := computeStructuralGrade(exp, "", "", "escalated", false, 0, 0)
+	g := computeStructuralGrade(exp, "", "", "escalated", false, 0, 0, false)
 	if g.TriageAction != AxisNA {
 		t.Errorf("triage_action: want n/a when expected empty, got %q", g.TriageAction)
 	}
@@ -115,7 +115,7 @@ func TestGrading_Mentions_Pass(t *testing.T) {
 		ReasoningMustMention: []string{"external", "python-requests"},
 	}
 	reason := "The action involved an external collaborator via python-requests tool."
-	g := computeStructuralGrade(exp, "", reason, "", false, 0, 0)
+	g := computeStructuralGrade(exp, "", reason, "", false, 0, 0, false)
 	if g.Mentions != AxisPass {
 		t.Errorf("mentions: want pass, got %q", g.Mentions)
 	}
@@ -126,7 +126,7 @@ func TestGrading_Mentions_PassCaseInsensitive(t *testing.T) {
 		ReasoningMustMention: []string{"EXTERNAL"},
 	}
 	reason := "external collaborator was added"
-	g := computeStructuralGrade(exp, "", reason, "", false, 0, 0)
+	g := computeStructuralGrade(exp, "", reason, "", false, 0, 0, false)
 	if g.Mentions != AxisPass {
 		t.Errorf("mentions: want pass (case-insensitive), got %q", g.Mentions)
 	}
@@ -137,7 +137,7 @@ func TestGrading_Mentions_Fail_MissingSubstring(t *testing.T) {
 		ReasoningMustMention: []string{"external", "anomaly"},
 	}
 	reason := "The action involved an external collaborator."
-	g := computeStructuralGrade(exp, "", reason, "", false, 0, 0)
+	g := computeStructuralGrade(exp, "", reason, "", false, 0, 0, false)
 	if g.Mentions != AxisFail {
 		t.Errorf("mentions: want fail when substring missing, got %q", g.Mentions)
 	}
@@ -145,7 +145,7 @@ func TestGrading_Mentions_Fail_MissingSubstring(t *testing.T) {
 
 func TestGrading_Mentions_NA_WhenEmpty(t *testing.T) {
 	exp := &exam.ExpectedResolution{}
-	g := computeStructuralGrade(exp, "", "any reason", "", false, 0, 0)
+	g := computeStructuralGrade(exp, "", "any reason", "", false, 0, 0, false)
 	if g.Mentions != AxisNA {
 		t.Errorf("mentions: want n/a when no must-mention list, got %q", g.Mentions)
 	}
@@ -158,7 +158,7 @@ func TestGrading_NoMentions_Pass(t *testing.T) {
 		ReasoningMustNotMention: []string{"known actor", "false positive"},
 	}
 	reason := "The external collaborator event is anomalous and requires escalation."
-	g := computeStructuralGrade(exp, "", reason, "", false, 0, 0)
+	g := computeStructuralGrade(exp, "", reason, "", false, 0, 0, false)
 	if g.NoMentions != AxisPass {
 		t.Errorf("no_mentions: want pass, got %q", g.NoMentions)
 	}
@@ -169,7 +169,7 @@ func TestGrading_NoMentions_Fail_ForbiddenPresent(t *testing.T) {
 		ReasoningMustNotMention: []string{"known actor"},
 	}
 	reason := "Dismissed because the known actor has a long history."
-	g := computeStructuralGrade(exp, "", reason, "", false, 0, 0)
+	g := computeStructuralGrade(exp, "", reason, "", false, 0, 0, false)
 	if g.NoMentions != AxisFail {
 		t.Errorf("no_mentions: want fail when forbidden substring present, got %q", g.NoMentions)
 	}
@@ -179,7 +179,7 @@ func TestGrading_NoMentions_Pass_EmptyList(t *testing.T) {
 	exp := &exam.ExpectedResolution{
 		ReasoningMustNotMention: []string{},
 	}
-	g := computeStructuralGrade(exp, "", "any reason", "", false, 0, 0)
+	g := computeStructuralGrade(exp, "", "any reason", "", false, 0, 0, false)
 	if g.NoMentions != AxisPass {
 		t.Errorf("no_mentions: want pass for empty forbidden list, got %q", g.NoMentions)
 	}
@@ -189,7 +189,7 @@ func TestGrading_NoMentions_Pass_EmptyList(t *testing.T) {
 
 func TestGrading_ToolsUsed_Pass_WhenRequired(t *testing.T) {
 	exp := &exam.ExpectedResolution{InvestigateMustUseTools: true}
-	g := computeStructuralGrade(exp, "", "", "", true, 0, 0)
+	g := computeStructuralGrade(exp, "", "", "", true, 0, 0, false)
 	if g.ToolsUsed != AxisPass {
 		t.Errorf("tools_used: want pass when required and used, got %q", g.ToolsUsed)
 	}
@@ -197,7 +197,7 @@ func TestGrading_ToolsUsed_Pass_WhenRequired(t *testing.T) {
 
 func TestGrading_ToolsUsed_Fail_WhenRequiredButNotUsed(t *testing.T) {
 	exp := &exam.ExpectedResolution{InvestigateMustUseTools: true}
-	g := computeStructuralGrade(exp, "", "", "", false, 0, 0)
+	g := computeStructuralGrade(exp, "", "", "", false, 0, 0, false)
 	if g.ToolsUsed != AxisFail {
 		t.Errorf("tools_used: want fail when required but not used, got %q", g.ToolsUsed)
 	}
@@ -206,7 +206,7 @@ func TestGrading_ToolsUsed_Fail_WhenRequiredButNotUsed(t *testing.T) {
 func TestGrading_ToolsUsed_Pass_WhenNotRequired(t *testing.T) {
 	exp := &exam.ExpectedResolution{InvestigateMustUseTools: false}
 	// expected=false → always pass regardless of actual tool use
-	g := computeStructuralGrade(exp, "", "", "", false, 0, 0)
+	g := computeStructuralGrade(exp, "", "", "", false, 0, 0, false)
 	if g.ToolsUsed != AxisPass {
 		t.Errorf("tools_used: want pass when not required, got %q", g.ToolsUsed)
 	}
@@ -216,7 +216,7 @@ func TestGrading_ToolsUsed_Pass_WhenNotRequired(t *testing.T) {
 
 func TestGrading_Iterations_Pass(t *testing.T) {
 	exp := &exam.ExpectedResolution{MinInvestigateIterations: 2}
-	g := computeStructuralGrade(exp, "", "", "", false, 3, 0)
+	g := computeStructuralGrade(exp, "", "", "", false, 3, 0, false)
 	if g.Iterations != AxisPass {
 		t.Errorf("iterations: want pass when actual >= required, got %q", g.Iterations)
 	}
@@ -224,7 +224,7 @@ func TestGrading_Iterations_Pass(t *testing.T) {
 
 func TestGrading_Iterations_PassExact(t *testing.T) {
 	exp := &exam.ExpectedResolution{MinInvestigateIterations: 2}
-	g := computeStructuralGrade(exp, "", "", "", false, 2, 0)
+	g := computeStructuralGrade(exp, "", "", "", false, 2, 0, false)
 	if g.Iterations != AxisPass {
 		t.Errorf("iterations: want pass when actual == required, got %q", g.Iterations)
 	}
@@ -232,7 +232,7 @@ func TestGrading_Iterations_PassExact(t *testing.T) {
 
 func TestGrading_Iterations_Fail(t *testing.T) {
 	exp := &exam.ExpectedResolution{MinInvestigateIterations: 5}
-	g := computeStructuralGrade(exp, "", "", "", false, 2, 0)
+	g := computeStructuralGrade(exp, "", "", "", false, 2, 0, false)
 	if g.Iterations != AxisFail {
 		t.Errorf("iterations: want fail when actual < required, got %q", g.Iterations)
 	}
@@ -240,7 +240,7 @@ func TestGrading_Iterations_Fail(t *testing.T) {
 
 func TestGrading_Iterations_NA_WhenZero(t *testing.T) {
 	exp := &exam.ExpectedResolution{MinInvestigateIterations: 0}
-	g := computeStructuralGrade(exp, "", "", "", false, 0, 0)
+	g := computeStructuralGrade(exp, "", "", "", false, 0, 0, false)
 	if g.Iterations != AxisNA {
 		t.Errorf("iterations: want n/a when min=0, got %q", g.Iterations)
 	}
@@ -250,7 +250,7 @@ func TestGrading_Iterations_NA_WhenZero(t *testing.T) {
 
 func TestGrading_QualityFloor_Pass(t *testing.T) {
 	exp := &exam.ExpectedResolution{MinInvestigationQuality: 4}
-	g := computeStructuralGrade(exp, "", "", "", false, 0, 5)
+	g := computeStructuralGrade(exp, "", "", "", false, 0, 5, true)
 	if g.QualityFloor != AxisPass {
 		t.Errorf("quality_floor: want pass when rubric >= min, got %q", g.QualityFloor)
 	}
@@ -258,7 +258,7 @@ func TestGrading_QualityFloor_Pass(t *testing.T) {
 
 func TestGrading_QualityFloor_PassExact(t *testing.T) {
 	exp := &exam.ExpectedResolution{MinInvestigationQuality: 4}
-	g := computeStructuralGrade(exp, "", "", "", false, 0, 4)
+	g := computeStructuralGrade(exp, "", "", "", false, 0, 4, true)
 	if g.QualityFloor != AxisPass {
 		t.Errorf("quality_floor: want pass when rubric == min, got %q", g.QualityFloor)
 	}
@@ -266,7 +266,7 @@ func TestGrading_QualityFloor_PassExact(t *testing.T) {
 
 func TestGrading_QualityFloor_Fail(t *testing.T) {
 	exp := &exam.ExpectedResolution{MinInvestigationQuality: 4}
-	g := computeStructuralGrade(exp, "", "", "", false, 0, 3)
+	g := computeStructuralGrade(exp, "", "", "", false, 0, 3, true)
 	if g.QualityFloor != AxisFail {
 		t.Errorf("quality_floor: want fail when rubric < min, got %q", g.QualityFloor)
 	}
@@ -274,15 +274,26 @@ func TestGrading_QualityFloor_Fail(t *testing.T) {
 
 func TestGrading_QualityFloor_Pending_WhenNoRubric(t *testing.T) {
 	exp := &exam.ExpectedResolution{MinInvestigationQuality: 4}
-	g := computeStructuralGrade(exp, "", "", "", false, 0, 0) // rubricScore=0
+	// judgeRan=false: judge not yet dispatched → pending
+	g := computeStructuralGrade(exp, "", "", "", false, 0, 0, false) // rubricScore=0
 	if g.QualityFloor != AxisPending {
 		t.Errorf("quality_floor: want pending when rubric not yet run (score=0), got %q", g.QualityFloor)
 	}
 }
 
+func TestGrading_QualityFloor_Unavailable_WhenJudgeRanButScoreZero(t *testing.T) {
+	// Judge was dispatched (judgeRan=true) but returned 0 (unavailable/fail-safe).
+	// quality_floor should be "unavailable", not "pending".
+	exp := &exam.ExpectedResolution{MinInvestigationQuality: 4}
+	g := computeStructuralGrade(exp, "", "", "", false, 0, 0, true) // rubricScore=0, judgeRan=true
+	if g.QualityFloor != AxisUnavailable {
+		t.Errorf("quality_floor: want unavailable when judge ran but score=0, got %q", g.QualityFloor)
+	}
+}
+
 func TestGrading_QualityFloor_NA_WhenZeroMin(t *testing.T) {
 	exp := &exam.ExpectedResolution{MinInvestigationQuality: 0}
-	g := computeStructuralGrade(exp, "", "", "", false, 0, 3)
+	g := computeStructuralGrade(exp, "", "", "", false, 0, 3, true)
 	if g.QualityFloor != AxisNA {
 		t.Errorf("quality_floor: want n/a when min=0, got %q", g.QualityFloor)
 	}
@@ -296,7 +307,7 @@ func TestGrading_CrossFeed_QualityFloor_Pass(t *testing.T) {
 		ChainAction:             "escalated",
 		MinInvestigationQuality: 4,
 	}
-	g := computeStructuralGrade(exp, "escalated", "", "", false, 0, 5)
+	g := computeStructuralGrade(exp, "escalated", "", "", false, 0, 5, true)
 	if g.QualityFloor != AxisPass {
 		t.Errorf("cross-feed pass: want pass, got %q", g.QualityFloor)
 	}
@@ -311,7 +322,7 @@ func TestGrading_CrossFeed_QualityFloor_Fail(t *testing.T) {
 		ChainAction:             "escalated",
 		MinInvestigationQuality: 4,
 	}
-	g := computeStructuralGrade(exp, "escalated", "", "", false, 0, 3)
+	g := computeStructuralGrade(exp, "escalated", "", "", false, 0, 3, true)
 	if g.QualityFloor != AxisFail {
 		t.Errorf("cross-feed fail: want fail when rubric < min, got %q", g.QualityFloor)
 	}
@@ -655,6 +666,164 @@ func TestGrading_Integration_QualityFloor_Pending(t *testing.T) {
 	}
 	if rec.Structural.QualityFloor != AxisPending {
 		t.Errorf("quality_floor: want pending when no judge result, got %q", rec.Structural.QualityFloor)
+	}
+}
+
+// TestGrading_Integration_QualityFloor_WiredAndPopulated verifies that
+// quality_floor is NOT "pending" when ts.judgeResult is set (judge wired).
+// This is the F4C done condition: quality_floor must be resolved after judge dispatch.
+func TestGrading_Integration_QualityFloor_WiredAndPopulated(t *testing.T) {
+	outDir := t.TempDir()
+
+	s := &exam.Scenario{
+		ID:          "AC-04",
+		FailureMode: "KA",
+		Category:    "access",
+		Finding: &exam.ScenarioFinding{
+			ID:       "fnd_004",
+			Detector: "new-external-access",
+			Title:    "Access event",
+			Severity: "medium",
+		},
+		Baseline: &exam.Baseline{
+			KnownEntities: exam.KnownEntities{Actors: []string{"user-b"}},
+		},
+		ExpectedResolution: &exam.ExpectedResolution{
+			ChainAction:             "escalated",
+			MinInvestigationQuality: 3,
+		},
+	}
+
+	// judgeResult set with investigation_thoroughness=5 → quality_floor should be "pass"
+	ts := &trackedScenario{
+		scenarioID:     s.ID,
+		findingID:      "academy-run-001-AC-04",
+		workItemID:     "msg-004",
+		terminal:       true,
+		terminalAction: "escalated",
+		terminalItemID: "item-004",
+		scenario:       s,
+		judgeResult: &JudgeResult{
+			FindingID: "fnd_004",
+			Verdict:   "pass",
+			Rubric: JudgeRubric{
+				ReasoningQuality:          4,
+				InvestigationThoroughness: 5,
+				ResolveQuality:            3,
+				EscalationActionability:   4,
+			},
+			Rationale:      "judge dispatched and scored",
+			JudgeFixTarget: "none",
+		},
+	}
+	now := timeNow()
+	ts.postedAt = now
+	ts.terminalAt = now.Add(5)
+
+	if err := writeScenarioRecord(ts, "run-001", "cf-abc", outDir); err != nil {
+		t.Fatalf("writeScenarioRecord: %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(outDir, "AC-04.json"))
+	if err != nil {
+		t.Fatalf("read record: %v", err)
+	}
+
+	var rec ScenarioRecord
+	if err := json.Unmarshal(data, &rec); err != nil {
+		t.Fatalf("parse record: %v", err)
+	}
+
+	if rec.Structural == nil {
+		t.Fatal("structural block must not be nil")
+	}
+	// The key assertion: quality_floor must NOT be "pending" — judge was wired and ran.
+	if rec.Structural.QualityFloor == AxisPending {
+		t.Errorf("quality_floor: must not be pending when judge result is set; got %q", rec.Structural.QualityFloor)
+	}
+	// rubric=5 >= min=3 → pass
+	if rec.Structural.QualityFloor != AxisPass {
+		t.Errorf("quality_floor: want pass (rubric=5 >= min=3), got %q", rec.Structural.QualityFloor)
+	}
+	// Rubric block must be present.
+	if rec.Rubric == nil {
+		t.Fatal("rubric block must not be nil when judge result is set")
+	}
+	if rec.Rubric.Rubric.InvestigationThoroughness != 5 {
+		t.Errorf("rubric.investigation_thoroughness: want 5, got %d", rec.Rubric.Rubric.InvestigationThoroughness)
+	}
+}
+
+// TestGrading_Integration_QualityFloor_UnavailableWhenJudgeRanButFailed verifies
+// that quality_floor is "unavailable" (not "pending") when judge was dispatched
+// but returned a zero rubric score (unavailable/fail-safe path).
+func TestGrading_Integration_QualityFloor_UnavailableWhenJudgeRanButFailed(t *testing.T) {
+	outDir := t.TempDir()
+
+	s := &exam.Scenario{
+		ID:          "AC-05",
+		FailureMode: "KA",
+		Category:    "access",
+		Finding: &exam.ScenarioFinding{
+			ID:       "fnd_005",
+			Detector: "new-external-access",
+			Title:    "Access event",
+			Severity: "medium",
+		},
+		Baseline: &exam.Baseline{
+			KnownEntities: exam.KnownEntities{Actors: []string{"user-c"}},
+		},
+		ExpectedResolution: &exam.ExpectedResolution{
+			ChainAction:             "escalated",
+			MinInvestigationQuality: 3,
+		},
+	}
+
+	// judgeResult set to the "unavailable" sentinel (rubric all zeros).
+	ts := &trackedScenario{
+		scenarioID:     s.ID,
+		findingID:      "academy-run-001-AC-05",
+		workItemID:     "msg-005",
+		terminal:       true,
+		terminalAction: "escalated",
+		terminalItemID: "item-005",
+		scenario:       s,
+		judgeResult:    judgeUnavailable("we binary failed to spawn in test"),
+	}
+	now := timeNow()
+	ts.postedAt = now
+	ts.terminalAt = now.Add(5)
+
+	if err := writeScenarioRecord(ts, "run-001", "cf-abc", outDir); err != nil {
+		t.Fatalf("writeScenarioRecord: %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(outDir, "AC-05.json"))
+	if err != nil {
+		t.Fatalf("read record: %v", err)
+	}
+
+	var rec ScenarioRecord
+	if err := json.Unmarshal(data, &rec); err != nil {
+		t.Fatalf("parse record: %v", err)
+	}
+
+	if rec.Structural == nil {
+		t.Fatal("structural block must not be nil")
+	}
+	// Judge ran but returned 0 → "unavailable", not "pending".
+	if rec.Structural.QualityFloor == AxisPending {
+		t.Errorf("quality_floor: must not be pending when judge was dispatched (even if it failed); got %q", rec.Structural.QualityFloor)
+	}
+	if rec.Structural.QualityFloor != AxisUnavailable {
+		t.Errorf("quality_floor: want unavailable when judge ran but score=0, got %q", rec.Structural.QualityFloor)
+	}
+	// The rubric block should still be present (the unavailable sentinel).
+	if rec.Rubric == nil {
+		t.Fatal("rubric block must not be nil when judge result is set (even unavailable)")
+	}
+	if rec.Rubric.Verdict != "unavailable" {
+		t.Errorf("rubric.verdict: want unavailable, got %q", rec.Rubric.Verdict)
 	}
 }
 
