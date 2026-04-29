@@ -236,6 +236,8 @@ var actionTools = map[string]bool{
 	// F1G-e: Operator chat tools
 	"read-recent-chat":    true,
 	"search-chat-history": true,
+	// F1G-h: Heal tools
+	"spawn-claude-code-fix": true,
 }
 
 // safeOpen resolves path relative to baseDir, rejects symlink escapes, and
