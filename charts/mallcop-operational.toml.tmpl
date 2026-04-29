@@ -123,6 +123,23 @@ tools = [
 model     = "{{MODEL}}"
 max_iters = 10
 
+  # F2A: Confidence-gated close — pre-close gate in the resolve-finding binary.
+  # Only task:investigate workers are gated (other skills default to enabled=false).
+  # Weights and thresholds are substituted at chart-deploy time via sed (same pattern
+  # as {{MODEL}}/{{RUN_ID}} substitutions). The binary reads MALLCOP_CONFIDENCE_GATED_CLOSE_*
+  # env vars injected by the leger worker jail at spawn.
+  [capabilities.seed.behaviors.confidence_gated_close]
+  enabled              = true
+  score_floor          = 0.55
+  tool_call_weight     = 0.04
+  tool_call_cap        = 8
+  distinct_tool_weight = 0.08
+  distinct_tool_cap    = 4
+  citation_weight      = 0.04
+  citation_cap         = 5
+  iteration_penalty    = -0.02
+  iteration_threshold  = 3
+
   [[capabilities.seed.tool_defs]]
   name = "check-baseline"
   description = "Check baseline frequency and history for an actor/entity."
