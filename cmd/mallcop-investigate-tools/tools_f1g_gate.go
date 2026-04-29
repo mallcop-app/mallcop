@@ -155,6 +155,10 @@ type cfMessage struct {
 // readEngagementTranscript reads all messages from the engagement campfire
 // (MALLCOP_CAMPFIRE_ID) and returns transcript statistics.
 // The engagement campfire contains all tool_use records posted by the worker.
+//
+// Returns an error if cf is not on PATH or the campfire read fails. The caller
+// is responsible for fail-closed handling (see checkConfidenceGate).
+// Set MALLCOP_GATE_ALLOW_NO_CF=1 to bypass the cf-missing check in test environments.
 func readEngagementTranscript(campfireID string) (transcriptStats, error) {
 	cfBin, err := cfBinPath()
 	if err != nil {
@@ -164,12 +168,8 @@ func readEngagementTranscript(campfireID string) (transcriptStats, error) {
 	cmd := exec.Command(cfBin, "read", campfireID, "--json", "--all") // #nosec G204
 	out, err := cmd.Output()
 	if err != nil {
-		var exitErr *exec.ExitError
-		if ok := false; !ok {
-			_ = exitErr
-		}
-		// Empty or error — return zero stats (gate will fire if below floor).
-		return transcriptStats{}, nil
+		// Propagate the error so the caller can fail closed.
+		return transcriptStats{}, fmt.Errorf("readEngagementTranscript: cf read: %w", err)
 	}
 
 	trimmed := strings.TrimSpace(string(out))
@@ -179,8 +179,8 @@ func readEngagementTranscript(campfireID string) (transcriptStats, error) {
 
 	var msgs []cfMessage
 	if err := json.Unmarshal(out, &msgs); err != nil {
-		// Parse failure — return zero stats.
-		return transcriptStats{}, nil
+		// Parse failure — propagate so the caller can fail closed.
+		return transcriptStats{}, fmt.Errorf("readEngagementTranscript: parse JSON: %w", err)
 	}
 
 	return parseTranscriptStats(msgs), nil
@@ -329,7 +329,19 @@ type gateResult struct {
 // The gate is a no-op (Fired=false) when:
 //   - MALLCOP_SKILL != "task:investigate"
 //   - config.Enabled == false
-//   - score >= score_floor
+//   - citations >= 1 AND score >= score_floor
+//
+// The gate fires (Fired=true) when:
+//   - citations == 0 (hard requirement — tool volume alone is not evidence)
+//   - score < score_floor
+//
+// Fail-closed semantics: if the transcript cannot be read (cf missing, campfire
+// unreachable, parse failure), the gate fires with score=0. The risk of an
+// accidental fan-out is much lower than the risk of a gate bypass.
+//
+// Exception: MALLCOP_GATE_ALLOW_NO_CF=1 disables the fail-closed behaviour for
+// test environments that do not have cf on PATH. This env var must never be set
+// in production worker jails.
 func checkConfidenceGate(campfireID, reason string) (gateResult, error) {
 	// Skill check: only gate on task:investigate workers.
 	skill := os.Getenv("MALLCOP_SKILL")
@@ -346,12 +358,38 @@ func checkConfidenceGate(campfireID, reason string) (gateResult, error) {
 	// Read the engagement campfire transcript.
 	stats, err := readEngagementTranscript(campfireID)
 	if err != nil {
-		// On transcript read failure, fail open (do not block the worker).
-		return gateResult{Fired: false}, fmt.Errorf("confidence gate: read transcript: %w", err)
+		// Fail CLOSED: if we cannot read the transcript, we cannot verify the
+		// worker's evidence. Treat as score=0 and fire the gate.
+		// MALLCOP_GATE_ALLOW_NO_CF=1 bypasses this for unit-test environments
+		// that do not have cf on PATH.
+		if os.Getenv("MALLCOP_GATE_ALLOW_NO_CF") == "1" {
+			return gateResult{Fired: false}, nil
+		}
+		readErr := fmt.Errorf("confidence gate: read transcript: %w", err)
+		return gateResult{
+			Fired: true,
+			Score: 0,
+		}, readErr
 	}
 
 	// Count citations in the reason field.
 	citationCount := countCitations(reason)
+
+	// Hard citation requirement: zero citations → gate fires unconditionally.
+	// Tool volume and breadth alone (tool_call_weight + distinct_weight) are not
+	// sufficient to satisfy the "evidence-grounded reasoning" spec intent.
+	// An agent making 8 calls across 4 distinct tools scores 0.64 on those
+	// components alone, clearing the 0.55 floor with zero evidence anchoring.
+	// Requiring at least one citation closes this score-cap bypass.
+	if citationCount == 0 {
+		score := computeConfidenceScore(cfg, stats, 0)
+		return gateResult{
+			Fired:         true,
+			Score:         score,
+			Stats:         stats,
+			CitationCount: 0,
+		}, nil
+	}
 
 	// Compute score.
 	score := computeConfidenceScore(cfg, stats, citationCount)
