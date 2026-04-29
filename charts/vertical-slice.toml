@@ -76,14 +76,17 @@ match = ["task:investigate"]
 tools = ["bash", "read", "grep", "web_fetch", "load-skill"]
 model = "sonnet"
 
-# heal: execute write actions after mandatory human gate approval.
-# Uses sonnet tier — remediation actions require judgment about minimum necessary action.
-# Write tools are gated by the human gate before the worker can call them.
+# heal: dispatches Claude Code to open a PR fixing the structural gap surfaced by
+# the finding. Uses spawn-claude-code-fix to fork/branch/PR against an allowlisted
+# upstream repo. No direct write tools — all changes go through a draft PR reviewed
+# by a human. max_iterations=3: heal reads, classifies, spawns (1 pass each step).
+# Schema change: spawn-claude-code-fix added (heal-broaden.md §5, mallcoppro-861).
 [[capabilities.seed]]
-name  = "heal"
-match = ["task:heal"]
-tools = ["bash", "read", "grep", "revoke-credential", "quarantine-user", "rotate-key", "disable-account", "revert-config"]
-model = "sonnet"
+name           = "heal"
+match          = ["task:heal"]
+tools          = ["read-finding", "annotate-finding", "resolve-finding", "spawn-claude-code-fix"]
+model          = "sonnet"
+max_iterations = 3
 
 # deliver: post resolution to the delivery campfire.
 [[capabilities.seed]]
@@ -113,14 +116,13 @@ routes_to  = "heal"
 tool_allowlist = ["bash", "read", "grep", "web_fetch", "load-skill", "connector-query:*"]
 
 [playbook.steps.heal]
-# Step 3: remediation with mandatory human gate.
-# Runs only when investigate escalates. Has write tool access.
-# MANDATORY human gate before any write action executes — no bypass, no exceptions.
+# Step 3: heal — spawn Claude Code to open a draft PR fixing the structural gap.
+# Runs only when investigate escalates. No direct write tools — changes go through
+# a draft PR (C4: no gh pr merge authority). Human reviews and merges the PR.
 # Budget is shared across all steps: heal starts with (max_session - triage_tokens - investigate_tokens) remaining.
-needs      = ["investigate"]
-seed       = "heal"
-gate       = "human"
-tool_allowlist = ["bash", "read", "grep", "revoke-credential", "quarantine-user", "rotate-key", "disable-account", "revert-config"]
+needs          = ["investigate"]
+seed           = "heal"
+tool_allowlist = ["read-finding", "annotate-finding", "resolve-finding", "spawn-claude-code-fix"]
 
 [lifecycle]
 max_workers   = 1

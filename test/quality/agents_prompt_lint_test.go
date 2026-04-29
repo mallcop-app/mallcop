@@ -64,71 +64,82 @@ func TestDeepInvestigatePromptHasLoadSkillDiscoveryNote(t *testing.T) {
 }
 
 // TestHealPromptExists verifies that agents/heal/POST.md exists and contains
-// the key directives required by F1H: narrow parser-fix scope (log_format_drift
-// only), three scenario types, patch structure, annotate-finding + resolve-finding
-// calls, and the security injection defense section.
+// the key directives required by mallcoppro-861 (heal-broaden.md §5):
+//   - The broadened 7-class finding taxonomy (log_format_drift is still one class).
+//   - All four required tools: read-finding, annotate-finding, resolve-finding,
+//     spawn-claude-code-fix.
+//   - USER_DATA hygiene markers (design §10, constraint C9).
+//   - No-retry directive (constraint C6).
+//   - Scope guard (no legion / mallcop-pro; constraints C1–C2).
+//   - Proposal language (fix is not automatically applied; constraint C4).
+//
+// Negative assertions (forbidden-token list) are UNCHANGED from the narrow b0b
+// version. Broadening does NOT add direct-remediation authority to heal — those
+// tools still belong to task:escalate only.
 func TestHealPromptExists(t *testing.T) {
 	root := repoRoot(t)
 	promptPath := filepath.Join(root, "agents", "heal", "POST.md")
 
 	data, err := os.ReadFile(promptPath)
 	if err != nil {
-		t.Fatalf("cannot read %s: %v — create agents/heal/POST.md (F1H)", promptPath, err)
+		t.Fatalf("cannot read %s: %v — create agents/heal/POST.md (mallcoppro-861)", promptPath, err)
 	}
 	content := string(data)
 	lower := strings.ToLower(content)
 
-	// Required scope: heal only responds to log_format_drift findings.
-	if !strings.Contains(lower, "log_format_drift") {
-		t.Errorf("agents/heal/POST.md: missing 'log_format_drift' — heal must specify its trigger finding type")
+	// Required finding classes (log_format_drift is still one of the 7 classes).
+	findingClasses := []string{
+		"log_format_drift",
+		"detector_gap",
+		"capability_seed_drift",
+		"connector_field_miss",
 	}
-
-	// Required scenario vocabulary
-	scenarios := []string{"new_field", "renamed_field", "format_change"}
-	for _, s := range scenarios {
-		if !strings.Contains(lower, strings.ToLower(s)) {
-			t.Errorf("agents/heal/POST.md: missing scenario %q — heal must identify all three drift scenarios", s)
+	for _, fc := range findingClasses {
+		if !strings.Contains(lower, strings.ToLower(fc)) {
+			t.Errorf("agents/heal/POST.md: missing finding class %q — broadened heal must enumerate all supported classes", fc)
 		}
 	}
 
-	// Required patch fields
-	patchFields := []string{"scenario", "app_name", "before", "after", "reason", "confidence"}
-	for _, f := range patchFields {
-		if !strings.Contains(lower, strings.ToLower(f)) {
-			t.Errorf("agents/heal/POST.md: missing patch field %q — patch dict must include this field", f)
+	// Required tools (broadened set — spawn-claude-code-fix added in mallcoppro-861).
+	requiredTools := []string{"read-finding", "annotate-finding", "resolve-finding", "spawn-claude-code-fix"}
+	for _, tool := range requiredTools {
+		if !strings.Contains(lower, strings.ToLower(tool)) {
+			t.Errorf("agents/heal/POST.md: missing tool %q — broadened heal must reference all four tools", tool)
 		}
 	}
 
-	// Required tool calls
-	toolCalls := []string{"annotate-finding", "resolve-finding"}
-	for _, tc := range toolCalls {
-		if !strings.Contains(lower, strings.ToLower(tc)) {
-			t.Errorf("agents/heal/POST.md: missing tool call %q — heal output must call this tool", tc)
-		}
-	}
-
-	// Security injection defense section
+	// Security injection defense section (C9).
 	if !strings.Contains(content, "USER_DATA_BEGIN") {
-		t.Errorf("agents/heal/POST.md: missing security section with USER_DATA_BEGIN marker")
+		t.Errorf("agents/heal/POST.md: missing security section with USER_DATA_BEGIN marker (C9)")
 	}
 	if !strings.Contains(content, "USER_DATA_END") {
-		t.Errorf("agents/heal/POST.md: missing security section with USER_DATA_END marker")
+		t.Errorf("agents/heal/POST.md: missing security section with USER_DATA_END marker (C9)")
 	}
 
-	// Proposal is a patch, not an automatic apply
-	if !strings.Contains(lower, "proposal") && !strings.Contains(lower, "not applied") {
-		t.Errorf("agents/heal/POST.md: must state that the patch is a proposal, not automatically applied")
+	// No-retry directive (C6).
+	if !strings.Contains(lower, "do not retry") && !strings.Contains(lower, "not retry") {
+		t.Errorf("agents/heal/POST.md: missing no-retry directive (design §10, C6) — heal must state single dispatch only")
 	}
 
-	// read-finding tool call for loading the finding record
-	if !strings.Contains(lower, "read-finding") {
-		t.Errorf("agents/heal/POST.md: missing 'read-finding' tool reference — heal must use read-finding to load the full finding")
+	// Scope guard: must mention legion + mallcop-pro are off-limits (C1/C2).
+	if !strings.Contains(lower, "legion") || !strings.Contains(lower, "mallcop-pro") {
+		t.Errorf("agents/heal/POST.md: missing scope guard naming 'legion' and 'mallcop-pro' as excluded (C1/C2)")
 	}
 
-	// Negative assertions: heal scope must stay narrow. The Python source-of-truth
-	// is parser-fix only. Broad-remediation language from the prior legion version
-	// must not regress in. These tokens are the specific writes the old POST.md
-	// authorized; heal must NEVER do these (those belong to task:escalate).
+	// Proposal language: fix is not automatically applied (C4).
+	if !strings.Contains(lower, "proposal") && !strings.Contains(lower, "not applied") && !strings.Contains(lower, "human must") {
+		t.Errorf("agents/heal/POST.md: must state that the fix is a proposal requiring human review, not automatically applied (C4)")
+	}
+
+	// Confidence cap: success case must reference confidence <= 4 (human still merges).
+	if !strings.Contains(content, "4") {
+		t.Errorf("agents/heal/POST.md: missing confidence value — success path must specify confidence=4 (capped; human merges)")
+	}
+
+	// Negative assertions: heal scope must NOT include broad-remediation authority.
+	// These forbidden tokens are UNCHANGED from the b0b narrow version — broadening
+	// heal to open PRs does NOT grant direct-write remediation authority. Those
+	// belong to task:escalate. This list is a regression tripwire.
 	forbiddenTokens := []string{
 		"revoke-credential",
 		"quarantine-user",
@@ -144,7 +155,7 @@ func TestHealPromptExists(t *testing.T) {
 	}
 	for _, ft := range forbiddenTokens {
 		if strings.Contains(lower, ft) {
-			t.Errorf("agents/heal/POST.md: forbidden token %q present — heal scope must stay narrow (parser-fix only); broad-remediation tools belong to task:escalate, not task:heal", ft)
+			t.Errorf("agents/heal/POST.md: forbidden token %q present — broadened heal does NOT include direct-remediation authority; those tools belong to task:escalate", ft)
 		}
 	}
 }
