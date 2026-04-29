@@ -14,6 +14,11 @@
 #   WORK_CAMPFIRE   — Hex campfire ID to use as the work campfire.
 #                     If unset, the template placeholder "operational-<RUN_ID>"
 #                     is used (requires a named campfire to be set up).
+#   MALLCOP_HOME    — Absolute path to the deployment dir. When set, identity
+#                     and transport paths in the rendered chart are rewritten
+#                     to point at $MALLCOP_HOME/.mallcop/... instead of the
+#                     legacy .run/operational-<RUN_ID>/ layout. See
+#                     docs/design/deployment-and-identity.md (mallcop-pro).
 #
 # Substitutions applied:
 #   {{MODEL}}        → $MODEL
@@ -21,7 +26,9 @@
 #   {{FORGE_API_URL}} → $FORGE_API_URL
 #   {{FORGE_API_KEY}} → $FORGE_API_KEY
 #   {{TOOL_BIN_DIR}} → $TOOL_BIN_DIR
-#   operational-<RUN_ID> (campfire name) → $WORK_CAMPFIRE (if set)
+#   operational-<RUN_ID> (campfire name)      → $WORK_CAMPFIRE  (if set)
+#   .run/operational-<RUN_ID>/identity.json   → $MALLCOP_HOME/.mallcop/automaton/identity.json   (if MALLCOP_HOME set)
+#   .run/operational-<RUN_ID>/campfires       → $MALLCOP_HOME/.mallcop/campfires                  (if MALLCOP_HOME set)
 #
 set -euo pipefail
 
@@ -52,6 +59,7 @@ FORGE_API_KEY="${FORGE_API_KEY:-}"
 MODEL="${MODEL:-claude-haiku-4-5}"
 TOOL_BIN_DIR="${TOOL_BIN_DIR:-${REPO_ROOT}/bin}"
 WORK_CAMPFIRE="${WORK_CAMPFIRE:-}"
+MALLCOP_HOME="${MALLCOP_HOME:-}"
 
 if [[ -z "${FORGE_API_KEY}" ]]; then
   echo "Error: FORGE_API_KEY is required" >&2
@@ -66,11 +74,20 @@ SED_EXPR="s/{{MODEL}}/${MODEL}/g; \
    s|{{FORGE_API_KEY}}|${FORGE_API_KEY}|g; \
    s|{{TOOL_BIN_DIR}}|${TOOL_BIN_DIR}|g"
 
+# Compose extra remaps based on optional env vars.
+EXTRA_SEDS=()
 if [[ -n "${WORK_CAMPFIRE}" ]]; then
-  # Replace only the campfire name in the worksources section (not the key_file path)
-  sed "${SED_EXPR}" "${TEMPLATE}" | \
-    sed "s|campfire = \"operational-${RUN_ID}\"|campfire = \"${WORK_CAMPFIRE}\"|g" \
-    > "${OUTPUT}"
+  EXTRA_SEDS+=(-e "s|campfire = \"operational-${RUN_ID}\"|campfire = \"${WORK_CAMPFIRE}\"|g")
+fi
+if [[ -n "${MALLCOP_HOME}" ]]; then
+  # Rewrite legacy .run/operational-<RUN_ID>/... paths to deployment-scoped paths.
+  # See docs/design/deployment-and-identity.md (mallcop-pro) for the layout.
+  EXTRA_SEDS+=(-e "s|\.run/operational-${RUN_ID}/identity\.json|${MALLCOP_HOME}/.mallcop/automaton/identity.json|g")
+  EXTRA_SEDS+=(-e "s|\.run/operational-${RUN_ID}/campfires|${MALLCOP_HOME}/.mallcop/campfires|g")
+fi
+
+if [[ ${#EXTRA_SEDS[@]} -gt 0 ]]; then
+  sed "${SED_EXPR}" "${TEMPLATE}" | sed "${EXTRA_SEDS[@]}" > "${OUTPUT}"
 else
   sed "${SED_EXPR}" "${TEMPLATE}" > "${OUTPUT}"
 fi

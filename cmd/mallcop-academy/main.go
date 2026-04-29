@@ -287,6 +287,7 @@ func main() {
 
 func mainRun() error {
 	var (
+		deploymentDir  string
 		targetCampfire string
 		scenariosDir   string
 		scenarioFilter string
@@ -298,7 +299,8 @@ func mainRun() error {
 		runID          string
 	)
 
-	flag.StringVar(&targetCampfire, "target-campfire", "", "operational deployment's work campfire ID or beacon (REQUIRED)")
+	flag.StringVar(&deploymentDir, "deployment", "", "path to a mallcop deployment dir; reads .mallcop/work-campfire.id and uses .mallcop as CF_HOME (preferred over --target-campfire)")
+	flag.StringVar(&targetCampfire, "target-campfire", "", "operational deployment's work campfire ID or beacon (legacy; use --deployment when possible)")
 	flag.StringVar(&scenariosDir, "scenarios-dir", "", "directory containing scenario YAML files (default: repo-root/exams/scenarios)")
 	flag.StringVar(&scenarioFilter, "scenario", "", "optional: limit to one scenario ID")
 	flag.StringVar(&outputDir, "output-dir", "", "output directory for per-scenario JSON artifacts (default: docs/academy/<run-id>)")
@@ -309,8 +311,33 @@ func mainRun() error {
 	flag.StringVar(&runID, "run-id", "", "run identifier (default: acad-<timestamp>)")
 	flag.Parse()
 
+	// Resolve --deployment into targetCampfire + cfHome before validating.
+	// See docs/design/deployment-and-identity.md (mallcop-pro) §Academy harness redesign.
+	cfHome := os.Getenv("CF_HOME")
+	if deploymentDir != "" {
+		absDeploy, err := filepath.Abs(deploymentDir)
+		if err != nil {
+			return fmt.Errorf("--deployment: %w", err)
+		}
+		mallcopDir := filepath.Join(absDeploy, ".mallcop")
+		cfIDFile := filepath.Join(mallcopDir, "work-campfire.id")
+		raw, err := os.ReadFile(cfIDFile)
+		if err != nil {
+			return fmt.Errorf("--deployment: read %s: %w", cfIDFile, err)
+		}
+		hexID := strings.TrimSpace(string(raw))
+		if hexID == "" {
+			return fmt.Errorf("--deployment: %s is empty", cfIDFile)
+		}
+		if targetCampfire != "" && targetCampfire != hexID {
+			return fmt.Errorf("--deployment and --target-campfire conflict (deployment work cf %q vs flag %q)", hexID, targetCampfire)
+		}
+		targetCampfire = hexID
+		cfHome = mallcopDir
+	}
+
 	if targetCampfire == "" {
-		return fmt.Errorf("--target-campfire is required")
+		return fmt.Errorf("--deployment or --target-campfire is required")
 	}
 
 	timeout, err := time.ParseDuration(timeoutStr)
@@ -339,7 +366,7 @@ func mainRun() error {
 		return fmt.Errorf("cf binary not found on PATH: %w", err)
 	}
 
-	sender := &cfSender{cfBin: cfBin, cfHome: os.Getenv("CF_HOME")}
+	sender := &cfSender{cfBin: cfBin, cfHome: cfHome}
 
 	return academy(sender, runArgs{
 		targetCampfire: targetCampfire,
