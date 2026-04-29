@@ -64,6 +64,11 @@ func dispatchActionTool(tool, inputJSON string) error {
 	// F1G-d: Approve-action
 	case "approve-action":
 		return runApproveAction(inputJSON)
+	// F1G-e: Operator chat tools
+	case "read-recent-chat":
+		return runReadRecentChat(inputJSON)
+	case "search-chat-history":
+		return runSearchChatHistory(inputJSON)
 	default:
 		return fmt.Errorf("unknown action tool %q", tool)
 	}

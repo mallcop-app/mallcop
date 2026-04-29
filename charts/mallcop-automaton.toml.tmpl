@@ -162,15 +162,15 @@ max_iters = 20
 
   [[capabilities.seed.tool_defs]]
   name = "read-recent-chat"
-  description = "Read recent messages from the operator campfire. Returns the last N messages (default 20). Use to catch up on conversation context before responding."
-  input_schema = '{"type":"object","required":["campfire_id"],"properties":{"campfire_id":{"type":"string","description":"campfire ID to read"},"limit":{"type":"integer","description":"max messages to return (default 20)"}}}'
+  description = "Read recent messages from the operator campfire posted by the Telegram bridge (tag: chat). Returns the last N messages (default 20) in reverse-chronological order. Use to catch up on what the operator just typed. If campfire_id is omitted, defaults to MALLCOP_OPERATOR_CAMPFIRE_ID env."
+  input_schema = '{"type":"object","properties":{"campfire_id":{"type":"string","description":"campfire ID to read (optional — defaults to MALLCOP_OPERATOR_CAMPFIRE_ID env)"},"limit":{"type":"integer","description":"max messages to return (default 20, max 100)","default":20,"minimum":1,"maximum":100}}}'
   binary = "{{TOOL_BIN_DIR}}/mallcop-investigate-tools"
   binary_args = ["--tool", "read-recent-chat"]
 
   [[capabilities.seed.tool_defs]]
   name = "search-chat-history"
-  description = "Search operator campfire history for messages matching a query. Returns matching messages with their timestamps and content."
-  input_schema = '{"type":"object","required":["campfire_id","query"],"properties":{"campfire_id":{"type":"string","description":"campfire ID to search"},"query":{"type":"string","description":"search query — matches against message content"},"limit":{"type":"integer","description":"max results (default 20)"}}}'
+  description = "Search operator campfire chat history (Telegram-bridged messages, tag: chat) for messages whose body contains the query string (case-insensitive). Returns matches in reverse-chronological order. If campfire_id is omitted, defaults to MALLCOP_OPERATOR_CAMPFIRE_ID env."
+  input_schema = '{"type":"object","required":["query"],"properties":{"campfire_id":{"type":"string","description":"campfire ID to search (optional — defaults to MALLCOP_OPERATOR_CAMPFIRE_ID env)"},"query":{"type":"string","description":"search query — case-insensitive substring match against message body"},"limit":{"type":"integer","description":"max results (default 20, max 100)","default":20,"minimum":1,"maximum":100}}}'
   binary = "{{TOOL_BIN_DIR}}/mallcop-investigate-tools"
   binary_args = ["--tool", "search-chat-history"]
 
