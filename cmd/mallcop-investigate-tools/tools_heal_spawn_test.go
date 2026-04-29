@@ -6,8 +6,9 @@
 //
 // Unit/integration tests — no real Claude Code spend. The claude CLI invocation
 // is replaced by a stub bash script via CLAUDE_CLI_OVERRIDE_PATH. The gh CLI is
-// bypassed via MALLCOP_HEAL_SKIP_GH_PR=1. All tests use real on-disk git repos
-// (t.TempDir) so worktree, diff, and success criterion are exercised for real.
+// bypassed via MALLCOP_HEAL_SKIP_GH_PR=1 OR replaced by a stub via
+// GH_CLI_OVERRIDE_PATH. All tests use real on-disk git repos (t.TempDir) so
+// worktree, diff, and success criterion are exercised for real.
 // Budget gate uses MALLCOP_HEAL_BUDGET_DIR override.
 package main
 
@@ -86,6 +87,26 @@ exit 1
 		// Emits 170k total tokens (>150k cap) without committing anything.
 		script = `#!/usr/bin/env bash
 echo '{"type":"result","subtype":"success","usage":{"input_tokens":120000,"output_tokens":50000}}'
+`
+	case "happy-commit":
+		// Commits a file inside the allowed subtree, emits stream-json result.
+		// Same as "happy" but named for clarity in PR-related tests.
+		script = `#!/usr/bin/env bash
+set -e
+ADD_DIR=""
+while [[ $# -gt 0 ]]; do
+  if [[ "$1" == "--add-dir" ]]; then ADD_DIR="$2"; shift 2; else shift; fi
+done
+if [[ -n "$ADD_DIR" ]]; then
+  mkdir -p "$ADD_DIR/agents/heal-test"
+  echo "# stub patch" > "$ADD_DIR/agents/heal-test/POST.md"
+  cd "$ADD_DIR"
+  git config user.email "stub@test.example"
+  git config user.name "Stub"
+  git add agents/heal-test/POST.md
+  git commit -m "heal: stub patch"
+fi
+echo '{"type":"result","subtype":"success","usage":{"input_tokens":1000,"output_tokens":500}}'
 `
 	default:
 		t.Fatalf("unknown stub mode %q", mode)
@@ -684,6 +705,212 @@ func TestSpawnClaudeCodeFix_OutputSchema(t *testing.T) {
 		}
 	} else {
 		t.Error("timestamp missing or not string")
+	}
+}
+
+// writeGHStub writes a stub gh binary to dir/<name> and returns its path.
+// exitCode controls the exit code returned by the stub.
+// mode controls behavior:
+//
+//	"fail" — exits 1 with stderr "pr create failed: stub error"
+func writeGHStub(t *testing.T, dir, name, mode string) string {
+	t.Helper()
+	stub := filepath.Join(dir, name)
+	var script string
+	switch mode {
+	case "fail":
+		script = `#!/usr/bin/env bash
+echo "pr create failed: stub error" >&2
+exit 1
+`
+	default:
+		t.Fatalf("unknown gh stub mode %q", mode)
+	}
+	if err := os.WriteFile(stub, []byte(script), 0o755); err != nil {
+		t.Fatalf("write gh stub %s: %v", stub, err)
+	}
+	return stub
+}
+
+// TestSpawnClaudeCodeFix_PRCreationFails verifies that when gh pr create exits
+// non-zero, the tool returns outcome=failure with reason containing
+// "pr_create_failed" and records the attempt as a budget failure (item 027b-f).
+func TestSpawnClaudeCodeFix_PRCreationFails(t *testing.T) {
+	setTempBudgetDir(t)
+	t.Setenv("MALLCOP_TRANSCRIPT_DIR", t.TempDir())
+	// Do NOT set MALLCOP_HEAL_SKIP_GH_PR — we want gh to be invoked and fail.
+
+	repoDir := newTestRepo(t)
+	patchAllowlist(t, "mallcop-legion-prompts", repoDir)
+
+	stubDir := t.TempDir()
+	// Claude stub commits inside allowed subtree so diff validation passes.
+	claudeStub := writeClaudeStub(t, stubDir, "claude", "happy-commit")
+	t.Setenv("CLAUDE_CLI_OVERRIDE_PATH", claudeStub)
+
+	// gh stub that returns non-zero on pr create.
+	ghStub := writeGHStub(t, stubDir, "gh", "fail")
+	t.Setenv("GH_CLI_OVERRIDE_PATH", ghStub)
+
+	input := spawnClaudeFixInput{
+		FindingID:        "pr-fail-stu",
+		RepoAlias:        "mallcop-legion-prompts",
+		TaskDescription:  "test pr creation failure",
+		SuccessCriterion: "true",
+		ModelTier:        "sonnet",
+		BranchHint:       "work/heal-pr-fail-stu",
+	}
+	result, err := spawnClaudeCodeFix(input, "work/heal-pr-fail-stu")
+	if err != nil {
+		t.Fatalf("expected no hard error, got: %v", err)
+	}
+	if result.Outcome != "failure" {
+		t.Errorf("expected outcome=failure, got %q (reason: %s)", result.Outcome, result.Reason)
+	}
+	if !strings.Contains(result.Reason, "pr_create_failed") {
+		t.Errorf("expected reason to contain 'pr_create_failed', got %q", result.Reason)
+	}
+
+	// Budget must be charged as a failure.
+	bg, err := loadBudgetGate()
+	if err != nil {
+		t.Fatalf("loadBudgetGate: %v", err)
+	}
+	e := bg.Classes["pr-fail-stu"]
+	if e == nil {
+		t.Fatal("expected budget class entry after pr_create_failed")
+	}
+	if e.AttemptsToday < 1 {
+		t.Errorf("expected AttemptsToday >= 1 after PR failure, got %d", e.AttemptsToday)
+	}
+	if e.ConsecutiveFailures < 1 {
+		t.Errorf("expected ConsecutiveFailures >= 1 after PR failure, got %d", e.ConsecutiveFailures)
+	}
+}
+
+// TestSpawnClaudeCodeFix_SuccessCriterionFails verifies that when the Claude stub
+// succeeds (commits a patch) but the success_criterion predicate exits 1, the tool
+// returns outcome=failure with "success_criterion_not_met" and does NOT create a
+// PR. Budget is recorded as failure (item 027b-g).
+func TestSpawnClaudeCodeFix_SuccessCriterionFails(t *testing.T) {
+	setTempBudgetDir(t)
+	t.Setenv("MALLCOP_TRANSCRIPT_DIR", t.TempDir())
+	// Do NOT set MALLCOP_HEAL_SKIP_GH_PR — the criterion must fail before gh is
+	// ever reached; we verify no PR is created by checking the result has no pr_url.
+
+	repoDir := newTestRepo(t)
+	patchAllowlist(t, "mallcop-legion-prompts", repoDir)
+
+	stubDir := t.TempDir()
+	// Claude stub commits inside allowed subtree (diff validation passes).
+	claudeStub := writeClaudeStub(t, stubDir, "claude", "happy-commit")
+	t.Setenv("CLAUDE_CLI_OVERRIDE_PATH", claudeStub)
+
+	// gh stub would fail loudly if reached — belt-and-suspenders to catch regressions.
+	ghStub := writeGHStub(t, stubDir, "gh", "fail")
+	t.Setenv("GH_CLI_OVERRIDE_PATH", ghStub)
+
+	input := spawnClaudeFixInput{
+		FindingID:        "sc-fail-vwx",
+		RepoAlias:        "mallcop-legion-prompts",
+		TaskDescription:  "test success criterion failure",
+		SuccessCriterion: "exit 1",  // always fails
+		ModelTier:        "sonnet",
+		BranchHint:       "work/heal-sc-fail-vwx",
+	}
+	result, err := spawnClaudeCodeFix(input, "work/heal-sc-fail-vwx")
+	if err != nil {
+		t.Fatalf("expected no hard error, got: %v", err)
+	}
+	if result.Outcome != "failure" {
+		t.Errorf("expected outcome=failure, got %q (reason: %s)", result.Outcome, result.Reason)
+	}
+	if !strings.Contains(result.Reason, "success_criterion_not_met") {
+		t.Errorf("expected reason to contain 'success_criterion_not_met', got %q", result.Reason)
+	}
+
+	// No PR URL — PR creation must not have been attempted.
+	if result.PRUrl != "" {
+		t.Errorf("expected empty pr_url when success criterion fails, got %q", result.PRUrl)
+	}
+
+	// Budget charged as failure.
+	bg, err := loadBudgetGate()
+	if err != nil {
+		t.Fatalf("loadBudgetGate: %v", err)
+	}
+	e := bg.Classes["sc-fail-vwx"]
+	if e == nil {
+		t.Fatal("expected budget class entry after success_criterion failure")
+	}
+	if e.AttemptsToday < 1 {
+		t.Errorf("expected AttemptsToday >= 1 after success_criterion failure, got %d", e.AttemptsToday)
+	}
+	if e.ConsecutiveFailures < 1 {
+		t.Errorf("expected ConsecutiveFailures >= 1 after success_criterion failure, got %d", e.ConsecutiveFailures)
+	}
+}
+
+// TestHealSpawn_GrepGuard is a regression tripwire that programmatically reads
+// tools_heal_spawn.go and asserts that three forbidden command invocations are
+// absent (item 027b-h). If any forbidden pattern is found on a non-comment,
+// non-instructional line, a code change reintroduced a prohibited invocation.
+//
+// Forbidden invocation patterns (must NOT appear in exec.Command or similar):
+//   - "gh pr merge"     — heal has no PR merge authority (C4)
+//   - "git push -f"     — no force-push (design §7)
+//   - "--no-verify"     — no hook bypass
+//
+// Lines that are comments (start with "//") or contain negation keywords
+// ("DO NOT", "must not", "no ", "not") are excluded from the check: those lines
+// document the prohibition, not implement it.
+func TestHealSpawn_GrepGuard(t *testing.T) {
+	const sourceFile = "tools_heal_spawn.go"
+
+	data, err := os.ReadFile(sourceFile)
+	if err != nil {
+		t.Fatalf("cannot read %s: %v — is the test running in the right package directory?", sourceFile, err)
+	}
+
+	lines := strings.Split(string(data), "\n")
+
+	forbidden := []struct {
+		token  string
+		reason string
+	}{
+		{"gh pr merge", "heal must not merge PRs (design §7, constraint C4)"},
+		{"git push -f", "heal must not force-push (design §7)"},
+		{"--no-verify", "heal must not bypass git hooks (design §7)"},
+	}
+
+	// Negation keywords (case-insensitive): a line containing one of these is
+	// documenting a prohibition, not implementing one. Skip such lines.
+	negationKeywords := []string{"do not", "must not", "no ", "not "}
+
+	for _, f := range forbidden {
+		for lineNo, line := range lines {
+			trimmed := strings.TrimSpace(line)
+			if !strings.Contains(trimmed, f.token) {
+				continue
+			}
+			// Check whether this line is a comment or contains a negation keyword.
+			trimmedLower := strings.ToLower(trimmed)
+			isExempt := false
+			if strings.HasPrefix(trimmed, "//") {
+				isExempt = true
+			} else {
+				for _, neg := range negationKeywords {
+					if strings.Contains(trimmedLower, neg) {
+						isExempt = true
+						break
+					}
+				}
+			}
+			if !isExempt {
+				t.Errorf("FORBIDDEN invocation on line %d of %s: %q — %s\n  line: %s",
+					lineNo+1, sourceFile, f.token, f.reason, trimmed)
+			}
+		}
 	}
 }
 
