@@ -153,37 +153,55 @@ type cfMessage struct {
 }
 
 // readEngagementTranscript reads all messages from the engagement campfire
-// (MALLCOP_CAMPFIRE_ID) and returns transcript statistics.
+// (MALLCOP_CAMPFIRE_ID) and returns transcript statistics plus the raw messages.
+// The raw messages are used by extractRetrievedIDs to cross-check cited IDs.
 // The engagement campfire contains all tool_use records posted by the worker.
 //
 // Returns an error if cf is not on PATH or the campfire read fails. The caller
 // is responsible for fail-closed handling (see checkConfidenceGate).
 // Set MALLCOP_GATE_ALLOW_NO_CF=1 to bypass the cf-missing check in test environments.
-func readEngagementTranscript(campfireID string) (transcriptStats, error) {
+func readEngagementTranscript(campfireID string) (transcriptStats, []cfMessage, error) {
 	cfBin, err := cfBinPath()
 	if err != nil {
-		return transcriptStats{}, fmt.Errorf("readEngagementTranscript: %w", err)
+		return transcriptStats{}, nil, fmt.Errorf("readEngagementTranscript: %w", err)
 	}
 
 	cmd := exec.Command(cfBin, "read", campfireID, "--json", "--all") // #nosec G204
 	out, err := cmd.Output()
 	if err != nil {
 		// Propagate the error so the caller can fail closed.
-		return transcriptStats{}, fmt.Errorf("readEngagementTranscript: cf read: %w", err)
+		return transcriptStats{}, nil, fmt.Errorf("readEngagementTranscript: cf read: %w", err)
 	}
 
 	trimmed := strings.TrimSpace(string(out))
 	if trimmed == "" || trimmed == "null" {
-		return transcriptStats{}, nil
+		return transcriptStats{}, nil, nil
 	}
 
 	var msgs []cfMessage
 	if err := json.Unmarshal(out, &msgs); err != nil {
 		// Parse failure — propagate so the caller can fail closed.
-		return transcriptStats{}, fmt.Errorf("readEngagementTranscript: parse JSON: %w", err)
+		return transcriptStats{}, nil, fmt.Errorf("readEngagementTranscript: parse JSON: %w", err)
 	}
 
-	return parseTranscriptStats(msgs), nil
+	return parseTranscriptStats(msgs), msgs, nil
+}
+
+// extractRetrievedIDs scans all campfire message payloads for citation-pattern
+// IDs (same regex as countCitations). Only IDs that appear in at least one
+// message payload are considered "retrieved" — i.e., were actually seen by a
+// tool call during the investigation.
+func extractRetrievedIDs(msgs []cfMessage) map[string]struct{} {
+	retrieved := make(map[string]struct{})
+	for _, msg := range msgs {
+		if msg.Payload == "" {
+			continue
+		}
+		for _, id := range citationPattern.FindAllString(msg.Payload, -1) {
+			retrieved[id] = struct{}{}
+		}
+	}
+	return retrieved
 }
 
 // parseTranscriptStats counts tool_use and assistant turns from campfire messages.
@@ -269,14 +287,22 @@ func parseTranscriptStats(msgs []cfMessage) transcriptStats {
 var citationPattern = regexp.MustCompile(`\b[a-z]+[-_][a-z0-9]{3,}\b`)
 
 // countCitations counts event-ID-like citation patterns in the reason field.
-func countCitations(reason string) int {
+// When retrievedIDs is non-nil, only IDs that appear in the retrieved set are
+// counted — IDs that were never seen in any campfire message payload are not
+// counted as valid citations. Pass nil to count all matching tokens (used in
+// unit tests and sanity checks that bypass the cross-check).
+func countCitations(reason string, retrievedIDs map[string]struct{}) int {
 	matches := citationPattern.FindAllString(reason, -1)
-	// Deduplicate.
 	seen := make(map[string]struct{}, len(matches))
 	count := 0
 	for _, m := range matches {
 		if _, dup := seen[m]; !dup {
 			seen[m] = struct{}{}
+			if retrievedIDs != nil {
+				if _, ok := retrievedIDs[m]; !ok {
+					continue
+				}
+			}
 			count++
 		}
 	}
@@ -356,7 +382,7 @@ func checkConfidenceGate(campfireID, reason string) (gateResult, error) {
 	}
 
 	// Read the engagement campfire transcript.
-	stats, err := readEngagementTranscript(campfireID)
+	stats, msgs, err := readEngagementTranscript(campfireID)
 	if err != nil {
 		// Fail CLOSED: if we cannot read the transcript, we cannot verify the
 		// worker's evidence. Treat as score=0 and fire the gate.
@@ -372,8 +398,12 @@ func checkConfidenceGate(campfireID, reason string) (gateResult, error) {
 		}, readErr
 	}
 
-	// Count citations in the reason field.
-	citationCount := countCitations(reason)
+	// Cross-check cited IDs against IDs actually retrieved from the campfire.
+	// This prevents citation inflation via pseudo-IDs stuffed in the reason field.
+	retrievedIDs := extractRetrievedIDs(msgs)
+
+	// Count citations in the reason field (only retrieved IDs count).
+	citationCount := countCitations(reason, retrievedIDs)
 
 	// Hard citation requirement: zero citations → gate fires unconditionally.
 	// Tool volume and breadth alone (tool_call_weight + distinct_weight) are not
