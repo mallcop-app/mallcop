@@ -1016,6 +1016,52 @@ func TestMallcopPromptHasTrustPin(t *testing.T) {
 	}
 }
 
+// TestMallcopPromptEscalateLanguage verifies that the escalation language in
+// agents/mallcop/POST.md does NOT permit agent-initiated escalation based on the
+// agent's own assessment of finding severity. The agent must only escalate when
+// the operator explicitly asks via trigger patterns (§Routing).
+func TestMallcopPromptEscalateLanguage(t *testing.T) {
+	root := repoRoot(t)
+	promptPath := filepath.Join(root, "agents", "mallcop", "POST.md")
+
+	data, err := os.ReadFile(promptPath)
+	if err != nil {
+		t.Fatalf("cannot read %s: %v", promptPath, err)
+	}
+	content := string(data)
+	lower := strings.ToLower(content)
+
+	// Forbidden tokens that would permit agent-initiated escalation
+	forbiddenTokens := []string{
+		"warrants depth",
+		"you decide whether to escalate",
+		"if it warrants",
+		"your assessment",
+	}
+	for _, token := range forbiddenTokens {
+		if strings.Contains(lower, strings.ToLower(token)) {
+			t.Errorf("agents/mallcop/POST.md: found forbidden escalation token %q — agent must NOT escalate based on its own judgment; only explicit operator requests trigger escalation", token)
+		}
+	}
+
+	// Required clarification: escalation is operator-initiated only
+	requiredTokens := []string{
+		"escalate only when the operator explicitly asks",
+		"operator explicitly",
+		"only when the operator",
+	}
+	hasRequired := false
+	for _, token := range requiredTokens {
+		if strings.Contains(lower, strings.ToLower(token)) {
+			hasRequired = true
+			break
+		}
+	}
+	if !hasRequired {
+		t.Errorf("agents/mallcop/POST.md: must contain language stating escalation is operator-initiated only (e.g., 'escalate only when the operator explicitly asks')")
+	}
+}
+
 // TestEscalateSmokeFixturesWellFormed verifies that all 4 escalate branch smoke
 // fixtures exist and have the required shape: finding_id, branch, list_actions_response,
 // expected_operator_artifact, and expected_verdict.
