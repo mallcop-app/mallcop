@@ -80,16 +80,37 @@ if [[ -n "${WORK_CAMPFIRE}" ]]; then
   EXTRA_SEDS+=(-e "s|campfire = \"operational-${RUN_ID}\"|campfire = \"${WORK_CAMPFIRE}\"|g")
 fi
 if [[ -n "${MALLCOP_HOME}" ]]; then
-  # Rewrite legacy .run/operational-<RUN_ID>/... paths to deployment-scoped paths.
+  # Rewrite paths in the chart so it points at the deployment dir instead of
+  # mallcop-legion source-tree relatives (.run/...) or cwd-relatives (agents/).
   # See docs/design/deployment-and-identity.md (mallcop-pro) for the layout.
-  EXTRA_SEDS+=(-e "s|\.run/operational-${RUN_ID}/identity\.json|${MALLCOP_HOME}/.mallcop/automaton/identity.json|g")
+  # The single-identity model collapses operator+automaton into one key file;
+  # the chart's key_file points at .mallcop/identity.json directly (the legacy
+  # .run/operational-<RUN_ID>/identity.json placeholder maps there).
+  EXTRA_SEDS+=(-e "s|\.run/operational-${RUN_ID}/identity\.json|${MALLCOP_HOME}/.mallcop/identity.json|g")
   EXTRA_SEDS+=(-e "s|\.run/operational-${RUN_ID}/campfires|${MALLCOP_HOME}/.mallcop/campfires|g")
+  EXTRA_SEDS+=(-e "s|^dir = \"agents\"|dir = \"${MALLCOP_HOME}/.mallcop/agents\"|g")
+  EXTRA_SEDS+=(-e "s|^  \"agents/\",|  \"${MALLCOP_HOME}/.mallcop/agents/\",|g")
 fi
 
 if [[ ${#EXTRA_SEDS[@]} -gt 0 ]]; then
   sed "${SED_EXPR}" "${TEMPLATE}" | sed "${EXTRA_SEDS[@]}" > "${OUTPUT}"
 else
   sed "${SED_EXPR}" "${TEMPLATE}" > "${OUTPUT}"
+fi
+
+# Bake jail_root into the rendered chart so `we start` keeps jails inside
+# the deployment even when invoked without LEGION_JAIL_ROOT set. jail_root is
+# a top-level key on AutomatonConfig (see legion internal/automaton/config.go).
+# Prepend so it sits outside any [section] block.
+if [[ -n "${MALLCOP_HOME}" ]]; then
+  TMP_OUT="${OUTPUT}.render.tmp"
+  {
+    echo "# Per-deployment isolation overrides (rendered by render-chart.sh)"
+    echo "jail_root = \"${MALLCOP_HOME}/.mallcop/jails\""
+    echo
+    cat "${OUTPUT}"
+  } > "${TMP_OUT}"
+  mv "${TMP_OUT}" "${OUTPUT}"
 fi
 
 echo "rendered: ${OUTPUT}"
