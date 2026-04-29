@@ -57,6 +57,7 @@ agents/*/identity.json
 # These are per-run scratch; never commit them.
 /.cf/
 /.run/
+**/.run/
 
 # Smoke / dev scripts that may contain credentials. Add committed scripts
 # explicitly (allowlist) once they are scrubbed of secrets.
