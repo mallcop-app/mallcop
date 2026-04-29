@@ -1,0 +1,6 @@
+PASS
+scenario: AC-01-external-access-stolen-cred
+expected: escalated
+observed: escalated
+wall_seconds: 54.4
+run_id: e2e-ac01-20260429m

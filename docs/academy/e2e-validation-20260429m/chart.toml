@@ -1,0 +1,242 @@
+# Operational chart — E2E AC-01 run c (fixed work:create "id" field)
+# Fix: cfWorkCreate now posts "id" (not "item_id") so the ReadyWorkSource
+# can parse and claim downstream task:investigate items.
+
+[identity]
+name     = "mallcop-e2e-ac01-20260429m"
+type     = "worker"
+key_file = ".run/e2e-ac01-20260429m/identity.json"
+
+[[worksources]]
+type     = "ready"
+campfire = "49b36ad1e06dcc21fae426a27c530ff2906256c58cde03357d8953330abc6116"
+skills   = ["task:triage", "task:investigate", "task:deep-investigate", "task:investigate-merge", "task:escalate", "task:heal"]
+
+[budget]
+max_tokens_per_session = 5000000
+max_tokens_per_task    = 50000
+
+[autonomy]
+max_tasks_per_session  = 200
+
+[curator]
+disabled = true
+
+[tools]
+enabled = ["fetch_work_output", "list_work_items", "get_session_transcript"]
+
+  [tools.party_grants]
+  "task:investigate-merge" = ["task:deep-investigate"]
+
+[capabilities]
+gate_policy    = "ungated"
+tool_allowlist = [
+  "check-baseline", "search-events", "search-findings",
+  "read-finding",
+  "resolve-finding", "annotate-finding",
+  "escalate-to-investigator", "escalate-to-stage-c", "escalate-to-deep",
+  "create-investigate-merge", "write-partial-transcript",
+  "list-actions",
+]
+
+[[capabilities.seed]]
+name  = "triage"
+match = ["task:triage"]
+tools = [
+  "check-baseline", "search-events", "search-findings",
+  "resolve-finding", "escalate-to-investigator", "annotate-finding",
+]
+model     = "glm-4.7-flash"
+max_iters = 10
+
+  [[capabilities.seed.tool_defs]]
+  name = "check-baseline"
+  description = "Check baseline frequency and history for an actor/entity. Returns JSON with known_user, action_count, last_seen, and baseline stats."
+  input_schema = '{"type":"object","properties":{"entity":{"type":"string","description":"actor email or username"},"source":{"type":"string","description":"connector source (e.g. github)"}},"required":["entity"]}'
+  binary = "/home/baron/projects/mallcop-legion/bin/mallcop-investigate-tools"
+  binary_args = ["--tool", "check-baseline", "--mode", "exam", "--fixture-dir", "exams/fixtures/e2e-ac01-20260429"]
+
+  [[capabilities.seed.tool_defs]]
+  name = "search-events"
+  description = "Search recent events by actor, type, or time range. Returns JSON array of matching events."
+  input_schema = '{"type":"object","properties":{"actor":{"type":"string","description":"actor filter"},"source":{"type":"string","description":"connector source"},"type":{"type":"string","description":"event_type filter"},"since":{"type":"string","description":"RFC3339 start time"},"until":{"type":"string","description":"RFC3339 end time"}}}'
+  binary = "/home/baron/projects/mallcop-legion/bin/mallcop-investigate-tools"
+  binary_args = ["--tool", "search-events", "--mode", "exam", "--fixture-dir", "exams/fixtures/e2e-ac01-20260429"]
+
+  [[capabilities.seed.tool_defs]]
+  name = "search-findings"
+  description = "Search existing findings by actor, severity, or time range. Returns JSON array of related findings within the last 30 days."
+  input_schema = '{"type":"object","properties":{"actor":{"type":"string"},"source":{"type":"string"},"since":{"type":"string"},"until":{"type":"string"}}}'
+  binary = "/home/baron/projects/mallcop-legion/bin/mallcop-investigate-tools"
+  binary_args = ["--tool", "search-findings", "--mode", "exam", "--fixture-dir", "exams/fixtures/e2e-ac01-20260429"]
+
+  [[capabilities.seed.tool_defs]]
+  name = "resolve-finding"
+  description = "Close a finding with a resolution action (resolved|escalated). Call last after analysis. For privilege changes, use action=escalated."
+  input_schema = '{"type":"object","required":["finding_id","action","reason"],"properties":{"finding_id":{"type":"string"},"action":{"type":"string","enum":["resolved","escalated"]},"reason":{"type":"string"},"confidence":{"type":"number","minimum":1,"maximum":5}}}'
+  binary = "/home/baron/projects/mallcop-legion/bin/mallcop-investigate-tools"
+  binary_args = ["--tool", "resolve-finding"]
+
+  [[capabilities.seed.tool_defs]]
+  name = "annotate-finding"
+  description = "Add a structured annotation to a finding."
+  input_schema = '{"type":"object","required":["finding_id","note"],"properties":{"finding_id":{"type":"string"},"note":{"type":"string","maxLength":4096},"tags":{"type":"array","items":{"type":"string"}}}}'
+  binary = "/home/baron/projects/mallcop-legion/bin/mallcop-investigate-tools"
+  binary_args = ["--tool", "annotate-finding"]
+
+  [[capabilities.seed.tool_defs]]
+  name = "escalate-to-investigator"
+  description = "Escalate a finding to a dedicated investigator worker. Emits a work:create task:investigate item on the work campfire. Call when triage determines a finding needs deeper investigation."
+  input_schema = '{"type":"object","required":["finding_id","reason"],"properties":{"finding_id":{"type":"string","description":"finding ID being escalated"},"reason":{"type":"string","description":"why this finding needs investigation"},"confidence":{"type":"number","description":"triage confidence score 1-5 (optional)"}}}'
+  binary = "/home/baron/projects/mallcop-legion/bin/mallcop-investigate-tools"
+  binary_args = ["--tool", "escalate-to-investigator"]
+
+[[capabilities.seed]]
+name  = "investigate"
+match = ["task:investigate"]
+tools = [
+  "check-baseline", "baseline-stats",
+  "search-events", "search-findings",
+  "read-config",
+  "annotate-finding", "resolve-finding",
+  "escalate-to-stage-c",
+]
+model     = "glm-4.7-flash"
+max_iters = 15
+
+  [[capabilities.seed.tool_defs]]
+  name = "check-baseline"
+  description = "Check baseline frequency and history for an actor/entity."
+  input_schema = '{"type":"object","properties":{"entity":{"type":"string"},"source":{"type":"string"}},"required":["entity"]}'
+  binary = "/home/baron/projects/mallcop-legion/bin/mallcop-investigate-tools"
+  binary_args = ["--tool", "check-baseline", "--mode", "exam", "--fixture-dir", "exams/fixtures/e2e-ac01-20260429"]
+
+  [[capabilities.seed.tool_defs]]
+  name = "baseline-stats"
+  description = "Return aggregate baseline statistics for an actor or source."
+  input_schema = '{"type":"object","properties":{"entity":{"type":"string","description":"actor email or username (optional)"},"source":{"type":"string","description":"connector source (e.g. github, aws)"}}}'
+  binary = "/home/baron/projects/mallcop-legion/bin/mallcop-investigate-tools"
+  binary_args = ["--tool", "baseline-stats", "--mode", "exam", "--fixture-dir", "exams/fixtures/e2e-ac01-20260429"]
+
+  [[capabilities.seed.tool_defs]]
+  name = "search-events"
+  description = "Search recent events by actor, type, or time range."
+  input_schema = '{"type":"object","properties":{"actor":{"type":"string"},"source":{"type":"string"},"type":{"type":"string"},"since":{"type":"string"},"until":{"type":"string"}}}'
+  binary = "/home/baron/projects/mallcop-legion/bin/mallcop-investigate-tools"
+  binary_args = ["--tool", "search-events", "--mode", "exam", "--fixture-dir", "exams/fixtures/e2e-ac01-20260429"]
+
+  [[capabilities.seed.tool_defs]]
+  name = "search-findings"
+  description = "Search existing findings by actor, severity, or time range."
+  input_schema = '{"type":"object","properties":{"actor":{"type":"string"},"source":{"type":"string"},"since":{"type":"string"},"until":{"type":"string"}}}'
+  binary = "/home/baron/projects/mallcop-legion/bin/mallcop-investigate-tools"
+  binary_args = ["--tool", "search-findings", "--mode", "exam", "--fixture-dir", "exams/fixtures/e2e-ac01-20260429"]
+
+  [[capabilities.seed.tool_defs]]
+  name = "read-config"
+  description = "Read connector or detector configuration."
+  input_schema = '{"type":"object","properties":{"detector":{"type":"string","description":"detector name (optional)"},"connector":{"type":"string","description":"connector name (optional)"}}}'
+  binary = "/home/baron/projects/mallcop-legion/bin/mallcop-investigate-tools"
+  binary_args = ["--tool", "read-config", "--mode", "exam", "--fixture-dir", "exams/fixtures/e2e-ac01-20260429"]
+
+  [[capabilities.seed.tool_defs]]
+  name = "resolve-finding"
+  description = "Close a finding with a resolution action (resolved|escalated|remediated). This is the agent's final action on a finding."
+  input_schema = '{"type":"object","required":["finding_id","action","reason"],"properties":{"finding_id":{"type":"string"},"action":{"type":"string","enum":["resolved","escalated","remediated"]},"reason":{"type":"string"},"confidence":{"type":"number","minimum":1,"maximum":5}}}'
+  binary = "/home/baron/projects/mallcop-legion/bin/mallcop-investigate-tools"
+  binary_args = ["--tool", "resolve-finding"]
+
+  [[capabilities.seed.tool_defs]]
+  name = "annotate-finding"
+  description = "Add a structured annotation to a finding."
+  input_schema = '{"type":"object","required":["finding_id","note"],"properties":{"finding_id":{"type":"string"},"note":{"type":"string","maxLength":4096},"tags":{"type":"array","items":{"type":"string"}}}}'
+  binary = "/home/baron/projects/mallcop-legion/bin/mallcop-investigate-tools"
+  binary_args = ["--tool", "annotate-finding"]
+
+  [[capabilities.seed.tool_defs]]
+  name = "escalate-to-stage-c"
+  description = "Escalate a finding to stage-C (task:escalate worker). action_class: auto-safe|needs-approval|informational|ambiguous."
+  input_schema = '{"type":"object","required":["finding_id","reason","action_class"],"properties":{"finding_id":{"type":"string"},"reason":{"type":"string"},"action_class":{"type":"string","enum":["auto-safe","needs-approval","informational","ambiguous"]},"flags":{"type":"array","items":{"type":"string"}}}}'
+  binary = "/home/baron/projects/mallcop-legion/bin/mallcop-investigate-tools"
+  binary_args = ["--tool", "escalate-to-stage-c"]
+
+[[capabilities.seed]]
+name  = "escalate"
+match = ["task:escalate"]
+tools = [
+  "list-actions", "annotate-finding", "resolve-finding",
+]
+model     = "glm-4.7-flash"
+max_iters = 5
+
+  [[capabilities.seed.tool_defs]]
+  name = "list-actions"
+  description = "List available remediation actions for a detector."
+  input_schema = '{"type":"object","required":["detector"],"properties":{"detector":{"type":"string"},"action_class_filter":{"type":"string"}}}'
+  binary = "/home/baron/projects/mallcop-legion/bin/mallcop-investigate-tools"
+  binary_args = ["--tool", "list-actions"]
+
+  [[capabilities.seed.tool_defs]]
+  name = "resolve-finding"
+  description = "Close a finding with a resolution action."
+  input_schema = '{"type":"object","required":["finding_id","action","reason"],"properties":{"finding_id":{"type":"string"},"action":{"type":"string","enum":["resolved","escalated","remediated"]},"reason":{"type":"string"},"confidence":{"type":"number","minimum":1,"maximum":5}}}'
+  binary = "/home/baron/projects/mallcop-legion/bin/mallcop-investigate-tools"
+  binary_args = ["--tool", "resolve-finding"]
+
+  [[capabilities.seed.tool_defs]]
+  name = "annotate-finding"
+  description = "Add finding:annotation note."
+  input_schema = '{"type":"object","required":["finding_id","note"],"properties":{"finding_id":{"type":"string"},"note":{"type":"string","maxLength":4096},"tags":{"type":"array","items":{"type":"string"}}}}'
+  binary = "/home/baron/projects/mallcop-legion/bin/mallcop-investigate-tools"
+  binary_args = ["--tool", "annotate-finding"]
+
+[[capabilities.seed]]
+name      = "heal"
+match     = ["task:heal"]
+tools     = ["read-finding", "annotate-finding", "resolve-finding"]
+model     = "glm-4.7-flash"
+max_iters = 5
+
+  [[capabilities.seed.tool_defs]]
+  name = "read-finding"
+  description = "Read the full finding record by finding_id."
+  input_schema = '{"type":"object","required":["finding_id"],"properties":{"finding_id":{"type":"string"}}}'
+  binary = "/home/baron/projects/mallcop-legion/bin/mallcop-investigate-tools"
+  binary_args = ["--tool", "read-finding", "--mode", "exam", "--fixture-dir", "exams/fixtures/e2e-ac01-20260429"]
+
+  [[capabilities.seed.tool_defs]]
+  name = "annotate-finding"
+  description = "Add finding:annotation note."
+  input_schema = '{"type":"object","required":["finding_id","note"],"properties":{"finding_id":{"type":"string"},"note":{"type":"string","maxLength":4096},"tags":{"type":"array","items":{"type":"string"}}}}'
+  binary = "/home/baron/projects/mallcop-legion/bin/mallcop-investigate-tools"
+  binary_args = ["--tool", "annotate-finding"]
+
+  [[capabilities.seed.tool_defs]]
+  name = "resolve-finding"
+  description = "Close a finding with a resolution action."
+  input_schema = '{"type":"object","required":["finding_id","action","reason"],"properties":{"finding_id":{"type":"string"},"action":{"type":"string","enum":["resolved","escalated","remediated"]},"reason":{"type":"string"},"confidence":{"type":"number","minimum":1,"maximum":5}}}'
+  binary = "/home/baron/projects/mallcop-legion/bin/mallcop-investigate-tools"
+  binary_args = ["--tool", "resolve-finding"]
+
+[lifecycle]
+max_workers   = 4
+time_limit    = "90m"
+poll_interval = "10s"
+
+[inference]
+# Use Forge backend for GLM model (non-Anthropic → ForgeBackend, no OAuth rate limit)
+forge_api_url = "https://forge.3dl.dev"
+api_key       = "REDACTED-FORGE-KEY-EC5"
+
+[agents]
+dir = "agents"
+
+[campfire]
+transport_dir = "/home/baron/projects/mallcop-legion/.run/e2e-ac01-20260429m/campfires"
+
+[sandbox]
+extra_ro = [
+  "agents/",
+  "exams/",
+  "/home/baron/projects/mallcop-legion/.run/e2e-ac01-20260429m",
+]

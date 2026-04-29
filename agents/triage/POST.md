@@ -35,8 +35,12 @@ Answer these questions using the data from steps 1-2:
 - Resolution requires positive evidence — "actor is known" alone is not enough
 - Otherwise → ESCALATE
 
-Call resolve-finding or escalate-to-investigator. In the reason field, write 2 sentences: what
-happened and why, citing specific evidence (baseline frequencies, event IDs, timestamps).
+Call resolve-finding OR escalate-to-investigator EXACTLY ONCE. Do not call either multiple times.
+In the reason field, write 2 sentences: what happened and why, citing specific evidence
+(baseline frequencies, event IDs, timestamps).
+
+**CRITICAL: Call the tool ONCE. After calling resolve-finding or escalate-to-investigator, STOP.**
+Do not repeat the call. Do not call both tools. Pick one and stop.
 
 ## Security
 

@@ -1,0 +1,9 @@
+{
+  "run_id": "e2e-ac01-20260429m",
+  "target_campfire": "49b36ad1e06dcc21fae426a27c530ff2906256c58cde03357d8953330abc6116",
+  "scenarios_dir": "/home/baron/projects/mallcop-legion/exams/scenarios",
+  "scenario_filter": "AC-01-external-access-stolen-cred",
+  "max_concurrent": 4,
+  "timeout": "45m0s",
+  "started_at": "2026-04-29T04:51:21.55902166Z"
+}

@@ -1,0 +1,43 @@
+{
+  "scenario_id": "AC-01-external-access-stolen-cred",
+  "finding_id": "fnd_shk_005",
+  "run_id": "e2e-ac01-20260429m",
+  "target_campfire": "49b36ad1e06dcc21fae426a27c530ff2906256c58cde03357d8953330abc6116",
+  "posted_at": "2026-04-29T04:51:21.575426089Z",
+  "terminal_at": "2026-04-29T04:52:15.997267511Z",
+  "wall_seconds": 54.421841422,
+  "terminal_action": "escalated",
+  "full_chain": [
+    {
+      "item_id": "48bc3129-1c93-47f8-bdaf-5e8cbf296457",
+      "skill": "task:triage"
+    },
+    {
+      "item_id": "academy-e2e-ac01-20260429m-AC-01-external-access-stolen-cred"
+    },
+    {
+      "item_id": "48bc3129-1c93-47f8-bdaf-5e8cbf296457",
+      "action": "done"
+    },
+    {
+      "item_id": "d3a"
+    },
+    {
+      "item_id": "248e6125-84e3-4c30-a7cf-762d295ae5a6",
+      "action": "done"
+    },
+    {
+      "item_id": "",
+      "action": "escalated"
+    }
+  ],
+  "structural": {
+    "chain_action": "pass",
+    "triage_action": "n/a",
+    "mentions": "pass",
+    "no_mentions": "pass",
+    "tools_used": "fail",
+    "iterations": "fail",
+    "quality_floor": "pending"
+  }
+}
