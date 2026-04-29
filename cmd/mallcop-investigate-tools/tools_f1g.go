@@ -754,10 +754,28 @@ func defaultRemediationActions() []RemediationAction {
 }
 
 // parseSimpleYAMLRegistry is a minimal YAML parser for the registry format.
-// Supports only the fields we write.
+// Supports only the fields we write. Skips comment lines (lines starting with #).
 func parseSimpleYAMLRegistry(data []byte) ([]RemediationAction, error) {
-	// Fall back to defaults on parse failure — v1 is best-effort.
-	return defaultRemediationActions(), nil
+	// Remove comment lines and parse remaining YAML.
+	lines := strings.Split(string(data), "\n")
+	var filtered []string
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		// Skip empty lines and comment lines.
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		filtered = append(filtered, line)
+	}
+
+	// Rejoin and try to parse as JSON (YAML is a superset of JSON for simple cases).
+	cleanData := []byte(strings.Join(filtered, "\n"))
+	var reg RemediationRegistry
+	if err := json.Unmarshal(cleanData, &reg); err != nil {
+		// Parse failure — fall back to defaults — v1 is best-effort.
+		return defaultRemediationActions(), nil
+	}
+	return reg.Actions, nil
 }
 
 // listActionsInput is the input_schema for list-actions.
