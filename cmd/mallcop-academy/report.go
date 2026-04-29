@@ -174,7 +174,9 @@ func buildResults(scenarios []*exam.Scenario, tracked map[string]*trackedScenari
 		var sg *StructuralGrade
 		if s.ExpectedResolution != nil {
 			rubricScore := 0
+			judgeRan := false
 			if ts.judgeResult != nil {
+				judgeRan = true
 				rubricScore = ts.judgeResult.Rubric.InvestigationThoroughness
 			}
 			grade := computeStructuralGrade(
@@ -185,6 +187,7 @@ func buildResults(scenarios []*exam.Scenario, tracked map[string]*trackedScenari
 				ts.toolsUsedInInvest,
 				ts.maxInvestIterations,
 				rubricScore,
+				judgeRan,
 			)
 			sg = &grade
 		}
