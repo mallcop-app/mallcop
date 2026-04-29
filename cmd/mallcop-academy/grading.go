@@ -22,10 +22,11 @@ import (
 type AxisResult = string
 
 const (
-	AxisPass    AxisResult = "pass"
-	AxisFail    AxisResult = "fail"
-	AxisNA      AxisResult = "n/a"
-	AxisPending AxisResult = "pending"
+	AxisPass        AxisResult = "pass"
+	AxisFail        AxisResult = "fail"
+	AxisNA          AxisResult = "n/a"
+	AxisPending     AxisResult = "pending"
+	AxisUnavailable AxisResult = "unavailable"
 )
 
 // StructuralGrade holds the per-axis grading results.
@@ -89,7 +90,8 @@ type IterationInfo struct {
 //   - triageCloseAction: action from the first triage skill close in the chain
 //   - toolsUsedInInvestigate: true if any investigate step had ≥1 tool call
 //   - maxInvestigateIterations: the highest iteration count seen across investigate workers
-//   - rubricScore: investigation_thoroughness score from F4C (0 = not yet available)
+//   - rubricScore: investigation_thoroughness score from F4C (0 = not yet available or unavailable)
+//   - judgeRan: true if the judge was dispatched for this scenario (even if it returned 0)
 func computeStructuralGrade(
 	expected *exam.ExpectedResolution,
 	terminalAction string,
@@ -98,6 +100,7 @@ func computeStructuralGrade(
 	toolsUsedInInvestigate bool,
 	maxInvestigateIterations int,
 	rubricScore int,
+	judgeRan bool,
 ) StructuralGrade {
 	g := StructuralGrade{
 		ChainAction:  AxisNA,
@@ -202,7 +205,14 @@ func computeStructuralGrade(
 	// --- min_investigation_quality (cross-axis on F4C) ---
 	if expected.MinInvestigationQuality > 0 {
 		if rubricScore == 0 {
-			g.QualityFloor = AxisPending
+			if judgeRan {
+				// Judge ran but scored 0 (returned unavailable or failed to score).
+				// Report as "unavailable" — not "pending" (judge did run).
+				g.QualityFloor = AxisUnavailable
+			} else {
+				// Judge has not been dispatched yet.
+				g.QualityFloor = AxisPending
+			}
 		} else if rubricScore >= expected.MinInvestigationQuality {
 			g.QualityFloor = AxisPass
 		} else {

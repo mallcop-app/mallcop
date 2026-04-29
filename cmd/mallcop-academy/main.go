@@ -373,6 +373,10 @@ func academy(sender Sender, args runArgs) error {
 		return fmt.Errorf("create output dir: %w", err)
 	}
 
+	// F4C: build judge dispatch. Attempt to wire a judicator for this run.
+	// Falls back gracefully if we binary or chart template is unavailable.
+	judge := buildJudicator(args)
+
 	// Write run.json.
 	runRecord := RunRecord{
 		RunID:          args.runID,
@@ -652,6 +656,21 @@ func academy(sender Sender, args runArgs) error {
 				ts.terminalItemID = itemID
 				ts.mu.Unlock()
 
+				// F4C: run judge BEFORE writing the record so quality_floor is
+				// populated in the single-pass write. If the judge is unavailable
+				// or fails, judgeResult is set to the unavailable sentinel so that
+				// quality_floor reflects "unavailable" rather than "pending".
+				if judge != nil {
+					jr, judgeErr := judge.spawnAndCollect(scenID, ts.findingID, args.targetCampfire)
+					if judgeErr != nil {
+						fmt.Fprintf(os.Stderr, "WARN: judge for scenario %s: %v\n", scenID, judgeErr)
+						jr = judgeUnavailable(judgeErr.Error())
+					}
+					ts.mu.Lock()
+					ts.judgeResult = jr
+					ts.mu.Unlock()
+				}
+
 				// Write per-scenario JSON.
 				if err := writeScenarioRecord(ts, args.runID, args.targetCampfire, args.outputDir); err != nil {
 					fmt.Fprintf(os.Stderr, "WARN: write scenario record for %s: %v\n", scenID, err)
@@ -822,7 +841,9 @@ func writeScenarioRecord(ts *trackedScenario, runID, targetCampfire, outputDir s
 	// F4B: compute structural grade if the scenario has an expected: block.
 	if s, ok := ts.scenario.(*exam.Scenario); ok && s != nil && s.ExpectedResolution != nil {
 		rubricScore := 0
+		judgeRan := false
 		if ts.judgeResult != nil {
+			judgeRan = true
 			rubricScore = ts.judgeResult.Rubric.InvestigationThoroughness
 		}
 		grade := computeStructuralGrade(
@@ -833,6 +854,7 @@ func writeScenarioRecord(ts *trackedScenario, runID, targetCampfire, outputDir s
 			ts.toolsUsedInInvest,
 			ts.maxInvestIterations,
 			rubricScore,
+			judgeRan,
 		)
 		rec.Structural = &grade
 	}
