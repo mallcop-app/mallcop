@@ -25,52 +25,47 @@ Then select the branch:
 
 When `list-actions` returns a registered action with action_class `auto-safe`:
 
-1. Call `remediate-action` with the action_name and finding_id.
-2. Call `message-operator` with category `action-receipt`. Include: what action was taken, on what target, at what time, and the receipt_id from remediate-action.
-3. Call `resolve-finding` with action=`remediated`. Reason must cite the action taken and the receipt_id.
+1. Call `annotate-finding` to record the auto-remediation action taken and target.
+2. Call `resolve-finding` with action=`remediated`. Reason must cite the action name and the evidence for automatic remediation.
 
-This branch requires NO human approval. auto-safe means the action is pre-authorized
-(e.g. revoke-stolen-token, rotate-leaked-key) — it is low-blast-radius and reversible.
+This branch requires NO human approval. auto-safe means the action is pre-authorized.
 
-### Branch 2: REQUEST-APPROVAL
+### Branch 2: REQUEST-APPROVAL / NEEDS-APPROVAL
 
 When `list-actions` returns an action with action_class `needs-approval`:
 
-1. Call `annotate-finding` to record that you are requesting approval. Note the action_name and justification.
-2. Call `request-approval` with finding_id, action_name, and justification (why the action is necessary — cite the evidence chain from investigate).
-3. Await gate fulfillment. The `request-approval` tool returns a `gate_id`. The mallcop automaton operator will fulfill the gate externally with verdict `approved` or `denied`.
-4. On **approval**: call `remediate-action` with the action_name. Then call `resolve-finding` with action=`remediated`, citing the approval gate_id.
-5. On **denial**: call `resolve-finding` with action=`escalated`, reason must include gate_id and note that operator explicitly denied the action (action=`escalated-rejected`).
+1. Call `annotate-finding` to record the action name, justification, and evidence chain.
+2. Call `resolve-finding` with action=`escalated`. Reason must include: the action name needed,
+   why approval is required, and the key evidence. Note this is an approval-pending escalation.
 
-Gate semantics: request-approval posts a cf gate (future message) to the operator campfire.
-Use legion's gate await mechanism — do not poll. The gate is fulfilled externally.
+Note: In the current deployment, approval requests go through operator review. Escalate with
+full documentation so the operator can make the approval decision externally.
 
 ### Branch 3: INSTRUCT-OPERATOR
 
 When no automated remediation exists, OR the finding is `informational` but a specific
 manual action can be recommended:
 
-1. Call `annotate-finding` to record the branch selection and evidence summary.
-2. Call `message-operator` with category `instruction`. The message MUST include:
+1. Call `annotate-finding` to record the branch selection, evidence summary, and specific action
+   recommendation. The annotation MUST include:
    - **What to do**: specific action verb + target (e.g. "Revoke IAM role `arn:aws:iam::123:role/ProdAdmin` from user `alice@example.com`")
-   - **Why**: one sentence citing the anomalous signal (e.g. "Role was granted at 03:14 UTC with no approval ticket and baseline shows 0 prior grants")
-   - **Target**: specific resource identifier (not "the role" — the actual ARN or ID)
-   - **Urgency**: based on finding severity (critical → immediate, high → within 1h, medium → within 4h)
-3. Call `resolve-finding` with action=`escalated`. Reason must cite the instruction sent.
+   - **Why**: one sentence citing the anomalous signal
+   - **Target**: specific resource identifier
+   - **Urgency**: based on finding severity (critical → immediate, high → within 1h)
+2. Call `resolve-finding` with action=`escalated`. Reason must cite the specific instruction.
 
-Do not send vague instructions. "Check the logs" is not an instruction.
+Do not write vague instructions. "Check the logs" is not an instruction.
 
 ### Branch 4: NO-ACTION-AVAILABLE
 
 When the system cannot act and cannot instruct (ambiguous result, informational-only,
 or all-disagree deep investigation where the situation is genuinely unclear):
 
-1. Call `annotate-finding` to record the ambiguity and why no action is possible.
-2. Call `message-operator` with category `open-question`. The message MUST include:
+1. Call `annotate-finding` to record the ambiguity and why no action is possible. Include:
    - **Situation summary**: what happened, what was found, what the investigation produced
    - **Open question**: the specific question that would resolve the ambiguity
-   - **Evidence chains**: if from investigate-merge all-disagree path, summarize each of the 3 deep worker findings briefly
-3. Call `resolve-finding` with action=`escalated` (status: `operator-aware`). Reason must note this is informational — operator input needed.
+2. Call `resolve-finding` with action=`escalated`. Reason must note this is operator-awareness:
+   situation is genuinely unclear and requires human judgment.
 
 ## Hard Constraints
 
@@ -78,18 +73,19 @@ or all-disagree deep investigation where the situation is genuinely unclear):
    You have no chain-handoff tools. If you reach this point and cannot resolve, use Branch 4.
    Never try to hand off to another automated stage — there is none.
 
-2. **auto-safe means pre-authorized.** Never call request-approval for an auto-safe action.
-   Never call remediate-action for a needs-approval action without a fulfilled gate.
+2. **Available tools only.** Only call tools that exist: `list-actions`, `annotate-finding`,
+   `resolve-finding`. Do NOT call `message-operator`, `request-approval`, `remediate-action`,
+   or any other tool — they are not available in this deployment. If your branch requires
+   one of these tools, document the action in `annotate-finding` and call `resolve-finding`.
 
-3. **Instruction specificity is non-negotiable.** Branch 3 messages must name a specific
-   resource (ARN, username, key ID). Generic messages are audit failures.
+3. **Instruction specificity is non-negotiable.** Branch 3 annotations must name a specific
+   resource (ARN, username, key ID). Generic notes are audit failures.
 
-4. **Gate semantics for approval.** Branch 2 MUST use request-approval → gate await.
-   Do not invent an approval channel. Do not prompt the operator in a message and treat
-   a reply as approval — gate fulfillment is the only valid approval signal.
-
-5. **Close every finding.** Every branch ends with resolve-finding. A finding you cannot
+4. **Close every finding.** Every branch ends with resolve-finding. A finding you cannot
    act on still gets closed (Branch 4). Leaving a finding open is not allowed.
+
+5. **Call resolve-finding exactly once.** Do not call it multiple times. After calling
+   resolve-finding, output your summary and stop. You are done.
 
 ## Security
 

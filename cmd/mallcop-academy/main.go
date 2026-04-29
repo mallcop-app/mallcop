@@ -217,10 +217,32 @@ type trackedScenario struct {
 // ---- Close payload parsing ----------------------------------------------------
 
 // closePayload is a partial unmarshal of a work:close message payload.
+// Handles both "action" (new convention) and "resolution" (we automaton-manager
+// format). The target field is the msg ID of the original work:create and is
+// used when item_id is not present.
 type closePayload struct {
-	ItemID string `json:"item_id"`
-	Action string `json:"action"`
-	Skill  string `json:"skill"`
+	ItemID     string `json:"item_id"`
+	Target     string `json:"target"`     // we automaton-manager format: msg ID of work:create
+	Action     string `json:"action"`
+	Resolution string `json:"resolution"` // we automaton-manager format
+	Skill      string `json:"skill"`
+}
+
+// resolvedAction returns the terminal action from either the action or
+// resolution field, whichever is populated.
+func (c closePayload) resolvedAction() string {
+	if c.Action != "" {
+		return c.Action
+	}
+	return c.Resolution
+}
+
+// resolvedItemID returns the item ID from either item_id or target field.
+func (c closePayload) resolvedItemID() string {
+	if c.ItemID != "" {
+		return c.ItemID
+	}
+	return c.Target
 }
 
 // terminalActions are work:close actions that indicate chain completion.
@@ -317,7 +339,7 @@ func mainRun() error {
 		return fmt.Errorf("cf binary not found on PATH: %w", err)
 	}
 
-	sender := &cfSender{cfBin: cfBin}
+	sender := &cfSender{cfBin: cfBin, cfHome: os.Getenv("CF_HOME")}
 
 	return academy(sender, runArgs{
 		targetCampfire: targetCampfire,
@@ -371,9 +393,17 @@ func academy(sender Sender, args runArgs) error {
 	// Also build workItemID → *trackedScenario for watch-loop lookups.
 	tracked := make(map[string]*trackedScenario, len(scenarios))
 	for _, s := range scenarios {
+		// findingID is the actual finding ID from the scenario (e.g. "fnd_shk_005").
+		// This is the ID that workers use when calling resolve-finding and annotate-finding,
+		// allowing us to match work:output messages back to their scenario by finding_id.
+		// Also keep the tracking ID for backward-compat lookups.
+		actualFindingID := s.Finding.ID
+		if actualFindingID == "" {
+			actualFindingID = findingTrackingID(args.runID, s.ID)
+		}
 		ts := &trackedScenario{
 			scenarioID: s.ID,
-			findingID:  findingTrackingID(args.runID, s.ID),
+			findingID:  actualFindingID,
 			scenario:   s, // stored for F4B grading
 		}
 		tracked[s.ID] = ts
@@ -426,33 +456,62 @@ func academy(sender Sender, args runArgs) error {
 
 		// Build a fresh workItemToScenario map including any new chain items
 		// (work:create from escalations) before processing closes.
+		// For each work:create that chains from a known scenario item, register
+		// both the message ID and the "id" field so downstream closes can be matched.
 		postMu.Lock()
 		for _, msg := range msgs {
-			if hasTag(msg.Tags, "work:create") {
-				var p closePayload
-				if json.Unmarshal([]byte(msg.Payload), &p) == nil && p.ItemID != "" {
-					// If this work:create chains off a known scenario, track it.
-					// We detect by checking reply-to chains — not directly available
-					// in the read output, so instead we check if any tracked
-					// scenario's chain already has a close that references this new item.
-					// For now: add to workItemToScenario under the same scenario if
-					// the ID prefix matches our academy run.
-					for scenID, tsRef := range tracked {
-						tsRef.mu.Lock()
-						for _, ce := range tsRef.chain {
-							if ce.ItemID != "" && strings.HasPrefix(msg.ID, "acad-") {
-								_ = ce
-							}
-						}
-						tsRef.mu.Unlock()
-						_ = scenID
+			if !hasTag(msg.Tags, "work:create") {
+				continue
+			}
+			// Parse work:create payload: look for "id" field (cfWorkCreate format).
+			var p struct {
+				ID      string `json:"id"`
+				ItemID  string `json:"item_id"` // legacy
+				Context string `json:"context"`
+			}
+			if err2 := json.Unmarshal([]byte(msg.Payload), &p); err2 != nil {
+				continue
+			}
+			workCreateID := p.ID
+			if workCreateID == "" {
+				workCreateID = p.ItemID
+			}
+
+			// Map both the campfire message ID and the work item ID to the scenario.
+			// Strategy: the work:create is a chain item if it was preceded by a
+			// work:claim for the original scenario item. We check if ANY tracked
+			// scenario has this msg ID already tracked (e.g. via the initial posting),
+			// or if the context references a known scenario item ID.
+			for scenID, tsRef := range tracked {
+				tsRef.mu.Lock()
+				alreadyKnown := false
+				for _, ce := range tsRef.chain {
+					if ce.ItemID == msg.ID || ce.ItemID == workCreateID {
+						alreadyKnown = true
+						break
 					}
-					// Simple tracking: if item_id of the new work:create is referenced
-					// in a close payload, we add it when we see the close.
-					if _, known := workItemToScenario[msg.ID]; !known {
-						// Register as belonging to whichever scenario claimed this
-						// item in a prior close. Defer: fill in on close observation.
-						_ = msg.ID
+				}
+				if !alreadyKnown && (workItemToScenario[msg.ID] == scenID) {
+					alreadyKnown = true
+				}
+				tsRef.mu.Unlock()
+				_ = alreadyKnown
+			}
+			// Register message ID → scenario for any scenario that owns the
+			// immediately-preceding item in the chain (heuristic: register under
+			// ALL tracked scenarios if it's the only one, or match by context).
+			if workCreateID != "" {
+				if _, known := workItemToScenario[workCreateID]; !known {
+					// Default: assign to the first scenario that hasn't reached terminal.
+					for scenIDKey, tsRef := range tracked {
+						tsRef.mu.Lock()
+						isTerminal := tsRef.terminal
+						tsRef.mu.Unlock()
+						if !isTerminal {
+							workItemToScenario[workCreateID] = scenIDKey
+							workItemToScenario[msg.ID] = scenIDKey
+							break
+						}
 					}
 				}
 			}
@@ -460,22 +519,92 @@ func academy(sender Sender, args runArgs) error {
 		postMu.Unlock()
 
 		for _, msg := range msgs {
-			if !hasTag(msg.Tags, "work:close") {
+			// Accept both work:close and work:output messages.
+			// work:close is posted by we automaton-manager (resolution:done always).
+			// work:output with action:* tag is posted by resolve-finding tool with
+			// the actual finding disposition (escalated/resolved/remediated).
+			isClose := hasTag(msg.Tags, "work:close")
+			isOutput := hasTag(msg.Tags, "work:output")
+			if !isClose && !isOutput {
 				continue
 			}
 
-			// Parse close payload.
+			// Parse close/output payload.
 			var cp closePayload
 			if err := json.Unmarshal([]byte(msg.Payload), &cp); err != nil {
 				continue
 			}
 
-			// Look up scenario via item_id in the payload.
+			// For work:output messages, extract action from tags (action:<val>)
+			// if the payload action field is empty.
+			if isOutput && cp.Action == "" {
+				for _, tag := range msg.Tags {
+					if strings.HasPrefix(tag, "action:") {
+						cp.Action = strings.TrimPrefix(tag, "action:")
+						break
+					}
+				}
+			}
+
+			// For we-format closes: use target as item ID, resolution as action.
+			itemID := cp.resolvedItemID()
+			action := cp.resolvedAction()
+
+			// Look up scenario via item_id/target in the payload.
 			postMu.Lock()
-			scenID, ok := workItemToScenario[cp.ItemID]
+			scenID, ok := workItemToScenario[itemID]
 			if !ok {
-				// Also try the message ID itself.
+				// Try the message's own ID.
 				scenID, ok = workItemToScenario[msg.ID]
+			}
+			// For work:output: try matching by finding_id tag or finding_id payload field.
+			// This handles resolve-finding emitting action:escalated to the work campfire
+			// where the item_id/target fields don't match the original work:create msg.
+			if !ok {
+				// Extract finding_id from tags (finding:<id>) or payload.
+				var foundFindingID string
+				for _, tag := range msg.Tags {
+					if strings.HasPrefix(tag, "finding:") && !strings.HasPrefix(tag, "finding:annotation") {
+						foundFindingID = strings.TrimPrefix(tag, "finding:")
+						break
+					}
+				}
+				if foundFindingID == "" {
+					var payloadFindingID struct{ FindingID string `json:"finding_id"` }
+					if json.Unmarshal([]byte(msg.Payload), &payloadFindingID) == nil {
+						foundFindingID = payloadFindingID.FindingID
+					}
+				}
+				// Match against tracked scenario finding IDs.
+				if foundFindingID != "" {
+					for scenIDKey, tsRef := range tracked {
+						tsRef.mu.Lock()
+						match := tsRef.findingID == foundFindingID
+						tsRef.mu.Unlock()
+						if match {
+							ok = true
+							scenID = scenIDKey
+							break
+						}
+					}
+				}
+			}
+			// Also try chain-based lookup.
+			if !ok && cp.Action != "" {
+				for scenIDKey, tsRef := range tracked {
+					tsRef.mu.Lock()
+					for _, ce := range tsRef.chain {
+						if ce.ItemID == itemID {
+							ok = true
+							scenID = scenIDKey
+							break
+						}
+					}
+					tsRef.mu.Unlock()
+					if ok {
+						break
+					}
+				}
 			}
 			postMu.Unlock()
 
@@ -490,11 +619,11 @@ func academy(sender Sender, args runArgs) error {
 
 			ts.mu.Lock()
 			// Add this close to the chain.
-			entry := ChainEntry{ItemID: cp.ItemID, Skill: cp.Skill, Action: cp.Action}
+			entry := ChainEntry{ItemID: itemID, Skill: cp.Skill, Action: action}
 			// Avoid duplicates.
 			seen := false
 			for _, ce := range ts.chain {
-				if ce.ItemID == cp.ItemID && ce.Action == cp.Action {
+				if ce.ItemID == itemID && ce.Action == action {
 					seen = true
 					break
 				}
@@ -505,22 +634,22 @@ func academy(sender Sender, args runArgs) error {
 
 			// F4B: capture triage close action (first task:triage close seen).
 			if ts.triageCloseAction == "" && isTriageSkill(cp.Skill) {
-				ts.triageCloseAction = cp.Action
+				ts.triageCloseAction = action
 			}
 
 			// F4B: capture reason from close payload for mention/no-mention checks.
-			if terminalActions[cp.Action] && ts.terminalReason == "" {
+			if terminalActions[action] && ts.terminalReason == "" {
 				ts.terminalReason = extractTerminalReason(msg.Payload)
 			}
 
 			// Classify as terminal: terminal action AND no follow-on work:create
 			// from this close observed yet.
-			if !ts.terminal && terminalActions[cp.Action] {
+			if !ts.terminal && terminalActions[action] {
 				ts.terminal = true
 				now := time.Now()
 				ts.terminalAt = now
-				ts.terminalAction = cp.Action
-				ts.terminalItemID = cp.ItemID
+				ts.terminalAction = action
+				ts.terminalItemID = itemID
 				ts.mu.Unlock()
 
 				// Write per-scenario JSON.
@@ -528,7 +657,7 @@ func academy(sender Sender, args runArgs) error {
 					fmt.Fprintf(os.Stderr, "WARN: write scenario record for %s: %v\n", scenID, err)
 				} else {
 					fmt.Fprintf(os.Stderr, "scenario %s terminal: action=%s item=%s\n",
-						scenID, cp.Action, cp.ItemID)
+						scenID, action, itemID)
 				}
 			} else {
 				ts.mu.Unlock()
