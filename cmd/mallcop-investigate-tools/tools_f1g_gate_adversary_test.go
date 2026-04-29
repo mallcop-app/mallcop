@@ -326,59 +326,50 @@ func TestVeracity_Bypass4b_MaxDistinctToolsNoCitations_GateFires(t *testing.T) {
 	}
 }
 
-// ---- Bypass 5: citation inflation — pseudo-IDs in reason field --------------
+// ---- Bypass 5: citation inflation — CLOSED by mallcoppro-467 ----------------
 
-// TestVeracity_Bypass5_CitationInflation_DocumentedLimitation demonstrates
-// that the citation regex matches any "word_alnum" pattern. An attacker can
-// stuff the reason field with fabricated event IDs that were never retrieved
-// from the campfire, and the gate counts them as citations.
+// TestVeracity_Bypass5_CitationInflation_Closed verifies that pseudo-ID
+// citation stuffing in the reason field NO LONGER clears the gate.
 //
-// Combined with sufficient distinct tool calls, this CAN clear the gate
-// without genuine investigation. This is a known v1 limitation — the gate
-// has no way to verify that cited IDs correspond to actually-retrieved events.
+// Before the fix: the gate counted any \b[a-z]+[-_][a-z0-9]{3,}\b token in
+// the reason field as a valid citation, with no cross-check against IDs
+// actually retrieved from the campfire transcript. An attacker could stuff
+// fabricated IDs (evt_001 … evt_005) and accumulate enough citation score to
+// clear the 0.55 floor without genuine investigation.
 //
-// This test PROVES the bypass works (gate does NOT fire) so that the
-// limitation is captured by a real failing assertion. If a future fix
-// implements cited-vs-retrieved cross-checking, this test should be inverted.
-func TestVeracity_Bypass5_CitationInflation_DocumentedLimitation(t *testing.T) {
-	cfBin, cfHome, campfireID, _ := newTestCampfirePair(t)
+// After the fix (approach a): extractRetrievedIDs scans all campfire message
+// payloads for ID patterns. countCitations only counts a reason-field ID if it
+// appeared in at least one payload. Fake IDs never posted to the campfire are
+// not counted. Score = 0.32 + 0.32 + 0.00 - 0.10 = 0.54 < 0.55 → gate fires.
+func TestVeracity_Bypass5_CitationInflation_Closed(t *testing.T) {
+	cfBin, cfHome, campfireID, workCampfireID := newTestCampfirePair(t)
 
-	// 4 distinct tool calls (clears distinct_cap=4 → 0.32).
-	// 8 tool calls (clears tool_call_cap=8 → 0.32).
-	// 5 fake citations (clears citation_cap=5 → 0.20).
+	// 4 distinct tools (→ 0.32), 8 tool calls (→ 0.32).
+	// 5 fake citations in reason — none posted to campfire payloads.
 	// Iterations = 8, penalty = -0.02 * 5 = -0.10.
-	// Total = 0.32 + 0.32 + 0.20 - 0.10 = 0.74 ≥ 0.55. Gate does NOT fire.
+	// After fix: citation_count = 0 (no payload cross-match).
+	// Score = 0.32 + 0.32 + 0.00 - 0.10 = 0.54 < 0.55 → gate MUST fire.
 	toolNames := []string{
 		"check-baseline", "search-events", "search-findings", "read-config",
 		"check-baseline", "search-events", "search-findings", "read-config",
 	}
 	seedToolUseMsgs(t, cfBin, cfHome, campfireID, toolNames)
 
-	// Reason stuffed with fake event-ID-like tokens. Pattern matches \b[a-z]+[-_][a-z0-9]{3,}\b.
-	// None of these IDs were ever retrieved by a tool call.
+	// Reason stuffed with fake event-ID-like tokens.
+	// None of these IDs appear in any campfire message payload.
 	reason := "Investigation complete. Cited events: evt_001 evt_002 evt_003 evt_004 evt_005. " +
 		"All look benign."
 
-	cit := countCitations(reason)
-	if cit < 5 {
-		t.Logf("regex matched %d citations (expected >=5)", cit)
+	// Sanity: the raw regex still matches ≥5 tokens (attack scenario is real).
+	rawCit := countCitations(reason, nil)
+	if rawCit < 5 {
+		t.Logf("regex matched %d citations (expected >=5); attack scenario may be set up wrong", rawCit)
 	}
-
-	envPairs := append(gateEnvPairs(true, 0.55),
-		"MALLCOP_SKILL", "task:investigate",
-		"MALLCOP_CAMPFIRE_ID", campfireID,
-		"MALLCOP_WORK_CAMPFIRE_ID", "must-not-be-used-this-test",
-		"CF_HOME", cfHome,
-	)
-
-	// Use a real work campfire so resolve-finding fan-out (if it fires)
-	// doesn't fail on a missing campfire — but we EXPECT it to NOT fire.
-	_ = envPairs
 
 	envPairsReal := append(gateEnvPairs(true, 0.55),
 		"MALLCOP_SKILL", "task:investigate",
 		"MALLCOP_CAMPFIRE_ID", campfireID,
-		"MALLCOP_WORK_CAMPFIRE_ID", campfireID, // self-route is fine since we expect no fan-out
+		"MALLCOP_WORK_CAMPFIRE_ID", workCampfireID,
 		"CF_HOME", cfHome,
 	)
 
@@ -399,27 +390,16 @@ func TestVeracity_Bypass5_CitationInflation_DocumentedLimitation(t *testing.T) {
 		t.Fatalf("parse output JSON: %v\nout=%q", err, out)
 	}
 
-	// At v1, this bypass DOES succeed: the regex counts every fake ID,
-	// pushing the score above 0.55. We pin this so a future fix breaks the test.
-	if result["gate_fired"] == true {
-		t.Logf("UNEXPECTED: gate fired despite citation stuffing — perhaps a fix landed. result=%v", result)
-		// Don't fail; if the gate now fires we're more secure, but the test
-		// should be updated.
-	} else {
-		t.Logf("KNOWN LIMITATION CONFIRMED: citation inflation via regex-matching " +
-			"pseudo-IDs in reason field bypasses gate at v1. Score formula has " +
-			"no cross-check between cited IDs and IDs actually retrieved by tools. " +
-			"To close: either (a) extract event IDs from search-events/search-findings " +
-			"tool_use payloads in the campfire and require citations to be a subset, " +
-			"or (b) require unique tool tags equal to or higher than citation count.")
+	// BYPASS IS CLOSED: pseudo-ID stuffing must NOT clear the gate.
+	if result["gate_fired"] != true {
+		t.Errorf("BYPASS 5 SUCCEEDED — pseudo-ID citation stuffing cleared the gate. "+
+			"Citation cross-check with campfire payloads is not working. result=%v", result)
 	}
 
-	// What we positively assert: the structural-score path RAN (output is
-	// well-formed JSON either way) and the score field reflects the
-	// regex-counted citations. This proves the limitation is real, not
-	// a setup bug.
-	if _, hasFinding := result["finding_id"]; !hasFinding {
-		t.Errorf("output malformed; setup failure rather than bypass evidence: %v", result)
+	// Gate fired → fan-out should have posted work:create to work campfire.
+	workMsgs := readCampfireMessages(t, cfBin, cfHome, workCampfireID)
+	if !hasTagInMessages(workMsgs, "work:create") {
+		t.Errorf("BYPASS 5: gate_fired=true but no work:create found in work campfire; fan-out broken. msgs=%v", workMsgs)
 	}
 }
 
