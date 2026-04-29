@@ -108,15 +108,33 @@ irreconcilable evidence).
 
 **When Rule 3 fires (either path):**
 - Do NOT emit a verdict
-- Call `escalate-to-stage-c` with:
+- Call BOTH of the following in parallel:
+
+  **1. `escalate-to-stage-c`** — handles the immediate event:
   - `action_class = "ambiguous"`
   - `flags = ["system-genuinely-uncertain"]`
   - `reason`: include all 3 evidence chains compiled. State explicitly:
     "System genuinely uncertain. Three hypothesis-directed workers reached
     divergent conclusions. Evidence chains follow: [W-benign evidence] /
     [W-malicious evidence] / [W-incomplete evidence]."
-- Then call `resolve-finding` with `action = "escalated"` and the same
-  compiled reason.
+
+  **2. `heal`** — addresses the systemic gap that caused ambiguity:
+  - `finding_class = "agent_blind_spot"` (or a more specific class if
+    the evidence chains reveal a detector gap, parser miss, or other
+    structural cause for the irreconcilable divergence)
+  - `reason`: summarize the systemic gap exposed by the ambiguity.
+    Example: "Three hypothesis-directed workers reached divergent
+    conclusions because the investigation toolset has no coverage for
+    [observable X]. This is a structural blind spot — heal should
+    extend the relevant agent prompt or detector to cover this class."
+  - `flags = ["system-genuinely-uncertain", "heal-fanout"]`
+
+  These two calls are independent. Dispatch both before waiting on either.
+  `escalate-to-stage-c` handles the current finding. `heal` closes the
+  gap so future findings of the same class are no longer ambiguous.
+
+- After both calls return, call `resolve-finding` with `action = "escalated"`
+  and the same compiled reason (including the heal dispatch note).
 
 The "system genuinely uncertain" flag in metadata is required — use
 `flags = ["system-genuinely-uncertain"]` in the `escalate-to-stage-c` call.
