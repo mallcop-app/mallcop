@@ -153,37 +153,34 @@ type cfMessage struct {
 }
 
 // readEngagementTranscript reads all messages from the engagement campfire
-// (MALLCOP_CAMPFIRE_ID) and returns transcript statistics.
-// The engagement campfire contains all tool_use records posted by the worker.
-func readEngagementTranscript(campfireID string) (transcriptStats, error) {
+// (MALLCOP_CAMPFIRE_ID) and returns transcript statistics and the raw messages.
+// The raw messages are used by extractRetrievedIDs to build the set of IDs
+// that actually appeared in the session (tool call args, tool results, event IDs).
+func readEngagementTranscript(campfireID string) (transcriptStats, []cfMessage, error) {
 	cfBin, err := cfBinPath()
 	if err != nil {
-		return transcriptStats{}, fmt.Errorf("readEngagementTranscript: %w", err)
+		return transcriptStats{}, nil, fmt.Errorf("readEngagementTranscript: %w", err)
 	}
 
 	cmd := exec.Command(cfBin, "read", campfireID, "--json", "--all") // #nosec G204
 	out, err := cmd.Output()
 	if err != nil {
-		var exitErr *exec.ExitError
-		if ok := false; !ok {
-			_ = exitErr
-		}
-		// Empty or error — return zero stats (gate will fire if below floor).
-		return transcriptStats{}, nil
+		// Propagate the error so the caller can fail closed.
+		return transcriptStats{}, nil, fmt.Errorf("readEngagementTranscript: cf read: %w", err)
 	}
 
 	trimmed := strings.TrimSpace(string(out))
 	if trimmed == "" || trimmed == "null" {
-		return transcriptStats{}, nil
+		return transcriptStats{}, nil, nil
 	}
 
 	var msgs []cfMessage
 	if err := json.Unmarshal(out, &msgs); err != nil {
-		// Parse failure — return zero stats.
-		return transcriptStats{}, nil
+		// Parse failure — propagate so the caller can fail closed.
+		return transcriptStats{}, nil, fmt.Errorf("readEngagementTranscript: parse JSON: %w", err)
 	}
 
-	return parseTranscriptStats(msgs), nil
+	return parseTranscriptStats(msgs), msgs, nil
 }
 
 // parseTranscriptStats counts tool_use and assistant turns from campfire messages.
@@ -268,8 +265,34 @@ func parseTranscriptStats(msgs []cfMessage) transcriptStats {
 // These are the event/finding ID shapes found in mallcop fixture scenarios.
 var citationPattern = regexp.MustCompile(`\b[a-z]+[-_][a-z0-9]{3,}\b`)
 
-// countCitations counts event-ID-like citation patterns in the reason field.
-func countCitations(reason string) int {
+// extractRetrievedIDs scans all campfire message payloads and returns the set of
+// citation-pattern IDs that appeared in any message. These are the IDs actually
+// exchanged during the investigation session — tool call arguments, event IDs
+// returned by search-events, finding IDs returned by search-findings, baseline
+// keys returned by check-baseline, etc.
+//
+// Only IDs present in this retrieved set may be counted as valid citations.
+// Pseudo-IDs stuffed into the reason field but never part of any campfire
+// exchange are not counted.
+func extractRetrievedIDs(msgs []cfMessage) map[string]struct{} {
+	retrieved := make(map[string]struct{})
+	for _, msg := range msgs {
+		if msg.Payload == "" {
+			continue
+		}
+		for _, id := range citationPattern.FindAllString(msg.Payload, -1) {
+			retrieved[id] = struct{}{}
+		}
+	}
+	return retrieved
+}
+
+// countCitations counts event-ID-like citation patterns in the reason field
+// that also appear in the retrievedIDs set (IDs actually seen in the campfire
+// transcript). When retrievedIDs is nil, all regex-matching tokens are counted
+// (used only in unit tests that call computeConfidenceScore directly without a
+// campfire, such as TestVeracity_ScoreMath_Sanity).
+func countCitations(reason string, retrievedIDs map[string]struct{}) int {
 	matches := citationPattern.FindAllString(reason, -1)
 	// Deduplicate.
 	seen := make(map[string]struct{}, len(matches))
@@ -277,6 +300,16 @@ func countCitations(reason string) int {
 	for _, m := range matches {
 		if _, dup := seen[m]; !dup {
 			seen[m] = struct{}{}
+			// When retrievedIDs is non-nil, only count citations that were
+			// actually retrieved from the campfire. This prevents pseudo-ID
+			// stuffing: an attacker can put "evt_001 evt_002 ..." in the reason
+			// field but those strings must also appear in a campfire message
+			// payload (tool call arg or tool result) to be counted.
+			if retrievedIDs != nil {
+				if _, ok := retrievedIDs[m]; !ok {
+					continue
+				}
+			}
 			count++
 		}
 	}
@@ -330,6 +363,13 @@ type gateResult struct {
 //   - MALLCOP_SKILL != "task:investigate"
 //   - config.Enabled == false
 //   - score >= score_floor
+//
+// Fail-closed semantics: if the transcript cannot be read (cf missing, campfire
+// unreachable, parse failure), the gate fires with score=0. The risk of an
+// accidental fan-out is much lower than the risk of a gate bypass.
+//
+// Exception: MALLCOP_GATE_ALLOW_NO_CF=1 disables the fail-closed behaviour for
+// test environments that do not have cf on PATH. Must never be set in production.
 func checkConfidenceGate(campfireID, reason string) (gateResult, error) {
 	// Skill check: only gate on task:investigate workers.
 	skill := os.Getenv("MALLCOP_SKILL")
@@ -343,15 +383,30 @@ func checkConfidenceGate(campfireID, reason string) (gateResult, error) {
 		return gateResult{Fired: false}, nil
 	}
 
-	// Read the engagement campfire transcript.
-	stats, err := readEngagementTranscript(campfireID)
+	// Read the engagement campfire transcript (stats + raw messages for ID extraction).
+	stats, msgs, err := readEngagementTranscript(campfireID)
 	if err != nil {
-		// On transcript read failure, fail open (do not block the worker).
-		return gateResult{Fired: false}, fmt.Errorf("confidence gate: read transcript: %w", err)
+		// Fail CLOSED: if we cannot read the transcript, we cannot verify the
+		// worker's evidence. Treat as score=0 and fire the gate.
+		// MALLCOP_GATE_ALLOW_NO_CF=1 bypasses this for unit-test environments
+		// that do not have cf on PATH.
+		if os.Getenv("MALLCOP_GATE_ALLOW_NO_CF") == "1" {
+			return gateResult{Fired: false}, nil
+		}
+		readErr := fmt.Errorf("confidence gate: read transcript: %w", err)
+		return gateResult{
+			Fired: true,
+			Score: 0,
+		}, readErr
 	}
 
-	// Count citations in the reason field.
-	citationCount := countCitations(reason)
+	// Extract the set of IDs that appeared in the campfire transcript (tool call
+	// args, tool results, event IDs, finding IDs, baseline keys, etc.).
+	// Only citations present in this set are counted as verified references.
+	retrievedIDs := extractRetrievedIDs(msgs)
+
+	// Count verified citations: reason tokens that also appear in campfire payloads.
+	citationCount := countCitations(reason, retrievedIDs)
 
 	// Compute score.
 	score := computeConfidenceScore(cfg, stats, citationCount)

@@ -72,6 +72,9 @@ func dispatchActionTool(tool, inputJSON string) error {
 	// F1G-h: Heal tools
 	case "spawn-claude-code-fix":
 		return runSpawnClaudeCodeFix(inputJSON)
+	// F2B: Engagement-campfire watcher -- detects direct cf-send bypass of F2A gate
+	case "watch-engagement-campfire":
+		return runWatchEngagementCampfire(inputJSON)
 	default:
 		return fmt.Errorf("unknown action tool %q", tool)
 	}
@@ -302,11 +305,13 @@ func runResolveFinding(inputJSON string) error {
 	// gateResult{Fired: false} immediately with no campfire I/O.
 	gr, gateErr := checkConfidenceGate(campfireID, input.Reason)
 	if gateErr != nil {
-		// Fail open: log to stderr but do not block the worker.
-		fmt.Fprintf(os.Stderr, "resolve-finding: confidence gate check failed (failing open): %v\n", gateErr)
+		// Fail CLOSED: log to stderr and treat as gate fired (score=0).
+		// A worker jail without cf cannot bypass the gate by removing the binary.
+		fmt.Fprintf(os.Stderr, "resolve-finding: confidence gate check failed (failing closed): %v\n", gateErr)
 	}
 	if gr.Fired {
-		// Gate fired: emit 4 fan-out work:create messages instead of work:output.
+		// Gate fired: emit fan-out work:create messages instead of work:output.
+		// This covers both score-below-floor and transcript-read-error cases.
 		// Worker exits 0 (still a successful tool call from the agent's POV).
 		return runConfidenceGateFanOut(input.FindingID, input.Reason, gr)
 	}
@@ -326,6 +331,7 @@ func runResolveFinding(inputJSON string) error {
 
 	tags := []string{
 		"work:output",
+		"gate:checked", // structural marker: this work:output passed through resolve-finding (F2B guard)
 		"finding:" + input.FindingID,
 		"action:" + input.Action,
 	}
@@ -1127,4 +1133,165 @@ func runApproveAction(inputJSON string) error {
 		"audit_message_id":    auditID,
 		"timestamp":           ts,
 	})
+}
+
+// ---- F2B: Engagement-campfire watcher ----------------------------------------
+
+// watchEngagementInput is the input_schema for watch-engagement-campfire.
+type watchEngagementInput struct {
+	// CampfireID overrides MALLCOP_CAMPFIRE_ID when set.
+	CampfireID string `json:"campfire_id,omitempty"`
+}
+
+// watchEngagementResult is the JSON output for watch-engagement-campfire.
+type watchEngagementResult struct {
+	CampfireID          string   `json:"campfire_id"`
+	WorkOutputTotal     int      `json:"work_output_total"`
+	Unsolicited         int      `json:"unsolicited"`
+	UnsolicitedMessages []string `json:"unsolicited_message_ids"`
+	Intercepted         int      `json:"intercepted"`
+	InterceptedMessages []string `json:"intercepted_message_ids"`
+	Timestamp           string   `json:"timestamp"`
+}
+
+// runWatchEngagementCampfire is the F2B engagement-campfire watcher.
+//
+// It reads all messages from the engagement campfire and looks for work:output
+// messages that lack the gate:checked tag. A legitimate work:output is always
+// emitted by resolve-finding, which adds gate:checked to every work:output it
+// posts. Any work:output without gate:checked was written directly via cf send,
+// bypassing the F2A gate. The watcher intercepts each one by posting
+// bypass:intercepted to the engagement campfire.
+//
+// Returns a JSON summary: campfire_id, work_output_total, unsolicited count,
+// intercepted count, and the message IDs of both.
+func runWatchEngagementCampfire(inputJSON string) error {
+	var input watchEngagementInput
+	if inputJSON != "" {
+		if err := json.Unmarshal([]byte(inputJSON), &input); err != nil {
+			return fmt.Errorf("watch-engagement-campfire: parse input: %w", err)
+		}
+	}
+
+	campfireID := input.CampfireID
+	if campfireID == "" {
+		var err error
+		campfireID, err = requireEnv("MALLCOP_CAMPFIRE_ID")
+		if err != nil {
+			return fmt.Errorf("watch-engagement-campfire: %w", err)
+		}
+	}
+
+	cfBin, err := cfBinPath()
+	if err != nil {
+		return fmt.Errorf("watch-engagement-campfire: %w", err)
+	}
+
+	emptyResult := watchEngagementResult{
+		CampfireID:          campfireID,
+		UnsolicitedMessages: []string{},
+		InterceptedMessages: []string{},
+		Timestamp:           nowRFC3339(),
+	}
+
+	cmd := exec.Command(cfBin, "read", campfireID, "--json", "--all") // #nosec G204
+	out, cmdErr := cmd.Output()
+	if cmdErr != nil {
+		return emitJSON(emptyResult)
+	}
+
+	trimmed := strings.TrimSpace(string(out))
+	if trimmed == "" || trimmed == "null" {
+		return emitJSON(emptyResult)
+	}
+
+	var msgs []cfMessage
+	if jsonErr := json.Unmarshal(out, &msgs); jsonErr != nil {
+		return fmt.Errorf("watch-engagement-campfire: parse campfire messages: %w", jsonErr)
+	}
+
+	result := emptyResult
+	for _, msg := range msgs {
+		hasWorkOutput := false
+		hasGateChecked := false
+		for _, tag := range msg.Tags {
+			switch tag {
+			case "work:output":
+				hasWorkOutput = true
+			case "gate:checked":
+				hasGateChecked = true
+			}
+		}
+		if !hasWorkOutput {
+			continue
+		}
+		result.WorkOutputTotal++
+		if hasGateChecked {
+			continue
+		}
+
+		// Unsolicited work:output — direct cf send bypass detected.
+		result.Unsolicited++
+		result.UnsolicitedMessages = append(result.UnsolicitedMessages, msg.ID)
+
+		// Extract finding_id from tags then payload.
+		findingID := "unknown"
+		for _, tag := range msg.Tags {
+			if strings.HasPrefix(tag, "finding:") {
+				findingID = strings.TrimPrefix(tag, "finding:")
+				break
+			}
+		}
+		if findingID == "unknown" && msg.Payload != "" {
+			var p map[string]interface{}
+			if json.Unmarshal([]byte(msg.Payload), &p) == nil {
+				if fid, ok := p["finding_id"].(string); ok && fid != "" {
+					findingID = fid
+				}
+			}
+		}
+
+		// Post bypass:intercepted to the engagement campfire.
+		interceptPayload, _ := json.Marshal(map[string]interface{}{
+			"intercepted_message_id": msg.ID,
+			"finding_id":             findingID,
+			"reason":                 "direct cf-send bypass: work:output without gate:checked detected by F2B watcher (mallcoppro-753)",
+			"timestamp":              nowRFC3339(),
+		})
+		interceptID, sendErr := cfSend(campfireID, string(interceptPayload), []string{
+			"bypass:intercepted",
+			"finding:" + findingID,
+		})
+		if sendErr == nil && interceptID != "" {
+			result.Intercepted++
+			result.InterceptedMessages = append(result.InterceptedMessages, interceptID)
+		}
+
+		// Run the confidence gate on the unsolicited message.
+		reason := ""
+		if msg.Payload != "" {
+			var p map[string]interface{}
+			if json.Unmarshal([]byte(msg.Payload), &p) == nil {
+				if r, ok := p["reason"].(string); ok {
+					reason = r
+				}
+			}
+		}
+		gr, gateErr := checkConfidenceGate(campfireID, reason)
+		if gateErr == nil && gr.Fired {
+			gatePayload, _ := json.Marshal(map[string]interface{}{
+				"intercepted_message_id": msg.ID,
+				"finding_id":             findingID,
+				"score":                  gr.Score,
+				"reason":                 "F2B watcher: gate check on unsolicited work:output",
+				"timestamp":              nowRFC3339(),
+			})
+			_, _ = cfSend(campfireID, string(gatePayload), []string{
+				"gate:watcher-fired",
+				"finding:" + findingID,
+			})
+		}
+	}
+
+	return emitJSON(result)
 }

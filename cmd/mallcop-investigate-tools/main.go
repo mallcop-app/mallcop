@@ -238,6 +238,8 @@ var actionTools = map[string]bool{
 	"search-chat-history": true,
 	// F1G-h: Heal tools
 	"spawn-claude-code-fix": true,
+	// F2B: Engagement-campfire watcher — detects direct cf-send bypass of F2A gate
+	"watch-engagement-campfire": true,
 }
 
 // safeOpen resolves path relative to baseDir, rejects symlink escapes, and

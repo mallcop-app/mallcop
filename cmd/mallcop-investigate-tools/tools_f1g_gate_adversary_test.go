@@ -331,7 +331,7 @@ func TestVeracity_Bypass5_CitationInflation_DocumentedLimitation(t *testing.T) {
 	reason := "Investigation complete. Cited events: evt_001 evt_002 evt_003 evt_004 evt_005. " +
 		"All look benign."
 
-	cit := countCitations(reason)
+	cit := countCitations(reason, nil)
 	if cit < 5 {
 		t.Logf("regex matched %d citations (expected >=5)", cit)
 	}
