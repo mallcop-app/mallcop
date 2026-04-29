@@ -265,6 +265,24 @@ func TestInvestigateMergePromptExists(t *testing.T) {
 			t.Errorf("agents/investigate-merge/POST.md: missing JSON output field %q", tok)
 		}
 	}
+
+	// Rule 3 fan-out: ambiguous findings must route to BOTH escalate-to-stage-c AND heal
+	// in parallel (heal-broaden downstream cascade, mallcoppro-5c2).
+	// escalate-to-stage-c handles the immediate event; heal addresses the systemic gap.
+	rule3FanoutTokens := []struct {
+		label string
+		token string
+	}{
+		{"Rule 3 escalate-to-stage-c fan-out", "escalate-to-stage-c"},
+		{"Rule 3 heal fan-out", "heal"},
+		{"Rule 3 parallel dispatch directive", "parallel"},
+		{"Rule 3 heal-fanout flag", "heal-fanout"},
+	}
+	for _, ft := range rule3FanoutTokens {
+		if !strings.Contains(lower, strings.ToLower(ft.token)) {
+			t.Errorf("agents/investigate-merge/POST.md: Rule 3 fan-out missing %q — Rule 3 must dispatch BOTH escalate-to-stage-c (immediate event) AND heal (systemic gap) in parallel (mallcoppro-5c2)", ft.label)
+		}
+	}
 }
 
 // TestSmokeFixturesWellFormed verifies that the 3 smoke-merge fixture JSON files
