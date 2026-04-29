@@ -523,6 +523,52 @@ func TestWritePartialTranscript_WritesFile(t *testing.T) {
 	}
 }
 
+// ---- F1G-c: parseSimpleYAMLRegistry ------------------------------------------------
+
+func TestParseSimpleYAMLRegistry_HandlesCommentHeader(t *testing.T) {
+	yamlInput := []byte(`# remediation-registry — auto-safe and needs-approval entries
+# generated 2026-04-29
+# do not edit by hand
+
+actions:
+  - name: revoke-collaborator
+    detector: new-external-access
+    action_class: auto-safe
+  - name: disable-account
+    detector: privilege-escalation
+    action_class: needs-approval
+`)
+	actions, err := parseSimpleYAMLRegistry(yamlInput)
+	if err != nil {
+		t.Fatalf("parse failed: %v", err)
+	}
+	if len(actions) != 2 {
+		t.Errorf("got %d actions, want 2", len(actions))
+	}
+	if len(actions) >= 1 {
+		if actions[0].ActionName != "revoke-collaborator" {
+			t.Errorf("actions[0].ActionName = %q, want revoke-collaborator", actions[0].ActionName)
+		}
+		if actions[0].Detector != "new-external-access" {
+			t.Errorf("actions[0].Detector = %q, want new-external-access", actions[0].Detector)
+		}
+		if actions[0].ActionClass != "auto-safe" {
+			t.Errorf("actions[0].ActionClass = %q, want auto-safe", actions[0].ActionClass)
+		}
+	}
+	if len(actions) >= 2 {
+		if actions[1].ActionName != "disable-account" {
+			t.Errorf("actions[1].ActionName = %q, want disable-account", actions[1].ActionName)
+		}
+		if actions[1].Detector != "privilege-escalation" {
+			t.Errorf("actions[1].Detector = %q, want privilege-escalation", actions[1].Detector)
+		}
+		if actions[1].ActionClass != "needs-approval" {
+			t.Errorf("actions[1].ActionClass = %q, want needs-approval", actions[1].ActionClass)
+		}
+	}
+}
+
 // ---- F1G-c: list-actions ------------------------------------------------------
 
 func TestListActions_InputValidation(t *testing.T) {
