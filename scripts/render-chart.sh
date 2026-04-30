@@ -21,11 +21,17 @@
 #                     docs/design/deployment-and-identity.md (mallcop-pro).
 #
 # Substitutions applied:
-#   {{MODEL}}        → $MODEL
-#   {{RUN_ID}}       → $RUN_ID
-#   {{FORGE_API_URL}} → $FORGE_API_URL
-#   {{FORGE_API_KEY}} → $FORGE_API_KEY
-#   {{TOOL_BIN_DIR}} → $TOOL_BIN_DIR
+#   {{MODEL}}                 → $MODEL (deprecated — kept for back-compat; per-stage vars take precedence)
+#   {{TRIAGE_MODEL}}          → $TRIAGE_MODEL (falls back to $MODEL when unset)
+#   {{INVESTIGATE_MODEL}}     → $INVESTIGATE_MODEL (falls back to $MODEL when unset)
+#   {{DEEP_INVESTIGATE_MODEL}} → $DEEP_INVESTIGATE_MODEL (falls back to $MODEL when unset)
+#   {{INVESTIGATE_MERGE_MODEL}} → $INVESTIGATE_MERGE_MODEL (falls back to $MODEL when unset)
+#   {{ESCALATE_MODEL}}        → $ESCALATE_MODEL (falls back to $MODEL when unset)
+#   {{HEAL_MODEL}}            → $HEAL_MODEL (falls back to $MODEL when unset)
+#   {{RUN_ID}}                → $RUN_ID
+#   {{FORGE_API_URL}}         → $FORGE_API_URL
+#   {{FORGE_API_KEY}}         → $FORGE_API_KEY
+#   {{TOOL_BIN_DIR}}          → $TOOL_BIN_DIR
 #   operational-<RUN_ID> (campfire name)      → $WORK_CAMPFIRE  (if set)
 #   .run/operational-<RUN_ID>/identity.json   → $MALLCOP_HOME/.mallcop/automaton/identity.json   (if MALLCOP_HOME set)
 #   .run/operational-<RUN_ID>/campfires       → $MALLCOP_HOME/.mallcop/campfires                  (if MALLCOP_HOME set)
@@ -61,6 +67,14 @@ TOOL_BIN_DIR="${TOOL_BIN_DIR:-${REPO_ROOT}/bin}"
 WORK_CAMPFIRE="${WORK_CAMPFIRE:-}"
 MALLCOP_HOME="${MALLCOP_HOME:-}"
 
+# Per-stage model overrides — each falls back to $MODEL when unset.
+TRIAGE_MODEL="${TRIAGE_MODEL:-${MODEL}}"
+INVESTIGATE_MODEL="${INVESTIGATE_MODEL:-${MODEL}}"
+DEEP_INVESTIGATE_MODEL="${DEEP_INVESTIGATE_MODEL:-${MODEL}}"
+INVESTIGATE_MERGE_MODEL="${INVESTIGATE_MERGE_MODEL:-${MODEL}}"
+ESCALATE_MODEL="${ESCALATE_MODEL:-${MODEL}}"
+HEAL_MODEL="${HEAL_MODEL:-${MODEL}}"
+
 if [[ -z "${FORGE_API_KEY}" ]]; then
   echo "Error: FORGE_API_KEY is required" >&2
   exit 1
@@ -68,7 +82,13 @@ fi
 
 mkdir -p "$(dirname "${OUTPUT}")"
 
-SED_EXPR="s/{{MODEL}}/${MODEL}/g; \
+SED_EXPR="s/{{TRIAGE_MODEL}}/${TRIAGE_MODEL}/g; \
+   s/{{INVESTIGATE_MERGE_MODEL}}/${INVESTIGATE_MERGE_MODEL}/g; \
+   s/{{INVESTIGATE_MODEL}}/${INVESTIGATE_MODEL}/g; \
+   s/{{DEEP_INVESTIGATE_MODEL}}/${DEEP_INVESTIGATE_MODEL}/g; \
+   s/{{ESCALATE_MODEL}}/${ESCALATE_MODEL}/g; \
+   s/{{HEAL_MODEL}}/${HEAL_MODEL}/g; \
+   s/{{MODEL}}/${MODEL}/g; \
    s/{{RUN_ID}}/${RUN_ID}/g; \
    s|{{FORGE_API_URL}}|${FORGE_API_URL}|g; \
    s|{{FORGE_API_KEY}}|${FORGE_API_KEY}|g; \

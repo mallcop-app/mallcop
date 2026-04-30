@@ -63,7 +63,7 @@ tools = [
   "check-baseline", "search-events", "search-findings",
   "resolve-finding", "escalate-to-investigator", "annotate-finding",
 ]
-model     = "{{MODEL}}"
+model     = "{{TRIAGE_MODEL}}"
 max_iters = 3
 
   [[capabilities.seed.tool_defs]]
@@ -124,7 +124,7 @@ tools = [
   # F2B: engagement-campfire watcher — detects direct cf-send bypass of F2A gate
   "watch-engagement-campfire",
 ]
-model     = "{{MODEL}}"
+model     = "{{INVESTIGATE_MODEL}}"
 max_iters = 10
 
   # F2A: Confidence-gated close — pre-close gate in the resolve-finding binary.
@@ -249,7 +249,7 @@ tools = [
   "annotate-finding", "resolve-finding",
   "load-skill",
 ]
-model = "{{MODEL}}"
+model = "{{DEEP_INVESTIGATE_MODEL}}"
 max_iters = 10
 # NOTE: NO escalate tools — deep workers emit verdicts only; they never hand off
 # to stage-C or create new work items. Escalation decisions belong to
@@ -322,7 +322,7 @@ tools = [
   "annotate-finding", "resolve-finding",
   "escalate-to-stage-c",
 ]
-model = "{{MODEL}}"
+model = "{{INVESTIGATE_MERGE_MODEL}}"
 max_iters = 5
 # Party grant (tools.party_grants above) allows get_session_transcript to access
 # task:deep-investigate sessions. Without it, the call returns {"error":"unauthorized"}.
@@ -359,7 +359,7 @@ tools = [
   "list-actions", "remediate-action", "request-approval",
   "message-operator", "annotate-finding", "resolve-finding",
 ]
-model     = "{{MODEL}}"
+model     = "{{ESCALATE_MODEL}}"
 max_iters = 5
 
   # F1G-c: Operator/escalation tools
@@ -421,7 +421,7 @@ max_iters = 5
 name      = "heal"
 match     = ["task:heal"]
 tools     = ["read-finding", "annotate-finding", "resolve-finding"]
-model     = "{{MODEL}}"
+model     = "{{HEAL_MODEL}}"
 max_iters = 5
 
   [[capabilities.seed.tool_defs]]
