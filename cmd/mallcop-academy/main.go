@@ -300,6 +300,8 @@ func mainRun() error {
 		runID          string
 	)
 
+	var noJudge bool
+	flag.BoolVar(&noJudge, "no-judge", false, "skip the F4C rubric judge (judge runs synchronously per scenario inside the watch loop and blocks; use this when you need terminal pass-rate data without quality scoring — see mallcoppro-707 for the cost-tier eval that uses the judge separately)")
 	flag.StringVar(&deploymentDir, "deployment", "", "path to a mallcop deployment dir; reads .mallcop/work-campfire.id and uses .mallcop as CF_HOME (preferred over --target-campfire)")
 	flag.StringVar(&targetCampfire, "target-campfire", "", "operational deployment's work campfire ID or beacon (legacy; use --deployment when possible)")
 	flag.StringVar(&scenariosDir, "scenarios-dir", "", "directory containing scenario YAML files (default: repo-root/exams/scenarios)")
@@ -384,6 +386,11 @@ func mainRun() error {
 
 	sender := &cfSender{cfBin: cfBin, cfHome: cfHome}
 
+	if noJudge {
+		// Setting FORGE_API_KEY="" for buildJudicator's skip path is the
+		// minimum-touch way to disable the judge without changing runArgs.
+		os.Setenv("FORGE_API_KEY", "")
+	}
 	return academy(sender, runArgs{
 		targetCampfire: targetCampfire,
 		scenariosDir:   scenariosDir,
@@ -475,11 +482,14 @@ func academy(sender Sender, args runArgs) error {
 			// mallcop-investigate-tools (--mode exam --fixture-dir
 			// exams/fixtures/<RUN_ID>) can read events.json and baseline.json
 			// at the path the chart's tool args expect. Mirrors the retired
-			// cmd/exam-seed/materializeFixtures step.
-			fxDir := filepath.Join(args.fixturesDir, s.ID)
-			if err := materializeScenarioFixtures(s, fxDir); err != nil {
-				fmt.Fprintf(os.Stderr, "WARN: materialize fixtures for scenario %s: %v\n", s.ID, err)
-				return
+			// cmd/exam-seed/materializeFixtures step. Skipped when
+			// fixturesDir is empty (mock/test paths build runArgs directly).
+			if args.fixturesDir != "" {
+				fxDir := filepath.Join(args.fixturesDir, s.ID)
+				if err := materializeScenarioFixtures(s, fxDir); err != nil {
+					fmt.Fprintf(os.Stderr, "WARN: materialize fixtures for scenario %s: %v\n", s.ID, err)
+					return
+				}
 			}
 
 			ts := tracked[s.ID]
