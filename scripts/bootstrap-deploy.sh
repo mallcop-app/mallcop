@@ -91,6 +91,15 @@ generate_identity_into() {
 # 1. Operator+automaton identity. The chart's [identity].key_file points here.
 generate_identity_into "${DEPLOY_DIR}/identity.json" "operator+automaton"
 
+# 1a. Mirror the operator/automaton identity to campfire-identity.json so
+# legion's CampfireClient (boot.go:140 — uses <identityDir>/campfire-identity.json,
+# NOT the chart's key_file) shares the same keypair as the one rd init admits
+# to the work campfire. Without this, NewCampfireClient generates a fresh
+# keypair on first boot and the SDK reads the work campfire as a non-member,
+# returning empty. (legion-side fix would be to use the chart's key_file
+# directly; this mirror keeps deployments working without that change.)
+cp "${DEPLOY_DIR}/identity.json" "${DEPLOY_DIR}/campfire-identity.json"
+
 # 2. Disposition identity SHELLS. Per legion's DispositionRoster code comment,
 # dispositions inherit their spawner's identity at runtime — these files exist
 # only so LoadDispositionRoster registers each disposition. Generated as real
