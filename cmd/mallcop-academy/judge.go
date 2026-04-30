@@ -231,6 +231,13 @@ func buildJudicator(args runArgs) *judicator {
 		fmt.Fprintf(os.Stderr, "INFO: judge skipped — chart template not found at %s\n", tmplPath)
 		return nil
 	}
+	// Skip judge in test environments where FORGE_API_KEY is unset — the
+	// rendered chart's [inference] block requires it, and spawnAndCollect
+	// would block on `we start` until the academy's outer timeout otherwise.
+	if os.Getenv("FORGE_API_KEY") == "" {
+		fmt.Fprintf(os.Stderr, "INFO: judge skipped — FORGE_API_KEY not set\n")
+		return nil
+	}
 
 	// Create per-run academy campfire in output dir.
 	judgeCFHome := filepath.Join(args.outputDir, ".judge-cf-"+args.runID)
@@ -272,6 +279,11 @@ func buildJudicator(args runArgs) *judicator {
 		"RUN_ID":        args.runID,
 		"FORGE_API_URL": forgeAPIURL,
 		"FORGE_API_KEY": forgeAPIKey,
+		// Rewrite chart paths to point at the academy-side CF_HOME (just
+		// initialized via `cf init` above) and the academy campfire so the
+		// judge worker can read scenarios without depending on cwd.
+		"JUDGE_CF_HOME": judgeCFHome,
+		"WORK_CAMPFIRE": academyCampfireID,
 	}
 	if err := renderJudgeChart(tmplPath, judgeChartPath, chartVars); err != nil {
 		fmt.Fprintf(os.Stderr, "INFO: judge skipped — render chart: %v\n", err)
@@ -331,6 +343,14 @@ func judgeUnavailable(reason string) *JudgeResult {
 // renderJudgeChart renders a minimal judge-only chart to outPath using the
 // exam.toml.tmpl template. Only the exam:judge seed is needed.
 // vars must include: RUN_ID, FORGE_API_URL, FORGE_API_KEY.
+//
+// vars["JUDGE_CF_HOME"], when set, must be an absolute path to the academy-
+// side CF_HOME (created by cf init in setupJudge). Identity / transport_dir /
+// agents.dir paths in the rendered chart are rewritten to absolutes inside
+// that CF_HOME so `we start --chart <rendered>` resolves them regardless of
+// the cwd it inherits.
+// vars["WORK_CAMPFIRE"], when set, replaces the "exam-<RUN_ID>" campfire
+// alias with the academy-side campfire hex ID.
 func renderJudgeChart(tmplPath, outPath string, vars map[string]string) error {
 	b, err := os.ReadFile(tmplPath)
 	if err != nil {
@@ -339,6 +359,17 @@ func renderJudgeChart(tmplPath, outPath string, vars map[string]string) error {
 	s := string(b)
 	for k, v := range vars {
 		s = strings.ReplaceAll(s, "{{"+k+"}}", v)
+	}
+	if jch := vars["JUDGE_CF_HOME"]; jch != "" {
+		runID := vars["RUN_ID"]
+		legacyIdentity := ".run/exam-" + runID + "/identity.json"
+		legacyTransport := ".run/exam-" + runID + "/campfires"
+		s = strings.ReplaceAll(s, legacyIdentity, jch+"/identity.json")
+		s = strings.ReplaceAll(s, legacyTransport, jch+"/campfires")
+	}
+	if wc := vars["WORK_CAMPFIRE"]; wc != "" {
+		runID := vars["RUN_ID"]
+		s = strings.ReplaceAll(s, "campfire = \"exam-"+runID+"\"", "campfire = \""+wc+"\"")
 	}
 	return os.WriteFile(outPath, []byte(s), 0o644)
 }

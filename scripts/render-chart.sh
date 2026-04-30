@@ -88,7 +88,11 @@ if [[ -n "${MALLCOP_HOME}" ]]; then
   # .run/operational-<RUN_ID>/identity.json placeholder maps there).
   EXTRA_SEDS+=(-e "s|\.run/operational-${RUN_ID}/identity\.json|${MALLCOP_HOME}/.mallcop/identity.json|g")
   EXTRA_SEDS+=(-e "s|\.run/operational-${RUN_ID}/campfires|${MALLCOP_HOME}/.mallcop/campfires|g")
-  EXTRA_SEDS+=(-e "s|^dir = \"agents\"|dir = \"${MALLCOP_HOME}/.mallcop/agents\"|g")
+  # [agents].dir must be RELATIVE to the project root (MALLCOP_HOME). Legion
+  # does filepath.Join(projectRoot, agentDir, ...) which does NOT special-case
+  # absolute paths — an absolute agentDir gets concatenated, producing
+  # /home/baron/.../home/baron/... and the spec load fails. Use relative.
+  EXTRA_SEDS+=(-e "s|^dir = \"agents\"|dir = \".mallcop/agents\"|g")
   EXTRA_SEDS+=(-e "s|^  \"agents/\",|  \"${MALLCOP_HOME}/.mallcop/agents/\",|g")
 fi
 

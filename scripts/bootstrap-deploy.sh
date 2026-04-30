@@ -170,6 +170,14 @@ export LEGION_JAIL_ROOT="${DEPLOY_DIR}/jails"
 # Source: cmd/mallcop-investigate-tools/tools_f1g.go env contract.
 export MALLCOP_WORK_CAMPFIRE_ID="\$(cat ${DEPLOY_DIR}/work-campfire.id 2>/dev/null)"
 export MALLCOP_OPERATOR_CAMPFIRE_ID="\${MALLCOP_OPERATOR_CAMPFIRE_ID:-\$MALLCOP_WORK_CAMPFIRE_ID}"
+# MALLCOP_CAMPFIRE_ID is the engagement campfire ID — legion creates an
+# engagement campfire per work item but does NOT inject its ID as an env var
+# (legion only sets CF_HOME/CF_TRANSPORT_DIR per jail). Tools require this
+# env var to know where to post work:output / annotate-finding messages.
+# Default it to the work campfire so the academy's watch loop, which polls
+# the work campfire for terminal outputs, can see them. Per-engagement
+# routing would require a legion-side env-injection feature.
+export MALLCOP_CAMPFIRE_ID="\${MALLCOP_CAMPFIRE_ID:-\$MALLCOP_WORK_CAMPFIRE_ID}"
 export MALLCOP_RUN_ID="${RUN_ID}"
 EOF
 
