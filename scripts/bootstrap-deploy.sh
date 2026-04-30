@@ -112,14 +112,10 @@ done
 note "disposition POST.md specs linked from ${REPO_ROOT}/agents/"
 
 # 4. Work campfire — created via rd init (canonical mallcop work source).
-# rd init writes .campfire/root in MALLCOP_HOME. We then `cf join <id>` from
-# the deployment's CF_HOME so the local cf store has the join record the
-# legion SDK Subscribe() requires under cf v0.19.x.
-#
-# WORKAROUND: this `cf join` line is a temporary unblock for a known legion
-# bug — boot does not call MembershipManager.RestoreMemberships(), so the
-# automaton cannot subscribe to externally-created campfires after restart.
-# Remove this line once that legion fix lands.
+# rd init writes .campfire/root in MALLCOP_HOME and admits the operator/
+# automaton identity. Legion v0.7.3+ handles store-side membership
+# restoration at boot (RestoreMemberships) and Subscribe auto-join shield —
+# no operator-side cf join ceremony required.
 RD_ROOT_FILE="${MALLCOP_HOME}/.campfire/root"
 WORK_CF_FILE="${DEPLOY_DIR}/work-campfire.id"
 if [[ -s "${WORK_CF_FILE}" && -f "${RD_ROOT_FILE}" && "${FORCE}" != "yes" ]]; then
@@ -134,8 +130,6 @@ else
   echo "${WORK_CF}" > "${WORK_CF_FILE}"
   note "work campfire: ${WORK_CF:0:12}... → ${WORK_CF_FILE}"
 fi
-# WORKAROUND (remove once legion calls RestoreMemberships at boot):
-CF_HOME="${DEPLOY_DIR}" cf join "${WORK_CF}" >/dev/null 2>&1 || true
 
 # 5. Render chart with the resolved work campfire.
 CHART_OUT="${DEPLOY_DIR}/chart.toml"
