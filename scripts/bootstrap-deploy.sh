@@ -162,6 +162,15 @@ export MALLCOP_HOME="${MALLCOP_HOME}"
 export CF_HOME="${DEPLOY_DIR}"
 export LEGION_FLEET_REGISTRY="${DEPLOY_DIR}/fleet.json"
 export LEGION_JAIL_ROOT="${DEPLOY_DIR}/jails"
+
+# mallcop-investigate-tools environment — inherited by workers spawned by
+# 'we start'. The investigate tools (escalate-to-investigator,
+# escalate-to-stage-c, resolve-finding, annotate-finding, etc.) require
+# these to know where to post chain-handoff and operator messages.
+# Source: cmd/mallcop-investigate-tools/tools_f1g.go env contract.
+export MALLCOP_WORK_CAMPFIRE_ID="\$(cat ${DEPLOY_DIR}/work-campfire.id 2>/dev/null)"
+export MALLCOP_OPERATOR_CAMPFIRE_ID="\${MALLCOP_OPERATOR_CAMPFIRE_ID:-\$MALLCOP_WORK_CAMPFIRE_ID}"
+export MALLCOP_RUN_ID="${RUN_ID}"
 EOF
 
 note "done"

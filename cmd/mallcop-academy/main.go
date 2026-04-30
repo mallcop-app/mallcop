@@ -271,6 +271,7 @@ type runArgs struct {
 	scenariosDir   string
 	scenarioFilter string
 	outputDir      string
+	fixturesDir    string
 	judgeModel     string
 	budgetUSD      float64
 	maxConcurrent  int
@@ -360,6 +361,21 @@ func mainRun() error {
 	if outputDir == "" {
 		outputDir = filepath.Join(repoRoot, "docs", "academy", runID)
 	}
+	// Fixtures must land where the worker process resolves the chart's
+	// relative `exams/fixtures/<RUN_ID>` path — that resolves against the
+	// jail's working directory, which is the deployment dir (when running
+	// against a --deployment) or the repo root (when running against a raw
+	// --target-campfire).
+	var fixturesDir string
+	if deploymentDir != "" {
+		absDeploy, derr := filepath.Abs(deploymentDir)
+		if derr != nil {
+			return fmt.Errorf("--deployment abs: %w", derr)
+		}
+		fixturesDir = filepath.Join(absDeploy, "exams", "fixtures", runID)
+	} else {
+		fixturesDir = filepath.Join(repoRoot, "exams", "fixtures", runID)
+	}
 
 	cfBin, err := exec.LookPath("cf")
 	if err != nil {
@@ -373,6 +389,7 @@ func mainRun() error {
 		scenariosDir:   scenariosDir,
 		scenarioFilter: scenarioFilter,
 		outputDir:      outputDir,
+		fixturesDir:    fixturesDir,
 		judgeModel:     judgeModel,
 		budgetUSD:      budgetUSD,
 		maxConcurrent:  maxConcurrent,
@@ -453,6 +470,17 @@ func academy(sender Sender, args runArgs) error {
 			defer postWG.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
+
+			// Materialize per-scenario fixtures so the operational chart's
+			// mallcop-investigate-tools (--mode exam --fixture-dir
+			// exams/fixtures/<RUN_ID>) can read events.json and baseline.json
+			// at the path the chart's tool args expect. Mirrors the retired
+			// cmd/exam-seed/materializeFixtures step.
+			fxDir := filepath.Join(args.fixturesDir, s.ID)
+			if err := materializeScenarioFixtures(s, fxDir); err != nil {
+				fmt.Fprintf(os.Stderr, "WARN: materialize fixtures for scenario %s: %v\n", s.ID, err)
+				return
+			}
 
 			ts := tracked[s.ID]
 			msgID, postedAt, err := postFinding(sender, s, args.runID, args.targetCampfire)
@@ -1058,3 +1086,54 @@ func walkGoMod(start string) string {
 
 // Ensure watchCF is not flagged as dead code — it's production path.
 var _ = watchCF
+
+// fixtureEvents is the on-disk shape of events.json read by
+// mallcop-investigate-tools in --mode exam.
+type fixtureEvents struct {
+	Events []exam.Event `json:"events"`
+}
+
+// fixtureBaseline is the on-disk shape of baseline.json read by
+// mallcop-investigate-tools in --mode exam.
+type fixtureBaseline struct {
+	KnownEntities   exam.KnownEntities                `json:"known_entities"`
+	FrequencyTables map[string]int                    `json:"frequency_tables,omitempty"`
+	Relationships   map[string]exam.RelationshipEntry `json:"relationships,omitempty"`
+}
+
+// materializeScenarioFixtures writes events.json and baseline.json to dir
+// so the operational chart's investigate tools can read them. Mirrors the
+// retired cmd/exam-seed/materializeFixtures function (lost in F4D).
+func materializeScenarioFixtures(s *exam.Scenario, dir string) error {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("mkdir %s: %w", dir, err)
+	}
+
+	evts := fixtureEvents{Events: s.Events}
+	if err := writeFixtureJSON(filepath.Join(dir, "events.json"), evts); err != nil {
+		return fmt.Errorf("write events.json: %w", err)
+	}
+
+	var bl fixtureBaseline
+	if s.Baseline != nil {
+		bl = fixtureBaseline{
+			KnownEntities:   s.Baseline.KnownEntities,
+			FrequencyTables: s.Baseline.FrequencyTables,
+			Relationships:   s.Baseline.Relationships,
+		}
+	}
+	if err := writeFixtureJSON(filepath.Join(dir, "baseline.json"), bl); err != nil {
+		return fmt.Errorf("write baseline.json: %w", err)
+	}
+
+	return nil
+}
+
+// writeFixtureJSON marshals v to indented JSON and writes it to path.
+func writeFixtureJSON(path string, v interface{}) error {
+	data, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0o644)
+}
