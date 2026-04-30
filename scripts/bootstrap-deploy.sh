@@ -111,15 +111,40 @@ for d in "${DISPOSITIONS[@]}"; do
 done
 note "disposition POST.md specs linked from ${REPO_ROOT}/agents/"
 
-# 4. Render chart. Worksource campfire, admission, and join records are
-# entirely legion's job (constellation init + RestoreMemberships at boot).
-# We do NOT pre-create or admit campfires here.
+# 4. Work campfire — created via rd init (canonical mallcop work source).
+# rd init writes .campfire/root in MALLCOP_HOME. We then `cf join <id>` from
+# the deployment's CF_HOME so the local cf store has the join record the
+# legion SDK Subscribe() requires under cf v0.19.x.
+#
+# WORKAROUND: this `cf join` line is a temporary unblock for a known legion
+# bug — boot does not call MembershipManager.RestoreMemberships(), so the
+# automaton cannot subscribe to externally-created campfires after restart.
+# Remove this line once that legion fix lands.
+RD_ROOT_FILE="${MALLCOP_HOME}/.campfire/root"
+WORK_CF_FILE="${DEPLOY_DIR}/work-campfire.id"
+if [[ -s "${WORK_CF_FILE}" && -f "${RD_ROOT_FILE}" && "${FORCE}" != "yes" ]]; then
+  WORK_CF=$(cat "${WORK_CF_FILE}")
+  note "work campfire: existing ${WORK_CF:0:12}... (from ${WORK_CF_FILE})"
+else
+  note "work campfire: rd init --name $(basename "${MALLCOP_HOME}")"
+  ( cd "${MALLCOP_HOME}" && CF_HOME="${DEPLOY_DIR}" rd init --name "$(basename "${MALLCOP_HOME}")" >/dev/null 2>&1 ) \
+    || err "rd init failed in ${MALLCOP_HOME}"
+  [[ -f "${RD_ROOT_FILE}" ]] || err "rd init did not create ${RD_ROOT_FILE}"
+  WORK_CF=$(cat "${RD_ROOT_FILE}")
+  echo "${WORK_CF}" > "${WORK_CF_FILE}"
+  note "work campfire: ${WORK_CF:0:12}... → ${WORK_CF_FILE}"
+fi
+# WORKAROUND (remove once legion calls RestoreMemberships at boot):
+CF_HOME="${DEPLOY_DIR}" cf join "${WORK_CF}" >/dev/null 2>&1 || true
+
+# 5. Render chart with the resolved work campfire.
 CHART_OUT="${DEPLOY_DIR}/chart.toml"
 note "rendering chart → ${CHART_OUT}"
 RUN_ID="${RUN_ID}" \
 FORGE_API_KEY="${FORGE_API_KEY}" \
 FORGE_API_URL="${FORGE_API_URL}" \
 MODEL="${MODEL}" \
+WORK_CAMPFIRE="${WORK_CF}" \
 MALLCOP_HOME="${MALLCOP_HOME}" \
 "${SCRIPT_DIR}/render-chart.sh" \
   "${REPO_ROOT}/charts/mallcop-operational.toml.tmpl" \
