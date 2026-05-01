@@ -168,6 +168,16 @@ type ScenarioRecord struct {
 	TerminalItemID  string          `json:"terminal_item_id,omitempty"`
 	FullChain       []ChainEntry    `json:"full_chain"`
 
+	// Forge metering: real per-scenario token and call counts from GET /v1/usage.
+	// Populated by querying Forge with a [posted_at, terminal_at] time window.
+	// Zero when FORGE_API_KEY is absent or Forge is unreachable.
+	// With max_concurrent > 1, attribution is approximate (concurrent scenario
+	// time windows overlap). Run-level totals (sum across scenarios) are accurate.
+	ForgeCalls int     `json:"forge_calls"`
+	TokensIn   int64   `json:"tokens_in"`
+	TokensOut  int64   `json:"tokens_out"`
+	CostUSD    float64 `json:"cost_usd,omitempty"`
+
 	// F4B structural grading block (nil if no expected: block in scenario yaml).
 	Structural *StructuralGrade `json:"structural,omitempty"`
 
@@ -277,6 +287,7 @@ type runArgs struct {
 	maxConcurrent  int
 	timeout        time.Duration
 	runID          string
+	usage          usageFetcher // nil = use noopUsageFetcher
 }
 
 func main() {
@@ -386,6 +397,16 @@ func mainRun() error {
 
 	sender := &cfSender{cfBin: cfBin, cfHome: cfHome}
 
+	// Wire the Forge usage fetcher. The HTTP fetcher is built before clearing
+	// FORGE_API_KEY (which --no-judge does to disable the judge). Usage metering
+	// is independent of the judge — both use FORGE_API_KEY but for different purposes.
+	var uf usageFetcher
+	if f := newHTTPUsageFetcher(); f != nil {
+		uf = f
+	} else {
+		uf = &noopUsageFetcher{}
+	}
+
 	if noJudge {
 		// Setting FORGE_API_KEY="" for buildJudicator's skip path is the
 		// minimum-touch way to disable the judge without changing runArgs.
@@ -402,6 +423,7 @@ func mainRun() error {
 		maxConcurrent:  maxConcurrent,
 		timeout:        timeout,
 		runID:          runID,
+		usage:          uf,
 	})
 }
 
@@ -737,7 +759,7 @@ func academy(sender Sender, args runArgs) error {
 				}
 
 				// Write per-scenario JSON.
-				if err := writeScenarioRecord(ts, args.runID, args.targetCampfire, args.outputDir); err != nil {
+				if err := writeScenarioRecord(ts, args.runID, args.targetCampfire, args.outputDir, args.usage); err != nil {
 					fmt.Fprintf(os.Stderr, "WARN: write scenario record for %s: %v\n", scenID, err)
 				} else {
 					fmt.Fprintf(os.Stderr, "scenario %s terminal: action=%s item=%s\n",
@@ -775,7 +797,7 @@ func academy(sender Sender, args runArgs) error {
 			terminal := ts.terminal
 			ts.mu.Unlock()
 			if posted && !terminal {
-				if err := writeScenarioRecord(ts, args.runID, args.targetCampfire, args.outputDir); err != nil {
+				if err := writeScenarioRecord(ts, args.runID, args.targetCampfire, args.outputDir, args.usage); err != nil {
 					fmt.Fprintf(os.Stderr, "WARN: write partial scenario record for %s: %v\n", ts.scenarioID, err)
 				}
 			}
@@ -880,7 +902,7 @@ func isInvestigateSkill(skill string) bool {
 // F4B: computes structural grading from the scenario's expected: block.
 // F4C: includes the judge rubric if already collected (single-pass: judge runs
 // before this function is called on the terminal close path).
-func writeScenarioRecord(ts *trackedScenario, runID, targetCampfire, outputDir string) error {
+func writeScenarioRecord(ts *trackedScenario, runID, targetCampfire, outputDir string, uf ...usageFetcher) error {
 	ts.mu.Lock()
 	defer ts.mu.Unlock()
 
@@ -898,6 +920,24 @@ func writeScenarioRecord(ts *trackedScenario, runID, targetCampfire, outputDir s
 		rec.WallSeconds = ts.terminalAt.Sub(ts.postedAt).Seconds()
 		rec.TerminalAction = ts.terminalAction
 		rec.TerminalItemID = ts.terminalItemID
+	}
+
+	// Forge metering: query usage for the scenario's time window.
+	// Non-fatal: failure results in zero counts (metering miss, not a pipeline failure).
+	if len(uf) > 0 && uf[0] != nil {
+		until := time.Now()
+		if ts.terminal {
+			until = ts.terminalAt
+		}
+		usage, err := uf[0].fetch(ts.postedAt, until)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "WARN: forge usage for scenario %s: %v\n", ts.scenarioID, err)
+		} else {
+			rec.ForgeCalls = usage.ForgeCalls
+			rec.TokensIn = usage.TokensIn
+			rec.TokensOut = usage.TokensOut
+			rec.CostUSD = usage.CostUSD
+		}
 	}
 
 	// F4C: attach rubric if collected.
