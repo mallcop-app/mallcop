@@ -108,11 +108,12 @@ if [[ -n "${MALLCOP_HOME}" ]]; then
   # .run/operational-<RUN_ID>/identity.json placeholder maps there).
   EXTRA_SEDS+=(-e "s|\.run/operational-${RUN_ID}/identity\.json|${MALLCOP_HOME}/.mallcop/identity.json|g")
   EXTRA_SEDS+=(-e "s|\.run/operational-${RUN_ID}/campfires|${MALLCOP_HOME}/.mallcop/campfires|g")
-  # [agents].dir must be RELATIVE to the project root (MALLCOP_HOME). Legion
-  # does filepath.Join(projectRoot, agentDir, ...) which does NOT special-case
-  # absolute paths — an absolute agentDir gets concatenated, producing
-  # /home/baron/.../home/baron/... and the spec load fails. Use relative.
-  EXTRA_SEDS+=(-e "s|^dir = \"agents\"|dir = \".mallcop/agents\"|g")
+  # [agents].dir resolves relative to the rendered chart file's parent dir,
+  # which is ${MALLCOP_HOME}/.mallcop/. The template's `dir = "agents"` already
+  # resolves to ${MALLCOP_HOME}/.mallcop/agents — no rewrite needed. (Earlier
+  # versions of this script prepended ".mallcop/" here under the wrong
+  # assumption that resolution was relative to MALLCOP_HOME, producing a
+  # doubled .mallcop/.mallcop/agents/ path that silently fails spec load.)
   EXTRA_SEDS+=(-e "s|^  \"agents/\",|  \"${MALLCOP_HOME}/.mallcop/agents/\",|g")
 fi
 
