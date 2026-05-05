@@ -118,7 +118,16 @@ func computeStructuralGrade(
 
 	// --- chain_action ---
 	if expected.ChainAction != "" {
-		if strings.EqualFold(terminalAction, expected.ChainAction) {
+		// Special token "escalate-or-stronger": accept literal "escalated" as
+		// PASS. A safe escalate satisfies the expectation; a weaker outcome
+		// (e.g. "resolved") fails. See mallcoppro-a42.
+		if strings.EqualFold(expected.ChainAction, "escalate-or-stronger") {
+			if strings.EqualFold(terminalAction, "escalated") {
+				g.ChainAction = AxisPass
+			} else {
+				g.ChainAction = AxisFail
+			}
+		} else if strings.EqualFold(terminalAction, expected.ChainAction) {
 			g.ChainAction = AxisPass
 		} else {
 			g.ChainAction = AxisFail
