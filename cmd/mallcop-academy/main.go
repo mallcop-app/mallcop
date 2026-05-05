@@ -500,6 +500,34 @@ func academy(sender Sender, args runArgs) error {
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
+			ts := tracked[s.ID]
+
+			// Rung 0 (March cost ladder): hard-constraint short-circuit.
+			// If the finding's detector is in the always-escalate set, we
+			// emit a synthetic terminal-escalate event and skip the LLM
+			// worker dispatch entirely. This costs zero donuts. Findings
+			// that don't match fall through to the normal triage path
+			// unchanged. See cmd/mallcop-academy/hard_constraints.go.
+			if reason, matched := checkHardConstraints(s.Finding.Detector); matched {
+				msgID, err := seedHardConstraintEscalate(sender, s, args.runID, args.targetCampfire, reason, ts)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "WARN: hard-constraint seed for scenario %s: %v\n", s.ID, err)
+					return
+				}
+				postMu.Lock()
+				workItemToScenario[msgID] = s.ID
+				postMu.Unlock()
+
+				// Write the terminal record immediately — no watch loop
+				// needs to fire. Skip the judge: there is no LLM output
+				// to grade, and the judge would only add cost.
+				if err := writeScenarioRecord(ts, args.runID, args.targetCampfire, args.outputDir); err != nil {
+					fmt.Fprintf(os.Stderr, "WARN: write scenario record for %s: %v\n", s.ID, err)
+				}
+				fmt.Fprintf(os.Stderr, "scenario %s hard-constraint escalate: detector=%s\n", s.ID, s.Finding.Detector)
+				return
+			}
+
 			// Materialize per-scenario fixtures so the operational chart's
 			// mallcop-investigate-tools (--mode exam --fixture-dir
 			// exams/fixtures/<RUN_ID>) can read events.json and baseline.json
@@ -514,7 +542,6 @@ func academy(sender Sender, args runArgs) error {
 				}
 			}
 
-			ts := tracked[s.ID]
 			msgID, postedAt, err := postFinding(sender, s, args.runID, args.targetCampfire)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "WARN: post finding for scenario %s: %v\n", s.ID, err)
