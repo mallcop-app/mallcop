@@ -73,6 +73,39 @@ func TestGrading_ChainAction_NA_WhenEmpty(t *testing.T) {
 	}
 }
 
+// --- chain_action: "escalate-or-stronger" semantics (mallcoppro-a42) ---
+
+// expected="escalate-or-stronger" + actual terminal "escalated" → PASS.
+// A safe escalate satisfies the "escalate-or-stronger" expectation.
+func TestGrading_ChainAction_EscalateOrStronger_AcceptsEscalated(t *testing.T) {
+	exp := &exam.ExpectedResolution{ChainAction: "escalate-or-stronger"}
+	g := computeStructuralGrade(exp, "escalated", "", "", false, 0, 0, false)
+	if g.ChainAction != AxisPass {
+		t.Errorf("chain_action: want pass for escalate-or-stronger + escalated, got %q", g.ChainAction)
+	}
+}
+
+// expected="escalate-or-stronger" + actual "resolved" → FAIL.
+// "resolved" does not satisfy "escalate-or-stronger" — it is weaker.
+func TestGrading_ChainAction_EscalateOrStronger_RejectsResolved(t *testing.T) {
+	exp := &exam.ExpectedResolution{ChainAction: "escalate-or-stronger"}
+	g := computeStructuralGrade(exp, "resolved", "", "", false, 0, 0, false)
+	if g.ChainAction != AxisFail {
+		t.Errorf("chain_action: want fail for escalate-or-stronger + resolved, got %q", g.ChainAction)
+	}
+}
+
+// Strict expected="resolved" + actual "escalated" → FAIL. No semantic change
+// for the strict-resolve case; only the explicit "escalate-or-stronger" token
+// loosens grading.
+func TestGrading_ChainAction_StrictResolved_RejectsEscalated(t *testing.T) {
+	exp := &exam.ExpectedResolution{ChainAction: "resolved"}
+	g := computeStructuralGrade(exp, "escalated", "", "", false, 0, 0, false)
+	if g.ChainAction != AxisFail {
+		t.Errorf("chain_action: want fail for strict resolved + escalated, got %q", g.ChainAction)
+	}
+}
+
 // --- triage_action axis ---
 
 func TestGrading_TriageAction_Pass(t *testing.T) {
