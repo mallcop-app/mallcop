@@ -4,7 +4,7 @@
 // synthetic tool_use messages to simulate investigate worker sessions.
 // No mocks — the gate reads real cf campfire data.
 //
-// Test plan (6 tests):
+// Test plan (8 tests):
 //
 //  1. TestConfidenceGate_Disabled_PassesThrough — enabled=false → normal work:output.
 //  2. TestConfidenceGate_OtherSkill_PassesThrough — MALLCOP_SKILL != task:investigate → normal close.
@@ -12,6 +12,8 @@
 //  4. TestConfidenceGate_LowScore_FiresFanOut — 1 tool call, no citations, 5 iterations → gate fires.
 //  5. TestConfidenceGate_VerifyFanOutShape — all 3 hypotheses present, merge has 3 deep ids.
 //  6. TestConfidenceGate_IterationPenalty — high tool count + many iterations → gate fires.
+//  7. TestConfidenceGate_EscalatedAction_PassesThrough — action=escalated + low evidence → no fan-out (rung-3 semantic).
+//  8. TestConfidenceGate_RemediatedAction_PassesThrough — action=remediated + low evidence → no fan-out (rung-3 semantic).
 package main
 
 import (
@@ -502,9 +504,12 @@ func TestConfidenceGate_IterationPenalty(t *testing.T) {
 	)
 
 	out := captureStdout(t, func() {
+		// Use action=resolved so the gate evaluates the iteration penalty path.
+		// Per the rung-3 semantic restored in mallcoppro-09d, the gate only fires
+		// on "resolved" — escalations are an early-return no-op.
 		input, _ := json.Marshal(map[string]interface{}{
 			"finding_id": "fnd-gate-iter-001",
-			"action":     "escalated",
+			"action":     "resolved",
 			"reason":     reason,
 		})
 		err := runToolWithEnv(t, "resolve-finding", string(input), envPairs...)
@@ -533,5 +538,136 @@ func TestConfidenceGate_IterationPenalty(t *testing.T) {
 	workMsgs := readCampfireMessages(t, cfBin, cfHome, workCampfireID)
 	if !hasTagInMessages(workMsgs, "work:create") {
 		t.Errorf("expected work:create in work campfire after iteration penalty gate fires; got %d messages", len(workMsgs))
+	}
+}
+
+// ---- TestConfidenceGate_EscalatedAction_PassesThrough --------------------------
+//
+// Rung-3 semantic (mallcoppro-09d): the confidence gate exists to second-guess
+// "resolved" decisions only. An "escalated" action is already a system PASS and
+// must not trigger fan-out, even with low structural evidence. The gate must
+// early-return before reading the engagement transcript or counting citations.
+//
+// Without this gate, ~78% of investigate workers (the ones that escalate) would
+// pay the consensus surcharge unnecessarily, causing the cost ladder to collapse.
+// This test pins the early-return: the same low-evidence transcript that fires
+// the gate when action=resolved (TestConfidenceGate_LowScore_FiresFanOut) MUST
+// pass through when action=escalated.
+func TestConfidenceGate_EscalatedAction_PassesThrough(t *testing.T) {
+	cfBin, cfHome, campfireID, workCampfireID := newTestCampfirePair(t)
+
+	// Same low-evidence transcript as LowScore_FiresFanOut: 1 tool call, no citations.
+	// If the gate were not action-gated, this would fire fan-out.
+	seedToolUseMsgs(t, cfBin, cfHome, campfireID, []string{"search-events"})
+	for i := 0; i < 4; i++ {
+		_, _ = runCFCmd(cfBin, cfHome, "send", campfireID,
+			fmt.Sprintf(`{"assistant_turn":true,"turn":%d}`, i+2), "--tag", "assistant:turn")
+	}
+
+	envPairs := append(gateEnvPairs(true, 0.55),
+		"MALLCOP_SKILL", "task:investigate",
+		"MALLCOP_CAMPFIRE_ID", campfireID,
+		"MALLCOP_WORK_CAMPFIRE_ID", workCampfireID,
+		"CF_HOME", cfHome,
+	)
+
+	out := captureStdout(t, func() {
+		input, _ := json.Marshal(map[string]interface{}{
+			"finding_id": "fnd-gate-esc-001",
+			"action":     "escalated",
+			"reason":     "Insufficient evidence; escalating to a human reviewer.",
+		})
+		err := runToolWithEnv(t, "resolve-finding", string(input), envPairs...)
+		if err != nil {
+			t.Errorf("resolve-finding: unexpected error: %v", err)
+		}
+	})
+
+	var result map[string]interface{}
+	if err := json.Unmarshal([]byte(out), &result); err != nil {
+		t.Fatalf("parse output JSON: %v\nout=%q", err, out)
+	}
+
+	// Gate MUST NOT fire on escalated action, regardless of evidence quality.
+	if gf, ok := result["gate_fired"]; ok && gf == true {
+		t.Errorf("expected gate to NOT fire for action=escalated (rung-3 early-return); got gate_fired=true. result=%v", result)
+	}
+	if result["finding_id"] != "fnd-gate-esc-001" {
+		t.Errorf("finding_id = %v, want fnd-gate-esc-001", result["finding_id"])
+	}
+	if result["action"] != "escalated" {
+		t.Errorf("action = %v, want escalated", result["action"])
+	}
+
+	// Normal close (work:output) must be in engagement campfire.
+	engMsgs := readCampfireMessages(t, cfBin, cfHome, campfireID)
+	if !hasTagInMessages(engMsgs, "work:output") {
+		t.Errorf("expected work:output in engagement campfire for action=escalated; got %d messages", len(engMsgs))
+	}
+
+	// Critical: NO work:create messages in work campfire — fan-out must be skipped.
+	workMsgs := readCampfireMessages(t, cfBin, cfHome, workCampfireID)
+	if hasTagInMessages(workMsgs, "work:create") {
+		t.Errorf("expected NO work:create in work campfire for action=escalated; deep-investigate fan-out must be skipped. got %d messages", len(workMsgs))
+	}
+
+	// Specifically, no skill:task:deep-investigate messages.
+	deepCount := 0
+	for _, msg := range workMsgs {
+		for _, tagRaw := range msg["tags"].([]interface{}) {
+			if tag, _ := tagRaw.(string); tag == "skill:task:deep-investigate" {
+				deepCount++
+			}
+		}
+	}
+	if deepCount != 0 {
+		t.Errorf("expected 0 deep-investigate workers for action=escalated; got %d (rung-3 escalate-PASS contract violated)", deepCount)
+	}
+}
+
+// ---- TestConfidenceGate_RemediatedAction_PassesThrough -------------------------
+//
+// Sibling of EscalatedAction: any non-"resolved" action skips the gate. Pinning
+// "remediated" (the third valid action per resolveInput.Action) ensures we don't
+// regress to special-casing only "escalated".
+func TestConfidenceGate_RemediatedAction_PassesThrough(t *testing.T) {
+	cfBin, cfHome, campfireID, workCampfireID := newTestCampfirePair(t)
+
+	// Low-evidence transcript — same shape as the fan-out tests.
+	seedToolUseMsgs(t, cfBin, cfHome, campfireID, []string{"check-baseline"})
+
+	envPairs := append(gateEnvPairs(true, 0.55),
+		"MALLCOP_SKILL", "task:investigate",
+		"MALLCOP_CAMPFIRE_ID", campfireID,
+		"MALLCOP_WORK_CAMPFIRE_ID", workCampfireID,
+		"CF_HOME", cfHome,
+	)
+
+	out := captureStdout(t, func() {
+		input, _ := json.Marshal(map[string]interface{}{
+			"finding_id": "fnd-gate-rem-001",
+			"action":     "remediated",
+			"reason":     "Issue auto-remediated via runbook step 3.",
+		})
+		err := runToolWithEnv(t, "resolve-finding", string(input), envPairs...)
+		if err != nil {
+			t.Errorf("resolve-finding: unexpected error: %v", err)
+		}
+	})
+
+	var result map[string]interface{}
+	if err := json.Unmarshal([]byte(out), &result); err != nil {
+		t.Fatalf("parse output JSON: %v\nout=%q", err, out)
+	}
+
+	// Gate MUST NOT fire on remediated action.
+	if gf, ok := result["gate_fired"]; ok && gf == true {
+		t.Errorf("expected gate to NOT fire for action=remediated; got gate_fired=true. result=%v", result)
+	}
+
+	// No fan-out work:create messages.
+	workMsgs := readCampfireMessages(t, cfBin, cfHome, workCampfireID)
+	if hasTagInMessages(workMsgs, "work:create") {
+		t.Errorf("expected NO work:create for action=remediated; got %d messages", len(workMsgs))
 	}
 }
