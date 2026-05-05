@@ -303,7 +303,7 @@ func runResolveFinding(inputJSON string) error {
 	// The gate lives here in binary code — the agent CANNOT skip it from a prompt.
 	// For non-investigate skills or disabled config, checkConfidenceGate returns
 	// gateResult{Fired: false} immediately with no campfire I/O.
-	gr, gateErr := checkConfidenceGate(campfireID, input.Reason)
+	gr, gateErr := checkConfidenceGate(campfireID, input.Action, input.Reason)
 	if gateErr != nil {
 		// Fail open: log to stderr but do not block the worker.
 		fmt.Fprintf(os.Stderr, "resolve-finding: confidence gate check failed (failing open): %v\n", gateErr)
