@@ -353,13 +353,21 @@ type gateResult struct {
 // emit fan-out work:create messages instead of the normal work:output.
 //
 // The gate is a no-op (Fired=false) when:
+//   - action != "resolved" (escalations and remediations skip the gate — see below)
 //   - MALLCOP_SKILL != "task:investigate"
 //   - config.Enabled == false
 //   - citations >= 1 AND score >= score_floor
 //
 // The gate fires (Fired=true) when:
-//   - citations == 0 (hard requirement — tool volume alone is not evidence)
-//   - score < score_floor
+//   - action == "resolved" AND citations == 0 (hard requirement — tool volume alone is not evidence)
+//   - action == "resolved" AND score < score_floor
+//
+// Action gating (rung 3 — restored from March pipeline.py:221-243):
+// The consensus check exists to second-guess the LLM when it claims a finding is
+// benign (resolved). Escalation is already a system PASS — there is no payoff in
+// spending fan-out donuts to challenge an escalate decision, and doing so was
+// punishing the safe choice on ~78% of scenarios. We early-return for any non-
+// "resolved" action to restore the original semantic.
 //
 // Fail-closed semantics: if the transcript cannot be read (cf missing, campfire
 // unreachable, parse failure), the gate fires with score=0. The risk of an
@@ -368,7 +376,13 @@ type gateResult struct {
 // Exception: MALLCOP_GATE_ALLOW_NO_CF=1 disables the fail-closed behaviour for
 // test environments that do not have cf on PATH. This env var must never be set
 // in production worker jails.
-func checkConfidenceGate(campfireID, reason string) (gateResult, error) {
+func checkConfidenceGate(campfireID, action, reason string) (gateResult, error) {
+	// Action check: only gate on "resolved" — escalations need no double-check
+	// (escalate is already a system PASS). Restores March rung-3 semantic.
+	if action != "resolved" {
+		return gateResult{Fired: false}, nil
+	}
+
 	// Skill check: only gate on task:investigate workers.
 	skill := os.Getenv("MALLCOP_SKILL")
 	if skill != "task:investigate" {
