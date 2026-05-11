@@ -736,6 +736,150 @@ func TestAcademyIntegration_RealCampfire(t *testing.T) {
 	}
 }
 
+// ---- unit: loadScenarios --scenario-prefix filter (mallcoppro-bab) -----------
+
+// TestLoadScenarios_PrefixFilter verifies that --scenario-prefix filters
+// scenarios by the comma-separated prefix list. Real YAML files are written
+// and loaded via exam.Load — no mocks.
+func TestLoadScenarios_PrefixFilter(t *testing.T) {
+	dir := t.TempDir()
+	// Write scenarios with various prefixes.
+	writeMinimalScenario(t, dir, "PE-01", "fnd-pe-01", "detector-priv-escalation", "Priv escalation", "high")
+	writeMinimalScenario(t, dir, "PE-02", "fnd-pe-02", "detector-priv-escalation", "Priv escalation 2", "medium")
+	writeMinimalScenario(t, dir, "IP-01", "fnd-ip-01", "detector-injection-probe", "Injection probe", "high")
+	writeMinimalScenario(t, dir, "LFD-01", "fnd-lfd-01", "detector-log-format-drift", "Log format drift", "low")
+	writeMinimalScenario(t, dir, "AC-01", "fnd-ac-01", "detector-unusual-login", "Unusual login", "medium")
+	writeMinimalScenario(t, dir, "AF-01", "fnd-af-01", "detector-rate-anomaly", "Auth failure", "low")
+
+	tests := []struct {
+		name      string
+		filter    string
+		prefix    string
+		wantCount int
+		wantIDs   []string
+	}{
+		{
+			name:      "no filter no prefix — all 6",
+			wantCount: 6,
+		},
+		{
+			name:      "single prefix PE — 2 scenarios",
+			prefix:    "PE",
+			wantCount: 2,
+			wantIDs:   []string{"PE-01", "PE-02"},
+		},
+		{
+			name:      "multi-prefix PE,IP,LFD — 4 scenarios",
+			prefix:    "PE,IP,LFD",
+			wantCount: 4,
+			wantIDs:   []string{"PE-01", "PE-02", "IP-01", "LFD-01"},
+		},
+		{
+			name:      "prefix with spaces trimmed",
+			prefix:    " PE , IP ",
+			wantCount: 3,
+			wantIDs:   []string{"PE-01", "PE-02", "IP-01"},
+		},
+		{
+			name:      "exact filter overrides prefix — returns one",
+			filter:    "AC-01",
+			prefix:    "PE",
+			wantCount: 1,
+			wantIDs:   []string{"AC-01"},
+		},
+		{
+			name:      "prefix matching no scenarios — returns empty",
+			prefix:    "ZZ",
+			wantCount: 0,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := loadScenarios(dir, tc.filter, tc.prefix)
+			if err != nil {
+				t.Fatalf("loadScenarios: %v", err)
+			}
+			if len(got) != tc.wantCount {
+				ids := make([]string, len(got))
+				for i, s := range got {
+					ids[i] = s.ID
+				}
+				t.Errorf("loadScenarios count = %d, want %d; got IDs: %v", len(got), tc.wantCount, ids)
+			}
+			for _, wantID := range tc.wantIDs {
+				found := false
+				for _, s := range got {
+					if s.ID == wantID {
+						found = true
+						break
+					}
+				}
+				if !found {
+					ids := make([]string, len(got))
+					for i, s := range got {
+						ids[i] = s.ID
+					}
+					t.Errorf("expected scenario %q not found in results: %v", wantID, ids)
+				}
+			}
+		})
+	}
+}
+
+// TestRunArgs_ScenarioPrefix_WrittenToRunJSON verifies that the scenario_prefix
+// field from runArgs is written to run.json for observability.
+// Uses a mock sender — no real campfire required.
+func TestRunArgs_ScenarioPrefix_WrittenToRunJSON(t *testing.T) {
+	dir := t.TempDir()
+	scenDir := t.TempDir()
+	writeMinimalScenario(t, scenDir, "PE-01", "fnd-pe-01", "detector-priv-escalation", "Priv escalation", "high")
+
+	// Provide a terminal close so academy exits without timing out.
+	// The work:create message is mock-msg-1; the close references it.
+	closeJSON, _ := json.Marshal(closePayload{
+		ItemID: "mock-msg-1",
+		Action: "resolved",
+		Skill:  "task:triage",
+	})
+	ms := &mockSender{
+		readMsgs: []cfMessage{
+			{
+				ID:      "close-msg-1",
+				Tags:    []string{"work:close"},
+				Payload: string(closeJSON),
+			},
+		},
+	}
+
+	args := runArgs{
+		targetCampfire: "test-campfire-prefix",
+		scenariosDir:   scenDir,
+		scenarioFilter: "PE-01",
+		scenarioPrefix: "PE,IP,LFD",
+		outputDir:      dir,
+		maxConcurrent:  1,
+		timeout:        2 * time.Second,
+		runID:          "run-prefix-test",
+	}
+	if err := academy(ms, args); err != nil {
+		t.Fatalf("academy: %v", err)
+	}
+
+	// Verify run.json contains scenario_prefix.
+	runData, err := os.ReadFile(filepath.Join(dir, "run.json"))
+	if err != nil {
+		t.Fatalf("read run.json: %v", err)
+	}
+	var rec RunRecord
+	if err := json.Unmarshal(runData, &rec); err != nil {
+		t.Fatalf("parse run.json: %v", err)
+	}
+	if rec.ScenarioPrefix != "PE,IP,LFD" {
+		t.Errorf("run.json scenario_prefix = %q, want %q", rec.ScenarioPrefix, "PE,IP,LFD")
+	}
+}
+
 // ---- helpers -----------------------------------------------------------------
 
 // writeMinimalScenario writes a minimal scenario YAML to dir/<id>.yaml.

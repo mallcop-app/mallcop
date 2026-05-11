@@ -187,15 +187,16 @@ type ScenarioRecord struct {
 
 // RunRecord is the run-level metadata written to run.json.
 type RunRecord struct {
-	RunID          string    `json:"run_id"`
-	TargetCampfire string    `json:"target_campfire"`
-	ScenariosDir   string    `json:"scenarios_dir"`
-	ScenarioFilter string    `json:"scenario_filter,omitempty"`
-	JudgeModel     string    `json:"judge_model,omitempty"`
-	BudgetUSD      float64   `json:"budget_usd,omitempty"`
-	MaxConcurrent  int       `json:"max_concurrent"`
-	Timeout        string    `json:"timeout"`
-	StartedAt      time.Time `json:"started_at"`
+	RunID           string    `json:"run_id"`
+	TargetCampfire  string    `json:"target_campfire"`
+	ScenariosDir    string    `json:"scenarios_dir"`
+	ScenarioFilter  string    `json:"scenario_filter,omitempty"`
+	ScenarioPrefix  string    `json:"scenario_prefix,omitempty"`
+	JudgeModel      string    `json:"judge_model,omitempty"`
+	BudgetUSD       float64   `json:"budget_usd,omitempty"`
+	MaxConcurrent   int       `json:"max_concurrent"`
+	Timeout         string    `json:"timeout"`
+	StartedAt       time.Time `json:"started_at"`
 }
 
 // ---- Tracked state ------------------------------------------------------------
@@ -277,17 +278,18 @@ type Sender interface {
 // ---- Core logic ---------------------------------------------------------------
 
 type runArgs struct {
-	targetCampfire string
-	scenariosDir   string
-	scenarioFilter string
-	outputDir      string
-	fixturesDir    string
-	judgeModel     string
-	budgetUSD      float64
-	maxConcurrent  int
-	timeout        time.Duration
-	runID          string
-	usage          usageFetcher // nil = use noopUsageFetcher
+	targetCampfire  string
+	scenariosDir    string
+	scenarioFilter  string
+	scenarioPrefix  string // comma-separated prefixes; if non-empty, only load matching scenarios
+	outputDir       string
+	fixturesDir     string
+	judgeModel      string
+	budgetUSD       float64
+	maxConcurrent   int
+	timeout         time.Duration
+	runID           string
+	usage           usageFetcher // nil = use noopUsageFetcher
 }
 
 func main() {
@@ -303,6 +305,7 @@ func mainRun() error {
 		targetCampfire string
 		scenariosDir   string
 		scenarioFilter string
+		scenarioPrefix string
 		outputDir      string
 		judgeModel     string
 		budgetUSD      float64
@@ -317,6 +320,7 @@ func mainRun() error {
 	flag.StringVar(&targetCampfire, "target-campfire", "", "operational deployment's work campfire ID or beacon (legacy; use --deployment when possible)")
 	flag.StringVar(&scenariosDir, "scenarios-dir", "", "directory containing scenario YAML files (default: repo-root/exams/scenarios)")
 	flag.StringVar(&scenarioFilter, "scenario", "", "optional: limit to one scenario ID")
+	flag.StringVar(&scenarioPrefix, "scenario-prefix", "", "optional: comma-separated list of scenario ID prefixes (e.g. PE,IP,LFD,PI); only scenarios whose IDs start with one of these prefixes are loaded. Enables per-rung PR-time gates targeting <5 min wall-clock (mallcoppro-bab)")
 	flag.StringVar(&outputDir, "output-dir", "", "output directory for per-scenario JSON artifacts (default: docs/academy/<run-id>)")
 	flag.StringVar(&judgeModel, "judge-model", "", "model for the judge (F4C territory; stored in run.json only)")
 	flag.Float64Var(&budgetUSD, "budget-usd", 0, "USD budget cap (advisory, stored in run.json)")
@@ -416,6 +420,7 @@ func mainRun() error {
 		targetCampfire: targetCampfire,
 		scenariosDir:   scenariosDir,
 		scenarioFilter: scenarioFilter,
+		scenarioPrefix: scenarioPrefix,
 		outputDir:      outputDir,
 		fixturesDir:    fixturesDir,
 		judgeModel:     judgeModel,
@@ -433,12 +438,12 @@ func academy(sender Sender, args runArgs) error {
 	startedAt := time.Now()
 
 	// Load scenarios.
-	scenarios, err := loadScenarios(args.scenariosDir, args.scenarioFilter)
+	scenarios, err := loadScenarios(args.scenariosDir, args.scenarioFilter, args.scenarioPrefix)
 	if err != nil {
 		return err
 	}
 	if len(scenarios) == 0 {
-		return fmt.Errorf("no scenarios found in %s (filter=%q)", args.scenariosDir, args.scenarioFilter)
+		return fmt.Errorf("no scenarios found in %s (filter=%q prefix=%q)", args.scenariosDir, args.scenarioFilter, args.scenarioPrefix)
 	}
 
 	// Create output directory.
@@ -456,6 +461,7 @@ func academy(sender Sender, args runArgs) error {
 		TargetCampfire: args.targetCampfire,
 		ScenariosDir:   args.scenariosDir,
 		ScenarioFilter: args.scenarioFilter,
+		ScenarioPrefix: args.scenarioPrefix,
 		JudgeModel:     args.judgeModel,
 		BudgetUSD:      args.budgetUSD,
 		MaxConcurrent:  args.maxConcurrent,
@@ -1007,7 +1013,23 @@ func writeJSON(path string, v interface{}) error {
 
 // loadScenarios walks dir for *.yaml files and loads them via exam.Load.
 // If filter is non-empty, only the scenario with that ID is returned.
-func loadScenarios(dir, filter string) ([]*exam.Scenario, error) {
+// If prefix is non-empty, it is treated as a comma-separated list of ID
+// prefixes; only scenarios whose IDs start with one of those prefixes are
+// included. prefix and filter may be combined — filter takes precedence (a
+// single-scenario filter is not further constrained by prefix). Prefix
+// matching enables per-rung PR-time gates (mallcoppro-bab).
+func loadScenarios(dir, filter, prefix string) ([]*exam.Scenario, error) {
+	// Parse prefix list once.
+	var prefixes []string
+	if prefix != "" {
+		for _, p := range strings.Split(prefix, ",") {
+			p = strings.TrimSpace(p)
+			if p != "" {
+				prefixes = append(prefixes, p)
+			}
+		}
+	}
+
 	var paths []string
 	err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
@@ -1035,8 +1057,26 @@ func loadScenarios(dir, filter string) ([]*exam.Scenario, error) {
 		if err != nil {
 			return nil, fmt.Errorf("load %s: %w", p, err)
 		}
-		if filter != "" && s.ID != filter {
+		// --scenario exact-match filter takes priority; no prefix check needed.
+		if filter != "" {
+			if s.ID == filter {
+				scenarios = append(scenarios, s)
+			}
 			continue
+		}
+		// --scenario-prefix filter: include only scenarios whose IDs start with
+		// one of the requested prefixes. No prefix = include all.
+		if len(prefixes) > 0 {
+			matched := false
+			for _, pfx := range prefixes {
+				if strings.HasPrefix(s.ID, pfx) {
+					matched = true
+					break
+				}
+			}
+			if !matched {
+				continue
+			}
 		}
 		scenarios = append(scenarios, s)
 	}
