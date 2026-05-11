@@ -103,11 +103,11 @@ func TestRunUpdate(t *testing.T) {
 	dir := t.TempDir()
 	out := filepath.Join(dir, "baseline.json")
 
-	err := runUpdate([]string{
+	err := runUpdateWithNow([]string{
 		"--window", "30d",
 		"--events", path,
 		"--out", out,
-	})
+	}, refTime)
 	if err != nil {
 		t.Fatalf("runUpdate: %v", err)
 	}
