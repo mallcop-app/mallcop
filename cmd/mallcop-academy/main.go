@@ -534,6 +534,34 @@ func academy(sender Sender, args runArgs) error {
 				return
 			}
 
+			// Rung 2 (Wk2 — mallcoppro-379): deterministic triage gate.
+			// If the finding's actor is known, severity is non-critical,
+			// detector is not in the never-auto-resolve set, and the actor
+			// has ≥3 prior matching events in the baseline, emit a synthetic
+			// terminal-resolved event and skip the LLM worker dispatch. Zero
+			// donuts spent. Falls through to normal triage if any condition
+			// fails. See cmd/mallcop-academy/triage_gate.go.
+			if reason, matched := triageGatePredicate(s); matched {
+				msgID, err := seedTriageGateResolve(sender, s, args.runID, args.targetCampfire, reason, ts)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "WARN: triage-gate seed for scenario %s: %v\n", s.ID, err)
+					return
+				}
+				postMu.Lock()
+				workItemToScenario[msgID] = s.ID
+				postMu.Unlock()
+
+				// Write the terminal record immediately — no watch loop
+				// needs to fire. Skip the judge: there is no LLM output
+				// to grade, and the judge would only add cost.
+				if err := writeScenarioRecord(ts, args.runID, args.targetCampfire, args.outputDir); err != nil {
+					fmt.Fprintf(os.Stderr, "WARN: write scenario record for %s: %v\n", s.ID, err)
+				}
+				fmt.Fprintf(os.Stderr, "scenario %s triage-gate resolve: actor=%s detector=%s\n",
+					s.ID, extractActor(s.Finding.Metadata), s.Finding.Detector)
+				return
+			}
+
 			// Materialize per-scenario fixtures so the operational chart's
 			// mallcop-investigate-tools (--mode exam --fixture-dir
 			// exams/fixtures/<RUN_ID>) can read events.json and baseline.json
