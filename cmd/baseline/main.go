@@ -61,7 +61,14 @@ Commands:
 }
 
 // runUpdate implements: baseline update --window 30d --events events.jsonl --out baseline.json
+// For testing, use runUpdateWithNow to inject a specific timestamp.
 func runUpdate(args []string) error {
+	return runUpdateWithNow(args, time.Now().UTC())
+}
+
+// runUpdateWithNow is the internal implementation that accepts a testable 'now' parameter.
+// In production, pass time.Now().UTC(). In tests, pass a fixed reference time.
+func runUpdateWithNow(args []string, now time.Time) error {
 	fs := flag.NewFlagSet("update", flag.ContinueOnError)
 	windowStr := fs.String("window", "", "Sliding window duration (e.g. 30d, 24h)")
 	eventsPath := fs.String("events", "", "Path to events JSONL file")
@@ -86,7 +93,7 @@ func runUpdate(args []string) error {
 	}
 
 	eng := baseline.NewEngine()
-	eng.Update(events, window, time.Now().UTC())
+	eng.Update(events, window, now)
 
 	if err := eng.Save(*outPath); err != nil {
 		return fmt.Errorf("saving baseline: %w", err)
