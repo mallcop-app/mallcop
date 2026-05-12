@@ -2,10 +2,11 @@
 //
 // Usage:
 //
-//	mallcop scan   [--chart <path>] [--timeout <duration>] [--json]
-//	mallcop init   [--dir <path>]
-//	mallcop status [--chart <path>]
-//	mallcop config [--chart <path>]
+//	mallcop scan    [--chart <path>] [--timeout <duration>] [--json]
+//	mallcop init    [--dir <path>]
+//	mallcop status  [--chart <path>]
+//	mallcop config  [--chart <path>]
+//	mallcop balance [--url <url>] [--key <token>] [--json]
 package main
 
 import (
@@ -36,6 +37,8 @@ func main() {
 		err = runStatus(args)
 	case "config":
 		err = runConfig(args)
+	case "balance":
+		err = runBalance(args)
 	default:
 		fmt.Fprintf(os.Stderr, "mallcop: unknown command %q\n\n", cmd)
 		usage()
@@ -69,6 +72,11 @@ Commands:
 
   config  Print and validate the current config
     --chart    Path to the legion chart TOML (default: charts/vertical-slice.toml)
+
+  balance  Show current donut balance
+    --url      mallcop.app base URL (default: $MALLCOP_APP_URL or https://mallcop.app)
+    --key      mallcop service token (default: $MALLCOP_SERVICE_TOKEN)
+    --json     Output as JSON
 
 Exit codes (scan):
   0  No findings
