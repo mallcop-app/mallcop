@@ -59,7 +59,7 @@ events:
   event_type: role_assignment
   actor: sre-engineer
   action: add_role_assignment
-  target: sub-169efd95
+  target: sub-00000000
   severity: critical
   metadata:
     ip: 192.0.2.30
@@ -67,7 +67,7 @@ events:
     role: Owner
     principal_id: sre-engineer
     principal_type: User
-    scope: /subscriptions/169efd95-5e00-42f9-8e65-a1892791ed9a
+    scope: /subscriptions/00000000-0000-0000-0000-000000000000
     break_glass: 'true'
     incident_ticket: INC-2026-0312
     approved_by: on-call-manager
@@ -108,11 +108,11 @@ baseline:
     azure:config_change:sre-engineer: 89
     incident-system:incident_declared: 12
   relationships:
-    sre-engineer:sub-169efd95:
+    sre-engineer:sub-00000000:
       count: 45
       first_seen: '2025-01-15'
       last_seen: '2026-03-12'
-    sre-engineer:sub-169efd95/resourceGroups/atom-rg:
+    sre-engineer:sub-00000000/resourceGroups/atom-rg:
       count: 567
       first_seen: '2025-01-15'
       last_seen: '2026-03-12'

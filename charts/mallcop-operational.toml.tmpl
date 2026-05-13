@@ -2,7 +2,7 @@
 # Task-pipeline only: triage → investigate → deep-investigate → investigate-merge → escalate → heal.
 # No bakeoff/exam skills — use charts/exam-bakeoff.toml.tmpl for bakeoff runs.
 # Usage:
-#   sed 's/{{MODEL}}/claude-sonnet-4-5/g; s/{{RUN_ID}}/20260414/g; s|{{FORGE_API_URL}}|https://forge.3dl.dev|g; s|{{FORGE_API_KEY}}|mallcop-sk-...|g; s|{{TOOL_BIN_DIR}}|/path/to/bin|g' \
+#   sed 's/{{MODEL}}/claude-sonnet-4-5/g; s/{{RUN_ID}}/20260414/g; s|{{FORGE_API_URL}}|${FORGE_BASE_URL:-https://forge.3dl.dev}|g; s|{{FORGE_API_KEY}}|mallcop-sk-...|g; s|{{TOOL_BIN_DIR}}|/path/to/bin|g' \
 #     charts/mallcop-operational.toml.tmpl > mallcop-operational.toml
 
 [identity]

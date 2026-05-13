@@ -40,7 +40,7 @@ events:
   event_type: role_assignment
   actor: contrib-user
   action: add_role_assignment
-  target: sub-169efd95/resourceGroups/mallcop-rg
+  target: sub-00000000/resourceGroups/mallcop-rg
   severity: warn
   metadata:
     ip: 203.0.113.77
@@ -48,9 +48,9 @@ events:
     role: Contributor
     principal_id: contrib-user
     principal_type: User
-    subscription_id: 169efd95-5e00-42f9-8e65-a1892791ed9a
+    subscription_id: 00000000-0000-0000-0000-000000000000
     resource_group: mallcop-rg
-    scope: /subscriptions/169efd95-5e00-42f9-8e65-a1892791ed9a/resourceGroups/mallcop-rg
+    scope: /subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/mallcop-rg
   raw: {}
 
 baseline:
@@ -91,27 +91,27 @@ baseline:
     azure:resource_list:ci-bot: 4401
     azure:login:tf-automation: 445
   relationships:
-    contrib-user:sub-169efd95/resourceGroups/atom-rg:
+    contrib-user:sub-00000000/resourceGroups/atom-rg:
       count: 412
       first_seen: '2024-03-01'
       last_seen: '2026-03-13'
-    contrib-user:sub-169efd95/resourceGroups/opensign-rg:
+    contrib-user:sub-00000000/resourceGroups/opensign-rg:
       count: 67
       first_seen: '2025-01-10'
       last_seen: '2026-02-28'
-    contrib-user:sub-169efd95:
+    contrib-user:sub-00000000:
       count: 23
       first_seen: '2024-03-01'
       last_seen: '2026-03-10'
-    admin-user:sub-169efd95/resourceGroups/atom-rg:
+    admin-user:sub-00000000/resourceGroups/atom-rg:
       count: 156
       first_seen: '2024-01-15'
       last_seen: '2026-03-09'
-    ci-bot:sub-169efd95/resourceGroups/atom-rg:
+    ci-bot:sub-00000000/resourceGroups/atom-rg:
       count: 4401
       first_seen: '2024-03-01'
       last_seen: '2026-03-09'
-    tf-automation:sub-169efd95:
+    tf-automation:sub-00000000:
       count: 167
       first_seen: '2024-03-15'
       last_seen: '2026-03-06'

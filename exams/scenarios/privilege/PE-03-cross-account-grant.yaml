@@ -37,7 +37,7 @@ events:
   event_type: role_assignment
   actor: admin-user
   action: add_role_assignment
-  target: sub-169efd95/resourceGroups/atom-rg
+  target: sub-00000000/resourceGroups/atom-rg
   severity: critical
   metadata:
     ip: 192.0.2.41
@@ -46,7 +46,7 @@ events:
     principal_id: ext-sp-9c2f1a8b-4d3e-4f5a-b6c7-d8e9f0a1b2c3
     principal_type: ServicePrincipal
     principal_tenant_id: ffffffff-dead-beef-dead-000000000000
-    scope: /subscriptions/169efd95-5e00-42f9-8e65-a1892791ed9a/resourceGroups/atom-rg
+    scope: /subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/atom-rg
   raw: {}
 baseline:
   known_entities:
@@ -95,27 +95,27 @@ baseline:
     azure:login:tf-automation: 445
     azure:write:tf-automation: 312
   relationships:
-    admin-user:sub-169efd95/resourceGroups/atom-rg:
+    admin-user:sub-00000000/resourceGroups/atom-rg:
       count: 156
       first_seen: '2024-01-15'
       last_seen: '2026-03-09'
-    admin-user:sub-169efd95/resourceGroups/opensign-rg:
+    admin-user:sub-00000000/resourceGroups/opensign-rg:
       count: 89
       first_seen: '2025-05-20'
       last_seen: '2026-03-08'
-    admin-user:sub-169efd95/resourceGroups/rudi-dev:
+    admin-user:sub-00000000/resourceGroups/rudi-dev:
       count: 67
       first_seen: '2025-06-01'
       last_seen: '2026-03-07'
-    admin-user:sub-169efd95/resourceGroups/3dl-os:
+    admin-user:sub-00000000/resourceGroups/3dl-os:
       count: 34
       first_seen: '2025-07-10'
       last_seen: '2026-03-05'
-    admin-user:sub-169efd95/resourceGroups/atom-state-rg:
+    admin-user:sub-00000000/resourceGroups/atom-state-rg:
       count: 28
       first_seen: '2024-04-01'
       last_seen: '2026-02-28'
-    admin-user:sub-169efd95:
+    admin-user:sub-00000000:
       count: 512
       first_seen: '2024-01-01'
       last_seen: '2026-03-09'
@@ -131,15 +131,15 @@ baseline:
       count: 178
       first_seen: '2024-02-01'
       last_seen: '2026-03-07'
-    ci-bot:sub-169efd95/resourceGroups/atom-rg:
+    ci-bot:sub-00000000/resourceGroups/atom-rg:
       count: 4401
       first_seen: '2024-03-01'
       last_seen: '2026-03-09'
-    tf-automation:sub-169efd95:
+    tf-automation:sub-00000000:
       count: 167
       first_seen: '2024-03-15'
       last_seen: '2026-03-06'
-    tf-automation:sub-169efd95/resourceGroups/atom-rg:
+    tf-automation:sub-00000000/resourceGroups/atom-rg:
       count: 89
       first_seen: '2024-03-15'
       last_seen: '2026-03-06'

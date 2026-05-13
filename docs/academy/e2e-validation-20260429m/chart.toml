@@ -225,7 +225,7 @@ poll_interval = "10s"
 
 [inference]
 # Use Forge backend for GLM model (non-Anthropic → ForgeBackend, no OAuth rate limit)
-forge_api_url = "https://forge.3dl.dev"
+forge_api_url = "https://forge.example.com"
 api_key       = "REDACTED-FORGE-KEY-EC5"
 
 [agents]
