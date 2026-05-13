@@ -71,7 +71,7 @@ jobs:
                 "./cmd/${CMD}/"
             done
 
-            tar -czf "${OUTDIR}/mallcop-legion-${LABEL}.tar.gz" \
+            tar -czf "${OUTDIR}/mallcop-${LABEL}.tar.gz" \
               -C "${OUTDIR}/stage-${LABEL}" \
               bin
 
@@ -90,12 +90,12 @@ jobs:
         run: |
           cd dist
           for LABEL in linux-amd64 linux-arm64 darwin-arm64; do
-            if [ ! -f "mallcop-legion-${LABEL}.tar.gz" ]; then
-              echo "FATAL: missing mallcop-legion-${LABEL}.tar.gz"
+            if [ ! -f "mallcop-${LABEL}.tar.gz" ]; then
+              echo "FATAL: missing mallcop-${LABEL}.tar.gz"
               exit 1
             fi
-            if [ ! -f "mallcop-legion-${LABEL}.tar.gz.sha256" ]; then
-              echo "FATAL: missing mallcop-legion-${LABEL}.tar.gz.sha256"
+            if [ ! -f "mallcop-${LABEL}.tar.gz.sha256" ]; then
+              echo "FATAL: missing mallcop-${LABEL}.tar.gz.sha256"
               exit 1
             fi
           done
@@ -128,7 +128,7 @@ jobs:
           {
             echo "## Contents"
             echo ""
-            echo "Each tarball contains \`bin/\` with all mallcop-legion binaries:"
+            echo "Each tarball contains \`bin/\` with all mallcop binaries:"
             echo ""
             echo "- \`baseline\` — baseline engine + CLI"
             echo "- \`detector-*\` — 13 security detectors"
@@ -140,10 +140,10 @@ jobs:
             echo ""
             echo '```bash'
             echo "# Download (replace PLATFORM with linux-amd64, linux-arm64, or darwin-arm64)"
-            echo "curl -fsSLO https://github.com/baron-3dl/mallcop-legion/releases/download/${VERSION}/mallcop-legion-PLATFORM.tar.gz"
-            echo "curl -fsSLO https://github.com/baron-3dl/mallcop-legion/releases/download/${VERSION}/mallcop-legion-PLATFORM.tar.gz.sha256"
-            echo "sha256sum -c mallcop-legion-PLATFORM.tar.gz.sha256"
-            echo "tar xzf mallcop-legion-PLATFORM.tar.gz"
+            echo "curl -fsSLO https://github.com/mallcop-app/mallcop/releases/download/${VERSION}/mallcop-PLATFORM.tar.gz"
+            echo "curl -fsSLO https://github.com/mallcop-app/mallcop/releases/download/${VERSION}/mallcop-PLATFORM.tar.gz.sha256"
+            echo "sha256sum -c mallcop-PLATFORM.tar.gz.sha256"
+            echo "tar xzf mallcop-PLATFORM.tar.gz"
             echo "ls bin/"
             echo '```'
             echo ""
@@ -176,5 +176,5 @@ jobs:
           body_path: /tmp/release_notes.md
           generate_release_notes: false
           files: |
-            dist/mallcop-legion-*.tar.gz
-            dist/mallcop-legion-*.tar.gz.sha256
+            dist/mallcop-*.tar.gz
+            dist/mallcop-*.tar.gz.sha256
