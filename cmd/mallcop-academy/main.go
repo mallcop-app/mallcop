@@ -35,7 +35,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/thirdiv/mallcop-legion/internal/exam"
+	"github.com/mallcop-app/mallcop/internal/exam"
 )
 
 // ---- Campfire messaging -------------------------------------------------------
@@ -1189,7 +1189,7 @@ func walkGoMod(start string) string {
 	for {
 		modPath := filepath.Join(dir, "go.mod")
 		if b, err := os.ReadFile(modPath); err == nil {
-			if strings.Contains(string(b), "module github.com/thirdiv/mallcop-legion") {
+			if strings.Contains(string(b), "module github.com/mallcop-app/mallcop") {
 				return dir
 			}
 		}

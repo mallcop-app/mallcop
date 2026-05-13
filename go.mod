@@ -1,4 +1,4 @@
-module github.com/thirdiv/mallcop-legion
+module github.com/mallcop-app/mallcop
 
 go 1.25.0
 

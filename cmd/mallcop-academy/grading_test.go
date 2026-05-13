@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/thirdiv/mallcop-legion/internal/exam"
+	"github.com/mallcop-app/mallcop/internal/exam"
 )
 
 // ---- Unit tests: per-axis pass/fail/n/a -----------------------------------------

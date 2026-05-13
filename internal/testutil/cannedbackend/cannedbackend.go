@@ -4,7 +4,7 @@
 // It lives under internal/testutil/ (not a _test.go file) so that both
 // test/budget and test/quality can import it without cross-package build-tag
 // complications.  The package is in internal/ so it is only accessible to
-// modules rooted at github.com/thirdiv/mallcop-legion.
+// modules rooted at github.com/mallcop-app/mallcop.
 //
 // For budget tests the canned responses cycle through triage/investigate/heal
 // resolutions.  For the exam smoke test (ID-01-new-actor-benign-onboarding)

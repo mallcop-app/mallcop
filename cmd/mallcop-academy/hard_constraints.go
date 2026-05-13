@@ -15,7 +15,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/thirdiv/mallcop-legion/internal/exam"
+	"github.com/mallcop-app/mallcop/internal/exam"
 )
 
 // alwaysEscalateDetectors is the literal port of ALWAYS_ESCALATE_DETECTORS

@@ -309,7 +309,7 @@ func spawnClaudeCodeFix(input spawnClaudeFixInput, branch string) (*spawnClaudeF
 // ---- spawn glue (inlined from legion/internal/inference) -----------------
 //
 // legion's inference package is github.com/3dl-dev/legion/internal/inference,
-// which is not a dependency of github.com/thirdiv/mallcop-legion. Rather than
+// which is not a dependency of github.com/mallcop-app/mallcop. Rather than
 // introduce a cross-module dependency (with all the version-pinning overhead),
 // we inline the ~50 lines of spawn glue here. The interface is identical.
 

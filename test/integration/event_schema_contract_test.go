@@ -4,7 +4,7 @@
 //
 // The Event struct is defined in both repos:
 //   - github.com/thirdiv/mallcop-connectors/pkg/event
-//   - github.com/thirdiv/mallcop-legion/pkg/event
+//   - github.com/mallcop-app/mallcop/pkg/event
 //
 // They must remain structurally identical (same fields, types, JSON tags).
 // This test catches drift in two ways:
@@ -35,7 +35,7 @@ import (
 	"testing"
 	"time"
 
-	legionEvent "github.com/thirdiv/mallcop-legion/pkg/event"
+	legionEvent "github.com/mallcop-app/mallcop/pkg/event"
 )
 
 // ---- helpers ----------------------------------------------------------------

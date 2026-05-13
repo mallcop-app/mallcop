@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/thirdiv/mallcop-legion/pkg/baseline"
-	"github.com/thirdiv/mallcop-legion/pkg/event"
+	"github.com/mallcop-app/mallcop/pkg/baseline"
+	"github.com/mallcop-app/mallcop/pkg/event"
 )
 
 // makeEvent constructs a test event with the given actor and timestamp.

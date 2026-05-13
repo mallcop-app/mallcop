@@ -15,7 +15,7 @@ import (
 	"encoding/json"
 	"strings"
 
-	"github.com/thirdiv/mallcop-legion/internal/exam"
+	"github.com/mallcop-app/mallcop/internal/exam"
 )
 
 // AxisResult is one of: "pass", "fail", "n/a", "pending".

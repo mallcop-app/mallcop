@@ -6,9 +6,9 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/thirdiv/mallcop-legion/pkg/baseline"
-	"github.com/thirdiv/mallcop-legion/pkg/event"
-	"github.com/thirdiv/mallcop-legion/pkg/finding"
+	"github.com/mallcop-app/mallcop/pkg/baseline"
+	"github.com/mallcop-app/mallcop/pkg/event"
+	"github.com/mallcop-app/mallcop/pkg/finding"
 )
 
 // depTamperEventTypes are event types that carry dependency change signals.

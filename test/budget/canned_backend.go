@@ -11,7 +11,7 @@
 // See internal/testutil/cannedbackend/cannedbackend.go for the full source.
 package budget
 
-import "github.com/thirdiv/mallcop-legion/internal/testutil/cannedbackend"
+import "github.com/mallcop-app/mallcop/internal/testutil/cannedbackend"
 
 // CannedBackend re-exports the shared type for use in chain_budget_test.go.
 type CannedBackend = cannedbackend.CannedBackend

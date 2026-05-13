@@ -28,7 +28,7 @@ import (
 	"runtime"
 	"strings"
 
-	"github.com/thirdiv/mallcop-legion/internal/exam"
+	"github.com/mallcop-app/mallcop/internal/exam"
 )
 
 // ReadySender posts messages to a campfire and returns the posted message ID.

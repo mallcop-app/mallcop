@@ -8,7 +8,7 @@ import (
 	"sort"
 	"time"
 
-	"github.com/thirdiv/mallcop-legion/pkg/event"
+	"github.com/mallcop-app/mallcop/pkg/event"
 )
 
 // SchemaVersion is incremented on any breaking change to the baseline JSON format.

@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/thirdiv/mallcop-legion/pkg/resolution"
+	"github.com/mallcop-app/mallcop/pkg/resolution"
 )
 
 type config struct {

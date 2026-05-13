@@ -7,7 +7,7 @@ import (
 	"runtime"
 	"testing"
 
-	"github.com/thirdiv/mallcop-legion/internal/exam"
+	"github.com/mallcop-app/mallcop/internal/exam"
 )
 
 // scenarioPath resolves a path relative to the repo root (two levels up from

@@ -48,7 +48,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/thirdiv/mallcop-legion/internal/testutil/cannedbackend"
+	"github.com/mallcop-app/mallcop/internal/testutil/cannedbackend"
 )
 
 // repoRootQuality resolves the repository root from this test file's location.

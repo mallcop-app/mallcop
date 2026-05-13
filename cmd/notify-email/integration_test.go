@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/thirdiv/mallcop-legion/pkg/resolution"
+	"github.com/mallcop-app/mallcop/pkg/resolution"
 )
 
 func TestIntegration_Email(t *testing.T) {

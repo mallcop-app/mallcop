@@ -19,7 +19,7 @@ import (
 	"text/template"
 	"time"
 
-	"github.com/thirdiv/mallcop-legion/internal/exam"
+	"github.com/mallcop-app/mallcop/internal/exam"
 )
 
 // scenarioPassResult summarises one scenario's pass/fail status for the

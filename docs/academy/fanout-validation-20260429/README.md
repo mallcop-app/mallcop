@@ -104,9 +104,9 @@ The triage and investigate disposition agents ARE present (they were set up in e
 
 Full test suite GREEN:
 ```
-ok  github.com/thirdiv/mallcop-legion/cmd/mallcop-academy        10.843s
-ok  github.com/thirdiv/mallcop-legion/cmd/mallcop-investigate-tools  72.877s
-ok  github.com/thirdiv/mallcop-legion/... (all packages)         PASS
+ok  github.com/mallcop-app/mallcop/cmd/mallcop-academy        10.843s
+ok  github.com/mallcop-app/mallcop/cmd/mallcop-investigate-tools  72.877s
+ok  github.com/mallcop-app/mallcop/... (all packages)         PASS
 ```
 
 New tests added:

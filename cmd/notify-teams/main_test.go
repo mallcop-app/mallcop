@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/thirdiv/mallcop-legion/pkg/resolution"
+	"github.com/mallcop-app/mallcop/pkg/resolution"
 )
 
 var sampleResolution = resolution.Resolution{

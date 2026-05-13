@@ -11,8 +11,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/thirdiv/mallcop-legion/pkg/finding"
-	"github.com/thirdiv/mallcop-legion/pkg/resolution"
+	"github.com/mallcop-app/mallcop/pkg/finding"
+	"github.com/mallcop-app/mallcop/pkg/resolution"
 )
 
 const (
