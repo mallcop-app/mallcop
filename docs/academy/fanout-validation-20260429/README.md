@@ -45,7 +45,7 @@ Rendered chart: `.run/fanout-validate-20260429/operational-final.toml`
 **Status: CONFIRMED**
 
 ```
-curl -s https://forge.3dl.dev/health → {"status":"ok"}
+curl -s https://forge.example.com/health → {"status":"ok"}
 FORGE_API_KEY present (forge-sk-9b36..., 40 chars)
 ```
 
@@ -84,7 +84,7 @@ Verifies that the academy watch loop correctly classifies a full fan-out chain:
 
 The `we start` automaton booted successfully against the rendered chart:
 - Legion version: v0.6.1 ✓
-- Forge API key valid: `https://forge.3dl.dev/health` → 200 OK ✓
+- Forge API key valid: `https://forge.example.com/health` → 200 OK ✓
 - Capability seeds loaded: triage, investigate, heal, judge, report ✓
 - Budget configured: 5M tokens/session, 15K/task ✓
 - Confidence gate: `enabled=true`, `score_floor=0.55` verified in rendered chart ✓

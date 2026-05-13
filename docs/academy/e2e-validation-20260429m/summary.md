@@ -49,7 +49,7 @@ The tools_used and iterations failures are expected artifacts of the sleep-agent
 ## Infrastructure Used
 
 - Automaton: we v0.6.1 (mallcop-e2e-ac01-20260429m)
-- Model: glm-4.7-flash via Forge (https://forge.3dl.dev)
+- Model: glm-4.7-flash via Forge (https://forge.example.com)
 - Work campfire: 49b36ad1e06dcc21...
 - Chart: .run/e2e-ac01-20260429m/chart.toml
 

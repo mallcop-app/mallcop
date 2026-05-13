@@ -6,7 +6,7 @@ mallcop-legion integration tests use the existing dogfood deployment infrastruct
 
 The mallcop-deploy project maintains a production-like infrastructure (dogfood) that serves as the source of truth for integration test fixtures. Tests load configuration from this fixture source rather than spinning up sandboxes or mocks.
 
-**IMPORTANT:** mallcop-deploy is production dogfood, not a sandbox. Integration tests **must use read-only scans only** and never make destructive calls against the 3dl-dev organization.
+**IMPORTANT:** mallcop-deploy is production dogfood, not a sandbox. Integration tests **must use read-only scans only** and never make destructive calls against the example-org organization.
 
 ## Configuration Source
 
@@ -20,8 +20,8 @@ This file is the single source of truth. Tests should load from this file at run
 ## GitHub App Authentication
 
 ### Fixture Details
-- **Organization**: `3dl-dev`
-- **Installation ID**: `116376961`
+- **Organization**: `example-org`
+- **Installation ID**: `123456789`
 - **Secrets backend**: environment variables (`env`)
 
 ### Loading in Tests
@@ -33,8 +33,8 @@ secrets:
   backend: env
 connectors:
   github:
-    org: 3dl-dev
-    installation_id: 116376961
+    org: example-org
+    installation_id: 123456789
 ```
 
 To use in integration tests:
@@ -48,7 +48,7 @@ See the secrets backend documentation (env provider) for how credentials are res
 ### Usage Pattern
 
 Tests using GitHub App auth:
-1. Parse `org: 3dl-dev` and `installation_id: 116376961` from the YAML
+1. Parse `org: example-org` and `installation_id: 123456789` from the YAML
 2. Obtain the app private key from the secrets backend (env)
 3. Use the app private key to generate JWT tokens for API calls
 4. All GitHub scans are **read-only only** — no commits, no branch protection changes, no destructive mutations
@@ -182,7 +182,7 @@ campfireID := config.Delivery.CampfireID
 
 mallcop-deploy is a real, production-like deployment used for internal testing. It is **not** a sandbox or test-only environment.
 
-- **All scans run against real GitHub organizations** (3dl-dev is a real org we control)
+- **All scans run against real GitHub organizations** (example-org is a real org we control)
 - **Do not make destructive calls** — no branch pushes, no permission changes, no webhook modifications
 - **Read-only operations only** — query findings, check scan status, verify delivery
 - **Think before testing** — consider the impact on the real dogfood environment

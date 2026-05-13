@@ -146,7 +146,7 @@ transport_dir = "/tmp/campfire"
 # [pipeline]
 # connector_bin      = "github"                    # from mallcop-connectors
 # connector_org      = "3dl-dev"
-# connector_install  = "116376961"
+# connector_install  = "123456789"
 # detector_bin       = "detector-unusual-login"    # from this repo
 # context_bin        = "mallcop-finding-context"   # from this repo
 # baseline_path      = "test/fixtures/baseline.json"

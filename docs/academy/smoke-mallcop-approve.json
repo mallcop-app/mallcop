@@ -2,8 +2,8 @@
   "fixture_id": "smoke-mallcop-approve",
   "description": "Smoke 2: synthetic approval gate posted to operator campfire; mallcop fetches finding context, prompts operator, operator approves with text, mallcop calls approve-action with operator's exact words; gate fulfills.",
   "prerequisites": {
-    "forge_base_url": "${FORGE_BASE_URL:-https://forge.3dl.dev}",
-    "health_check": "curl -sf \"${FORGE_BASE_URL:-https://forge.3dl.dev}/health\"",
+    "forge_base_url": "https://forge.example.com",
+    "health_check": "curl -sf \"https://forge.example.com/health\"",
     "operator_deployment": "mallcop agent must be deployed with operator campfire configured and mallcop-sk-* key provisioned",
     "note": "LLM smoke cannot be run without operator deployment. See smoke_prerequisites below."
   },
