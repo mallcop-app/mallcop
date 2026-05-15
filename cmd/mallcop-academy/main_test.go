@@ -1277,7 +1277,7 @@ func TestWatchLoop_TimeWindowFilter(t *testing.T) {
 	afterWindowTs := now.Add(2 * time.Hour).UnixNano()   // 2h after  — outside window (> deadline+5s)
 
 	// In-window work:create (chain extension for a hypothetical escalation step).
-	// References "in-window-chain-id" as its id. Should be processed by the
+	// References "mock-msg-1" as its id. Should be processed by the
 	// work:create map-building loop and registered.
 	inWindowCreatePayload, _ := json.Marshal(map[string]interface{}{
 		"id":    "mock-msg-1", // same id as the posted scenario — extends chain
