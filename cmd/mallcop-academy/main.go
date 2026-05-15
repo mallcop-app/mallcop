@@ -222,9 +222,17 @@ type trackedScenario struct {
 	toolsUsedInInvest   bool   // true if any investigate step had tool calls
 	maxInvestIterations int    // highest iteration count seen across investigate workers
 
+	// Campfire-sourced usage (mallcoppro-237 A2): accumulated from tool-usage
+	// tagged messages posted by resolve-finding / escalate-to-investigator /
+	// escalate-to-stage-c on the work campfire. Matched by finding_id during
+	// the watch loop. Non-zero when at least one terminal tool call was observed.
+	toolUsageCalls     int   // sum of forge_calls fields across tool-usage messages
+	toolUsageTokensIn  int64 // sum of tokens_in fields
+	toolUsageTokensOut int64 // sum of tokens_out fields
+
 	// F4B/F4C wiring — set after judge runs (single-pass write).
-	scenario        interface{} // *exam.Scenario, stored as interface{} to avoid circular import issues
-	judgeResult     *JudgeResult
+	scenario    interface{} // *exam.Scenario, stored as interface{} to avoid circular import issues
+	judgeResult *JudgeResult
 }
 
 // ---- Close payload parsing ----------------------------------------------------
@@ -705,6 +713,13 @@ func academy(sender Sender, args runArgs) error {
 				continue
 			}
 
+			// tool-usage messages (mallcoppro-237 A2): accumulate before the
+			// work:close/work:output guard so they are never skipped by the
+			// isClose/isOutput filter below.
+			if hasTag(msg.Tags, "tool-usage") {
+				accumulateToolUsage(msg, tracked)
+			}
+
 			// Accept both work:close and work:output messages.
 			// work:close is posted by we automaton-manager (resolution:done always).
 			// work:output with action:* tag is posted by resolve-finding tool with
@@ -1013,6 +1028,64 @@ func isInvestigateSkill(skill string) bool {
 		skill == "task:investigate-merge"
 }
 
+// ---- Tool-usage accumulation (mallcoppro-237 A2) --------------------------------
+
+// toolUsagePayload is the JSON payload shape of a tool-usage message posted by
+// resolve-finding / escalate-to-investigator / escalate-to-stage-c.
+type toolUsagePayload struct {
+	ForgeCalls int    `json:"forge_calls"`
+	TokensIn   int64  `json:"tokens_in"`
+	TokensOut  int64  `json:"tokens_out"`
+	FindingID  string `json:"finding_id"`
+	ItemID     string `json:"item_id"`
+}
+
+// accumulateToolUsage processes a tool-usage tagged campfire message and adds
+// its forge_calls/tokens_in/tokens_out to the matching scenario's accumulators.
+// Matching is done via finding_id tag (finding:<id>) or the payload finding_id field.
+// Called from the watch loop for every message tagged tool-usage.
+// tracked must not be held under any scenario lock when called.
+func accumulateToolUsage(msg cfMessage, tracked map[string]*trackedScenario) {
+	if msg.Payload == "" {
+		return
+	}
+	var p toolUsagePayload
+	if err := json.Unmarshal([]byte(msg.Payload), &p); err != nil {
+		return
+	}
+	if p.ForgeCalls == 0 {
+		return
+	}
+
+	// Extract finding_id from tags first (finding:<id>), then payload field.
+	findingID := p.FindingID
+	if findingID == "" {
+		for _, tag := range msg.Tags {
+			if strings.HasPrefix(tag, "finding:") && !strings.HasPrefix(tag, "finding:annotation") {
+				findingID = strings.TrimPrefix(tag, "finding:")
+				break
+			}
+		}
+	}
+	if findingID == "" {
+		return
+	}
+
+	for _, ts := range tracked {
+		ts.mu.Lock()
+		match := ts.findingID == findingID
+		if match {
+			ts.toolUsageCalls += p.ForgeCalls
+			ts.toolUsageTokensIn += p.TokensIn
+			ts.toolUsageTokensOut += p.TokensOut
+		}
+		ts.mu.Unlock()
+		if match {
+			return
+		}
+	}
+}
+
 // ---- JSON output helpers ------------------------------------------------------
 
 // writeScenarioRecord writes a ScenarioRecord to
@@ -1040,9 +1113,22 @@ func writeScenarioRecord(ts *trackedScenario, runID, targetCampfire, outputDir s
 		rec.TerminalItemID = ts.terminalItemID
 	}
 
-	// Forge metering: query usage for the scenario's time window.
-	// Non-fatal: failure results in zero counts (metering miss, not a pipeline failure).
-	if len(uf) > 0 && uf[0] != nil {
+	// Forge metering: prefer campfire-sourced usage (mallcoppro-237 A2) over the
+	// HTTP billing API fetcher. The campfire path reads tool-usage messages posted
+	// by resolve-finding/escalate-to-investigator/escalate-to-stage-c, which counts
+	// forge_calls as 1 per terminal tool invocation. This avoids the 403 returned by
+	// GET /v1/billing/accounts/{id}/usage for customer keys (RoleAgent auth only).
+	//
+	// Priority:
+	//   1. Campfire-accumulated data (ts.toolUsageCalls > 0): nonzero, use directly.
+	//   2. HTTP fetcher (fallback when campfire data is absent — e.g. old deployments
+	//      without the tool-usage emission, or FORGE_API_KEY set with RoleTenant).
+	if ts.toolUsageCalls > 0 {
+		rec.ForgeCalls = ts.toolUsageCalls
+		rec.TokensIn = ts.toolUsageTokensIn
+		rec.TokensOut = ts.toolUsageTokensOut
+		// CostUSD not available from campfire path (no billing access); left zero.
+	} else if len(uf) > 0 && uf[0] != nil {
 		until := time.Now()
 		if ts.terminal {
 			until = ts.terminalAt

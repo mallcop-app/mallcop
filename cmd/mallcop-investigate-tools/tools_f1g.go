@@ -344,9 +344,17 @@ func runResolveFinding(inputJSON string) error {
 	// campfire for terminal events). When the two collapse to the same
 	// campfire (operational fallback in activate), this is a no-op via
 	// the early-return inside the helper.
-	if workCampfireID := os.Getenv("MALLCOP_WORK_CAMPFIRE_ID"); workCampfireID != "" && workCampfireID != campfireID {
+	workCampfireID := os.Getenv("MALLCOP_WORK_CAMPFIRE_ID")
+	if workCampfireID != "" && workCampfireID != campfireID {
 		emitScenarioTerminalWorkOutput(workCampfireID, input.FindingID, input.Action, input.Reason, os.Getenv("MALLCOP_ITEM_ID"))
 	}
+	// Emit tool-usage accounting message so academy can accumulate forge_calls
+	// without needing billing API access (mallcoppro-237 A2).
+	usageCampfire := workCampfireID
+	if usageCampfire == "" {
+		usageCampfire = campfireID
+	}
+	emitToolUsage(usageCampfire, input.FindingID, os.Getenv("MALLCOP_ITEM_ID"))
 
 	return emitJSON(map[string]interface{}{
 		"finding_id": input.FindingID,
@@ -501,6 +509,55 @@ func emitScenarioTerminalWorkOutput(workCampfireID, findingID, action, summary, 
 	}
 }
 
+// emitToolUsage posts a tool-usage message to the work campfire with forge_calls=1
+// plus optional token counts from MALLCOP_SESSION_TOKENS_IN / MALLCOP_SESSION_TOKENS_OUT
+// env vars (A2.b forward-compat path — left as 0 when not set). Academy reads these
+// messages and accumulates them into per-scenario forge_calls/tokens_in/tokens_out
+// without needing billing API access (mallcoppro-237 A2).
+// Best-effort: errors are logged but never returned to the caller.
+func emitToolUsage(campfireID, findingID, itemID string) {
+	if campfireID == "" {
+		return
+	}
+	tokensIn, _ := parseInt64Env(os.Getenv("MALLCOP_SESSION_TOKENS_IN"))
+	tokensOut, _ := parseInt64Env(os.Getenv("MALLCOP_SESSION_TOKENS_OUT"))
+	payload := map[string]interface{}{
+		"forge_calls": 1,
+		"tokens_in":   tokensIn,
+		"tokens_out":  tokensOut,
+		"timestamp":   nowRFC3339(),
+	}
+	if findingID != "" {
+		payload["finding_id"] = findingID
+	}
+	if itemID != "" {
+		payload["item_id"] = itemID
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "tool-usage: marshal: %v\n", err)
+		return
+	}
+	tags := []string{"tool-usage"}
+	if findingID != "" {
+		tags = append(tags, "finding:"+findingID)
+	}
+	if _, sendErr := cfSend(campfireID, string(body), tags); sendErr != nil {
+		fmt.Fprintf(os.Stderr, "tool-usage: campfire send: %v\n", sendErr)
+	}
+}
+
+// parseInt64Env parses an integer from an env var string.
+// Returns 0 and an error when s is empty or not an integer.
+func parseInt64Env(s string) (int64, error) {
+	if s == "" {
+		return 0, fmt.Errorf("empty")
+	}
+	var n int64
+	_, err := fmt.Sscanf(s, "%d", &n)
+	return n, err
+}
+
 // escalateToInvestigatorInput is the input_schema for escalate-to-investigator.
 type escalateToInvestigatorInput struct {
 	FindingID  string  `json:"finding_id"`
@@ -543,6 +600,8 @@ func runEscalateToInvestigator(inputJSON string) error {
 	// which carries no finding/scenario tag, and the bakeoff never grades
 	// non-hard-constraint scenarios as terminal.
 	emitScenarioTerminalWorkOutput(workCampfireID, input.FindingID, "escalated", input.Reason, parentItemID)
+	// Emit tool-usage accounting for academy (mallcoppro-237 A2).
+	emitToolUsage(workCampfireID, input.FindingID, parentItemID)
 
 	return emitJSON(map[string]interface{}{
 		"item_id":    itemID,
@@ -599,6 +658,8 @@ func runEscalateToStageC(inputJSON string) error {
 
 	// Terminal signal for academy — see emitScenarioTerminalWorkOutput.
 	emitScenarioTerminalWorkOutput(workCampfireID, input.FindingID, "escalated", input.Reason, parentItemID)
+	// Emit tool-usage accounting for academy (mallcoppro-237 A2).
+	emitToolUsage(workCampfireID, input.FindingID, parentItemID)
 
 	return emitJSON(map[string]interface{}{
 		"item_id":      itemID,
