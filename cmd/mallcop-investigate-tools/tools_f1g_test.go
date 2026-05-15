@@ -793,6 +793,158 @@ func TestMessageOperator_PostsToOperatorCampfire(t *testing.T) {
 	}
 }
 
+// ---- tool-usage emission (mallcoppro-237 Fix #2) ------------------------------------
+
+// findToolUsageMessage returns the first message with tag "tool-usage" and a
+// "forge_calls" field in its payload, or nil if no such message exists.
+func findToolUsageMessage(msgs []map[string]interface{}) map[string]interface{} {
+	for _, msg := range msgs {
+		if !hasTagInMessages([]map[string]interface{}{msg}, "tool-usage") {
+			continue
+		}
+		payload, ok := msg["payload"].(string)
+		if !ok {
+			continue
+		}
+		var p map[string]interface{}
+		if err := json.Unmarshal([]byte(payload), &p); err != nil {
+			continue
+		}
+		if _, has := p["forge_calls"]; has {
+			return msg
+		}
+	}
+	return nil
+}
+
+// toolUsagePayload extracts the forge_calls count from a tool-usage message map.
+func toolUsagePayload(msg map[string]interface{}) (forgeCalls int, findingID string) {
+	payload, ok := msg["payload"].(string)
+	if !ok {
+		return 0, ""
+	}
+	var p map[string]interface{}
+	if err := json.Unmarshal([]byte(payload), &p); err != nil {
+		return 0, ""
+	}
+	if v, ok := p["forge_calls"].(float64); ok {
+		forgeCalls = int(v)
+	}
+	if v, ok := p["finding_id"].(string); ok {
+		findingID = v
+	}
+	return forgeCalls, findingID
+}
+
+// TestToolEmitsToolUsage_ResolveFinding verifies that resolve-finding posts a
+// tool-usage message with forge_calls=1 to the campfire (mallcoppro-237 Fix #2).
+func TestToolEmitsToolUsage_ResolveFinding(t *testing.T) {
+	cfBin := requireCFF(t)
+	cfHome, campfireID := newTestCampfire(t, cfBin)
+
+	captureStdout(t, func() {
+		err := runToolWithEnv(t, "resolve-finding",
+			`{"finding_id":"fnd-usage-resolve","action":"resolved","reason":"Confirmed benign. No further action.","confidence":5}`,
+			"MALLCOP_CAMPFIRE_ID", campfireID,
+			"CF_HOME", cfHome,
+		)
+		if err != nil {
+			t.Errorf("resolve-finding: unexpected error: %v", err)
+		}
+	})
+
+	msgs := readCampfireMessages(t, cfBin, cfHome, campfireID)
+	toolMsg := findToolUsageMessage(msgs)
+	if toolMsg == nil {
+		t.Fatalf("expected tool-usage message with forge_calls in campfire after resolve-finding; got %d messages", len(msgs))
+	}
+	forgeCalls, findingID := toolUsagePayload(toolMsg)
+	if forgeCalls != 1 {
+		t.Errorf("forge_calls = %d, want 1", forgeCalls)
+	}
+	if findingID != "fnd-usage-resolve" {
+		t.Errorf("finding_id = %q, want fnd-usage-resolve", findingID)
+	}
+	// Tag finding:<id> must be present for academy aggregation by scenario.
+	if !hasTagInMessages(msgs, "tool-usage") {
+		t.Errorf("expected tool-usage tag in campfire messages")
+	}
+}
+
+// TestToolEmitsToolUsage_EscalationTools verifies that the three escalation
+// tools (escalate-to-investigator, escalate-to-stage-c, escalate-to-deep) each
+// post a tool-usage message with forge_calls=1 referencing the finding_id
+// (mallcoppro-237 Fix #2). Table-driven to keep setup DRY.
+func TestToolEmitsToolUsage_EscalationTools(t *testing.T) {
+	cfBin := requireCFF(t)
+
+	cases := []struct {
+		name      string
+		tool      string
+		inputJSON string
+		envKey    string // campfire env var the tool reads
+		findingID string
+	}{
+		{
+			name:      "escalate-to-investigator",
+			tool:      "escalate-to-investigator",
+			inputJSON: `{"finding_id":"fnd-usage-inv","reason":"Needs deeper look — unusual lateral movement pattern.","confidence":2}`,
+			envKey:    "MALLCOP_WORK_CAMPFIRE_ID",
+			findingID: "fnd-usage-inv",
+		},
+		{
+			name:      "escalate-to-stage-c",
+			tool:      "escalate-to-stage-c",
+			inputJSON: `{"finding_id":"fnd-usage-sc","reason":"Confirmed malicious — needs action.","action_class":"needs-approval"}`,
+			envKey:    "MALLCOP_WORK_CAMPFIRE_ID",
+			findingID: "fnd-usage-sc",
+		},
+		{
+			name:      "escalate-to-deep",
+			tool:      "escalate-to-deep",
+			inputJSON: `{"finding_id":"fnd-usage-deep","hypothesis":"malicious","partial_transcript_path":"/tmp/fnd-usage-deep-partial.md"}`,
+			envKey:    "MALLCOP_WORK_CAMPFIRE_ID",
+			findingID: "fnd-usage-deep",
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			cfHome, campfireID := newTestCampfire(t, cfBin)
+
+			captureStdout(t, func() {
+				err := runToolWithEnv(t, tc.tool, tc.inputJSON,
+					tc.envKey, campfireID,
+					"MALLCOP_ITEM_ID", "item-usage-test",
+					"CF_HOME", cfHome,
+				)
+				if err != nil {
+					t.Errorf("%s: unexpected error: %v", tc.tool, err)
+				}
+			})
+
+			msgs := readCampfireMessages(t, cfBin, cfHome, campfireID)
+			toolMsg := findToolUsageMessage(msgs)
+			if toolMsg == nil {
+				t.Fatalf("%s: expected tool-usage message with forge_calls in campfire; got %d messages", tc.tool, len(msgs))
+			}
+			forgeCalls, findingID := toolUsagePayload(toolMsg)
+			if forgeCalls != 1 {
+				t.Errorf("%s: forge_calls = %d, want 1", tc.tool, forgeCalls)
+			}
+			if findingID != tc.findingID {
+				t.Errorf("%s: finding_id = %q, want %q", tc.tool, findingID, tc.findingID)
+			}
+			// finding:<id> tag must be on the tool-usage message so academy can match it.
+			wantFindingTag := "finding:" + tc.findingID
+			if !hasTagInMessages([]map[string]interface{}{toolMsg}, wantFindingTag) {
+				t.Errorf("%s: tool-usage message missing tag %q; message tags: %v", tc.tool, wantFindingTag, toolMsg["tags"])
+			}
+		})
+	}
+}
+
 // ---- F1G-d: approve-action ----------------------------------------------------
 
 func TestApproveAction_OperatorReasonRequired(t *testing.T) {

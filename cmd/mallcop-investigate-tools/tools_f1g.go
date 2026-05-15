@@ -710,6 +710,11 @@ func runEscalateToDeep(inputJSON string) error {
 		return fmt.Errorf("escalate-to-deep: %w", err)
 	}
 
+	// Terminal signal for academy — see emitScenarioTerminalWorkOutput.
+	emitScenarioTerminalWorkOutput(workCampfireID, input.FindingID, "escalated", input.Hypothesis, parentItemID)
+	// Emit tool-usage accounting for academy (mallcoppro-237 A2).
+	emitToolUsage(workCampfireID, input.FindingID, parentItemID)
+
 	return emitJSON(map[string]interface{}{
 		"item_id":                itemID,
 		"finding_id":             input.FindingID,
