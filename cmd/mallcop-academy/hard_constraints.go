@@ -3,6 +3,11 @@
 // Findings whose detector matches the always-escalate set go straight to
 // "escalated" without spawning any LLM worker. Ports the March pipeline's
 // check_hard_constraints (mallcop/src/mallcop/resolution_rules.py:48-70)
+//
+// Scenario authoring contract: scenarios whose finding.detector matches a key
+// in alwaysEscalateDetectors MUST set expected.chain_action: escalated.
+// Setting chain_action: resolved is unreachable for these detectors and will
+// deterministically fail evaluation. See docs/exams/scenario-authoring.md.
 // into the Go academy seed step so eval runs avoid spending donuts on
 // scenarios that the system would always escalate by policy anyway.
 //
