@@ -858,6 +858,12 @@ func TestAcademyIntegration_RealCampfire(t *testing.T) {
 		t.Errorf("payload.id = %q, want %q", p.ID, trackingID)
 	}
 
+	// Assert that Finding.ID is the per-run-suffixed form, not the bare YAML finding ID.
+	expectedFindingID := perRunFindingID("fnd_ac_001", "integ-test-001")
+	if p.Finding.ID != expectedFindingID {
+		t.Errorf("Finding.ID = %q, want %q (per-run suffix required)", p.Finding.ID, expectedFindingID)
+	}
+
 	// Post a synthetic work:close referencing the sent message ID.
 	closePayloadBytes, _ := json.Marshal(closePayload{
 		ItemID: sentMsgID,
