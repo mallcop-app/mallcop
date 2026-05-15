@@ -58,6 +58,188 @@ func TestFindingTrackingID_DifferentInputsDifferentOutputs(t *testing.T) {
 	}
 }
 
+// ---- unit: perRunFindingID — cross-run collision prevention (mallcoppro-73b) ---
+
+// TestPerRunFindingID_DistinctAcrossRuns verifies that two scenarios sharing the
+// same base YAML finding ID but different run IDs produce distinct tracked.findingID
+// values, and that a bare (unsuffixed) finding ID does not match either.
+//
+// This is the regression guard for the cross-run finding-ID collision that caused
+// work:output messages to be mis-attributed across bakeoff lanes sharing YAML
+// scenario files.
+func TestPerRunFindingID_DistinctAcrossRuns(t *testing.T) {
+	const baseFindingID = "fnd_shk_005"
+
+	id1 := perRunFindingID(baseFindingID, "bk-lane1")
+	id2 := perRunFindingID(baseFindingID, "bk-lane2")
+
+	if id1 == id2 {
+		t.Errorf("same base finding ID with different run IDs produced the same perRunFindingID: %q", id1)
+	}
+
+	// A bare finding ID (no run suffix) must match neither suffixed form.
+	if id1 == baseFindingID {
+		t.Errorf("perRunFindingID(%q, %q) = %q equals the bare finding ID — not per-run-unique",
+			baseFindingID, "bk-lane1", id1)
+	}
+	if id2 == baseFindingID {
+		t.Errorf("perRunFindingID(%q, %q) = %q equals the bare finding ID — not per-run-unique",
+			baseFindingID, "bk-lane2", id2)
+	}
+}
+
+// TestAcademyMock_PerRunFindingID_TwoRunsSameYAML verifies the academy tracked map:
+// when two scenarios share the same base YAML finding ID but are run under
+// different run IDs, tracked.findingID is distinct for each and a work:output
+// with the bare (unsuffixed) finding ID matches neither scenario.
+func TestAcademyMock_PerRunFindingID_TwoRunsSameYAML(t *testing.T) {
+	const baseFindingID = "fnd_shared_001"
+
+	// Scenario SC-01 with finding.id = baseFindingID, run under run-alpha.
+	scenDirA := t.TempDir()
+	writeMinimalScenario(t, scenDirA, "SC-01", baseFindingID, "detector-shared",
+		"Shared finding scenario", "medium")
+	outDirA := t.TempDir()
+
+	// Scenario SC-01 with finding.id = baseFindingID, run under run-beta.
+	scenDirB := t.TempDir()
+	writeMinimalScenario(t, scenDirB, "SC-01", baseFindingID, "detector-shared",
+		"Shared finding scenario", "medium")
+	outDirB := t.TempDir()
+
+	// Run alpha: inject a work:output with the BARE finding ID (finding:fnd_shared_001).
+	// This must NOT match the run-alpha scenario (since it's not suffixed).
+	// Run alpha also gets its real terminal close by item_id.
+	bareOutputPayload, _ := json.Marshal(map[string]interface{}{
+		"finding_id": baseFindingID,
+		"action":     "resolved",
+	})
+	// mock-msg-1 is the work:create ID for run alpha's SC-01.
+	closeAlphaPayload, _ := json.Marshal(closePayload{
+		ItemID: "mock-msg-1",
+		Action: "resolved",
+		Skill:  "task:triage",
+	})
+
+	msAlpha := &mockSender{
+		readMsgs: []cfMessage{
+			// work:output with bare finding ID — must NOT match run-alpha's scenario.
+			{
+				ID:      "bare-output-msg",
+				Tags:    []string{"work:output", "action:resolved", "finding:" + baseFindingID},
+				Payload: string(bareOutputPayload),
+			},
+			// Real terminal close for alpha's SC-01 via item_id.
+			{
+				ID:      "close-alpha",
+				Tags:    []string{"work:close", "action:resolved"},
+				Payload: string(closeAlphaPayload),
+			},
+		},
+	}
+
+	argsAlpha := runArgs{
+		targetCampfire: "cf-run-alpha",
+		scenariosDir:   scenDirA,
+		scenarioFilter: "SC-01",
+		outputDir:      outDirA,
+		maxConcurrent:  1,
+		timeout:        5 * time.Second,
+		runID:          "run-alpha",
+	}
+	if err := academy(msAlpha, argsAlpha); err != nil {
+		t.Fatalf("academy run-alpha: %v", err)
+	}
+
+	// Run beta: inject a work:output with the BARE finding ID.
+	// mock-msg-1 is again the work:create ID (fresh sender) for run beta's SC-01.
+	closeBetaPayload, _ := json.Marshal(closePayload{
+		ItemID: "mock-msg-1",
+		Action: "escalated",
+		Skill:  "task:triage",
+	})
+
+	msBeta := &mockSender{
+		readMsgs: []cfMessage{
+			// work:output with bare finding ID — must NOT match run-beta's scenario.
+			{
+				ID:      "bare-output-msg-2",
+				Tags:    []string{"work:output", "action:resolved", "finding:" + baseFindingID},
+				Payload: string(bareOutputPayload),
+			},
+			// Real terminal close for beta's SC-01 via item_id.
+			{
+				ID:      "close-beta",
+				Tags:    []string{"work:close", "action:escalated"},
+				Payload: string(closeBetaPayload),
+			},
+		},
+	}
+
+	argsBeta := runArgs{
+		targetCampfire: "cf-run-beta",
+		scenariosDir:   scenDirB,
+		scenarioFilter: "SC-01",
+		outputDir:      outDirB,
+		maxConcurrent:  1,
+		timeout:        5 * time.Second,
+		runID:          "run-beta",
+	}
+	if err := academy(msBeta, argsBeta); err != nil {
+		t.Fatalf("academy run-beta: %v", err)
+	}
+
+	// Read run-alpha's SC-01.json.
+	alphaData, err := os.ReadFile(fmt.Sprintf("%s/SC-01.json", outDirA))
+	if err != nil {
+		t.Fatalf("run-alpha SC-01.json not found: %v", err)
+	}
+	var alphaRec ScenarioRecord
+	if err := json.Unmarshal(alphaData, &alphaRec); err != nil {
+		t.Fatalf("parse run-alpha SC-01.json: %v", err)
+	}
+
+	// Read run-beta's SC-01.json.
+	betaData, err := os.ReadFile(fmt.Sprintf("%s/SC-01.json", outDirB))
+	if err != nil {
+		t.Fatalf("run-beta SC-01.json not found: %v", err)
+	}
+	var betaRec ScenarioRecord
+	if err := json.Unmarshal(betaData, &betaRec); err != nil {
+		t.Fatalf("parse run-beta SC-01.json: %v", err)
+	}
+
+	// The finding_id in each record must be the suffixed form, not the bare ID.
+	if alphaRec.FindingID == baseFindingID {
+		t.Errorf("run-alpha finding_id = %q — must be per-run-suffixed, not bare", alphaRec.FindingID)
+	}
+	if betaRec.FindingID == baseFindingID {
+		t.Errorf("run-beta finding_id = %q — must be per-run-suffixed, not bare", betaRec.FindingID)
+	}
+
+	// The two runs must have distinct finding IDs.
+	if alphaRec.FindingID == betaRec.FindingID {
+		t.Errorf("run-alpha and run-beta have identical finding_id %q — cross-run collision not prevented",
+			alphaRec.FindingID)
+	}
+
+	// Alpha's terminal must come from the real close (mock-msg-1 / close-alpha),
+	// NOT from the bare work:output. If the bare work:output had matched, terminal
+	// action would be "resolved" from work:output rather than via item_id close.
+	// Since the real close action is also "resolved", we check that finding_id is
+	// the suffixed form and does NOT equal the bare finding ID (already checked above).
+	//
+	// Beta's terminal action must be "escalated" (from the real close), NOT
+	// "resolved" (from the bare work:output).
+	if betaRec.TerminalAction != "escalated" {
+		t.Errorf("run-beta terminal_action = %q, want escalated — bare work:output may have matched incorrectly",
+			betaRec.TerminalAction)
+	}
+	if alphaRec.TerminalAction != "resolved" {
+		t.Errorf("run-alpha terminal_action = %q, want resolved", alphaRec.TerminalAction)
+	}
+}
+
 // ---- unit: payload composition -----------------------------------------------
 
 func TestPayloadComposition_FindingFields(t *testing.T) {
@@ -79,8 +261,10 @@ func TestPayloadComposition_FindingFields(t *testing.T) {
 	// Build payload the same way postFinding does.
 	runID := "test-run"
 	fid := findingTrackingID(runID, s.ID)
+	// postFinding uses perRunFindingID for the finding payload ID (mallcoppro-73b).
+	payloadFindingID := perRunFindingID(s.Finding.ID, runID)
 	fp := findingPayload{
-		ID:       s.Finding.ID,
+		ID:       payloadFindingID,
 		Detector: s.Finding.Detector,
 		Title:    s.Finding.Title,
 		Severity: s.Finding.Severity,
@@ -106,6 +290,13 @@ func TestPayloadComposition_FindingFields(t *testing.T) {
 	// Skill must be task:triage.
 	if payload.Skill != "task:triage" {
 		t.Errorf("payload.Skill = %q, want task:triage", payload.Skill)
+	}
+	// Finding ID must be the per-run-suffixed form (not the bare YAML finding ID).
+	if payload.Finding.ID != payloadFindingID {
+		t.Errorf("finding.ID = %q, want per-run-suffixed %q", payload.Finding.ID, payloadFindingID)
+	}
+	if payload.Finding.ID == s.Finding.ID {
+		t.Errorf("finding.ID %q equals bare YAML finding ID — not per-run-unique", payload.Finding.ID)
 	}
 	// Finding must carry original fields.
 	if payload.Finding.Detector != "detector-unusual-login" {
@@ -1039,6 +1230,157 @@ func TestWorkItemToScenario_RequiresChainLink(t *testing.T) {
 				t.Errorf("scenario %s full_chain contains foreign item %q — chain-link guard failed",
 					rec.ScenarioID, ce.ItemID)
 			}
+		}
+	}
+}
+
+// ---- unit: time-window filtering (mallcoppro-f6b) ----------------------------
+
+// TestWatchLoop_TimeWindowFilter verifies that the watch loop's time-window guard
+// skips messages whose timestamps are outside [runPostedAtMin-5s, runDeadline+5s].
+//
+// Test shape:
+//   - One scenario (TW-01) posted via mock sender.
+//   - readAll returns 5 synthetic cfMessages:
+//     1. In-window work:create (chain extension — Timestamp = now)
+//     2. In-window work:output with action:noted — Timestamp = now
+//     3. In-window work:close action=resolved referencing the scenario's msg ID — Timestamp = now
+//     4. Out-of-window (before): Timestamp = now - 1 hour → must be skipped
+//     5. Out-of-window (after):  Timestamp = now + 2 hours → must be skipped
+//
+// Assertions:
+//   - TW-01 reaches terminal via the in-window work:close.
+//   - The out-of-window messages do not affect the result:
+//     the scenario's chain does NOT contain the out-of-window item IDs.
+//
+// The out-of-window messages reference different item IDs so we can assert their
+// absence from full_chain independently of deduplication.
+func TestWatchLoop_TimeWindowFilter(t *testing.T) {
+	scenDir := t.TempDir()
+	writeMinimalScenario(t, scenDir, "TW-01", "fnd_tw_001", "detector-time-window",
+		"Time window filter test", "medium")
+
+	outDir := t.TempDir()
+
+	now := time.Now()
+	// The mock sender will assign "mock-msg-1" to the TW-01 work:create.
+	// runPostedAtMin will be set to approximately now.UnixNano() after posting.
+	// Window: [now-5s, now+timeout+5s]. Use timeout=2s → window=[now-5s, now+7s].
+	inWindowTs := now.UnixNano()                          // within window
+	beforeWindowTs := now.Add(-1 * time.Hour).UnixNano() // 1h before — outside window
+	afterWindowTs := now.Add(2 * time.Hour).UnixNano()   // 2h after  — outside window (> deadline+5s)
+
+	// In-window work:create (chain extension for a hypothetical escalation step).
+	// References "in-window-chain-id" as its id. Should be processed by the
+	// work:create map-building loop and registered.
+	inWindowCreatePayload, _ := json.Marshal(map[string]interface{}{
+		"id":    "mock-msg-1", // same id as the posted scenario — extends chain
+		"skill": "task:investigate",
+		"title": "investigate step",
+	})
+	// In-window work:output with action:noted.
+	inWindowOutputPayload, _ := json.Marshal(closePayload{
+		ItemID: "mock-msg-1",
+		Action: "noted",
+		Skill:  "task:triage",
+	})
+	// In-window terminal work:close.
+	inWindowClosePayload, _ := json.Marshal(closePayload{
+		ItemID: "mock-msg-1",
+		Action: "resolved",
+		Skill:  "task:triage",
+	})
+	// Out-of-window (before) close. References a distinct item ID so we can assert
+	// its absence from full_chain.
+	outBeforePayload, _ := json.Marshal(closePayload{
+		ItemID: "out-before-item",
+		Action: "resolved",
+		Skill:  "task:triage",
+	})
+	// Out-of-window (after) close. References another distinct item ID.
+	outAfterPayload, _ := json.Marshal(closePayload{
+		ItemID: "out-after-item",
+		Action: "resolved",
+		Skill:  "task:triage",
+	})
+
+	ms := &mockSender{
+		readMsgs: []cfMessage{
+			// 1. In-window work:create
+			{
+				ID:        "in-create-1",
+				Tags:      []string{"work:create", "task:investigate"},
+				Payload:   string(inWindowCreatePayload),
+				Timestamp: inWindowTs,
+			},
+			// 2. In-window work:output
+			{
+				ID:        "in-output-1",
+				Tags:      []string{"work:output", "action:noted"},
+				Payload:   string(inWindowOutputPayload),
+				Timestamp: inWindowTs,
+			},
+			// 3. In-window work:close (terminal)
+			{
+				ID:        "in-close-1",
+				Tags:      []string{"work:close", "action:resolved"},
+				Payload:   string(inWindowClosePayload),
+				Timestamp: inWindowTs,
+			},
+			// 4. Out-of-window (before) — must be skipped
+			{
+				ID:        "out-before-1",
+				Tags:      []string{"work:close", "action:resolved"},
+				Payload:   string(outBeforePayload),
+				Timestamp: beforeWindowTs,
+			},
+			// 5. Out-of-window (after) — must be skipped
+			{
+				ID:        "out-after-1",
+				Tags:      []string{"work:close", "action:resolved"},
+				Payload:   string(outAfterPayload),
+				Timestamp: afterWindowTs,
+			},
+		},
+	}
+
+	args := runArgs{
+		targetCampfire: "cf-tw-test",
+		scenariosDir:   scenDir,
+		scenarioFilter: "TW-01",
+		outputDir:      outDir,
+		maxConcurrent:  1,
+		timeout:        2 * time.Second,
+		runID:          "tw-test-run",
+	}
+
+	if err := academy(ms, args); err != nil {
+		t.Fatalf("academy: %v", err)
+	}
+
+	// TW-01 must be terminal (reached via in-window work:close).
+	data, err := os.ReadFile(filepath.Join(outDir, "TW-01.json"))
+	if err != nil {
+		t.Fatalf("TW-01.json not found: %v", err)
+	}
+	var rec ScenarioRecord
+	if err := json.Unmarshal(data, &rec); err != nil {
+		t.Fatalf("parse TW-01.json: %v", err)
+	}
+	if rec.TerminalAction != "resolved" {
+		t.Errorf("TW-01 terminal_action = %q, want resolved (in-window close must process)", rec.TerminalAction)
+	}
+	if rec.TerminalAt == nil {
+		t.Error("TW-01 terminal_at must not be nil — in-window close must mark terminal")
+	}
+
+	// Out-of-window item IDs must NOT appear in full_chain.
+	for _, ce := range rec.FullChain {
+		if ce.ItemID == "out-before-item" {
+			t.Errorf("full_chain contains out-of-window (before) item ID %q — time-window filter failed", ce.ItemID)
+		}
+		if ce.ItemID == "out-after-item" {
+			t.Errorf("full_chain contains out-of-window (after) item ID %q — time-window filter failed", ce.ItemID)
 		}
 	}
 }

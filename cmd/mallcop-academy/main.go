@@ -44,9 +44,10 @@ import (
 // cfMessage is a partial unmarshal of the JSON returned by `cf send --json` or
 // one line from `cf read --json --all`.
 type cfMessage struct {
-	ID      string   `json:"id"`
-	Tags    []string `json:"tags"`
-	Payload string   `json:"payload"`
+	ID        string   `json:"id"`
+	Tags      []string `json:"tags"`
+	Payload   string   `json:"payload"`
+	Timestamp int64    `json:"timestamp"` // Unix nanoseconds; 0 when not present (legacy)
 }
 
 // cfSender shells out to the cf binary to send messages and returns the
@@ -477,12 +478,19 @@ func academy(sender Sender, args runArgs) error {
 	// Also build workItemID → *trackedScenario for watch-loop lookups.
 	tracked := make(map[string]*trackedScenario, len(scenarios))
 	for _, s := range scenarios {
-		// findingID is the actual finding ID from the scenario (e.g. "fnd_shk_005").
-		// This is the ID that workers use when calling resolve-finding and annotate-finding,
-		// allowing us to match work:output messages back to their scenario by finding_id.
-		// Also keep the tracking ID for backward-compat lookups.
-		actualFindingID := s.Finding.ID
-		if actualFindingID == "" {
+		// findingID is the per-run-unique finding ID derived from the scenario's
+		// base finding ID and the run ID. Suffixing with _<runID> ensures that
+		// two bakeoff runs that share the same YAML finding ID (e.g. "fnd_shk_005")
+		// produce distinct tracked.findingID values, preventing a work:output with
+		// finding:<bare-id> from matching scenarios across runs (mallcoppro-73b).
+		//
+		// The suffixed ID is also carried into the work:create payload (finding.id)
+		// so workers call resolve-finding with the suffixed form, ensuring the
+		// finding:<id> tag on work:output is likewise suffixed and unambiguous.
+		var actualFindingID string
+		if s.Finding.ID != "" {
+			actualFindingID = perRunFindingID(s.Finding.ID, args.runID)
+		} else {
 			actualFindingID = findingTrackingID(args.runID, s.ID)
 		}
 		ts := &trackedScenario{
@@ -499,6 +507,13 @@ func academy(sender Sender, args runArgs) error {
 	var postMu sync.Mutex
 	// workItemToScenario maps cf message ID → scenario ID.
 	workItemToScenario := make(map[string]string)
+
+	// runPostedAtMin is the Unix-nanosecond timestamp of the FIRST successfully
+	// posted scenario. Set once (guarded by postMu) in the post goroutine.
+	// Used to bound the watch-loop time window: messages outside
+	// [runPostedAtMin - 5s, runDeadline + 5s] are skipped before classification.
+	// Zero until the first scenario is posted.
+	var runPostedAtMin int64
 
 	for _, s := range scenarios {
 		postWG.Add(1)
@@ -562,6 +577,12 @@ func academy(sender Sender, args runArgs) error {
 
 			postMu.Lock()
 			workItemToScenario[msgID] = s.ID
+			// Record the earliest posted-at timestamp as the run window floor.
+			// Use the local clock captured in postFinding (before sender.send).
+			postedAtNs := postedAt.UnixNano()
+			if runPostedAtMin == 0 || postedAtNs < runPostedAtMin {
+				runPostedAtMin = postedAtNs
+			}
 			postMu.Unlock()
 
 			fmt.Fprintf(os.Stderr, "posted scenario %s → cf message %s\n", s.ID, msgID)
@@ -579,6 +600,25 @@ func academy(sender Sender, args runArgs) error {
 			fmt.Fprintf(os.Stderr, "WARN: read campfire: %v\n", err)
 		}
 
+		// Compute time-window bounds for this poll iteration.
+		// Defense-in-depth: messages outside [runPostedAtMin-5s, runDeadline+5s]
+		// are skipped before classification to prevent cross-run message pickup (mallcoppro-f6b).
+		// When runPostedAtMin is zero (no scenario posted yet), the window is not applied.
+		// A message with Timestamp==0 also passes through (pre-timestamp cf versions).
+		postMu.Lock()
+		iterWindowFloor := runPostedAtMin
+		iterWindowCeil := runPostedAtMin + args.timeout.Nanoseconds()
+		postMu.Unlock()
+		const msgWindowSlackNs = int64(5 * time.Second)
+
+		inRunWindow := func(msg cfMessage) bool {
+			if iterWindowFloor == 0 || msg.Timestamp == 0 {
+				return true
+			}
+			return msg.Timestamp >= iterWindowFloor-msgWindowSlackNs &&
+				msg.Timestamp <= iterWindowCeil+msgWindowSlackNs
+		}
+
 		// Build a fresh workItemToScenario map including any new chain items
 		// (work:create from escalations) before processing closes.
 		// For each work:create that chains from a known scenario item, register
@@ -586,6 +626,12 @@ func academy(sender Sender, args runArgs) error {
 		postMu.Lock()
 		for _, msg := range msgs {
 			if !hasTag(msg.Tags, "work:create") {
+				continue
+			}
+			// Time-window guard: skip out-of-window work:create messages.
+			if !inRunWindow(msg) {
+				slog.Debug("academy: skipping out-of-window work:create",
+					"msg_id", msg.ID, "msg_ts_ns", msg.Timestamp)
 				continue
 			}
 			// Parse work:create payload: look for "id" field (cfWorkCreate format).
@@ -647,6 +693,18 @@ func academy(sender Sender, args runArgs) error {
 		postMu.Unlock()
 
 		for _, msg := range msgs {
+			// Time-window guard: skip messages outside the run's active window.
+			// Defense-in-depth on top of the tag-based and chain-link filtering (mallcoppro-f6b).
+			if !inRunWindow(msg) {
+				slog.Debug("academy: skipping out-of-window message",
+					"msg_id", msg.ID,
+					"msg_ts_ns", msg.Timestamp,
+					"window_floor_ns", iterWindowFloor-msgWindowSlackNs,
+					"window_ceil_ns", iterWindowCeil+msgWindowSlackNs,
+				)
+				continue
+			}
+
 			// Accept both work:close and work:output messages.
 			// work:close is posted by we automaton-manager (resolution:done always).
 			// work:output with action:* tag is posted by resolve-finding tool with
@@ -857,8 +915,19 @@ func academy(sender Sender, args runArgs) error {
 func postFinding(sender Sender, s *exam.Scenario, runID, campfireID string) (string, time.Time, error) {
 	fid := findingTrackingID(runID, s.ID)
 
+	// Use the per-run-unique finding ID in the payload so workers call
+	// resolve-finding with the suffixed form. This ensures the finding:<id>
+	// tag on any work:output is likewise suffixed, making cross-run collision
+	// impossible. If the base finding ID is empty, fall back to the tracking ID.
+	var payloadFindingID string
+	if s.Finding.ID != "" {
+		payloadFindingID = perRunFindingID(s.Finding.ID, runID)
+	} else {
+		payloadFindingID = fid
+	}
+
 	fp := findingPayload{
-		ID:       s.Finding.ID,
+		ID:       payloadFindingID,
 		Detector: s.Finding.Detector,
 		Title:    s.Finding.Title,
 		Severity: s.Finding.Severity,
@@ -902,6 +971,18 @@ func postFinding(sender Sender, s *exam.Scenario, runID, campfireID string) (str
 // scenario within a run: academy-<run-id>-<scenario-id>.
 func findingTrackingID(runID, scenarioID string) string {
 	return "academy-" + runID + "-" + scenarioID
+}
+
+// perRunFindingID returns a per-run-unique finding ID by suffixing the base
+// finding ID with the run ID: <base>_<runID>. This prevents cross-run
+// finding-ID collisions when multiple bakeoff runs share the same YAML
+// scenario file (and therefore the same s.Finding.ID). Allowed characters in
+// the suffix are alphanumeric plus '-' and '_'; a runID like "bk-lane1" is
+// safe. The base is the original finding ID from the scenario YAML (e.g.
+// "fnd_shk_005"). The suffixed form is used in tracked.findingID AND in the
+// work:create finding.id payload so workers call resolve-finding with it.
+func perRunFindingID(baseFindingID, runID string) string {
+	return baseFindingID + "_" + runID
 }
 
 // filterAcademyMetadata passes through finding metadata for academy use.

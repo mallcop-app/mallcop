@@ -82,12 +82,14 @@ func seedHardConstraintEscalate(
 ) (string, error) {
 	syntheticItemID := "hard-constraint-" + findingTrackingID(runID, s.ID)
 
+	// Use ts.findingID (already suffixed with the run ID) so the finding: tag
+	// and payload finding_id are per-run-unique — consistent with the LLM path.
 	payload := hardConstraintTerminalPayload{
 		ItemID:    syntheticItemID,
 		Action:    "escalated",
 		Skill:     "task:hard-constraint",
 		Reason:    reason,
-		FindingID: s.Finding.ID,
+		FindingID: ts.findingID,
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -101,7 +103,7 @@ func seedHardConstraintEscalate(
 		"detector:" + s.Finding.Detector,
 		"scenario:" + s.ID,
 		"run:" + runID,
-		"finding:" + s.Finding.ID,
+		"finding:" + ts.findingID,
 	}
 	msgID, err := sender.send(campfireID, string(body), tags)
 	if err != nil {
