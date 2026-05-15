@@ -27,6 +27,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -601,40 +602,43 @@ func academy(sender Sender, args runArgs) error {
 				workCreateID = p.ItemID
 			}
 
-			// Map both the campfire message ID and the work item ID to the scenario.
-			// Strategy: the work:create is a chain item if it was preceded by a
-			// work:claim for the original scenario item. We check if ANY tracked
-			// scenario has this msg ID already tracked (e.g. via the initial posting),
-			// or if the context references a known scenario item ID.
-			for scenID, tsRef := range tracked {
-				tsRef.mu.Lock()
-				alreadyKnown := false
-				for _, ce := range tsRef.chain {
-					if ce.ItemID == msg.ID || ce.ItemID == workCreateID {
-						alreadyKnown = true
-						break
-					}
-				}
-				if !alreadyKnown && (workItemToScenario[msg.ID] == scenID) {
-					alreadyKnown = true
-				}
-				tsRef.mu.Unlock()
-				_ = alreadyKnown
-			}
-			// Register message ID → scenario for any scenario that owns the
-			// immediately-preceding item in the chain (heuristic: register under
-			// ALL tracked scenarios if it's the only one, or match by context).
+			// Register message ID → scenario only if the work:create has a real
+			// chain link: either msg.ID is already known (registered at post time),
+			// or workCreateID appears as an antecedent in some scenario's chain.
+			// The prior "first non-terminal" fallback is removed — assigning unknown
+			// work:create messages to an arbitrary scenario caused mis-attribution
+			// when multiple scenarios are tracked concurrently (mallcoppro-647).
 			if workCreateID != "" {
 				if _, known := workItemToScenario[workCreateID]; !known {
-					// Default: assign to the first scenario that hasn't reached terminal.
-					for scenIDKey, tsRef := range tracked {
-						tsRef.mu.Lock()
-						isTerminal := tsRef.terminal
-						tsRef.mu.Unlock()
-						if !isTerminal {
-							workItemToScenario[workCreateID] = scenIDKey
-							workItemToScenario[msg.ID] = scenIDKey
-							break
+					// Check if msg.ID is already mapped (e.g. posted by academy's own sender).
+					if scenIDKey, msgKnown := workItemToScenario[msg.ID]; msgKnown {
+						workItemToScenario[workCreateID] = scenIDKey
+					} else {
+						// Walk chains: assign only if workCreateID is an antecedent
+						// already present in a scenario's chain (real chain link).
+						for scenIDKey, tsRef := range tracked {
+							tsRef.mu.Lock()
+							var chainMatch bool
+							for _, ce := range tsRef.chain {
+								if ce.ItemID == workCreateID {
+									chainMatch = true
+									break
+								}
+							}
+							tsRef.mu.Unlock()
+							if chainMatch {
+								workItemToScenario[workCreateID] = scenIDKey
+								workItemToScenario[msg.ID] = scenIDKey
+								break
+							}
+						}
+						// No chain link found — log and skip. Do not assign to an
+						// arbitrary scenario (the old bug).
+						if _, nowKnown := workItemToScenario[workCreateID]; !nowKnown {
+							slog.Info("academy: work:create with no known chain antecedent — skipping assignment",
+								"msg_id", msg.ID,
+								"work_create_id", workCreateID,
+							)
 						}
 					}
 				}

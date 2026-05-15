@@ -880,6 +880,169 @@ func TestRunArgs_ScenarioPrefix_WrittenToRunJSON(t *testing.T) {
 	}
 }
 
+// ---- regression: work:create with no chain antecedent must not be assigned (mallcoppro-647) ----
+
+// TestWorkItemToScenario_RequiresChainLink verifies that a work:create message
+// whose workCreateID has no known antecedent in any tracked scenario's chain is
+// not assigned to any scenario. This is the regression test for mallcoppro-647:
+// the old "first non-terminal" fallback assigned foreign work:create items to
+// arbitrary scenarios, causing spurious terminal attributions.
+//
+// Test shape:
+//  1. Two scenarios (AC-03, AC-04) are posted; mock sender assigns them IDs
+//     mock-msg-1 and mock-msg-2.
+//  2. readAll returns:
+//     a. A foreign work:create with workCreateID="totally-unrelated-id" —
+//        not in either scenario's chain.
+//     b. A terminal work:close with item_id="totally-unrelated-id" (action=resolved).
+//     c. Real terminal closes for AC-03 (item_id=mock-msg-1) and AC-04
+//        (item_id=mock-msg-2).
+//  3. Expected: AC-03 and AC-04 both reach terminal via their own closes;
+//     the foreign close does NOT cause either scenario to mark terminal
+//     prematurely or record a spurious chain entry with
+//     item_id="totally-unrelated-id".
+//
+// The assertion is: each scenario's full_chain must NOT contain the foreign
+// workCreateID, and the terminal_item_id must be the scenario's own close item.
+func TestWorkItemToScenario_RequiresChainLink(t *testing.T) {
+	scenDir := t.TempDir()
+	writeMinimalScenario(t, scenDir, "AC-03", "fnd_ac_003", "detector-new-actor-03",
+		"New actor 03", "medium")
+	writeMinimalScenario(t, scenDir, "AC-04", "fnd_ac_004", "detector-new-actor-04",
+		"New actor 04", "medium")
+
+	outDir := t.TempDir()
+
+	// The mock sender assigns IDs sequentially: AC-03→mock-msg-1, AC-04→mock-msg-2.
+	// We inject readMsgs BEFORE academy starts so the watch loop sees all messages
+	// in its first readAll poll.
+	//
+	// Foreign work:create: workCreateID="totally-unrelated-id", msg.ID="foreign-msg-1".
+	// Foreign close: item_id="totally-unrelated-id", action=resolved (terminal).
+	// Real close AC-03: item_id="mock-msg-1", action=resolved.
+	// Real close AC-04: item_id="mock-msg-2", action=resolved.
+	foreignWorkCreatePayload, _ := json.Marshal(map[string]interface{}{
+		"id":    "totally-unrelated-id",
+		"skill": "task:triage",
+		"title": "foreign finding from a different run",
+	})
+	foreignClosePayload, _ := json.Marshal(closePayload{
+		ItemID: "totally-unrelated-id",
+		Action: "resolved",
+		Skill:  "task:triage",
+	})
+	closeAC03Payload, _ := json.Marshal(closePayload{
+		ItemID: "mock-msg-1",
+		Action: "resolved",
+		Skill:  "task:triage",
+	})
+	closeAC04Payload, _ := json.Marshal(closePayload{
+		ItemID: "mock-msg-2",
+		Action: "resolved",
+		Skill:  "task:triage",
+	})
+
+	ms := &mockSender{
+		readMsgs: []cfMessage{
+			// Foreign work:create — no antecedent in any scenario's chain.
+			{
+				ID:      "foreign-msg-1",
+				Tags:    []string{"work:create", "task:triage"},
+				Payload: string(foreignWorkCreatePayload),
+			},
+			// Foreign terminal close — references the foreign workCreateID.
+			// Must NOT be attributed to AC-03 or AC-04.
+			{
+				ID:      "foreign-close-1",
+				Tags:    []string{"work:close", "action:resolved"},
+				Payload: string(foreignClosePayload),
+			},
+			// Real terminal closes for the two academy scenarios.
+			{
+				ID:      "close-ac03",
+				Tags:    []string{"work:close", "action:resolved"},
+				Payload: string(closeAC03Payload),
+			},
+			{
+				ID:      "close-ac04",
+				Tags:    []string{"work:close", "action:resolved"},
+				Payload: string(closeAC04Payload),
+			},
+		},
+	}
+
+	args := runArgs{
+		targetCampfire: "cf-chain-link-test",
+		scenariosDir:   scenDir,
+		outputDir:      outDir,
+		maxConcurrent:  2,
+		timeout:        5 * time.Second,
+		runID:          "chain-link-test",
+	}
+
+	if err := academy(ms, args); err != nil {
+		t.Fatalf("academy: %v", err)
+	}
+
+	// Read AC-03.json.
+	ac03Data, err := os.ReadFile(filepath.Join(outDir, "AC-03.json"))
+	if err != nil {
+		t.Fatalf("AC-03.json not found: %v", err)
+	}
+	var ac03Rec ScenarioRecord
+	if err := json.Unmarshal(ac03Data, &ac03Rec); err != nil {
+		t.Fatalf("parse AC-03.json: %v", err)
+	}
+
+	// Read AC-04.json.
+	ac04Data, err := os.ReadFile(filepath.Join(outDir, "AC-04.json"))
+	if err != nil {
+		t.Fatalf("AC-04.json not found: %v", err)
+	}
+	var ac04Rec ScenarioRecord
+	if err := json.Unmarshal(ac04Data, &ac04Rec); err != nil {
+		t.Fatalf("parse AC-04.json: %v", err)
+	}
+
+	// Both scenarios must be terminal via their own closes (not the foreign one).
+	// The terminal_item_id must be one of the academy-posted work:create IDs
+	// (mock-msg-1 or mock-msg-2), never the foreign workCreateID.
+	const foreignWorkCreateID = "totally-unrelated-id"
+	const foreignMsgID = "foreign-msg-1"
+
+	if ac03Rec.TerminalAction != "resolved" {
+		t.Errorf("AC-03 terminal_action = %q, want resolved", ac03Rec.TerminalAction)
+	}
+	if ac03Rec.TerminalAt == nil {
+		t.Error("AC-03 terminal_at must not be nil")
+	}
+	if ac03Rec.TerminalItemID == foreignWorkCreateID || ac03Rec.TerminalItemID == foreignMsgID {
+		t.Errorf("AC-03 terminal_item_id = %q — must not be the foreign item ID (chain-link guard failed)",
+			ac03Rec.TerminalItemID)
+	}
+
+	if ac04Rec.TerminalAction != "resolved" {
+		t.Errorf("AC-04 terminal_action = %q, want resolved", ac04Rec.TerminalAction)
+	}
+	if ac04Rec.TerminalAt == nil {
+		t.Error("AC-04 terminal_at must not be nil")
+	}
+	if ac04Rec.TerminalItemID == foreignWorkCreateID || ac04Rec.TerminalItemID == foreignMsgID {
+		t.Errorf("AC-04 terminal_item_id = %q — must not be the foreign item ID (chain-link guard failed)",
+			ac04Rec.TerminalItemID)
+	}
+
+	// Neither scenario's full_chain must contain the foreign workCreateID.
+	for _, rec := range []ScenarioRecord{ac03Rec, ac04Rec} {
+		for _, ce := range rec.FullChain {
+			if ce.ItemID == foreignWorkCreateID || ce.ItemID == foreignMsgID {
+				t.Errorf("scenario %s full_chain contains foreign item %q — chain-link guard failed",
+					rec.ScenarioID, ce.ItemID)
+			}
+		}
+	}
+}
+
 // ---- helpers -----------------------------------------------------------------
 
 // writeMinimalScenario writes a minimal scenario YAML to dir/<id>.yaml.
