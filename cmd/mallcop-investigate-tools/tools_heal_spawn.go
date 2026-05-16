@@ -392,22 +392,35 @@ func spawnClaude(
 	waitErr := cmd.Wait()
 	exitCode := exitCodeFrom(waitErr)
 
-	// Force-close the read end of the pipe after cmd.Wait() returns.
-	// When the child process is killed (context cancel), bash may keep child
-	// processes (e.g., `sleep 9999`) alive briefly, holding the write end open
-	// and blocking the scanner goroutine. Closing pr here unblocks the scanner
-	// immediately. The goroutine handles the double-close gracefully (os.File
-	// Close is a no-op on a closed fd).
-	_ = pr.Close()
-
+	// Drain the scanner with two phases (mallcoppro-338):
+	//
+	// Phase 1 — short wait for normal completion. When the child exits cleanly,
+	// the scanner reads EOF and sends its result quickly. We must NOT race the
+	// scanner by force-closing pr while it is still parsing the final JSON line
+	// — that turns a clean exit into `scanErr=use of closed file`, drops the
+	// result, and produces tokens_used=0 (the test_heal flake root cause).
+	//
+	// Phase 2 — force-close fallback. When the child is killed (context cancel,
+	// timeout) bash may keep grandchildren (e.g. `sleep 9999`) alive briefly,
+	// holding the write end open and blocking the scanner. After the short
+	// wait, force-close pr to unblock. The goroutine handles the double-close
+	// gracefully (os.File.Close is a no-op on a closed fd).
 	var inferResult *healInferResult
 	select {
 	case res, ok := <-resultCh:
 		if ok && res != nil {
 			inferResult = res
 		}
-	case <-time.After(2 * time.Second):
-		// Scanner still blocked after pipe close — proceed with zero tokens.
+	case <-time.After(200 * time.Millisecond):
+		_ = pr.Close()
+		select {
+		case res, ok := <-resultCh:
+			if ok && res != nil {
+				inferResult = res
+			}
+		case <-time.After(2 * time.Second):
+			// Scanner truly hung — proceed with zero tokens.
+		}
 	}
 	if inferResult == nil {
 		inferResult = &healInferResult{ExitCode: exitCode}
