@@ -700,6 +700,18 @@ func academy(sender Sender, args runArgs) error {
 		}
 		postMu.Unlock()
 
+		// Pre-pass: accumulate ALL tool-usage messages in the batch BEFORE processing
+		// any work:close/work:output messages. This ensures forge_calls is populated
+		// before writeScenarioRecord is triggered, regardless of the order in which
+		// the campfire delivers tool-usage vs. terminal-close messages (mallcoppro-b87,
+		// mallcoppro-632). Tool-usage is tied to the run by finding_id tag, not by
+		// timestamp, so it is exempt from the inRunWindow guard.
+		for _, msg := range msgs {
+			if hasTag(msg.Tags, "tool-usage") {
+				accumulateToolUsage(msg, tracked)
+			}
+		}
+
 		for _, msg := range msgs {
 			// Time-window guard: skip messages outside the run's active window.
 			// Defense-in-depth on top of the tag-based and chain-link filtering (mallcoppro-f6b).
@@ -711,13 +723,6 @@ func academy(sender Sender, args runArgs) error {
 					"window_ceil_ns", iterWindowCeil+msgWindowSlackNs,
 				)
 				continue
-			}
-
-			// tool-usage messages (mallcoppro-237 A2): accumulate before the
-			// work:close/work:output guard so they are never skipped by the
-			// isClose/isOutput filter below.
-			if hasTag(msg.Tags, "tool-usage") {
-				accumulateToolUsage(msg, tracked)
 			}
 
 			// Accept both work:close and work:output messages.

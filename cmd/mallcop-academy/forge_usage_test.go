@@ -536,3 +536,99 @@ func TestWriteScenarioRecord_CampfireUsagePreferredOverFetcher(t *testing.T) {
 		t.Errorf("tokens_in = %d, want 900 (campfire data)", rec.TokensIn)
 	}
 }
+
+// TestAcademy_CampfireUsage_ProductionOrder is the regression test for mallcoppro-b87.
+//
+// The masking test (TestAcademy_CampfireUsage_NonZeroForgeCalls) injected messages in
+// test order: tool-usage BEFORE work:close. In production, resolve-finding and the
+// escalate-* tools previously emitted work:output BEFORE tool-usage, so the academy
+// watch loop called writeScenarioRecord with toolUsageCalls=0, then the tool-usage
+// message arrived too late.
+//
+// This test exercises the production message order: work:output (or work:close) arrives
+// BEFORE tool-usage. After the fixes (emit swap in tools_f1g.go + accumulateToolUsage
+// moved before inRunWindow guard), forge_calls must still be nonzero.
+//
+// To verify this catches the original bug: on the pre-fix code, readMsgs has work:close
+// first — the watch loop triggers writeScenarioRecord immediately, then the tool-usage
+// arrives and accumulates into a record that's already on disk → forge_calls=0.
+func TestAcademy_CampfireUsage_ProductionOrder(t *testing.T) {
+	scenDir := t.TempDir()
+	const findingBase = "fnd_b87_prod_order"
+	writeMinimalScenario(t, scenDir, "PO-01", findingBase, "detector-prod-order",
+		"Production order forge_calls regression test", "high")
+
+	outDir := t.TempDir()
+	runID := "run-b87-prod-order"
+
+	// The mock sender assigns "mock-msg-1" to PO-01's work:create.
+	expectedFindingID := perRunFindingID(findingBase, runID)
+
+	tuPayload, _ := json.Marshal(toolUsagePayload{
+		ForgeCalls: 5,
+		TokensIn:   2000,
+		TokensOut:  800,
+		FindingID:  expectedFindingID,
+	})
+	closePayloadBytes, _ := json.Marshal(closePayload{
+		ItemID: "mock-msg-1",
+		Action: "resolved",
+		Skill:  "task:triage",
+	})
+
+	// PRODUCTION ORDER: work:close arrives BEFORE tool-usage.
+	// This is the order that caused forge_calls=0 before the fix.
+	ms := &mockSender{
+		readMsgs: []cfMessage{
+			{
+				ID:      "close-b87",
+				Tags:    []string{"work:close", "action:resolved"},
+				Payload: string(closePayloadBytes),
+			},
+			{
+				ID:      "tu-msg-b87",
+				Tags:    []string{"tool-usage", "finding:" + expectedFindingID},
+				Payload: string(tuPayload),
+			},
+		},
+	}
+
+	args := runArgs{
+		targetCampfire: "cf-b87-test",
+		scenariosDir:   scenDir,
+		scenarioFilter: "PO-01",
+		outputDir:      outDir,
+		maxConcurrent:  1,
+		timeout:        5 * time.Second,
+		runID:          runID,
+		// No usage fetcher — campfire path must supply forge_calls.
+	}
+
+	if err := academy(ms, args); err != nil {
+		t.Fatalf("academy: %v", err)
+	}
+
+	data, err := os.ReadFile(outDir + "/PO-01.json")
+	if err != nil {
+		t.Fatalf("PO-01.json not found: %v", err)
+	}
+	var rec ScenarioRecord
+	if err := json.Unmarshal(data, &rec); err != nil {
+		t.Fatalf("parse PO-01.json: %v", err)
+	}
+
+	// This assertion fails on pre-fix code (mallcoppro-b87): the watch loop wrote
+	// the record before the tool-usage message was accumulated.
+	if rec.ForgeCalls == 0 {
+		t.Errorf("forge_calls = 0 — production-order bug: tool-usage arrived after work:close but was not accumulated before writeScenarioRecord (mallcoppro-b87 regression)")
+	}
+	if rec.ForgeCalls != 5 {
+		t.Errorf("forge_calls = %d, want 5", rec.ForgeCalls)
+	}
+	if rec.TokensIn != 2000 {
+		t.Errorf("tokens_in = %d, want 2000", rec.TokensIn)
+	}
+	if rec.TokensOut != 800 {
+		t.Errorf("tokens_out = %d, want 800", rec.TokensOut)
+	}
+}
