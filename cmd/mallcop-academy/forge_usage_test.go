@@ -635,3 +635,109 @@ func TestAcademy_CampfireUsage_ProductionOrder(t *testing.T) {
 		t.Errorf("tokens_out = %d, want 800", rec.TokensOut)
 	}
 }
+
+// ---- mallcoppro-d93: HTTP fallback gating ----------------------------------------
+
+// TestHTTPUsageFetcher_RequiresTenantKey verifies that newHTTPUsageFetcher returns
+// nil when MALLCOP_FORGE_USAGE_HTTP_KEY is absent, regardless of FORGE_API_KEY.
+//
+// Before the fix: newHTTPUsageFetcher read FORGE_API_KEY and returned a non-nil
+// fetcher. Customer-tier mallcop-sk-* keys get 403 on GET /v1/usage (RoleTenant
+// required), so every non-HC scenario's forge_calls stayed 0 in the output JSON.
+//
+// After the fix: only MALLCOP_FORGE_USAGE_HTTP_KEY enables the HTTP path.
+// FORGE_API_KEY alone is not sufficient (mallcoppro-d93).
+func TestHTTPUsageFetcher_RequiresTenantKey(t *testing.T) {
+	// Ensure MALLCOP_FORGE_USAGE_HTTP_KEY is unset for this test.
+	orig := os.Getenv("MALLCOP_FORGE_USAGE_HTTP_KEY")
+	os.Unsetenv("MALLCOP_FORGE_USAGE_HTTP_KEY")
+	defer func() {
+		if orig != "" {
+			os.Setenv("MALLCOP_FORGE_USAGE_HTTP_KEY", orig)
+		}
+	}()
+
+	// Even with FORGE_API_KEY set (customer-tier key), fetcher must be nil.
+	origFAK := os.Getenv("FORGE_API_KEY")
+	os.Setenv("FORGE_API_KEY", "mallcop-sk-test-customer-key")
+	defer func() {
+		if origFAK != "" {
+			os.Setenv("FORGE_API_KEY", origFAK)
+		} else {
+			os.Unsetenv("FORGE_API_KEY")
+		}
+	}()
+
+	f := newHTTPUsageFetcher()
+	if f != nil {
+		t.Errorf("newHTTPUsageFetcher returned non-nil when MALLCOP_FORGE_USAGE_HTTP_KEY is absent; "+
+			"customer-tier FORGE_API_KEY must not enable the HTTP path (mallcoppro-d93)")
+	}
+}
+
+// TestHTTPUsageFetcher_EnabledByTenantKey verifies that newHTTPUsageFetcher returns
+// a non-nil fetcher when MALLCOP_FORGE_USAGE_HTTP_KEY is set.
+func TestHTTPUsageFetcher_EnabledByTenantKey(t *testing.T) {
+	orig := os.Getenv("MALLCOP_FORGE_USAGE_HTTP_KEY")
+	os.Setenv("MALLCOP_FORGE_USAGE_HTTP_KEY", "tenant-key-for-usage-api")
+	defer func() {
+		if orig != "" {
+			os.Setenv("MALLCOP_FORGE_USAGE_HTTP_KEY", orig)
+		} else {
+			os.Unsetenv("MALLCOP_FORGE_USAGE_HTTP_KEY")
+		}
+	}()
+
+	f := newHTTPUsageFetcher()
+	if f == nil {
+		t.Errorf("newHTTPUsageFetcher returned nil when MALLCOP_FORGE_USAGE_HTTP_KEY is set")
+	}
+}
+
+// TestWriteScenarioRecord_NoHTTPWhenNoCampfireAndNoKey verifies that when both
+// campfire usage is zero AND no HTTP fetcher is provided, forge_calls stays 0
+// and no HTTP call is attempted (mallcoppro-d93).
+//
+// This is the primary regression test: pre-fix code would attempt the HTTP call
+// with the customer-tier FORGE_API_KEY, receive 403, log a warning, and produce
+// forge_calls=0. Post-fix: the HTTP path is never entered when the fetcher is nil.
+func TestWriteScenarioRecord_NoHTTPWhenNoCampfireAndNoKey(t *testing.T) {
+	outDir := t.TempDir()
+	now := time.Now()
+	termAt := now.Add(10 * time.Second)
+
+	// No campfire usage (toolUsageCalls=0) and no fetcher (nil) — simulates the
+	// bakeoff scenario where MALLCOP_FORGE_USAGE_HTTP_KEY is unset.
+	ts := &trackedScenario{
+		scenarioID:     "D93-01",
+		findingID:      "fnd-d93-01",
+		workItemID:     "msg-d93-01",
+		postedAt:       now,
+		chain:          []ChainEntry{{ItemID: "msg-d93-01", Skill: "task:triage"}},
+		terminal:       true,
+		terminalAt:     termAt,
+		terminalAction: "resolved",
+		terminalItemID: "msg-d93-01",
+		// toolUsageCalls intentionally left 0 (no campfire tool-usage messages).
+	}
+
+	// No fetcher argument — simulates MALLCOP_FORGE_USAGE_HTTP_KEY absent.
+	if err := writeScenarioRecord(ts, "run-d93-test", "cf-test", outDir); err != nil {
+		t.Fatalf("writeScenarioRecord: %v", err)
+	}
+
+	data, err := os.ReadFile(outDir + "/D93-01.json")
+	if err != nil {
+		t.Fatalf("D93-01.json not found: %v", err)
+	}
+	var rec ScenarioRecord
+	if err := json.Unmarshal(data, &rec); err != nil {
+		t.Fatalf("parse D93-01.json: %v", err)
+	}
+
+	// forge_calls must stay 0 — no campfire data, no tenant key.
+	// The canary (canary_check_lane) will flag this run as suspect, which is correct.
+	if rec.ForgeCalls != 0 {
+		t.Errorf("forge_calls = %d, want 0 when campfire usage absent and no HTTP key", rec.ForgeCalls)
+	}
+}
