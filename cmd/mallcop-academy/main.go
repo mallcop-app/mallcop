@@ -771,6 +771,14 @@ func academy(sender Sender, args runArgs) error {
 							if tagFindingID != "" {
 								for scenIDKey, tsRef := range tracked {
 									tsRef.mu.Lock()
+									// Defense-in-depth (mallcoppro-0f9): never attribute
+									// a work:create to a scenario whose post failed.
+									// An unposted scenario has no real worker; any
+									// matching tag is a ghost from a prior bakeoff run.
+									if tsRef.workItemID == "" {
+										tsRef.mu.Unlock()
+										continue
+									}
 									match := matchesFindingTag(tsRef, tagFindingID)
 									tsRef.mu.Unlock()
 									if match {
@@ -886,6 +894,12 @@ func academy(sender Sender, args runArgs) error {
 				if foundFindingID != "" {
 					for scenIDKey, tsRef := range tracked {
 						tsRef.mu.Lock()
+						// Defense-in-depth (mallcoppro-0f9): never attribute a
+						// work:close/output to a scenario whose post failed.
+						if tsRef.workItemID == "" {
+							tsRef.mu.Unlock()
+							continue
+						}
 						match := matchesFindingTag(tsRef, foundFindingID)
 						tsRef.mu.Unlock()
 						if match {
@@ -1186,6 +1200,19 @@ func accumulateToolUsage(msg cfMessage, tracked map[string]*trackedScenario) {
 
 	for _, ts := range tracked {
 		ts.mu.Lock()
+		// Primary guard (mallcoppro-0f9): if the scenario's cf post failed,
+		// workItemID is empty and no real worker ever ran for this scenario.
+		// Attributing tool-usage to it would produce ghost forge_calls from
+		// prior bakeoff runs that match via the c33 scenarioID-suffix fallback.
+		// Drop the message and log it so future debugging is easy.
+		if ts.workItemID == "" {
+			slog.Debug("dropping tool-usage for unposted scenario",
+				"scenario_id", ts.scenarioID,
+				"msg_id", msg.ID,
+			)
+			ts.mu.Unlock()
+			continue
+		}
 		match := matchesFindingTag(ts, findingID)
 		if match && msg.ID != "" {
 			// Dedup: skip if we've already counted this message (mallcoppro-5119).

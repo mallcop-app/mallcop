@@ -291,6 +291,7 @@ func TestAccumulateToolUsage_MatchByFindingTag(t *testing.T) {
 		"SC-237": {
 			scenarioID: "SC-237",
 			findingID:  findingID,
+			workItemID: "posted-msg-sc237", // successfully posted
 		},
 	}
 
@@ -328,6 +329,7 @@ func TestAccumulateToolUsage_MatchByPayloadFindingID(t *testing.T) {
 		"SC-238": {
 			scenarioID: "SC-238",
 			findingID:  findingID,
+			workItemID: "posted-msg-sc238", // successfully posted
 		},
 	}
 
@@ -358,6 +360,7 @@ func TestAccumulateToolUsage_MultipleMessages(t *testing.T) {
 		"SC-239": {
 			scenarioID: "SC-239",
 			findingID:  findingID,
+			workItemID: "posted-msg-sc239", // successfully posted
 		},
 	}
 
@@ -384,7 +387,7 @@ func TestAccumulateToolUsage_MultipleMessages(t *testing.T) {
 // finding_id are silently skipped (no crash, no wrong attribution).
 func TestAccumulateToolUsage_NoMatchSkipped(t *testing.T) {
 	tracked := map[string]*trackedScenario{
-		"SC-240": {scenarioID: "SC-240", findingID: "fnd_test_237_real"},
+		"SC-240": {scenarioID: "SC-240", findingID: "fnd_test_237_real", workItemID: "posted-msg-sc240"},
 	}
 	payload, _ := json.Marshal(toolUsagePayload{ForgeCalls: 1, FindingID: "fnd_test_237_other"})
 	accumulateToolUsage(cfMessage{Tags: []string{"tool-usage"}, Payload: string(payload)}, tracked)

@@ -1789,11 +1789,14 @@ func TestAccumulateToolUsage_IdempotentAcrossPolls(t *testing.T) {
 	)
 
 	// Build a tracked scenario with the same setup academy uses.
+	// workItemID is non-empty to represent a successfully posted scenario
+	// (the guard added in mallcoppro-0f9 requires workItemID != "" to allow attribution).
 	suffixedFindingID := perRunFindingID(baseFindingID, runID)
 	ts := &trackedScenario{
 		scenarioID:        scenarioID,
 		findingID:         suffixedFindingID,
 		altFindingID:      findingTrackingID(runID, scenarioID),
+		workItemID:        "mock-work-item-dedup-01", // posted successfully
 		seenToolUsageMsgs: make(map[string]bool),
 	}
 	tracked := map[string]*trackedScenario{scenarioID: ts}
@@ -2014,3 +2017,210 @@ func TestWorkItemToScenario_TriageInvestigateAttribution(t *testing.T) {
 		t.Errorf("%s terminal_item_id = %q — 647 guard broken: bare close set terminal", scenarioID, rec.TerminalItemID)
 	}
 }
+
+// ---- regression: ghost forge_calls from unposted scenarios (mallcoppro-0f9) ----
+
+// TestAccumulateToolUsage_SkipsUnpostedScenarios verifies that a tool-usage message
+// whose finding tag matches a tracked scenario with workItemID="" (post failed) is
+// NOT attributed to that scenario.
+//
+// Pre-fix behaviour: accumulateToolUsage would match via matchesFindingTag's c33
+// suffix fallback and increment toolUsageCalls, producing ghost forge_calls.
+// Post-fix behaviour: forge_calls must remain 0 for the unposted scenario.
+func TestAccumulateToolUsage_SkipsUnpostedScenarios(t *testing.T) {
+	const (
+		scenarioID    = "UNPOSTED-01"
+		baseFindingID = "fnd_test_001"
+		runID         = "bk-test"
+	)
+
+	// Simulate a scenario whose cfWorkCreate post failed: workItemID is empty.
+	suffixedFindingID := perRunFindingID(baseFindingID, runID) // "fnd_test_001_bk-test"
+	ts := &trackedScenario{
+		scenarioID:        scenarioID,
+		findingID:         suffixedFindingID,
+		altFindingID:      findingTrackingID(runID, scenarioID),
+		workItemID:        "", // empty — post failed
+		seenToolUsageMsgs: make(map[string]bool),
+	}
+	tracked := map[string]*trackedScenario{scenarioID: ts}
+
+	// Build a tool-usage message carrying the matching finding tag.
+	payload, _ := json.Marshal(map[string]interface{}{
+		"forge_calls": 3,
+		"tokens_in":   500,
+		"tokens_out":  200,
+		"finding_id":  suffixedFindingID,
+	})
+	toolUsageMsg := cfMessage{
+		ID: "tool-usage-ghost-001",
+		Tags: []string{
+			"tool-usage",
+			"finding:" + suffixedFindingID,
+		},
+		Payload: string(payload),
+	}
+
+	accumulateToolUsage(toolUsageMsg, tracked)
+
+	ts.mu.Lock()
+	calls := ts.toolUsageCalls
+	ts.mu.Unlock()
+
+	if calls != 0 {
+		t.Errorf("forge_calls = %d for unposted scenario, want 0 — ghost attribution from prior bakeoff run not blocked",
+			calls)
+	}
+
+	// Verify the c33 suffix fallback is also blocked: deliver a message whose tag
+	// uses the altFindingID (academy-bk-test-UNPOSTED-01), which matches via suffix.
+	altPayload, _ := json.Marshal(map[string]interface{}{
+		"forge_calls": 5,
+		"tokens_in":   800,
+		"tokens_out":  300,
+		"finding_id":  ts.altFindingID,
+	})
+	altMsg := cfMessage{
+		ID: "tool-usage-ghost-alt-001",
+		Tags: []string{
+			"tool-usage",
+			"finding:" + ts.altFindingID,
+		},
+		Payload: string(altPayload),
+	}
+
+	accumulateToolUsage(altMsg, tracked)
+
+	ts.mu.Lock()
+	callsAfterAlt := ts.toolUsageCalls
+	ts.mu.Unlock()
+
+	if callsAfterAlt != 0 {
+		t.Errorf("forge_calls = %d after c33-suffix-fallback tool-usage for unposted scenario, want 0 — suffix-match ghost not blocked",
+			callsAfterAlt)
+	}
+}
+
+// TestWorkItemToScenario_TagAttribution_SkipsUnpostedScenarios verifies that a
+// work:create whose finding tag matches an unposted scenario (workItemID=="") is
+// NOT attributed to that scenario in the workItemToScenario map, and that a
+// tool-usage message similarly delivers zero forge_calls to it.
+//
+// Pre-fix behaviour: the c33 suffix fallback in the watch loop would register the
+// work:create against the unposted scenario, then any subsequent close for that
+// item would incorrectly mark the scenario terminal; accumulateToolUsage would
+// increment toolUsageCalls producing ghost forge_calls.
+// Post-fix behaviour: the work:create is silently dropped (not assigned to any
+// scenario); toolUsageCalls remains 0.
+//
+// Because a failed-post scenario is never written to disk (the timeout flush also
+// gates on workItemID != ""), this test validates the in-memory trackedScenario
+// state directly by building it without going through academy().
+func TestWorkItemToScenario_TagAttribution_SkipsUnpostedScenarios(t *testing.T) {
+	const (
+		scenarioID    = "UNPOSTED-02"
+		baseFindingID = "fnd_test_001"
+		runID         = "bk-test"
+	)
+
+	// Construct a trackedScenario identical to what academy builds for a failed post.
+	suffixedFindingID := perRunFindingID(baseFindingID, runID) // "fnd_test_001_bk-test"
+	altFindingID := findingTrackingID(runID, scenarioID)        // "academy-bk-test-UNPOSTED-02"
+	ts := &trackedScenario{
+		scenarioID:        scenarioID,
+		findingID:         suffixedFindingID,
+		altFindingID:      altFindingID,
+		workItemID:        "", // post failed — empty
+		seenToolUsageMsgs: make(map[string]bool),
+	}
+	tracked := map[string]*trackedScenario{scenarioID: ts}
+
+	// Scenario 1: tool-usage via primary findingID tag — must be blocked.
+	primaryPayload, _ := json.Marshal(map[string]interface{}{
+		"forge_calls": 3,
+		"tokens_in":   400,
+		"tokens_out":  150,
+		"finding_id":  suffixedFindingID,
+	})
+	primaryMsg := cfMessage{
+		ID:      "tool-usage-primary-001",
+		Tags:    []string{"tool-usage", "finding:" + suffixedFindingID},
+		Payload: string(primaryPayload),
+	}
+	accumulateToolUsage(primaryMsg, tracked)
+
+	ts.mu.Lock()
+	callsAfterPrimary := ts.toolUsageCalls
+	ts.mu.Unlock()
+	if callsAfterPrimary != 0 {
+		t.Errorf("forge_calls = %d after primary-tag tool-usage for unposted scenario, want 0",
+			callsAfterPrimary)
+	}
+
+	// Scenario 2: tool-usage via c33 altFindingID suffix-match tag — must also be blocked.
+	altPayload, _ := json.Marshal(map[string]interface{}{
+		"forge_calls": 5,
+		"tokens_in":   800,
+		"tokens_out":  300,
+		"finding_id":  altFindingID,
+	})
+	altMsg := cfMessage{
+		ID:      "tool-usage-alt-001",
+		Tags:    []string{"tool-usage", "finding:" + altFindingID},
+		Payload: string(altPayload),
+	}
+	accumulateToolUsage(altMsg, tracked)
+
+	ts.mu.Lock()
+	callsAfterAlt := ts.toolUsageCalls
+	ts.mu.Unlock()
+	if callsAfterAlt != 0 {
+		t.Errorf("forge_calls = %d after c33-suffix-fallback tool-usage for unposted scenario, want 0 — suffix-match ghost not blocked",
+			callsAfterAlt)
+	}
+
+	// Scenario 3: verify a POSTED scenario still gets tool-usage attributed normally.
+	// This guards against the fix being too aggressive (blocking all attribution).
+	tsPosted := &trackedScenario{
+		scenarioID:        "POSTED-01",
+		findingID:         perRunFindingID("fnd_other_002", runID),
+		altFindingID:      findingTrackingID(runID, "POSTED-01"),
+		workItemID:        "real-cf-msg-id-posted", // posted successfully
+		seenToolUsageMsgs: make(map[string]bool),
+	}
+	trackedMixed := map[string]*trackedScenario{
+		scenarioID: ts,
+		"POSTED-01": tsPosted,
+	}
+
+	postedPayload, _ := json.Marshal(map[string]interface{}{
+		"forge_calls": 2,
+		"tokens_in":   300,
+		"tokens_out":  100,
+		"finding_id":  tsPosted.findingID,
+	})
+	postedMsg := cfMessage{
+		ID:      "tool-usage-posted-001",
+		Tags:    []string{"tool-usage", "finding:" + tsPosted.findingID},
+		Payload: string(postedPayload),
+	}
+	accumulateToolUsage(postedMsg, trackedMixed)
+
+	tsPosted.mu.Lock()
+	callsPosted := tsPosted.toolUsageCalls
+	tsPosted.mu.Unlock()
+	if callsPosted != 2 {
+		t.Errorf("forge_calls = %d for posted scenario, want 2 — attribution for valid posted scenario broken",
+			callsPosted)
+	}
+
+	// Unposted scenario must still be 0 after the mixed-tracked run.
+	ts.mu.Lock()
+	callsUnpostedAfterMixed := ts.toolUsageCalls
+	ts.mu.Unlock()
+	if callsUnpostedAfterMixed != 0 {
+		t.Errorf("forge_calls = %d for unposted scenario after mixed run, want 0",
+			callsUnpostedAfterMixed)
+	}
+}
+
