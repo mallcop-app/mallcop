@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -78,12 +79,31 @@ func newTrustTestCampfire(t *testing.T, cfBin, label string) (cfHome, campfireID
 
 // admitAndJoin admits the identity at guestCFHome to the campfire owned by
 // hostCFHome, then joins it from guestCFHome's perspective.
+//
+// cf state is per-CF_HOME: the host's campfire .cbor files live under
+// hostCFHome/campfires/<id>/, and the guest's `cf join` reads from
+// guestCFHome/campfires/<id>/ — there is no shared transport-dir mode for
+// filesystem state. We link the campfire dir into the guest's CF_HOME after
+// admit so both identities operate on the same underlying state. Same hack
+// used in production mallcop repos (per cmbaron@gmail.com).
 func admitAndJoin(t *testing.T, cfBin, hostCFHome, campfireID, guestCFHome, guestPubkey string) {
 	t.Helper()
 	// Admit the guest.
 	admitOut, err := runCFCmd(cfBin, hostCFHome, "admit", campfireID, guestPubkey)
 	if err != nil {
 		t.Fatalf("cf admit: %v\nout: %s", err, admitOut)
+	}
+	// Link the host's campfire dir into the guest's CF_HOME so `cf join`
+	// finds campfire.cbor + members/. The link must NOT exist yet — `cf join`
+	// fails noisily otherwise. Create the parent dir on demand.
+	hostCampfireDir := filepath.Join(hostCFHome, "campfires", campfireID)
+	guestCampfiresDir := filepath.Join(guestCFHome, "campfires")
+	if err := os.MkdirAll(guestCampfiresDir, 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", guestCampfiresDir, err)
+	}
+	guestCampfireLink := filepath.Join(guestCampfiresDir, campfireID)
+	if err := os.Symlink(hostCampfireDir, guestCampfireLink); err != nil {
+		t.Fatalf("symlink %s -> %s: %v", guestCampfireLink, hostCampfireDir, err)
 	}
 	// Guest joins.
 	joinOut, err := runCFCmd(cfBin, guestCFHome, "join", campfireID)
@@ -219,7 +239,6 @@ func runApproveActionWithTrust(t *testing.T, inputJSON string, operatorCampfireI
 // Error contract for mallcoppro-d06: error must contain
 // "no signed approval message found for gate".
 func TestApproveAction_RejectsUntrustedSender(t *testing.T) {
-	t.Skip("mallcoppro-218: cf join fails reading campfire.cbor after cf protocol drift; pre-existing on main")
 	cfBin := requireCFF(t)
 
 	// Create operator identity + campfire.
@@ -350,7 +369,6 @@ func TestApproveAction_AcceptsLegitimateOperator(t *testing.T) {
 // Requirement (design §2): key_rotation_grace_period_seconds — both old and new
 // key are simultaneously valid during the grace period.
 func TestApproveAction_RotationGraceAcceptsOldAndNewKey(t *testing.T) {
-	t.Skip("mallcoppro-218: cf join fails reading campfire.cbor after cf protocol drift; pre-existing on main")
 	cfBin := requireCFF(t)
 
 	// New operator key is the primary.
