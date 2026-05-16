@@ -604,16 +604,18 @@ func runEscalateToInvestigator(inputJSON string) error {
 		return fmt.Errorf("escalate-to-investigator: %w", err)
 	}
 
-	// Emit tool-usage BEFORE the terminal work:output so that the academy watch
-	// loop accumulates forge_calls before writeScenarioRecord is triggered by the
-	// work:output close. Order matters: tool-usage must arrive first (mallcoppro-b87).
+	// Emit tool-usage so the academy watch loop counts this escalation as a
+	// forge_call. Do NOT emit a terminal work:output here — escalate-to-investigator
+	// is a chain HANDOFF, not a scenario terminal. The investigate worker spawned
+	// from the task:investigate work:create above (or any deeper worker) will emit
+	// its own resolve-finding terminal carrying the same finding:<id> tag; academy
+	// attributes it back to the scenario via the finding-tag path in
+	// cmd/mallcop-academy/main.go (mallcoppro-60e). Emitting a synthetic
+	// terminal=escalated here short-circuits chain grading and causes every
+	// scenario where triage correctly escalates and investigate correctly resolves
+	// to be graded as escalated — see mallcoppro-2d4 for the 8 universal bakeoff
+	// failures this caused on bk-2026-05-16-175541.
 	emitToolUsage(workCampfireID, input.FindingID, parentItemID)
-	// Terminal signal for the originating worker — academy needs this to
-	// observe the scenario as resolved-by-escalation. Without it the only
-	// close on the wire is automaton-manager's generic "worker completed"
-	// which carries no finding/scenario tag, and the bakeoff never grades
-	// non-hard-constraint scenarios as terminal.
-	emitScenarioTerminalWorkOutput(workCampfireID, input.FindingID, "escalated", input.Reason, parentItemID)
 
 	return emitJSON(map[string]interface{}{
 		"item_id":    itemID,
