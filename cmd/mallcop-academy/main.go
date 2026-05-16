@@ -212,10 +212,9 @@ type trackedScenario struct {
 	scenarioID     string
 	findingID      string
 	// altFindingID is the findingTrackingID (academy-<runID>-<scenarioID>) used as a
-	// secondary attribution key. Workers that process stale work:create messages from
-	// a different bakeoff run may emit finding:<altFindingID-like-ID> tags; we match by
-	// extracting the scenarioID suffix from any "academy-*-<scenarioID>" tag value
-	// (mallcoppro-c33). See matchesFindingTag.
+	// secondary attribution key. Workers that use the triage→investigate escalation
+	// path embed this exact value as the finding_id. Matched with strict equality only
+	// — no suffix extraction (mallcoppro-4dc). See matchesFindingTag.
 	altFindingID   string
 	workItemID     string // cf message ID of the work:create
 	postedAt       time.Time
@@ -517,10 +516,11 @@ func academy(sender Sender, args runArgs) error {
 			actualFindingID = findingTrackingID(args.runID, s.ID)
 		}
 		// altFindingID is the findingTrackingID (academy-<runID>-<scenarioID>).
-		// Workers that process stale work:create messages from a prior bakeoff
-		// run may emit finding:<altFindingID-style> tags. The watch loop matches
-		// by scenario ID suffix extraction when the primary findingID match fails
-		// (mallcoppro-c33). We always set altFindingID so the match is symmetric.
+		// altFindingID is the findingTrackingID (academy-<runID>-<scenarioID>).
+		// Triage workers that call escalate-to-investigator embed this exact form as
+		// the finding_id in their work:create payload. Matched with strict equality
+		// (mallcoppro-4dc). With timestamp run-IDs, the altFindingID is unique per
+		// run, so stale messages from a prior run cannot match.
 		altFindingID := findingTrackingID(args.runID, s.ID)
 		ts := &trackedScenario{
 			scenarioID:        s.ID,
@@ -1200,10 +1200,11 @@ func accumulateToolUsage(msg cfMessage, tracked map[string]*trackedScenario) {
 
 	for _, ts := range tracked {
 		ts.mu.Lock()
-		// Primary guard (mallcoppro-0f9): if the scenario's cf post failed,
-		// workItemID is empty and no real worker ever ran for this scenario.
-		// Attributing tool-usage to it would produce ghost forge_calls from
-		// prior bakeoff runs that match via the c33 scenarioID-suffix fallback.
+		// Guard (mallcoppro-0f9 + mallcoppro-4dc): if the scenario's cf post
+		// failed, workItemID is empty and no real worker ever ran for this scenario.
+		// Attributing tool-usage to it would produce ghost forge_calls from prior
+		// bakeoff runs. With 4dc's strict matchesFindingTag (no scenarioID fallback)
+		// + timestamped run-ids, this guard is defense-in-depth.
 		// Drop the message and log it so future debugging is easy.
 		if ts.workItemID == "" {
 			slog.Debug("dropping tool-usage for unposted scenario",
@@ -1241,35 +1242,27 @@ func accumulateToolUsage(msg cfMessage, tracked map[string]*trackedScenario) {
 // matchesFindingTag reports whether tagFindingID refers to ts.
 // ts.mu must be held by the caller.
 //
-// Two matching strategies (mallcoppro-c33):
+// Strict exact matching only (mallcoppro-4dc). Two forms are checked:
 //
 //  1. Primary: exact match against ts.findingID (perRunFindingID or findingTrackingID
 //     format, depending on whether s.Finding.ID was set).
 //
-//  2. Scenario-ID suffix extraction: when the tag is in the legacy
-//     findingTrackingID format "academy-<any-run-id>-<scenarioID>", extract the
-//     scenarioID suffix and compare against ts.scenarioID. Workers that process a
-//     stale work:create from a previous bakeoff run embed that run's ID in the
-//     finding tag they emit — this may not match the current run's findingID. The
-//     suffix check attributes the message to the correct tracked scenario regardless
-//     of which specific bakeoff run the worker consumed. The 647 guard is preserved:
-//     tags without a "finding:" prefix never reach this function.
+//  2. Alt: exact match against ts.altFindingID (findingTrackingID format, always set).
+//     Workers that use the triage→investigate escalation path embed the current
+//     run's altFindingID exactly; this is safe to match.
+//
+// The scenarioID-suffix fallback from mallcoppro-c33 is intentionally removed.
+// With timestamp-embedded run-IDs (bk-<lane>-<YYYYMMDD-HHMMSS>), stale messages
+// from a prior run carry a different timestamp in their finding tag and will NOT
+// match either ts.findingID or ts.altFindingID. Cross-run ghost attribution is
+// therefore impossible without the fallback. The 647 guard is preserved: tags
+// without a "finding:" prefix never reach this function.
 func matchesFindingTag(ts *trackedScenario, tagFindingID string) bool {
 	if ts.findingID == tagFindingID {
 		return true
 	}
-	// Suffix extraction: "academy-<runID>-<scenarioID>"
-	// The prefix "academy-" is fixed; runID may contain dashes (e.g. "bk-us_only").
-	// We find the scenarioID by checking whether tagFindingID ends with
-	// "-<ts.scenarioID>". This is safe because:
-	//   - ts.scenarioID values are known (loaded from exam YAML, e.g. "CN-01-correlated-low-severity").
-	//   - The "finding:" tag namespace guard (in the caller) prevents unscoped messages.
-	const academyPrefix = "academy-"
-	if strings.HasPrefix(tagFindingID, academyPrefix) && ts.scenarioID != "" {
-		suffix := "-" + ts.scenarioID
-		if strings.HasSuffix(tagFindingID, suffix) {
-			return true
-		}
+	if ts.altFindingID != "" && ts.altFindingID == tagFindingID {
+		return true
 	}
 	return false
 }

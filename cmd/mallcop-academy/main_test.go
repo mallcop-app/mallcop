@@ -1866,28 +1866,87 @@ func TestAccumulateToolUsage_IdempotentAcrossPolls(t *testing.T) {
 	}
 }
 
-// ---- regression: triage→investigate work:create attribution (mallcoppro-c33) -
+// ---- matchesFindingTag strict-exact-only (mallcoppro-4dc) ----
+
+// TestMatchesFindingTag_StrictExactOnly verifies that matchesFindingTag uses exact
+// equality only — no scenarioID-suffix fallback (mallcoppro-4dc). With timestamp
+// run-IDs, stale messages from a prior run carry a different timestamp in their
+// finding tag and will not match either findingID or altFindingID.
+func TestMatchesFindingTag_StrictExactOnly(t *testing.T) {
+	ts := &trackedScenario{
+		scenarioID:   "X",
+		findingID:    "fnd_X_bk-open-20260516",
+		altFindingID: "academy-bk-open-20260516-X",
+	}
+
+	tests := []struct {
+		name         string
+		tagFindingID string
+		want         bool
+	}{
+		{
+			name:         "primary findingID exact match → true",
+			tagFindingID: "fnd_X_bk-open-20260516",
+			want:         true,
+		},
+		{
+			name:         "altFindingID exact match → true",
+			tagFindingID: "academy-bk-open-20260516-X",
+			want:         true,
+		},
+		{
+			name:         "stale primary findingID (different timestamp) → false",
+			tagFindingID: "fnd_X_bk-open-20260515",
+			want:         false,
+		},
+		{
+			name:         "old scenarioID-suffix format no timestamp → false",
+			tagFindingID: "academy-bk-open-X",
+			want:         false,
+		},
+		{
+			name:         "stale altFindingID (different timestamp) → false",
+			tagFindingID: "academy-bk-open-20260515-X",
+			want:         false,
+		},
+		{
+			name:         "empty tag → false",
+			tagFindingID: "",
+			want:         false,
+		},
+		{
+			name:         "partial prefix only → false",
+			tagFindingID: "fnd_X_bk-open",
+			want:         false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := matchesFindingTag(ts, tc.tagFindingID)
+			if got != tc.want {
+				t.Errorf("matchesFindingTag(ts, %q) = %v, want %v", tc.tagFindingID, got, tc.want)
+			}
+		})
+	}
+}
+
+// ---- regression: triage→investigate work:create attribution (mallcoppro-c33 + mallcoppro-4dc) -
 
 // TestWorkItemToScenario_TriageInvestigateAttribution verifies that a work:create
-// emitted by a triage worker calling escalate-to-investigator is attributed to the
-// correct scenario even when the worker used a stale finding ID (e.g. from a prior
-// bakeoff run's work:create message).
+// emitted by a triage worker using the CURRENT run's altFindingID is attributed
+// to the correct scenario via strict exact matching (mallcoppro-4dc).
 //
-// Concretely: the triage worker may pass "academy-<OLD-runID>-<scenarioID>" as the
-// finding_id to escalate-to-investigator (because it processed a stale work:create
-// whose payload.finding.id carried the old format). The resulting investigate
-// work:create carries tag "finding:academy-<OLD-runID>-<scenarioID>", which
-// does NOT match the current run's tracked findingID (fnd_xxx_<currentRunID>).
-//
-// The fix (mallcoppro-c33) extracts the scenario ID from the "academy-*-<scenarioID>"
-// suffix and attributes by scenario ID. The 647 guard is preserved: a bare
-// work:create with no finding tag is still rejected.
+// With timestamp run-IDs (bk-<lane>-<YYYYMMDD-HHMMSS>), the altFindingID is
+// unique per run. A triage worker that processes a current-run work:create and
+// calls escalate-to-investigator embeds the current altFindingID exactly, so
+// exact matching is sufficient. The 647 guard is preserved: bare work:create
+// messages with no finding tag are still rejected.
 func TestWorkItemToScenario_TriageInvestigateAttribution(t *testing.T) {
 	const (
 		scenarioID    = "TRIAGE-01"
 		baseFindingID = "fnd_triage_001"
-		currentRunID  = "bk-current"
-		oldRunID      = "bk-stale"
+		currentRunID  = "bk-current-20260516"
 	)
 
 	scenDir := t.TempDir()
@@ -1896,21 +1955,16 @@ func TestWorkItemToScenario_TriageInvestigateAttribution(t *testing.T) {
 
 	outDir := t.TempDir()
 
-	// The current run tracks: findingID = "fnd_triage_001_bk-current"
-	// But the triage worker processed an old work:create whose finding.id was
-	// "fnd_triage_001" (without suffix, from before perRunFindingID was added)
-	// and used payload.id = "academy-bk-stale-TRIAGE-01" as the finding_id.
-	// The investigate work:create therefore carries tag:
-	//   "finding:academy-bk-stale-TRIAGE-01"
-	//
-	// With the fix, matchesFindingTag extracts "TRIAGE-01" from the suffix and
-	// attributes the message correctly.
-	staleAcademyFindingID := findingTrackingID(oldRunID, scenarioID) // "academy-bk-stale-TRIAGE-01"
+	// The current run's altFindingID = "academy-bk-current-20260516-TRIAGE-01".
+	// A triage worker that processes a current-run work:create and calls
+	// escalate-to-investigator will embed this exact ID. Strict exact matching
+	// attributes the investigate work:create to TRIAGE-01.
+	currentAltFindingID := findingTrackingID(currentRunID, scenarioID) // "academy-bk-current-20260516-TRIAGE-01"
 
 	investigateWorkCreatePayload, _ := json.Marshal(map[string]interface{}{
 		"id":    "mallcopdeploy-abc",
 		"skill": "task:investigate",
-		"title": "investigate: " + staleAcademyFindingID,
+		"title": "investigate: " + currentAltFindingID,
 	})
 	investigateClosePayload, _ := json.Marshal(closePayload{
 		ItemID: "mallcopdeploy-abc",
@@ -1932,16 +1986,16 @@ func TestWorkItemToScenario_TriageInvestigateAttribution(t *testing.T) {
 
 	ms := &mockSender{
 		readMsgs: []cfMessage{
-			// Stale-run investigate work:create: carries "academy-bk-stale-TRIAGE-01" tag.
-			// Must be attributed to TRIAGE-01 via suffix extraction (mallcoppro-c33).
+			// Current-run investigate work:create: carries current-run altFindingID tag.
+			// Must be attributed to TRIAGE-01 via exact altFindingID match (mallcoppro-4dc).
 			{
-				ID:      "stale-investigate-create",
-				Tags:    []string{"work:create", "skill:task:investigate", "finding:" + staleAcademyFindingID},
+				ID:      "current-investigate-create",
+				Tags:    []string{"work:create", "skill:task:investigate", "finding:" + currentAltFindingID},
 				Payload: string(investigateWorkCreatePayload),
 			},
-			// Terminal close for the stale-run investigate item.
+			// Terminal close for the investigate item.
 			{
-				ID:      "stale-investigate-close",
+				ID:      "current-investigate-close",
 				Tags:    []string{"work:close", "action:escalated"},
 				Payload: string(investigateClosePayload),
 			},
@@ -1983,15 +2037,14 @@ func TestWorkItemToScenario_TriageInvestigateAttribution(t *testing.T) {
 		t.Fatalf("parse %s.json: %v", scenarioID, err)
 	}
 
-	// TRIAGE-01 must be terminal via the stale-run investigate close (action=escalated).
-	// If the suffix attribution did NOT work, the investigate close would be rejected
-	// and TRIAGE-01 would timeout (terminal_action="").
+	// TRIAGE-01 must be terminal via the investigate close (action=escalated).
+	// Same-run altFindingID exact match must attribute correctly.
 	if rec.TerminalAction != "escalated" {
-		t.Errorf("%s terminal_action = %q, want escalated (stale-run finding tag attribution must work via suffix match)",
+		t.Errorf("%s terminal_action = %q, want escalated (same-run altFindingID exact match must attribute correctly)",
 			scenarioID, rec.TerminalAction)
 	}
 	if rec.TerminalAt == nil {
-		t.Errorf("%s terminal_at must not be nil — stale-run investigate close must reach terminal", scenarioID)
+		t.Errorf("%s terminal_at must not be nil — investigate close must reach terminal", scenarioID)
 	}
 
 	// The chain must include the investigate item.
@@ -2003,7 +2056,7 @@ func TestWorkItemToScenario_TriageInvestigateAttribution(t *testing.T) {
 		}
 	}
 	if !foundInvestigateItem {
-		t.Errorf("%s full_chain does not contain 'mallcopdeploy-abc' — stale-run attribution did not register chain link",
+		t.Errorf("%s full_chain does not contain 'mallcopdeploy-abc' — same-run altFindingID attribution did not register chain link",
 			scenarioID)
 	}
 
@@ -2015,6 +2068,96 @@ func TestWorkItemToScenario_TriageInvestigateAttribution(t *testing.T) {
 	}
 	if rec.TerminalItemID == "unscoped-item-xyz" || rec.TerminalItemID == "bare-create-msg" {
 		t.Errorf("%s terminal_item_id = %q — 647 guard broken: bare close set terminal", scenarioID, rec.TerminalItemID)
+	}
+}
+
+// TestWorkItemToScenario_StaleRunFindingTagRejected verifies that a work:create
+// carrying a STALE run's altFindingID tag is NOT attributed to any scenario
+// (mallcoppro-4dc strict matching). With timestamp run-IDs, cross-run tags
+// have a different timestamp embedded and cannot match.
+func TestWorkItemToScenario_StaleRunFindingTagRejected(t *testing.T) {
+	const (
+		scenarioID    = "TRIAGE-02"
+		baseFindingID = "fnd_triage_002"
+		currentRunID  = "bk-current-20260516"
+		oldRunID      = "bk-current-20260515" // different timestamp = different run
+	)
+
+	scenDir := t.TempDir()
+	writeMinimalScenario(t, scenDir, scenarioID, baseFindingID, "detector-unusual-login",
+		"Unusual login from stale-run rejection test", "medium")
+
+	outDir := t.TempDir()
+
+	// Stale-run tag: the tag the old-run worker would have emitted.
+	// Does NOT match current run's altFindingID (different timestamp).
+	staleAltFindingID := findingTrackingID(oldRunID, scenarioID) // "academy-bk-current-20260515-TRIAGE-02"
+
+	staleInvestigateCreatePayload, _ := json.Marshal(map[string]interface{}{
+		"id":    "mallcopdeploy-stale-xyz",
+		"skill": "task:investigate",
+		"title": "investigate: " + staleAltFindingID,
+	})
+	staleInvestigateClosePayload, _ := json.Marshal(closePayload{
+		ItemID: "mallcopdeploy-stale-xyz",
+		Action: "escalated",
+		Skill:  "task:investigate",
+	})
+
+	ms := &mockSender{
+		readMsgs: []cfMessage{
+			// Stale-run investigate work:create: tag has old timestamp in run-id.
+			// Strict exact matching must reject this (mallcoppro-4dc).
+			{
+				ID:      "stale-investigate-create",
+				Tags:    []string{"work:create", "skill:task:investigate", "finding:" + staleAltFindingID},
+				Payload: string(staleInvestigateCreatePayload),
+			},
+			// Close for the stale item — must NOT reach TRIAGE-02.
+			{
+				ID:      "stale-investigate-close",
+				Tags:    []string{"work:close", "action:escalated"},
+				Payload: string(staleInvestigateClosePayload),
+			},
+		},
+	}
+
+	args := runArgs{
+		targetCampfire: "cf-stale-rejection-test",
+		scenariosDir:   scenDir,
+		scenarioFilter: scenarioID,
+		outputDir:      outDir,
+		maxConcurrent:  1,
+		timeout:        5 * time.Second,
+		runID:          currentRunID,
+	}
+
+	if err := academy(ms, args); err != nil {
+		t.Fatalf("academy: %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(outDir, scenarioID+".json"))
+	if err != nil {
+		t.Fatalf("%s.json not found: %v", scenarioID, err)
+	}
+	var rec ScenarioRecord
+	if err := json.Unmarshal(data, &rec); err != nil {
+		t.Fatalf("parse %s.json: %v", scenarioID, err)
+	}
+
+	// TRIAGE-02 must NOT be terminal via the stale investigate close.
+	// With strict exact matching, stale tags are rejected — scenario times out (terminal_action="").
+	if rec.TerminalAction == "escalated" {
+		t.Errorf("%s terminal_action = escalated — stale-run tag should be rejected by strict exact matching (mallcoppro-4dc), not attributed",
+			scenarioID)
+	}
+
+	// The stale investigate item must NOT appear in the chain.
+	for _, ce := range rec.FullChain {
+		if ce.ItemID == "mallcopdeploy-stale-xyz" || ce.ItemID == "stale-investigate-create" {
+			t.Errorf("%s full_chain contains stale item %q — strict exact matching broken: stale tag attributed",
+				scenarioID, ce.ItemID)
+		}
 	}
 }
 
@@ -2096,7 +2239,7 @@ func TestAccumulateToolUsage_SkipsUnpostedScenarios(t *testing.T) {
 	ts.mu.Unlock()
 
 	if callsAfterAlt != 0 {
-		t.Errorf("forge_calls = %d after c33-suffix-fallback tool-usage for unposted scenario, want 0 — suffix-match ghost not blocked",
+		t.Errorf("forge_calls = %d after altFindingID tool-usage for unposted scenario, want 0 — ghost attribution not blocked",
 			callsAfterAlt)
 	}
 }
@@ -2106,9 +2249,9 @@ func TestAccumulateToolUsage_SkipsUnpostedScenarios(t *testing.T) {
 // NOT attributed to that scenario in the workItemToScenario map, and that a
 // tool-usage message similarly delivers zero forge_calls to it.
 //
-// Pre-fix behaviour: the c33 suffix fallback in the watch loop would register the
-// work:create against the unposted scenario, then any subsequent close for that
-// item would incorrectly mark the scenario terminal; accumulateToolUsage would
+// Pre-fix behaviour: the watch loop would register the work:create against the
+// unposted scenario, then any subsequent close for that item would incorrectly
+// mark the scenario terminal; accumulateToolUsage would
 // increment toolUsageCalls producing ghost forge_calls.
 // Post-fix behaviour: the work:create is silently dropped (not assigned to any
 // scenario); toolUsageCalls remains 0.
@@ -2157,7 +2300,7 @@ func TestWorkItemToScenario_TagAttribution_SkipsUnpostedScenarios(t *testing.T) 
 			callsAfterPrimary)
 	}
 
-	// Scenario 2: tool-usage via c33 altFindingID suffix-match tag — must also be blocked.
+	// Scenario 2: tool-usage via altFindingID tag — must also be blocked (workItemID="" guard).
 	altPayload, _ := json.Marshal(map[string]interface{}{
 		"forge_calls": 5,
 		"tokens_in":   800,
@@ -2175,7 +2318,7 @@ func TestWorkItemToScenario_TagAttribution_SkipsUnpostedScenarios(t *testing.T) 
 	callsAfterAlt := ts.toolUsageCalls
 	ts.mu.Unlock()
 	if callsAfterAlt != 0 {
-		t.Errorf("forge_calls = %d after c33-suffix-fallback tool-usage for unposted scenario, want 0 — suffix-match ghost not blocked",
+		t.Errorf("forge_calls = %d after altFindingID tool-usage for unposted scenario, want 0 — ghost attribution not blocked",
 			callsAfterAlt)
 	}
 
