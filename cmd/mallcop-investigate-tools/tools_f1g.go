@@ -345,16 +345,17 @@ func runResolveFinding(inputJSON string) error {
 	// campfire (operational fallback in activate), this is a no-op via
 	// the early-return inside the helper.
 	workCampfireID := os.Getenv("MALLCOP_WORK_CAMPFIRE_ID")
-	if workCampfireID != "" && workCampfireID != campfireID {
-		emitScenarioTerminalWorkOutput(workCampfireID, input.FindingID, input.Action, input.Reason, os.Getenv("MALLCOP_ITEM_ID"))
-	}
-	// Emit tool-usage accounting message so academy can accumulate forge_calls
-	// without needing billing API access (mallcoppro-237 A2).
+	// Emit tool-usage BEFORE the terminal work:output so that the academy watch
+	// loop accumulates forge_calls before writeScenarioRecord is triggered by the
+	// work:output close. Order matters: tool-usage must arrive first (mallcoppro-b87).
 	usageCampfire := workCampfireID
 	if usageCampfire == "" {
 		usageCampfire = campfireID
 	}
 	emitToolUsage(usageCampfire, input.FindingID, os.Getenv("MALLCOP_ITEM_ID"))
+	if workCampfireID != "" && workCampfireID != campfireID {
+		emitScenarioTerminalWorkOutput(workCampfireID, input.FindingID, input.Action, input.Reason, os.Getenv("MALLCOP_ITEM_ID"))
+	}
 
 	return emitJSON(map[string]interface{}{
 		"finding_id": input.FindingID,
@@ -594,14 +595,16 @@ func runEscalateToInvestigator(inputJSON string) error {
 		return fmt.Errorf("escalate-to-investigator: %w", err)
 	}
 
+	// Emit tool-usage BEFORE the terminal work:output so that the academy watch
+	// loop accumulates forge_calls before writeScenarioRecord is triggered by the
+	// work:output close. Order matters: tool-usage must arrive first (mallcoppro-b87).
+	emitToolUsage(workCampfireID, input.FindingID, parentItemID)
 	// Terminal signal for the originating worker — academy needs this to
 	// observe the scenario as resolved-by-escalation. Without it the only
 	// close on the wire is automaton-manager's generic "worker completed"
 	// which carries no finding/scenario tag, and the bakeoff never grades
 	// non-hard-constraint scenarios as terminal.
 	emitScenarioTerminalWorkOutput(workCampfireID, input.FindingID, "escalated", input.Reason, parentItemID)
-	// Emit tool-usage accounting for academy (mallcoppro-237 A2).
-	emitToolUsage(workCampfireID, input.FindingID, parentItemID)
 
 	return emitJSON(map[string]interface{}{
 		"item_id":    itemID,
@@ -656,10 +659,12 @@ func runEscalateToStageC(inputJSON string) error {
 		return fmt.Errorf("escalate-to-stage-c: %w", err)
 	}
 
+	// Emit tool-usage BEFORE the terminal work:output so that the academy watch
+	// loop accumulates forge_calls before writeScenarioRecord is triggered by the
+	// work:output close. Order matters: tool-usage must arrive first (mallcoppro-b87).
+	emitToolUsage(workCampfireID, input.FindingID, parentItemID)
 	// Terminal signal for academy — see emitScenarioTerminalWorkOutput.
 	emitScenarioTerminalWorkOutput(workCampfireID, input.FindingID, "escalated", input.Reason, parentItemID)
-	// Emit tool-usage accounting for academy (mallcoppro-237 A2).
-	emitToolUsage(workCampfireID, input.FindingID, parentItemID)
 
 	return emitJSON(map[string]interface{}{
 		"item_id":      itemID,
@@ -710,10 +715,12 @@ func runEscalateToDeep(inputJSON string) error {
 		return fmt.Errorf("escalate-to-deep: %w", err)
 	}
 
+	// Emit tool-usage BEFORE the terminal work:output so that the academy watch
+	// loop accumulates forge_calls before writeScenarioRecord is triggered by the
+	// work:output close. Order matters: tool-usage must arrive first (mallcoppro-b87).
+	emitToolUsage(workCampfireID, input.FindingID, parentItemID)
 	// Terminal signal for academy — see emitScenarioTerminalWorkOutput.
 	emitScenarioTerminalWorkOutput(workCampfireID, input.FindingID, "escalated", input.Hypothesis, parentItemID)
-	// Emit tool-usage accounting for academy (mallcoppro-237 A2).
-	emitToolUsage(workCampfireID, input.FindingID, parentItemID)
 
 	return emitJSON(map[string]interface{}{
 		"item_id":                itemID,
