@@ -1298,12 +1298,16 @@ func writeScenarioRecord(ts *trackedScenario, runID, targetCampfire, outputDir s
 	// HTTP billing API fetcher. The campfire path reads tool-usage messages posted
 	// by resolve-finding/escalate-to-investigator/escalate-to-stage-c, which counts
 	// forge_calls as 1 per terminal tool invocation. This avoids the 403 returned by
-	// GET /v1/billing/accounts/{id}/usage for customer keys (RoleAgent auth only).
+	// GET /v1/usage for customer keys (GET /v1/usage requires RoleTenant auth;
+	// mallcop-sk-* keys are customer-tier and will 403 — mallcoppro-d93).
 	//
 	// Priority:
 	//   1. Campfire-accumulated data (ts.toolUsageCalls > 0): nonzero, use directly.
-	//   2. HTTP fetcher (fallback when campfire data is absent — e.g. old deployments
-	//      without the tool-usage emission, or FORGE_API_KEY set with RoleTenant).
+	//      Short-circuits the HTTP fetcher — no RoleTenant key needed.
+	//   2. HTTP fetcher: only attempted when MALLCOP_FORGE_USAGE_HTTP_KEY is set
+	//      (the fetcher is non-nil only when that env var is present). When both
+	//      campfire data and the HTTP key are absent, forge_calls stays 0 and the
+	//      canary signals the run as suspect (mallcoppro-d93).
 	if ts.toolUsageCalls > 0 {
 		rec.ForgeCalls = ts.toolUsageCalls
 		rec.TokensIn = ts.toolUsageTokensIn
@@ -1323,6 +1327,12 @@ func writeScenarioRecord(ts *trackedScenario, runID, targetCampfire, outputDir s
 			rec.TokensOut = usage.TokensOut
 			rec.CostUSD = usage.CostUSD
 		}
+	} else {
+		// No campfire tool-usage and no tenant key — forge_calls stays 0.
+		// The canary (canary_check_lane in run-bakeoff.sh) will flag the run
+		// if non-HC scenarios uniformly have forge_calls=0 (mallcoppro-d93).
+		slog.Info("forge usage: no campfire tool-usage and no MALLCOP_FORGE_USAGE_HTTP_KEY; forge_calls stays 0",
+			"scenario_id", ts.scenarioID)
 	}
 
 	// F4C: attach rubric if collected.

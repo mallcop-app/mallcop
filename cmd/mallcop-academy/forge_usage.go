@@ -61,11 +61,18 @@ type httpUsageFetcher struct {
 
 // newHTTPUsageFetcher constructs a fetcher from env vars:
 //   - FORGE_BASE_URL (default: https://forge.3dl.dev)
-//   - FORGE_API_KEY
+//   - MALLCOP_FORGE_USAGE_HTTP_KEY — tenant-tier key for GET /v1/usage.
+//     Must be set explicitly because GET /v1/usage requires RoleTenant auth;
+//     the customer-tier FORGE_API_KEY (mallcop-sk-*) returns 403. When this
+//     env var is absent, the HTTP path is skipped entirely. The campfire
+//     tool-usage path (mallcoppro-237 A2) is the primary source of forge_calls
+//     and does not require RoleTenant access (mallcoppro-d93).
 //
-// Returns nil if FORGE_API_KEY is not set (caller should use noopUsageFetcher).
+// Returns nil if MALLCOP_FORGE_USAGE_HTTP_KEY is not set (caller should use
+// noopUsageFetcher). FORGE_API_KEY alone is not sufficient — customer-tier
+// keys produce 403 on /v1/usage.
 func newHTTPUsageFetcher() *httpUsageFetcher {
-	apiKey := os.Getenv("FORGE_API_KEY")
+	apiKey := os.Getenv("MALLCOP_FORGE_USAGE_HTTP_KEY")
 	if apiKey == "" {
 		return nil
 	}
