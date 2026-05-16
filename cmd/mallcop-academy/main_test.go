@@ -1772,3 +1772,245 @@ func TestWorkItemToScenario_TagBasedAttribution(t *testing.T) {
 			rec.TerminalItemID)
 	}
 }
+
+// ---- regression: forge_calls poll-dedup (mallcoppro-5119) --------------------
+
+// TestAccumulateToolUsage_IdempotentAcrossPolls verifies that the same tool-usage
+// campfire message delivered on two consecutive readAll batches is counted exactly
+// once, not twice.
+//
+// Pre-fix behaviour: forge_calls would be 2 (once per poll).
+// Post-fix behaviour: forge_calls must be 1.
+func TestAccumulateToolUsage_IdempotentAcrossPolls(t *testing.T) {
+	const (
+		scenarioID   = "DEDUP-01"
+		baseFindingID = "fnd_dedup_001"
+		runID        = "dedup-test-run"
+	)
+
+	// Build a tracked scenario with the same setup academy uses.
+	suffixedFindingID := perRunFindingID(baseFindingID, runID)
+	ts := &trackedScenario{
+		scenarioID:        scenarioID,
+		findingID:         suffixedFindingID,
+		altFindingID:      findingTrackingID(runID, scenarioID),
+		seenToolUsageMsgs: make(map[string]bool),
+	}
+	tracked := map[string]*trackedScenario{scenarioID: ts}
+
+	// Build a single tool-usage message that carries the matching finding tag.
+	toolUsageMsg := cfMessage{
+		ID: "tool-usage-msg-abc123",
+		Tags: []string{
+			"tool-usage",
+			"finding:" + suffixedFindingID,
+		},
+	}
+	payload, _ := json.Marshal(map[string]interface{}{
+		"forge_calls": 1,
+		"tokens_in":   100,
+		"tokens_out":  50,
+		"finding_id":  suffixedFindingID,
+	})
+	toolUsageMsg.Payload = string(payload)
+
+	// First poll delivers the message.
+	accumulateToolUsage(toolUsageMsg, tracked)
+
+	ts.mu.Lock()
+	afterFirstPoll := ts.toolUsageCalls
+	ts.mu.Unlock()
+
+	if afterFirstPoll != 1 {
+		t.Fatalf("forge_calls after first poll = %d, want 1", afterFirstPoll)
+	}
+
+	// Second poll re-delivers the SAME message (cf readAll is idempotent — it
+	// returns all messages from the beginning of the campfire log every time).
+	accumulateToolUsage(toolUsageMsg, tracked)
+
+	ts.mu.Lock()
+	afterSecondPoll := ts.toolUsageCalls
+	ts.mu.Unlock()
+
+	if afterSecondPoll != 1 {
+		t.Errorf("forge_calls after second poll = %d, want 1 (poll-dedup failed: same msg counted twice)",
+			afterSecondPoll)
+	}
+
+	// A DIFFERENT message with the same finding tag must still be counted.
+	toolUsageMsg2 := cfMessage{
+		ID:   "tool-usage-msg-def456",
+		Tags: toolUsageMsg.Tags,
+	}
+	payload2, _ := json.Marshal(map[string]interface{}{
+		"forge_calls": 1,
+		"tokens_in":   200,
+		"tokens_out":  80,
+		"finding_id":  suffixedFindingID,
+	})
+	toolUsageMsg2.Payload = string(payload2)
+
+	accumulateToolUsage(toolUsageMsg2, tracked)
+
+	ts.mu.Lock()
+	afterThirdMsg := ts.toolUsageCalls
+	ts.mu.Unlock()
+
+	if afterThirdMsg != 2 {
+		t.Errorf("forge_calls after distinct second message = %d, want 2 (distinct messages must each be counted once)",
+			afterThirdMsg)
+	}
+}
+
+// ---- regression: triage→investigate work:create attribution (mallcoppro-c33) -
+
+// TestWorkItemToScenario_TriageInvestigateAttribution verifies that a work:create
+// emitted by a triage worker calling escalate-to-investigator is attributed to the
+// correct scenario even when the worker used a stale finding ID (e.g. from a prior
+// bakeoff run's work:create message).
+//
+// Concretely: the triage worker may pass "academy-<OLD-runID>-<scenarioID>" as the
+// finding_id to escalate-to-investigator (because it processed a stale work:create
+// whose payload.finding.id carried the old format). The resulting investigate
+// work:create carries tag "finding:academy-<OLD-runID>-<scenarioID>", which
+// does NOT match the current run's tracked findingID (fnd_xxx_<currentRunID>).
+//
+// The fix (mallcoppro-c33) extracts the scenario ID from the "academy-*-<scenarioID>"
+// suffix and attributes by scenario ID. The 647 guard is preserved: a bare
+// work:create with no finding tag is still rejected.
+func TestWorkItemToScenario_TriageInvestigateAttribution(t *testing.T) {
+	const (
+		scenarioID    = "TRIAGE-01"
+		baseFindingID = "fnd_triage_001"
+		currentRunID  = "bk-current"
+		oldRunID      = "bk-stale"
+	)
+
+	scenDir := t.TempDir()
+	writeMinimalScenario(t, scenDir, scenarioID, baseFindingID, "detector-unusual-login",
+		"Unusual login from triage scenario", "medium")
+
+	outDir := t.TempDir()
+
+	// The current run tracks: findingID = "fnd_triage_001_bk-current"
+	// But the triage worker processed an old work:create whose finding.id was
+	// "fnd_triage_001" (without suffix, from before perRunFindingID was added)
+	// and used payload.id = "academy-bk-stale-TRIAGE-01" as the finding_id.
+	// The investigate work:create therefore carries tag:
+	//   "finding:academy-bk-stale-TRIAGE-01"
+	//
+	// With the fix, matchesFindingTag extracts "TRIAGE-01" from the suffix and
+	// attributes the message correctly.
+	staleAcademyFindingID := findingTrackingID(oldRunID, scenarioID) // "academy-bk-stale-TRIAGE-01"
+
+	investigateWorkCreatePayload, _ := json.Marshal(map[string]interface{}{
+		"id":    "mallcopdeploy-abc",
+		"skill": "task:investigate",
+		"title": "investigate: " + staleAcademyFindingID,
+	})
+	investigateClosePayload, _ := json.Marshal(closePayload{
+		ItemID: "mallcopdeploy-abc",
+		Action: "escalated",
+		Skill:  "task:investigate",
+	})
+
+	// Bare work:create with no finding tag — 647 guard: must be rejected.
+	bareWorkCreatePayload, _ := json.Marshal(map[string]interface{}{
+		"id":    "unscoped-item-xyz",
+		"skill": "task:triage",
+		"title": "some unrelated finding with no scope tag",
+	})
+	bareClosePayload, _ := json.Marshal(closePayload{
+		ItemID: "unscoped-item-xyz",
+		Action: "resolved",
+		Skill:  "task:triage",
+	})
+
+	ms := &mockSender{
+		readMsgs: []cfMessage{
+			// Stale-run investigate work:create: carries "academy-bk-stale-TRIAGE-01" tag.
+			// Must be attributed to TRIAGE-01 via suffix extraction (mallcoppro-c33).
+			{
+				ID:      "stale-investigate-create",
+				Tags:    []string{"work:create", "skill:task:investigate", "finding:" + staleAcademyFindingID},
+				Payload: string(investigateWorkCreatePayload),
+			},
+			// Terminal close for the stale-run investigate item.
+			{
+				ID:      "stale-investigate-close",
+				Tags:    []string{"work:close", "action:escalated"},
+				Payload: string(investigateClosePayload),
+			},
+			// Bare work:create — no finding tag. 647 guard must reject this.
+			{
+				ID:      "bare-create-msg",
+				Tags:    []string{"work:create", "task:triage"},
+				Payload: string(bareWorkCreatePayload),
+			},
+			// Close for the bare item — must NOT reach TRIAGE-01.
+			{
+				ID:      "bare-close-msg",
+				Tags:    []string{"work:close", "action:resolved"},
+				Payload: string(bareClosePayload),
+			},
+		},
+	}
+
+	args := runArgs{
+		targetCampfire: "cf-triage-investigate-test",
+		scenariosDir:   scenDir,
+		scenarioFilter: scenarioID,
+		outputDir:      outDir,
+		maxConcurrent:  1,
+		timeout:        5 * time.Second,
+		runID:          currentRunID,
+	}
+
+	if err := academy(ms, args); err != nil {
+		t.Fatalf("academy: %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(outDir, scenarioID+".json"))
+	if err != nil {
+		t.Fatalf("%s.json not found: %v", scenarioID, err)
+	}
+	var rec ScenarioRecord
+	if err := json.Unmarshal(data, &rec); err != nil {
+		t.Fatalf("parse %s.json: %v", scenarioID, err)
+	}
+
+	// TRIAGE-01 must be terminal via the stale-run investigate close (action=escalated).
+	// If the suffix attribution did NOT work, the investigate close would be rejected
+	// and TRIAGE-01 would timeout (terminal_action="").
+	if rec.TerminalAction != "escalated" {
+		t.Errorf("%s terminal_action = %q, want escalated (stale-run finding tag attribution must work via suffix match)",
+			scenarioID, rec.TerminalAction)
+	}
+	if rec.TerminalAt == nil {
+		t.Errorf("%s terminal_at must not be nil — stale-run investigate close must reach terminal", scenarioID)
+	}
+
+	// The chain must include the investigate item.
+	foundInvestigateItem := false
+	for _, ce := range rec.FullChain {
+		if ce.ItemID == "mallcopdeploy-abc" {
+			foundInvestigateItem = true
+			break
+		}
+	}
+	if !foundInvestigateItem {
+		t.Errorf("%s full_chain does not contain 'mallcopdeploy-abc' — stale-run attribution did not register chain link",
+			scenarioID)
+	}
+
+	// 647 guard: the bare unscoped item must NOT appear in the chain or as terminal.
+	for _, ce := range rec.FullChain {
+		if ce.ItemID == "unscoped-item-xyz" || ce.ItemID == "bare-create-msg" {
+			t.Errorf("%s full_chain contains unscoped item %q — 647 guard broken", scenarioID, ce.ItemID)
+		}
+	}
+	if rec.TerminalItemID == "unscoped-item-xyz" || rec.TerminalItemID == "bare-create-msg" {
+		t.Errorf("%s terminal_item_id = %q — 647 guard broken: bare close set terminal", scenarioID, rec.TerminalItemID)
+	}
+}

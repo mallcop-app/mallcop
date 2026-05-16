@@ -211,6 +211,12 @@ type trackedScenario struct {
 	mu             sync.Mutex
 	scenarioID     string
 	findingID      string
+	// altFindingID is the findingTrackingID (academy-<runID>-<scenarioID>) used as a
+	// secondary attribution key. Workers that process stale work:create messages from
+	// a different bakeoff run may emit finding:<altFindingID-like-ID> tags; we match by
+	// extracting the scenarioID suffix from any "academy-*-<scenarioID>" tag value
+	// (mallcoppro-c33). See matchesFindingTag.
+	altFindingID   string
 	workItemID     string // cf message ID of the work:create
 	postedAt       time.Time
 	chain          []ChainEntry
@@ -232,6 +238,12 @@ type trackedScenario struct {
 	toolUsageCalls     int   // sum of forge_calls fields across tool-usage messages
 	toolUsageTokensIn  int64 // sum of tokens_in fields
 	toolUsageTokensOut int64 // sum of tokens_out fields
+
+	// seenToolUsageMsgs deduplicates tool-usage campfire messages by message ID.
+	// cf readAll re-delivers the entire message history on every poll iteration,
+	// so without dedup the same tool-usage message is counted once per poll.
+	// (mallcoppro-5119)
+	seenToolUsageMsgs map[string]bool
 
 	// F4B/F4C wiring — set after judge runs (single-pass write).
 	scenario    interface{} // *exam.Scenario, stored as interface{} to avoid circular import issues
@@ -504,10 +516,18 @@ func academy(sender Sender, args runArgs) error {
 		} else {
 			actualFindingID = findingTrackingID(args.runID, s.ID)
 		}
+		// altFindingID is the findingTrackingID (academy-<runID>-<scenarioID>).
+		// Workers that process stale work:create messages from a prior bakeoff
+		// run may emit finding:<altFindingID-style> tags. The watch loop matches
+		// by scenario ID suffix extraction when the primary findingID match fails
+		// (mallcoppro-c33). We always set altFindingID so the match is symmetric.
+		altFindingID := findingTrackingID(args.runID, s.ID)
 		ts := &trackedScenario{
-			scenarioID: s.ID,
-			findingID:  actualFindingID,
-			scenario:   s, // stored for F4B grading
+			scenarioID:        s.ID,
+			findingID:         actualFindingID,
+			altFindingID:      altFindingID,
+			seenToolUsageMsgs: make(map[string]bool),
+			scenario:          s, // stored for F4B grading
 		}
 		tracked[s.ID] = ts
 	}
@@ -732,13 +752,14 @@ func academy(sender Sender, args runArgs) error {
 							}
 						}
 						// No chain link found. Before giving up, try tag-based attribution
-						// (mallcoppro-60e): triage workers emit investigate work:create
-						// items with fresh rd item IDs (not cf-msg-UUIDs), so they never
-						// appear in any scenario's chain. However, those messages carry a
+						// (mallcoppro-60e, mallcoppro-c33): triage workers emit investigate
+						// work:create items with fresh rd item IDs (not cf-msg-UUIDs), so
+						// they never appear in any scenario's chain. Those messages carry a
 						// finding:<id> tag scoping them to a specific scenario. If we find
-						// such a tag and it matches a tracked scenario's findingID, attribute
-						// it via that tag. This preserves the original 647 guard (unrelated
-						// messages with no scoping tag are still rejected).
+						// such a tag and it matches a tracked scenario (primary or via
+						// scenarioID suffix extraction), attribute it via that tag. This
+						// preserves the original 647 guard (messages with no finding tag
+						// are still rejected).
 						if _, nowKnown := workItemToScenario[workCreateID]; !nowKnown {
 							var tagFindingID string
 							for _, tag := range msg.Tags {
@@ -750,7 +771,7 @@ func academy(sender Sender, args runArgs) error {
 							if tagFindingID != "" {
 								for scenIDKey, tsRef := range tracked {
 									tsRef.mu.Lock()
-									match := tsRef.findingID == tagFindingID
+									match := matchesFindingTag(tsRef, tagFindingID)
 									tsRef.mu.Unlock()
 									if match {
 										workItemToScenario[workCreateID] = scenIDKey
@@ -861,11 +882,11 @@ func academy(sender Sender, args runArgs) error {
 						foundFindingID = payloadFindingID.FindingID
 					}
 				}
-				// Match against tracked scenario finding IDs.
+				// Match against tracked scenario finding IDs (primary + scenario-ID suffix).
 				if foundFindingID != "" {
 					for scenIDKey, tsRef := range tracked {
 						tsRef.mu.Lock()
-						match := tsRef.findingID == foundFindingID
+						match := matchesFindingTag(tsRef, foundFindingID)
 						tsRef.mu.Unlock()
 						if match {
 							ok = true
@@ -1130,6 +1151,13 @@ type toolUsagePayload struct {
 // Matching is done via finding_id tag (finding:<id>) or the payload finding_id field.
 // Called from the watch loop for every message tagged tool-usage.
 // tracked must not be held under any scenario lock when called.
+//
+// Dedup: cf readAll re-delivers the entire campfire history on every poll iteration.
+// Without dedup, the same tool-usage message increments toolUsageCalls on each poll,
+// causing forge_calls to grow as N×actual (mallcoppro-5119). Each message is
+// deduplicated by msg.ID via ts.seenToolUsageMsgs before incrementing counters.
+// Messages with an empty ID (pre-timestamp campfire versions) are counted without
+// dedup to preserve backward compatibility.
 func accumulateToolUsage(msg cfMessage, tracked map[string]*trackedScenario) {
 	if msg.Payload == "" {
 		return
@@ -1158,7 +1186,19 @@ func accumulateToolUsage(msg cfMessage, tracked map[string]*trackedScenario) {
 
 	for _, ts := range tracked {
 		ts.mu.Lock()
-		match := ts.findingID == findingID
+		match := matchesFindingTag(ts, findingID)
+		if match && msg.ID != "" {
+			// Dedup: skip if we've already counted this message (mallcoppro-5119).
+			// Only dedup when msg.ID is non-empty; pre-ID messages pass through.
+			if ts.seenToolUsageMsgs == nil {
+				ts.seenToolUsageMsgs = make(map[string]bool)
+			}
+			if ts.seenToolUsageMsgs[msg.ID] {
+				ts.mu.Unlock()
+				return
+			}
+			ts.seenToolUsageMsgs[msg.ID] = true
+		}
 		if match {
 			ts.toolUsageCalls += p.ForgeCalls
 			ts.toolUsageTokensIn += p.TokensIn
@@ -1169,6 +1209,42 @@ func accumulateToolUsage(msg cfMessage, tracked map[string]*trackedScenario) {
 			return
 		}
 	}
+}
+
+// matchesFindingTag reports whether tagFindingID refers to ts.
+// ts.mu must be held by the caller.
+//
+// Two matching strategies (mallcoppro-c33):
+//
+//  1. Primary: exact match against ts.findingID (perRunFindingID or findingTrackingID
+//     format, depending on whether s.Finding.ID was set).
+//
+//  2. Scenario-ID suffix extraction: when the tag is in the legacy
+//     findingTrackingID format "academy-<any-run-id>-<scenarioID>", extract the
+//     scenarioID suffix and compare against ts.scenarioID. Workers that process a
+//     stale work:create from a previous bakeoff run embed that run's ID in the
+//     finding tag they emit — this may not match the current run's findingID. The
+//     suffix check attributes the message to the correct tracked scenario regardless
+//     of which specific bakeoff run the worker consumed. The 647 guard is preserved:
+//     tags without a "finding:" prefix never reach this function.
+func matchesFindingTag(ts *trackedScenario, tagFindingID string) bool {
+	if ts.findingID == tagFindingID {
+		return true
+	}
+	// Suffix extraction: "academy-<runID>-<scenarioID>"
+	// The prefix "academy-" is fixed; runID may contain dashes (e.g. "bk-us_only").
+	// We find the scenarioID by checking whether tagFindingID ends with
+	// "-<ts.scenarioID>". This is safe because:
+	//   - ts.scenarioID values are known (loaded from exam YAML, e.g. "CN-01-correlated-low-severity").
+	//   - The "finding:" tag namespace guard (in the caller) prevents unscoped messages.
+	const academyPrefix = "academy-"
+	if strings.HasPrefix(tagFindingID, academyPrefix) && ts.scenarioID != "" {
+		suffix := "-" + ts.scenarioID
+		if strings.HasSuffix(tagFindingID, suffix) {
+			return true
+		}
+	}
+	return false
 }
 
 // ---- JSON output helpers ------------------------------------------------------
