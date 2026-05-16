@@ -441,7 +441,12 @@ type workCreatePayload struct {
 // cfWorkCreate posts a work:create message to the work campfire and returns
 // the new item ID extracted from the rd output. It creates an rd item with
 // the given skill and returns that item's ID.
-func cfWorkCreate(workCampfireID, skill, title, context string) (string, error) {
+//
+// findingID, when non-empty, is added as a "finding:<id>" tag on the work:create
+// message so that mallcop-academy can attribute downstream investigate/escalate
+// items to the originating scenario even when those items have fresh rd IDs that
+// are not yet in academy's chain map (mallcoppro-60e).
+func cfWorkCreate(workCampfireID, skill, title, context, findingID string) (string, error) {
 	// Create the rd item first to get a real item ID.
 	itemID, err := rdCreateItem(title, "task", "p1", skill, context)
 	if err != nil {
@@ -460,7 +465,11 @@ func cfWorkCreate(workCampfireID, skill, title, context string) (string, error) 
 	if marshalErr != nil {
 		return itemID, nil // item created; campfire post failure is non-fatal
 	}
-	_, _ = cfSend(workCampfireID, string(payload), []string{"work:create", "skill:" + skill})
+	tags := []string{"work:create", "skill:" + skill}
+	if findingID != "" {
+		tags = append(tags, "finding:"+findingID)
+	}
+	_, _ = cfSend(workCampfireID, string(payload), tags)
 	return itemID, nil
 }
 
@@ -590,7 +599,7 @@ func runEscalateToInvestigator(inputJSON string) error {
 	title := fmt.Sprintf("investigate: %s", input.FindingID)
 	ctx := fmt.Sprintf("skill=task:investigate finding_id=%s reason=%s parent_item_id=%s",
 		input.FindingID, input.Reason, parentItemID)
-	itemID, err := cfWorkCreate(workCampfireID, "task:investigate", title, ctx)
+	itemID, err := cfWorkCreate(workCampfireID, "task:investigate", title, ctx, input.FindingID)
 	if err != nil {
 		return fmt.Errorf("escalate-to-investigator: %w", err)
 	}
@@ -654,7 +663,7 @@ func runEscalateToStageC(inputJSON string) error {
 	title := fmt.Sprintf("escalate: %s [%s]", input.FindingID, input.ActionClass)
 	ctx := fmt.Sprintf("skill=task:escalate finding_id=%s action_class=%s reason=%s flags=%s parent_item_id=%s",
 		input.FindingID, input.ActionClass, input.Reason, flagsStr, parentItemID)
-	itemID, err := cfWorkCreate(workCampfireID, "task:escalate", title, ctx)
+	itemID, err := cfWorkCreate(workCampfireID, "task:escalate", title, ctx, input.FindingID)
 	if err != nil {
 		return fmt.Errorf("escalate-to-stage-c: %w", err)
 	}
@@ -710,7 +719,7 @@ func runEscalateToDeep(inputJSON string) error {
 	title := fmt.Sprintf("deep-investigate: %s [%s]", input.FindingID, input.Hypothesis)
 	ctx := fmt.Sprintf("skill=task:deep-investigate finding_id=%s hypothesis=%s partial_transcript_path=%s parent_item_id=%s",
 		input.FindingID, input.Hypothesis, input.PartialTranscriptPath, parentItemID)
-	itemID, err := cfWorkCreate(workCampfireID, "task:deep-investigate", title, ctx)
+	itemID, err := cfWorkCreate(workCampfireID, "task:deep-investigate", title, ctx, input.FindingID)
 	if err != nil {
 		return fmt.Errorf("escalate-to-deep: %w", err)
 	}
@@ -771,7 +780,7 @@ func runCreateInvestigateMerge(inputJSON string) error {
 	title := fmt.Sprintf("investigate-merge: %s", input.FindingID)
 	ctx := fmt.Sprintf("skill=task:investigate-merge finding_id=%s deep_item_ids=%s parent_item_id=%s",
 		input.FindingID, strings.Join(input.DeepItemIDs, ","), parentItemID)
-	mergeItemID, err := cfWorkCreate(workCampfireID, "task:investigate-merge", title, ctx)
+	mergeItemID, err := cfWorkCreate(workCampfireID, "task:investigate-merge", title, ctx, input.FindingID)
 	if err != nil {
 		return fmt.Errorf("create-investigate-merge: %w", err)
 	}
