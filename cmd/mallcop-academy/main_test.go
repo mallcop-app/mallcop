@@ -23,6 +23,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -1441,4 +1442,333 @@ func contains(slice []string, s string) bool {
 		}
 	}
 	return false
+}
+
+// ---- regression: SIGTERM partial-flush (mallcoppro-627) ----------------------
+
+// TestAcademySIGTERM verifies that when academy receives SIGTERM mid-run:
+//  1. All posted scenarios produce a JSON file (even if non-terminal).
+//  2. Non-terminal scenarios get a terminal_action of "" (partial/unresolved record).
+//  3. The process exits cleanly (exit code 0).
+//
+// This test spawns a subprocess (using the test binary itself) to safely test
+// SIGTERM without killing the test runner. The subprocess runs
+// TestAcademySIGTERM_Subprocess which starts academy in-process, waits for
+// work:create posts to complete, writes a sentinel file, then blocks until
+// SIGTERM arrives (from the parent test). The parent verifies JSON files exist.
+func TestAcademySIGTERM(t *testing.T) {
+	if os.Getenv("ACADEMY_SIGTERM_SUBPROCESS") == "1" {
+		// Guard: if this is already the subprocess, skip to avoid recursion.
+		t.Skip("subprocess marker present — skip to avoid recursion")
+	}
+
+	outDir := t.TempDir()
+	scenDir := t.TempDir()
+	writeMinimalScenario(t, scenDir, "SIG-01", "fnd_sig_001", "detector-sigterm-test",
+		"SIGTERM test finding 1", "medium")
+	writeMinimalScenario(t, scenDir, "SIG-02", "fnd_sig_002", "detector-sigterm-test",
+		"SIGTERM test finding 2", "low")
+
+	// Build the test binary from the current package directory.
+	pkgDir, err := filepath.Abs(".")
+	if err != nil {
+		t.Fatalf("abs path: %v", err)
+	}
+	binPath := filepath.Join(t.TempDir(), "academy-sigterm-test")
+	buildCmd := exec.Command("go", "test", "-c", "-o", binPath, pkgDir)
+	buildCmd.Env = os.Environ()
+	if out, buildErr := buildCmd.CombinedOutput(); buildErr != nil {
+		t.Fatalf("build test binary: %v\n%s", buildErr, out)
+	}
+
+	sentinelPath := filepath.Join(outDir, "READY")
+
+	// Run the subprocess test that starts academy with a long timeout (will be
+	// killed by SIGTERM before it times out naturally).
+	cmd := exec.Command(binPath,
+		"-test.run=TestAcademySIGTERM_Subprocess",
+		"-test.v",
+		"-test.timeout=60s",
+	)
+	cmd.Env = append(os.Environ(),
+		"ACADEMY_SIGTERM_SUBPROCESS=1",
+		"ACADEMY_SIGTERM_TEST_DIR="+outDir,
+		"ACADEMY_SIGTERM_SCEN_DIR="+scenDir,
+		"ACADEMY_SIGTERM_SENTINEL="+sentinelPath,
+	)
+
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start subprocess: %v", err)
+	}
+
+	// Wait until the subprocess writes the sentinel file (confirming work:create
+	// posts have completed and academy is in the watch loop).
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(sentinelPath); err == nil {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if _, err := os.Stat(sentinelPath); err != nil {
+		cmd.Process.Kill() // #nolint
+		cmd.Wait()         // #nolint
+		t.Fatalf("sentinel not written within 15s — subprocess may have crashed")
+	}
+
+	// Sentinel exists: academy is in the watch loop with all scenarios posted.
+	// Now send SIGTERM.
+	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
+		t.Fatalf("send SIGTERM: %v", err)
+	}
+
+	// Wait for subprocess to exit (the SIGTERM handler calls os.Exit(0)).
+	waitDone := make(chan error, 1)
+	go func() { waitDone <- cmd.Wait() }()
+	select {
+	case <-waitDone:
+	case <-time.After(10 * time.Second):
+		cmd.Process.Kill() // #nolint
+		t.Fatal("subprocess did not exit within 10s after SIGTERM")
+	}
+
+	// Both scenarios must have produced JSON files (partial flush fired).
+	for _, id := range []string{"SIG-01", "SIG-02"} {
+		path := filepath.Join(outDir, id+".json")
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Errorf("SIGTERM partial flush: %s.json not written: %v", id, err)
+			continue
+		}
+		var rec ScenarioRecord
+		if err := json.Unmarshal(data, &rec); err != nil {
+			t.Errorf("SIGTERM partial flush: parse %s.json: %v", id, err)
+			continue
+		}
+		// Non-terminal record: terminal_action must be empty (partial/unresolved).
+		if rec.TerminalAction != "" {
+			t.Errorf("SIGTERM partial flush: %s.json terminal_action = %q, want empty (non-terminal record)",
+				id, rec.TerminalAction)
+		}
+	}
+}
+
+// TestAcademySIGTERM_Subprocess is the in-process helper that runs academy
+// with a long timeout so a SIGTERM from the parent test arrives mid-run.
+// Only runs when ACADEMY_SIGTERM_SUBPROCESS=1.
+//
+// It writes a sentinel file once academy has posted all scenarios, then blocks
+// in the watch loop until SIGTERM triggers the partial-flush and os.Exit(0).
+func TestAcademySIGTERM_Subprocess(t *testing.T) {
+	if os.Getenv("ACADEMY_SIGTERM_SUBPROCESS") != "1" {
+		t.Skip("not in subprocess mode — skip")
+	}
+
+	outDir := os.Getenv("ACADEMY_SIGTERM_TEST_DIR")
+	scenDir := os.Getenv("ACADEMY_SIGTERM_SCEN_DIR")
+	sentinelPath := os.Getenv("ACADEMY_SIGTERM_SENTINEL")
+	if outDir == "" || scenDir == "" {
+		t.Fatal("ACADEMY_SIGTERM_TEST_DIR or ACADEMY_SIGTERM_SCEN_DIR not set")
+	}
+
+	// A mockSender that writes the sentinel after both sends complete.
+	ms := &sigtermMockSender{
+		sentinel:    sentinelPath,
+		totalNeeded: 2, // SIG-01 and SIG-02
+	}
+
+	args := runArgs{
+		targetCampfire: "cf-sigterm-test",
+		scenariosDir:   scenDir,
+		outputDir:      outDir,
+		maxConcurrent:  2,
+		timeout:        30 * time.Second, // long timeout; SIGTERM arrives before this
+		runID:          "sigterm-test-run",
+	}
+
+	// academy blocks until SIGTERM arrives (from parent) or timeout.
+	// The SIGTERM handler writes partial records and calls os.Exit(0).
+	_ = academy(ms, args)
+	// If we reach here, the normal timeout path fired (also writes partial records).
+}
+
+// sigtermMockSender is a mock Sender that writes a sentinel file once all
+// expected work:create sends have been posted. This signals to the parent test
+// that academy is in the watch loop and ready to receive SIGTERM.
+type sigtermMockSender struct {
+	mu          sync.Mutex
+	sends       int
+	totalNeeded int
+	sentinel    string
+	nextID      int
+}
+
+func (s *sigtermMockSender) send(campfireID, payload string, tags []string) (string, error) {
+	s.mu.Lock()
+	s.nextID++
+	id := fmt.Sprintf("sigterm-mock-%d", s.nextID)
+	if hasTag(tags, "work:create") {
+		s.sends++
+		if s.sends >= s.totalNeeded && s.sentinel != "" {
+			// Write sentinel to signal parent test that all scenarios are posted.
+			_ = os.WriteFile(s.sentinel, []byte("ready"), 0o644)
+		}
+	}
+	s.mu.Unlock()
+	return id, nil
+}
+
+func (s *sigtermMockSender) readAll(campfireID string) ([]cfMessage, error) {
+	// Return no messages — keep academy in the watch loop indefinitely until
+	// SIGTERM arrives.
+	return nil, nil
+}
+
+// ---- regression: work:create tag-based attribution (mallcoppro-60e) ----------
+
+// TestWorkItemToScenario_TagBasedAttribution verifies that a work:create message
+// with a fresh payload.id (not in any scenario's chain) but carrying a
+// "finding:<id>" tag is attributed to the correct scenario.
+//
+// This is the regression test for mallcoppro-60e: triage workers emit investigate
+// items with fresh rd item IDs (e.g. "mallcopdeploy-c1d") that are not cf-msg-UUIDs
+// and thus never appear in the chain map. The finding:<id> tag is the scoping signal
+// that allows academy to attribute such downstream work correctly.
+//
+// The original 647 guard must still hold: a work:create with a fresh payload.id
+// AND no finding/scenario tag must still be rejected (not assigned).
+func TestWorkItemToScenario_TagBasedAttribution(t *testing.T) {
+	scenDir := t.TempDir()
+	const baseFindingID = "fnd_test_per-run-1"
+	writeMinimalScenario(t, scenDir, "TAG-01", baseFindingID, "detector-tag-attribution",
+		"Tag attribution test", "medium")
+
+	outDir := t.TempDir()
+
+	// The mock sender assigns mock-msg-1 to the TAG-01 work:create.
+	// We inject:
+	//   (a) A work:create with fresh ID "mallcopdeploy-c1d" + finding:<suffixed-id> tag.
+	//       This must be attributed to TAG-01.
+	//   (b) A work:close referencing "mallcopdeploy-c1d" (terminal).
+	//       This close must reach TAG-01 via the attributed chain link.
+	//   (c) A work:create with fresh ID "unrelated-item-abc" + NO finding tag.
+	//       This must be REJECTED (647 guard still holds).
+	//   (d) A work:close referencing "unrelated-item-abc".
+	//       This close must NOT affect TAG-01.
+
+	// The suffixed finding ID is what academy actually tracks:
+	// perRunFindingID(baseFindingID, "tag-attr-run").
+	suffixedFindingID := perRunFindingID(baseFindingID, "tag-attr-run")
+
+	taggedWorkCreatePayload, _ := json.Marshal(map[string]interface{}{
+		"id":    "mallcopdeploy-c1d",
+		"skill": "task:investigate",
+		"title": "investigate: " + baseFindingID,
+	})
+	taggedClosePayload, _ := json.Marshal(closePayload{
+		ItemID: "mallcopdeploy-c1d",
+		Action: "escalated",
+		Skill:  "task:investigate",
+	})
+	unrelatedWorkCreatePayload, _ := json.Marshal(map[string]interface{}{
+		"id":    "unrelated-item-abc",
+		"skill": "task:triage",
+		"title": "unrelated finding",
+	})
+	unrelatedClosePayload, _ := json.Marshal(closePayload{
+		ItemID: "unrelated-item-abc",
+		Action: "resolved",
+		Skill:  "task:triage",
+	})
+
+	ms := &mockSender{
+		readMsgs: []cfMessage{
+			// (a) Tagged work:create — has finding:<suffixed-id> tag.
+			{
+				ID:   "tag-create-msg",
+				Tags: []string{"work:create", "task:investigate", "finding:" + suffixedFindingID},
+				Payload: string(taggedWorkCreatePayload),
+			},
+			// (b) Terminal close for the tagged investigate item.
+			{
+				ID:   "tag-close-msg",
+				Tags: []string{"work:close", "action:escalated"},
+				Payload: string(taggedClosePayload),
+			},
+			// (c) Unrelated work:create — no finding tag. 647 guard: must be rejected.
+			{
+				ID:   "unrelated-create-msg",
+				Tags: []string{"work:create", "task:triage"},
+				Payload: string(unrelatedWorkCreatePayload),
+			},
+			// (d) Close for the unrelated item. Must NOT affect TAG-01.
+			{
+				ID:   "unrelated-close-msg",
+				Tags: []string{"work:close", "action:resolved"},
+				Payload: string(unrelatedClosePayload),
+			},
+		},
+	}
+
+	args := runArgs{
+		targetCampfire: "cf-tag-attribution-test",
+		scenariosDir:   scenDir,
+		scenarioFilter: "TAG-01",
+		outputDir:      outDir,
+		maxConcurrent:  1,
+		timeout:        5 * time.Second,
+		runID:          "tag-attr-run",
+	}
+
+	if err := academy(ms, args); err != nil {
+		t.Fatalf("academy: %v", err)
+	}
+
+	// TAG-01.json must exist.
+	data, err := os.ReadFile(filepath.Join(outDir, "TAG-01.json"))
+	if err != nil {
+		t.Fatalf("TAG-01.json not found: %v", err)
+	}
+	var rec ScenarioRecord
+	if err := json.Unmarshal(data, &rec); err != nil {
+		t.Fatalf("parse TAG-01.json: %v", err)
+	}
+
+	// TAG-01 must be terminal via the tagged investigate close (action=escalated).
+	// If the tag-based attribution did NOT work, the tagged close would have been
+	// rejected as unattributed and TAG-01 would either timeout (terminal_action="")
+	// or be resolved via the unrelated close (terminal_action="resolved").
+	if rec.TerminalAction != "escalated" {
+		t.Errorf("TAG-01 terminal_action = %q, want escalated (tag-based attribution must work)",
+			rec.TerminalAction)
+	}
+	if rec.TerminalAt == nil {
+		t.Error("TAG-01 terminal_at must not be nil — tag-based close must reach terminal")
+	}
+
+	// The chain must include the tagged investigate item ID.
+	foundTaggedItem := false
+	for _, ce := range rec.FullChain {
+		if ce.ItemID == "mallcopdeploy-c1d" {
+			foundTaggedItem = true
+			break
+		}
+	}
+	if !foundTaggedItem {
+		t.Errorf("TAG-01 full_chain does not contain 'mallcopdeploy-c1d' — tag-based attribution did not register chain link")
+	}
+
+	// The 647 guard: unrelated-item-abc must NOT appear in TAG-01's chain.
+	for _, ce := range rec.FullChain {
+		if ce.ItemID == "unrelated-item-abc" || ce.ItemID == "unrelated-create-msg" {
+			t.Errorf("TAG-01 full_chain contains unrelated item %q — 647 guard broken", ce.ItemID)
+		}
+	}
+
+	// The unrelated close (action=resolved) must NOT have set terminal on TAG-01
+	// via the unrelated chain item (double-check: we already checked terminal_action=escalated).
+	if rec.TerminalItemID == "unrelated-item-abc" || rec.TerminalItemID == "unrelated-create-msg" {
+		t.Errorf("TAG-01 terminal_item_id = %q — 647 guard broken: unrelated close set terminal",
+			rec.TerminalItemID)
+	}
 }

@@ -30,10 +30,13 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/mallcop-app/mallcop/internal/exam"
@@ -509,10 +512,52 @@ func academy(sender Sender, args runArgs) error {
 		tracked[s.ID] = ts
 	}
 
+	// SIGTERM handler (mallcoppro-627): when the parent process kills us (e.g.
+	// bakeoff harness timeout), flush partial records for all posted-but-non-terminal
+	// scenarios so the run produces JSON output rather than silence.
+	//
+	// The handler uses the same partial-flush logic as the watch-loop timeout path.
+	// shuttingDown is checked in the watch loop to suppress redundant flushes.
+	var shuttingDown atomic.Bool
+	// postMu guards workItemToScenario, runPostedAtMin, and the partial-flush
+	// in the SIGTERM handler. Declared here (before the SIGTERM goroutine) so
+	// the closure can reference it.
+	var postMu sync.Mutex
+
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGTERM)
+	go func() {
+		_, ok := <-sigCh
+		if !ok {
+			return
+		}
+		if !shuttingDown.CompareAndSwap(false, true) {
+			return // already shutting down
+		}
+		fmt.Fprintf(os.Stderr, "WARN: SIGTERM received — flushing partial scenario records\n")
+		postMu.Lock()
+		for _, ts := range tracked {
+			ts.mu.Lock()
+			posted := ts.workItemID != ""
+			terminal := ts.terminal
+			ts.mu.Unlock()
+			if posted && !terminal {
+				if err := writeScenarioRecord(ts, args.runID, args.targetCampfire, args.outputDir, args.usage); err != nil {
+					fmt.Fprintf(os.Stderr, "WARN: SIGTERM flush: write partial record for %s: %v\n", ts.scenarioID, err)
+				}
+			}
+		}
+		postMu.Unlock()
+		os.Exit(0)
+	}()
+	defer func() {
+		signal.Stop(sigCh)
+		close(sigCh)
+	}()
+
 	// Post work:create messages, respecting max-concurrent.
 	sem := make(chan struct{}, args.maxConcurrent)
 	var postWG sync.WaitGroup
-	var postMu sync.Mutex
 	// workItemToScenario maps cf message ID → scenario ID.
 	workItemToScenario := make(map[string]string)
 
@@ -686,8 +731,43 @@ func academy(sender Sender, args runArgs) error {
 								break
 							}
 						}
-						// No chain link found — log and skip. Do not assign to an
-						// arbitrary scenario (the old bug).
+						// No chain link found. Before giving up, try tag-based attribution
+						// (mallcoppro-60e): triage workers emit investigate work:create
+						// items with fresh rd item IDs (not cf-msg-UUIDs), so they never
+						// appear in any scenario's chain. However, those messages carry a
+						// finding:<id> tag scoping them to a specific scenario. If we find
+						// such a tag and it matches a tracked scenario's findingID, attribute
+						// it via that tag. This preserves the original 647 guard (unrelated
+						// messages with no scoping tag are still rejected).
+						if _, nowKnown := workItemToScenario[workCreateID]; !nowKnown {
+							var tagFindingID string
+							for _, tag := range msg.Tags {
+								if strings.HasPrefix(tag, "finding:") {
+									tagFindingID = strings.TrimPrefix(tag, "finding:")
+									break
+								}
+							}
+							if tagFindingID != "" {
+								for scenIDKey, tsRef := range tracked {
+									tsRef.mu.Lock()
+									match := tsRef.findingID == tagFindingID
+									tsRef.mu.Unlock()
+									if match {
+										workItemToScenario[workCreateID] = scenIDKey
+										workItemToScenario[msg.ID] = scenIDKey
+										slog.Debug("academy: work:create attributed via finding tag",
+											"msg_id", msg.ID,
+											"work_create_id", workCreateID,
+											"finding_id", tagFindingID,
+											"scenario_id", scenIDKey,
+										)
+										break
+									}
+								}
+							}
+						}
+						// No chain link and no scoping finding tag — log and skip.
+						// Do not assign to an arbitrary scenario (the original 647 guard).
 						if _, nowKnown := workItemToScenario[workCreateID]; !nowKnown {
 							slog.Info("academy: work:create with no known chain antecedent — skipping assignment",
 								"msg_id", msg.ID,
