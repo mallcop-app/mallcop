@@ -446,7 +446,7 @@ max_iters = 5
   binary_args = ["--tool", "resolve-finding"]
 
 [lifecycle]
-max_workers   = 4                    # operational pipeline: parallel triage + investigate workers
+max_workers   = 16                   # mallcoppro-749: bumped 4→16 after phase-timing analysis on bk-20260518-151733 showed median queue wait 250-360s vs median worker run 9s. Pool shared with mallcop-deploy ops items via engagement-campfire watcher; the bakeoff effectively got ~2 workers at 4. 16 gives headroom even with deploy-ops contention. Re-evaluate if Forge/Bedrock 429s appear.
 time_limit    = "90m"
 poll_interval = "10s"
 
