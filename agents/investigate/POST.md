@@ -60,7 +60,89 @@ activity look identical?" Look for evidence that ONLY a legitimate user
 would produce — consistent source IP across sessions, expected device
 fingerprint, actions requiring physical presence. If you can't find
 anything that distinguishes legitimate use from credential misuse,
+AND no resolution-evidence category below explains the finding,
 escalate.
+
+## Resolution-Evidence Categories
+
+Before you decide resolve-vs-escalate, walk this checklist. For each
+category that applies to the finding, name what you looked for and
+what you found. **Resolve only if at least one category is satisfied
+with cited evidence.** A "suspicious-looking" surface signal does not
+override resolution evidence — that is exactly the trap.
+
+1. **Scheduled / windowed activity** — Do events carry
+   `maintenance_window`, `scheduled`, `window_id`, `deploy_window`, or
+   equivalent metadata? Does the baseline contain a recurring
+   time-keyed entry (e.g. `time:02:deploy-svc`) that matches the
+   timestamp?
+2. **Release / job correlation** — Do events share a `release`,
+   `image_tag`, `job_id`, `change_request`, or `schedule` field that
+   ties them to a coherent operation (deploy, batch run, quarterly
+   report)?
+3. **Baseline relationship to target** — Has this actor touched this
+   target — or a sibling resource in the same family — before? Recurring
+   `relationships` entries are positive evidence even when the specific
+   resource is new (e.g. Q1 archive DB is new; Q2/Q3/Q4 archive DBs are
+   in baseline).
+4. **Coherent event sequence** — Do the events form an expected
+   workflow (failures → password_reset → success; image_push →
+   container_deploy → health_check)? An anomaly explained by the next
+   event in the sequence is not an anomaly.
+5. **Trusted initiator** — Was the action initiated by a known,
+   high-trust actor in their normal pattern (admin-user creating an
+   SP during business hours with a non-privileged role)? The
+   initiator's history is evidence about the action.
+6. **Source consistency** — Are IP, user-agent, device, and session
+   metadata consistent across the suspicious events AND consistent with
+   the actor's prior sessions? Consistency across a multi-step sequence
+   is hard to forge.
+7. **Documented onboarding / approval** — Is there an onboarding
+   ticket, change-request, approval chain, or upstream event that
+   explains the activity? If so, cite it.
+
+If multiple weak signals fire at once (cross-correlated finding),
+**evaluate the signals together, not separately.** Three detectors
+firing on the same scheduled quarterly job are not three independent
+threats; they are one coherent operation that explains all three. Look
+for shared `job_id` / `release` / `schedule` fields across the events.
+
+If you walked this checklist and no category is satisfied, escalate
+and state which categories you checked and why each one failed.
+
+## Worked Examples — Looks-Bad-But-Resolves
+
+These patterns illustrate the resolution-evidence categories above.
+Recognize them before reaching for escalate.
+
+**Example 1 — off-hours service-account activity is scheduled work.**
+deploy-svc fires container_restart events at 02:00 UTC. The
+unusual-timing detector is correct that 02:00 is off-hours, but the
+events carry `maintenance_window: true`, `scheduled: true`, and a
+shared `window_id`. The baseline contains `time:02:deploy-svc: 24`
+confirming a recurring 02:00 pattern. → Resolve, citing categories 1
+(scheduled metadata) and 3 (baseline recurrence).
+
+**Example 2 — volume spike is a coherent release.**
+deploy-svc generates a 10x volume spike. Volume is genuinely anomalous,
+but the five events are image_push → container_deploy → container_restart
+→ container_deploy → health_check, all sharing `release: v2.4.0`, all
+hitting targets the actor has touched ~100+ times in baseline. → Resolve,
+citing categories 2 (release correlation), 3 (baseline relationships),
+and 4 (coherent sequence). Volume alone is not enough to escalate when
+the events explain the volume.
+
+**Example 3 — auth-failure burst is a forgotten password.**
+developer-alice triggers 8 login failures in 3 minutes — feels like a
+brute force. The sequence continues: password_reset (method
+email_link, reason forgot_password) → login_success → push from the
+same IP and user-agent. Baseline shows a password_changed event 7 days
+prior. → Resolve, citing categories 4 (coherent sequence
+failures→reset→success), 6 (source consistency across the whole
+sequence), and 1/7 (recent password_changed in baseline explains the
+forgotten password). 8 failures with no following reset would be
+escalate-worthy; 8 failures followed by a clean reset and continued
+work from the same fingerprint is the textbook benign pattern.
 
 ## Pre-Resolution Checklist
 
@@ -108,16 +190,18 @@ These are non-negotiable. Do not reason past them.
 
 ## Resolution Standards
 
-**RESOLVED (benign)** — you found POSITIVE evidence of legitimacy:
-- Activity traces to a documented workflow (deploy, onboarding, maintenance)
-- Companion events form a coherent, expected sequence
-- Baseline shows this exact action type on this exact target
-- Source metadata is consistent with the actor's history
-- Provenance chain traces to a legitimate upstream cause
+**RESOLVED (benign)** — at least one Resolution-Evidence Category is
+satisfied with cited evidence. In your reason field:
+- Name the category number(s) you satisfied (e.g. "Categories 1, 3:
+  scheduled maintenance metadata + baseline recurrence at 02:00")
+- Cite the specific fields, timestamps, or baseline entries
+- Note any adversary-can-spoof check from the credential-theft test
 
-**ESCALATED (suspicious)** — you found indicators of compromise OR
-could not find positive evidence of legitimacy:
-- State what was checked and what raised concern
+**ESCALATED (suspicious)** — you walked the Resolution-Evidence
+Categories and none applies, OR you found a positive indicator of
+compromise that the categories cannot explain:
+- State which categories you checked and why each one failed
+- State what raised concern beyond the surface signal
 - Recommend response actions (disable account, revoke access, forensics)
 
 **ESCALATED (insufficient data)** — you exhausted your tools and cannot
