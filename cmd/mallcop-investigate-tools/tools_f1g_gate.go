@@ -497,8 +497,10 @@ func runConfidenceGateFanOut(findingID, reason string, gr gateResult) error {
 		}
 	}
 	if transcriptPath == "" {
-		// Fallback path if write failed.
-		transcriptPath = fmt.Sprintf(".run/transcripts/unknown-run/%s-partial.md", findingID)
+		// Fallback path if write failed. Uses resolveRunID so the path still
+		// resolves correctly under the bakeoff harness even if the upstream
+		// write-partial-transcript call failed silently.
+		transcriptPath = fmt.Sprintf(".run/transcripts/%s/%s-partial.md", resolveRunID(findingID), findingID)
 	}
 
 	// Step 2: escalate-to-deep × 3 (benign, malicious, incomplete).
