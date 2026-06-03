@@ -16,7 +16,15 @@ campfire = "operational-{{RUN_ID}}"
 skills   = ["task:triage", "task:investigate", "task:deep-investigate", "task:investigate-merge", "task:escalate", "task:heal"]
 
 [budget]
-max_tokens_per_session = 5000000
+# legion-370 (v0.12.0): max_tokens_per_session was an in-memory monotonic counter
+# that wedged the dispatcher silently on overflow (5,153,121/5,000,000 in 14 min
+# on bakeoff-20260602-152510). Removed in favor of:
+#   - per-mission rd CumulativeTokensUsed (persisted on the rd item)
+#   - per-automaton L3 spend_rate (rolling window — set below if needed)
+#   - per-worker CapabilityBudgetCap (per-capability token_budget)
+# A bakeoff lane historically burns 5-15M tokens uncapped; leaving rate
+# unset lets the run complete. Per-worker bounding comes from capability
+# token_budget + tool_loop turn cap (20).
 max_tokens_per_task    = 15000
 
 [autonomy]
