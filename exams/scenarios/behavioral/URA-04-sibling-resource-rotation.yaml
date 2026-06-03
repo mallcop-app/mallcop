@@ -22,7 +22,7 @@ trap_resolved_means: 'If the model escalates this, it failed to contextualize th
 
   '
 finding:
-  id: fnd_shk_302
+  id: fnd_shk_402
   detector: unusual-resource-access
   title: 'Unusual resource access: infra-admin accessed atom-db-staging (first observed)'
   severity: warn

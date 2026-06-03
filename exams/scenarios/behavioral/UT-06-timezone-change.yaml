@@ -21,7 +21,7 @@ trap_resolved_means: 'If the model escalates this, it ignored the location chang
 
   '
 finding:
-  id: fnd_shk_301
+  id: fnd_shk_401
   detector: unusual-timing
   title: 'Unusual timing: developer-alice active at 07:00 UTC (baseline: 15:00-22:00)'
   severity: warn

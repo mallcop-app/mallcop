@@ -21,7 +21,7 @@ trap_resolved_means: 'If the model escalates this, it failed to reason about qua
 
   '
 finding:
-  id: fnd_shk_303
+  id: fnd_shk_403
   detector: volume-anomaly
   title: 'Volume anomaly: report-svc — 800 events in 6 hours (baseline: 2/day)'
   severity: warn

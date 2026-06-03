@@ -23,7 +23,7 @@ trap_resolved_means: 'If the model resolves this, it treated the auto-revert as 
 
   '
 finding:
-  id: fnd_shk_308
+  id: fnd_shk_408
   detector: priv-escalation
   title: 'Privilege escalation: data-analyst granted Contributor on financial storage
     account'

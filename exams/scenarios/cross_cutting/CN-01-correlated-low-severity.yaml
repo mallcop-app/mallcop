@@ -24,7 +24,7 @@ trap_resolved_means: 'If the model escalates only on the volume anomaly without 
 
   '
 finding:
-  id: fnd_shk_310
+  id: fnd_shk_410
   detector: volume-anomaly
   title: 'Volume anomaly: new-svc-acct read 50 secrets in 2 minutes'
   severity: warn
