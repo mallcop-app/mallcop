@@ -678,8 +678,10 @@ func trimPRTitle(s string) string {
 
 // healTranscriptPath returns the transcript file path and its parent directory.
 func healTranscriptPath(findingID string) (filePath, dir string, err error) {
-	runID := os.Getenv("MALLCOP_RUN_ID")
-	if runID == "" {
+	runID := resolveRunID(findingID)
+	// Preserve historical "heal-run" sentinel for the heal-specific fallback
+	// (resolveRunID's fallback is "unknown-run"; heal had its own).
+	if runID == "unknown-run" {
 		runID = "heal-run"
 	}
 	transcriptDir := filepath.Join(".run", "transcripts", runID)

@@ -568,6 +568,32 @@ func parseInt64Env(s string) (int64, error) {
 	return n, err
 }
 
+// resolveRunID returns the operational run ID for transcript-path scoping.
+//
+// Resolution order:
+//  1. MALLCOP_RUN_ID env var (set by legion when this binary runs inside a
+//     worker jail and legion's apiToolEnv passthrough list includes the var —
+//     requires legion >= the fix in legion-mallcop-run-id-passthrough).
+//  2. Derived from the finding ID. The bakeoff harness composes findings as
+//     `<scenario-finding-id>_<run-id>` (e.g. `fnd_shk_101_bk-open-20260603-174013`).
+//     We extract everything after the first `_bk-` marker. This is the
+//     workaround for older legion releases that don't passthrough the env var
+//     — without it, runID falls back to "unknown-run" and the partial transcript
+//     path becomes wrong, blinding every down-chain worker.
+//  3. Constant "unknown-run" as a last resort, preserving the historical
+//     fallback so behavior outside the bakeoff is unchanged.
+func resolveRunID(findingID string) string {
+	if v := os.Getenv("MALLCOP_RUN_ID"); v != "" {
+		return v
+	}
+	if findingID != "" {
+		if i := strings.Index(findingID, "_bk-"); i >= 0 {
+			return findingID[i+1:]
+		}
+	}
+	return "unknown-run"
+}
+
 // escalateToInvestigatorInput is the input_schema for escalate-to-investigator.
 type escalateToInvestigatorInput struct {
 	FindingID  string  `json:"finding_id"`
@@ -829,10 +855,7 @@ func runWritePartialTranscript(inputJSON string) error {
 		return errors.New("write-partial-transcript: content is required")
 	}
 
-	runID := os.Getenv("MALLCOP_RUN_ID")
-	if runID == "" {
-		runID = "unknown-run"
-	}
+	runID := resolveRunID(input.FindingID)
 
 	transcriptDir := filepath.Join(".run", "transcripts", runID)
 	if v := os.Getenv("MALLCOP_TRANSCRIPT_DIR"); v != "" {

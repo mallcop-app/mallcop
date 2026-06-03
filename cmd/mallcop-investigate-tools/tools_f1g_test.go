@@ -1070,3 +1070,44 @@ func TestApproveAction_FulfillsGateEndToEnd(t *testing.T) {
 		t.Errorf("expected verdict:approved tag in campfire after approve-action")
 	}
 }
+
+// TestResolveRunID_EnvVarPreferred verifies that MALLCOP_RUN_ID env var
+// wins when set, regardless of finding ID.
+func TestResolveRunID_EnvVarPreferred(t *testing.T) {
+	t.Setenv("MALLCOP_RUN_ID", "bk-test-explicit")
+	got := resolveRunID("fnd_shk_101_bk-open-20260603-174013")
+	if got != "bk-test-explicit" {
+		t.Errorf("env var should win: got %q, want %q", got, "bk-test-explicit")
+	}
+}
+
+// TestResolveRunID_DerivedFromFindingID verifies the workaround for legion
+// releases that don't passthrough MALLCOP_RUN_ID: derive from the finding ID
+// suffix. This is the actual fix that unblocks the bakeoff chain without
+// requiring a legion release.
+func TestResolveRunID_DerivedFromFindingID(t *testing.T) {
+	t.Setenv("MALLCOP_RUN_ID", "")
+	got := resolveRunID("fnd_shk_101_bk-open-20260603-174013")
+	want := "bk-open-20260603-174013"
+	if got != want {
+		t.Errorf("derive from finding ID: got %q, want %q", got, want)
+	}
+}
+
+// TestResolveRunID_FallbackForUnknownPattern verifies that a finding ID that
+// doesn't match the bakeoff pattern falls back to "unknown-run" — preserving
+// historical behavior outside the bakeoff.
+func TestResolveRunID_FallbackForUnknownPattern(t *testing.T) {
+	t.Setenv("MALLCOP_RUN_ID", "")
+	cases := []string{
+		"",                          // empty
+		"fnd_shk_101",               // no run suffix
+		"random-finding-name",       // no _bk- marker
+		"fnd_shk_101_other-prefix",  // wrong prefix
+	}
+	for _, c := range cases {
+		if got := resolveRunID(c); got != "unknown-run" {
+			t.Errorf("resolveRunID(%q) = %q, want unknown-run", c, got)
+		}
+	}
+}
