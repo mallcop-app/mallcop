@@ -1073,3 +1073,63 @@ func TestSymlinkEscape(t *testing.T) {
 		t.Errorf("error should mention 'escapes fixture dir', got: %v", err)
 	}
 }
+
+// TestResolveScenarioFixtureDir_AcademyItemID verifies that the per-scenario
+// subdir is resolved when MALLCOP_ITEM_ID matches the academy pattern.
+//
+// This was the primary blocker for fixture data reaching the model — without
+// this resolution, check-baseline reads <fixture-dir>/baseline.json directly
+// (academy writes to <fixture-dir>/<scenario-id>/baseline.json), so every
+// bakeoff before 2026-06-03 had empty baseline + events data and the model
+// could only escalate based on the finding's metadata field.
+func TestResolveScenarioFixtureDir_AcademyItemID(t *testing.T) {
+	root := t.TempDir()
+	runDir := filepath.Join(root, "exams", "fixtures", "bk-open-20260603-220156")
+	scnDir := filepath.Join(runDir, "UT-02-maintenance-window")
+	if err := os.MkdirAll(scnDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(scnDir, "baseline.json"), []byte(`{}`), 0o644); err != nil {
+		t.Fatalf("write baseline: %v", err)
+	}
+
+	got := resolveScenarioFixtureDir(runDir, "academy-bk-open-20260603-220156-UT-02-maintenance-window")
+	if got != scnDir {
+		t.Errorf("scenario subdir: got %q, want %q", got, scnDir)
+	}
+}
+
+// TestResolveScenarioFixtureDir_FallsBackWhenMissing verifies that we return
+// "" when the candidate scenario subdir doesn't exist on disk, so the caller
+// falls back to the run-level fixture dir (preserves legacy behavior for
+// fixtures laid out at run-level only).
+func TestResolveScenarioFixtureDir_FallsBackWhenMissing(t *testing.T) {
+	root := t.TempDir()
+	runDir := filepath.Join(root, "exams", "fixtures", "bk-open-test")
+	if err := os.MkdirAll(runDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	got := resolveScenarioFixtureDir(runDir, "academy-bk-open-test-DOES-NOT-EXIST")
+	if got != "" {
+		t.Errorf("missing subdir should return empty, got %q", got)
+	}
+}
+
+// TestResolveScenarioFixtureDir_NonAcademyItemID verifies that item IDs not
+// matching the academy pattern produce empty (legacy fallback).
+func TestResolveScenarioFixtureDir_NonAcademyItemID(t *testing.T) {
+	cases := []string{
+		"",
+		"mallcopdeploy-abc",
+		"rd-item-123",
+		"academy-",
+		"academy-rid",                 // no scenario
+		"academy-different-run-id-XX", // run-id doesn't match fixture-dir basename
+	}
+	for _, c := range cases {
+		got := resolveScenarioFixtureDir("/tmp/exams/fixtures/bk-open-test", c)
+		if got != "" {
+			t.Errorf("resolveScenarioFixtureDir(%q): got %q, want empty", c, got)
+		}
+	}
+}

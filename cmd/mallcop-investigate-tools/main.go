@@ -195,6 +195,23 @@ func run(args []string) error {
 		return fmt.Errorf("fixture-dir %q: %w", absFixtureDir, err)
 	}
 
+	// Per-scenario subdir resolution: chart binary_args pass the run-level
+	// fixture dir (`exams/fixtures/<run-id>`) but academy materializes fixtures
+	// at `<fixture-dir>/<scenario-id>/{baseline,events}.json`. Without this
+	// resolution, every fixture-based tool reads <fixture-dir>/baseline.json
+	// directly, which doesn't exist — every check-baseline returns
+	// known:false, every search-events returns empty. The model can't see
+	// the maintenance_window/scheduled/deploy_window metadata and defaults
+	// to escalation per the fail-safe rule.
+	//
+	// The per-engagement scenario ID is encoded in MALLCOP_ITEM_ID, which
+	// legion sets to the academy work item ID of the form
+	// `academy-<run-id>-<scenario-id>` (e.g.
+	// `academy-bk-open-20260603-220156-UT-02-maintenance-window`).
+	if scenarioDir := resolveScenarioFixtureDir(absFixtureDir, os.Getenv("MALLCOP_ITEM_ID")); scenarioDir != "" {
+		absFixtureDir = scenarioDir
+	}
+
 	switch *tool {
 	case "check-baseline":
 		return checkBaseline(absFixtureDir, *entity, *source, *hours)
@@ -268,6 +285,53 @@ func safeOpen(baseDir, relPath string) (*os.File, error) {
 		return nil, fmt.Errorf("open %q: %w", resolved, err)
 	}
 	return f, nil
+}
+
+// resolveScenarioFixtureDir returns the per-scenario subdirectory of fixtureDir
+// when itemID identifies an academy-driven engagement, or "" when no scenario
+// can be resolved (in which case the caller falls back to fixtureDir directly).
+//
+// itemID format produced by mallcop-academy is
+// `academy-<run-id>-<scenario-id>` where scenario-id is the YAML file's `id:`
+// field (e.g. `UT-02-maintenance-window`). We strip the `academy-<run-id>-`
+// prefix and look for a directory of that name under fixtureDir.
+//
+// Returns the subdir path only when it exists and contains a `baseline.json`
+// or `events.json` (the canonical fixture-dir markers). When the candidate
+// doesn't exist, returns "" so the caller falls back to the run-level
+// fixtureDir (preserving legacy behavior for non-academy invocations).
+func resolveScenarioFixtureDir(fixtureDir, itemID string) string {
+	if itemID == "" {
+		return ""
+	}
+	const prefix = "academy-"
+	if !strings.HasPrefix(itemID, prefix) {
+		return ""
+	}
+	rest := itemID[len(prefix):]
+	// The run-id is the first segment of fixtureDir's basename
+	// (`exams/fixtures/<run-id>`). Use it to strip the run-id from rest so the
+	// remainder is the scenario-id.
+	runID := filepath.Base(fixtureDir)
+	if runID == "" || !strings.HasPrefix(rest, runID+"-") {
+		return ""
+	}
+	scenarioID := rest[len(runID)+1:]
+	if scenarioID == "" {
+		return ""
+	}
+	candidate := filepath.Join(fixtureDir, scenarioID)
+	info, err := os.Stat(candidate)
+	if err != nil || !info.IsDir() {
+		return ""
+	}
+	// Sanity-check: candidate must contain at least one of the canonical files.
+	for _, marker := range []string{"baseline.json", "events.json"} {
+		if _, err := os.Stat(filepath.Join(candidate, marker)); err == nil {
+			return candidate
+		}
+	}
+	return ""
 }
 
 // ---- check-baseline --------------------------------------------------------
