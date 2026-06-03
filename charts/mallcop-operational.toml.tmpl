@@ -48,9 +48,9 @@ enabled = ["fetch_work_output", "list_work_items", "get_session_transcript"]
 [capabilities]
 gate_policy    = "ungated"
 tool_allowlist = [
-  "check-baseline", "search-events", "search-findings",
-  # heal query tool
-  "read-finding",
+  "check-baseline", "baseline-stats", "search-events", "search-findings",
+  # heal query tool + investigate-extension tools
+  "read-finding", "read-config", "load-skill",
   # F1G-a: finding-state
   "resolve-finding", "annotate-finding",
   # F1G-b: chain-handoff
