@@ -1133,3 +1133,51 @@ func TestResolveScenarioFixtureDir_NonAcademyItemID(t *testing.T) {
 		}
 	}
 }
+
+// TestCheckBaseline_FrequencySumsCompoundKeys verifies the bug fix for
+// frequency aggregation. Baseline fixtures use compound keys like
+// `<source>:<event_type>:<actor>` and `time:<hour>:<actor>`; the previous
+// direct-lookup logic always returned 0 because the bare entity name was
+// never a literal key.
+func TestCheckBaseline_FrequencySumsCompoundKeys(t *testing.T) {
+	root := t.TempDir()
+	baselineJSON := `{
+		"known_entities":{
+			"Actors":["deploy-svc","admin-user"],
+			"Sources":["azure"]
+		},
+		"frequency_tables":{
+			"azure:config_update:deploy-svc":48,
+			"azure:container_restart:deploy-svc":156,
+			"time:02:deploy-svc":24,
+			"azure:login:admin-user":340
+		}
+	}`
+	if err := os.WriteFile(filepath.Join(root, "baseline.json"), []byte(baselineJSON), 0o644); err != nil {
+		t.Fatalf("write baseline: %v", err)
+	}
+
+	// Redirect emitJSON to a buffer by reading stdout would require harness;
+	// instead capture via runner. Use the dispatchActionTool path? checkBaseline
+	// emits to stdout directly via emitJSON. For now exercise via the function
+	// and rely on no error + the run separately. Here we verify the sum logic.
+	captured := captureStdout(t, func() {
+		if err := checkBaseline(root, "deploy-svc", "", 168); err != nil {
+			t.Fatalf("checkBaseline: %v", err)
+		}
+	})
+	var got struct {
+		Known     bool `json:"known"`
+		Frequency int  `json:"frequency"`
+	}
+	if err := json.Unmarshal([]byte(captured), &got); err != nil {
+		t.Fatalf("decode result: %v\nraw: %s", err, captured)
+	}
+	if !got.Known {
+		t.Errorf("known should be true (actor in known_entities)")
+	}
+	if got.Frequency != 228 {
+		t.Errorf("frequency: got %d, want 228 (48+156+24)", got.Frequency)
+	}
+}
+

@@ -412,9 +412,32 @@ func checkBaseline(fixtureDir, entity, source string, hours int) error {
 		}
 	}
 
-	// Frequency: check frequency_tables for the entity key.
+	// Frequency: sum all frequency_table entries whose key contains the entity.
+	//
+	// Baseline.json frequency_tables uses compound keys produced by exam-seed,
+	// e.g. `<source>:<event_type>:<actor>` (`azure:container_restart:deploy-svc`)
+	// and `time:<hour>:<actor>` (`time:02:deploy-svc`). Direct lookup of the
+	// bare entity name (`bl.FrequencyTables[entity]`) never matched these keys
+	// and returned 0. The model then read "actor known but frequency 0" as
+	// "first-time occurrence" and escalated subtle behavioral scenarios
+	// (UT-02-maintenance-window, UT-04-admin-travel, etc.) that expected
+	// resolution. This bug existed for the entire history of the bakeoff.
+	//
+	// Match by case-insensitive substring on the entity within the compound
+	// key, sum all matching counts. This gives the model a non-zero
+	// "this actor has been seen N times in baseline" signal, which combined
+	// with the metadata flags in events.json lets triage resolve confidently.
 	freq := 0
 	if bl.FrequencyTables != nil {
+		entityLower := strings.ToLower(entity)
+		for key, v := range bl.FrequencyTables {
+			if strings.Contains(strings.ToLower(key), entityLower) {
+				freq += v
+			}
+		}
+		// Backwards compat: also allow a direct bare-entity key to override
+		// the sum when present (a curated value beats the sum). The current
+		// fixtures don't use this form but the test corpus may.
 		if v, ok := bl.FrequencyTables[entity]; ok {
 			freq = v
 		}
