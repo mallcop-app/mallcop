@@ -153,6 +153,47 @@ MALLCOP_HOME="${MALLCOP_HOME}" \
   "${REPO_ROOT}/charts/mallcop-operational.toml.tmpl" \
   "${CHART_OUT}" >/dev/null
 
+# 5b. Render per-skill capability TOMLs + sync into the live capabilities campfire.
+#
+# Before mallcoppro-eb3, capability config lived in [[capabilities.seed]] blocks
+# in the chart. Legion's bootstrap_capabilities is idempotent on name, so chart
+# edits to model/tools were silently dropped. capabilities/<name>.toml.tmpl now
+# owns the config; sync-capabilities.sh keeps the live campfire in agreement.
+#
+# Per-skill model env vars override $MODEL. When invoked from run-bakeoff.sh
+# these are set per lane; when invoked standalone they default to $MODEL.
+note "rendering per-skill capability TOMLs"
+TOMLS_DIR=$(mktemp -d "${TMPDIR:-/tmp}/mallcop-caps-XXXXXX")
+trap 'rm -rf "${TOMLS_DIR}"' EXIT
+TRIAGE_MODEL="${TRIAGE_MODEL:-${MODEL}}"
+INVESTIGATE_MODEL="${INVESTIGATE_MODEL:-${MODEL}}"
+DEEP_INVESTIGATE_MODEL="${DEEP_INVESTIGATE_MODEL:-${MODEL}}"
+INVESTIGATE_MERGE_MODEL="${INVESTIGATE_MERGE_MODEL:-${MODEL}}"
+ESCALATE_MODEL="${ESCALATE_MODEL:-${MODEL}}"
+HEAL_MODEL="${HEAL_MODEL:-${MODEL}}"
+TOOL_BIN_DIR="${TOOL_BIN_DIR:-${REPO_ROOT}/bin}"
+declare -A SYNC_MODEL_FOR=(
+  [triage]="${TRIAGE_MODEL}"
+  [investigate]="${INVESTIGATE_MODEL}"
+  [deep-investigate]="${DEEP_INVESTIGATE_MODEL}"
+  [investigate-merge]="${INVESTIGATE_MERGE_MODEL}"
+  [escalate]="${ESCALATE_MODEL}"
+  [heal]="${HEAL_MODEL}"
+)
+for skill in triage investigate deep-investigate investigate-merge escalate heal; do
+  "${SCRIPT_DIR}/render-capability.sh" \
+    "${skill}" "${SYNC_MODEL_FOR[$skill]}" \
+    --run-id "${RUN_ID}" \
+    --tool-bin-dir "${TOOL_BIN_DIR}" \
+    > "${TOMLS_DIR}/${skill}.toml"
+done
+
+note "syncing capabilities campfire"
+WE_BIN="${WE_BIN:-${REPO_ROOT}/bin/we}" \
+"${SCRIPT_DIR}/sync-capabilities.sh" \
+  --chart "${CHART_OUT}" \
+  --tomls-dir "${TOMLS_DIR}"
+
 # 5. Activate envelope — every cf/we/rd/mallcop-academy invocation against
 # this deployment uses these env vars to keep all state inside DEPLOY_DIR.
 cat > "${DEPLOY_DIR}/activate" <<EOF
