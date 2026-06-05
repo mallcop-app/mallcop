@@ -63,3 +63,4 @@ agents/*/identity.json
 # explicitly (allowlist) once they are scrubbed of secrets.
 /run-smoke.sh
 /run-smoke-*.sh
+.venv-sync-caps/
