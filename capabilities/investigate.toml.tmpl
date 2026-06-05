@@ -1,0 +1,117 @@
+
+name  = "investigate"
+match = ["task:investigate"]
+tools = [
+  "check-baseline", "baseline-stats",
+  "search-events", "search-findings",
+  "read-config",
+  "annotate-finding", "resolve-finding",
+  "load-skill",
+  "escalate-to-stage-c", "write-partial-transcript",
+  "escalate-to-deep", "create-investigate-merge",
+  # F2B: engagement-campfire watcher — detects direct cf-send bypass of F2A gate
+  "watch-engagement-campfire",
+]
+model     = "{{MODEL}}"
+max_iters = 10
+
+  # F2A: Confidence-gated close — pre-close gate in the resolve-finding binary.
+  # Only task:investigate workers are gated (other skills default to enabled=false).
+  # Weights and thresholds are substituted at chart-deploy time via sed (same pattern
+  # as {{MODEL}}/{{RUN_ID}} substitutions). The binary reads MALLCOP_CONFIDENCE_GATED_CLOSE_*
+  # env vars injected by the leger worker jail at spawn.
+[[tool_defs]]
+name = "check-baseline"
+description = "Check baseline frequency and history for an actor/entity."
+input_schema = '{"type":"object","properties":{"entity":{"type":"string"},"source":{"type":"string"}},"required":["entity"]}'
+binary = "{{TOOL_BIN_DIR}}/mallcop-investigate-tools"
+binary_args = ["--tool", "check-baseline", "--mode", "exam", "--fixture-dir", "exams/fixtures/{{RUN_ID}}"]
+
+[[tool_defs]]
+name = "baseline-stats"
+description = "Return aggregate baseline statistics for an actor or source: total event volume, time-of-day distribution, weekly cadence. Useful for spotting anomalous volume or timing without examining individual events."
+input_schema = '{"type":"object","properties":{"entity":{"type":"string","description":"actor email or username (optional)"},"source":{"type":"string","description":"connector source (e.g. github, aws)"}}}'
+binary = "{{TOOL_BIN_DIR}}/mallcop-investigate-tools"
+binary_args = ["--tool", "baseline-stats", "--mode", "exam", "--fixture-dir", "exams/fixtures/{{RUN_ID}}"]
+
+[[tool_defs]]
+name = "search-events"
+description = "Search recent events by actor, type, or time range."
+input_schema = '{"type":"object","properties":{"actor":{"type":"string"},"source":{"type":"string"},"type":{"type":"string"},"since":{"type":"string"},"until":{"type":"string"}}}'
+binary = "{{TOOL_BIN_DIR}}/mallcop-investigate-tools"
+binary_args = ["--tool", "search-events", "--mode", "exam", "--fixture-dir", "exams/fixtures/{{RUN_ID}}"]
+
+[[tool_defs]]
+name = "search-findings"
+description = "Search existing findings by actor, severity, or time range."
+input_schema = '{"type":"object","properties":{"actor":{"type":"string"},"source":{"type":"string"},"since":{"type":"string"},"until":{"type":"string"}}}'
+binary = "{{TOOL_BIN_DIR}}/mallcop-investigate-tools"
+binary_args = ["--tool", "search-findings", "--mode", "exam", "--fixture-dir", "exams/fixtures/{{RUN_ID}}"]
+
+[[tool_defs]]
+name = "read-config"
+description = "Read connector or detector configuration (read-only). Returns JSON with detector thresholds, connector scope, and enabled sources."
+input_schema = '{"type":"object","properties":{"detector":{"type":"string","description":"detector name (optional)"},"connector":{"type":"string","description":"connector name (optional)"}}}'
+binary = "{{TOOL_BIN_DIR}}/mallcop-investigate-tools"
+binary_args = ["--tool", "read-config", "--mode", "exam", "--fixture-dir", "exams/fixtures/{{RUN_ID}}"]
+
+[[tool_defs]]
+name = "load-skill"
+description = "Load a domain-specific skill module to gain specialized tools and context (e.g. AWS IAM analysis, cloud attack patterns). Returns {skill_id, new_tools, context}. Only load when baseline tools are insufficient."
+input_schema = '{"type":"object","required":["skill_name"],"properties":{"skill_name":{"type":"string","description":"skill name from the skill catalog"}}}'
+binary = "{{TOOL_BIN_DIR}}/mallcop-investigate-tools"
+binary_args = ["--tool", "load-skill"]
+
+# F1G-a: Finding-state tools
+[[tool_defs]]
+name = "resolve-finding"
+description = "Close a finding with a resolution action (resolved|escalated|remediated). Emits work:output to the engagement campfire with the action tag so downstream can filter. This is the agent's final action on a finding — call last."
+input_schema = '{"type":"object","required":["finding_id","action","reason"],"properties":{"finding_id":{"type":"string"},"action":{"type":"string","enum":["resolved","escalated","remediated"]},"reason":{"type":"string"},"confidence":{"type":"number","minimum":1,"maximum":5}}}'
+binary = "{{TOOL_BIN_DIR}}/mallcop-investigate-tools"
+binary_args = ["--tool", "resolve-finding"]
+
+[[tool_defs]]
+name = "annotate-finding"
+description = "Add a structured annotation to a finding. Posts a finding:annotation tagged message to the engagement campfire. Tag is consumed by F4B academy structural grading (must_mention checks). Use to record intermediate reasoning, evidence, or notes."
+input_schema = '{"type":"object","required":["finding_id","note"],"properties":{"finding_id":{"type":"string"},"note":{"type":"string","maxLength":4096},"tags":{"type":"array","items":{"type":"string"}}}}'
+binary = "{{TOOL_BIN_DIR}}/mallcop-investigate-tools"
+binary_args = ["--tool", "annotate-finding"]
+
+# F1G-b: Chain-handoff tools
+[[tool_defs]]
+name = "escalate-to-stage-c"
+description = "Escalate a finding to stage-C (task:escalate worker). action_class drives F1F branch selection: auto-safe→immediate remediation, needs-approval→operator gate, informational→notify only, ambiguous→operator review. Returns new item_id."
+input_schema = '{"type":"object","required":["finding_id","reason","action_class"],"properties":{"finding_id":{"type":"string"},"reason":{"type":"string"},"action_class":{"type":"string","enum":["auto-safe","needs-approval","informational","ambiguous"]},"flags":{"type":"array","items":{"type":"string"}}}}'
+binary = "{{TOOL_BIN_DIR}}/mallcop-investigate-tools"
+binary_args = ["--tool", "escalate-to-stage-c"]
+
+[[tool_defs]]
+name = "escalate-to-deep"
+description = "Escalate to a deep-investigate worker with a specific hypothesis (benign|malicious|incomplete). Typically called 3 times (once per hypothesis) before create-investigate-merge. Returns item_id so caller can pass to create-investigate-merge."
+input_schema = '{"type":"object","required":["finding_id","hypothesis","partial_transcript_path"],"properties":{"finding_id":{"type":"string"},"hypothesis":{"type":"string","enum":["benign","malicious","incomplete"]},"partial_transcript_path":{"type":"string","description":"absolute path to partial transcript written by write-partial-transcript"}}}'
+binary = "{{TOOL_BIN_DIR}}/mallcop-investigate-tools"
+binary_args = ["--tool", "escalate-to-deep"]
+
+[[tool_defs]]
+name = "create-investigate-merge"
+description = "Create an investigate-merge task that waits for 3 deep-investigate workers (deep_item_ids). Wires rd dep edges so the merge item blocks until all 3 complete. Returns the merge item_id. Call after 3x escalate-to-deep."
+input_schema = '{"type":"object","required":["finding_id","deep_item_ids"],"properties":{"finding_id":{"type":"string"},"deep_item_ids":{"type":"array","items":{"type":"string"},"minItems":3,"maxItems":3},"parent_investigate_item_id":{"type":"string"}}}'
+binary = "{{TOOL_BIN_DIR}}/mallcop-investigate-tools"
+binary_args = ["--tool", "create-investigate-merge"]
+
+[[tool_defs]]
+name = "write-partial-transcript"
+description = "Write a partial transcript file for this finding under .run/transcripts/<run-id>/<finding_id>-partial.md. Returns the absolute path so it can be passed to escalate-to-deep as partial_transcript_path. Call before escalate-to-deep fan-out."
+input_schema = '{"type":"object","required":["finding_id","content"],"properties":{"finding_id":{"type":"string"},"content":{"type":"string","description":"partial transcript markdown content"}}}'
+binary = "{{TOOL_BIN_DIR}}/mallcop-investigate-tools"
+binary_args = ["--tool", "write-partial-transcript"]
+
+# F2B: Engagement-campfire watcher (mallcoppro-753)
+[[tool_defs]]
+name = "watch-engagement-campfire"
+description = "Scan the engagement campfire for work:output messages that were posted directly via cf send (lacking gate:checked). Posts bypass:intercepted for each unsolicited message detected. Returns JSON: work_output_total, unsolicited, intercepted counts and message IDs. Call periodically as a self-audit or at task close."
+input_schema = '{"type":"object","properties":{"campfire_id":{"type":"string","description":"engagement campfire ID (defaults to MALLCOP_CAMPFIRE_ID)"}}}'
+binary = "{{TOOL_BIN_DIR}}/mallcop-investigate-tools"
+binary_args = ["--tool", "watch-engagement-campfire"]
+
+# task:deep-investigate capability seed — F1D: hypothesis-directed investigation

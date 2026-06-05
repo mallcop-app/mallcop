@@ -1,0 +1,27 @@
+
+name      = "heal"
+match     = ["task:heal"]
+tools     = ["read-finding", "annotate-finding", "resolve-finding"]
+model     = "{{MODEL}}"
+max_iters = 5
+
+[[tool_defs]]
+name = "read-finding"
+description = "Read the full finding record by finding_id from the fixture. Returns the finding JSON or {\"error\":\"not_found\",\"finding_id\":\"...\"} if not present."
+input_schema = '{"type":"object","required":["finding_id"],"properties":{"finding_id":{"type":"string","description":"finding ID to look up"}}}'
+binary = "{{TOOL_BIN_DIR}}/mallcop-investigate-tools"
+binary_args = ["--tool", "read-finding", "--mode", "exam", "--fixture-dir", "exams/fixtures/{{RUN_ID}}"]
+
+[[tool_defs]]
+name = "annotate-finding"
+description = "Add finding:annotation tagged note to engagement campfire. Use to store the parser.yaml patch JSON as annotation text."
+input_schema = '{"type":"object","required":["finding_id","note"],"properties":{"finding_id":{"type":"string"},"note":{"type":"string","maxLength":4096},"tags":{"type":"array","items":{"type":"string"}}}}'
+binary = "{{TOOL_BIN_DIR}}/mallcop-investigate-tools"
+binary_args = ["--tool", "annotate-finding"]
+
+[[tool_defs]]
+name = "resolve-finding"
+description = "Close a finding with a resolution action. Use action=\"resolved\" after annotating with the parser patch proposal."
+input_schema = '{"type":"object","required":["finding_id","action","reason"],"properties":{"finding_id":{"type":"string"},"action":{"type":"string","enum":["resolved","escalated","remediated"]},"reason":{"type":"string"},"confidence":{"type":"number","minimum":1,"maximum":5}}}'
+binary = "{{TOOL_BIN_DIR}}/mallcop-investigate-tools"
+binary_args = ["--tool", "resolve-finding"]
