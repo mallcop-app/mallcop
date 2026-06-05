@@ -1,0 +1,39 @@
+
+name  = "investigate-merge"
+match = ["task:investigate-merge"]
+tools = [
+  "fetch_work_output",         # legion-tools: read deep worker's final JSON verdict
+  "get_session_transcript",    # legion-tools: read deep worker's full reasoning chain
+  "annotate-finding", "resolve-finding",
+  "escalate-to-stage-c",
+]
+model = "{{MODEL}}"
+max_iters = 5
+# Party grant (tools.party_grants above) allows get_session_transcript to access
+# task:deep-investigate sessions. Without it, the call returns {"error":"unauthorized"}.
+
+  # legion-tools (fetch_work_output, get_session_transcript) are injected natively
+  # via [tools].enabled — no tool_defs needed for them.
+
+[[tool_defs]]
+name = "annotate-finding"
+description = "Add a structured annotation recording aggregation reasoning. Posts finding:annotation to engagement campfire. Consumed by F4B academy structural grading."
+input_schema = '{"type":"object","required":["finding_id","note"],"properties":{"finding_id":{"type":"string"},"note":{"type":"string","maxLength":4096},"tags":{"type":"array","items":{"type":"string"}}}}'
+binary = "{{TOOL_BIN_DIR}}/mallcop-investigate-tools"
+binary_args = ["--tool", "annotate-finding"]
+
+[[tool_defs]]
+name = "resolve-finding"
+description = "Close a finding with the aggregated verdict. Emits work:output to engagement campfire. Call after annotate-finding."
+input_schema = '{"type":"object","required":["finding_id","action","reason"],"properties":{"finding_id":{"type":"string"},"action":{"type":"string","enum":["resolved","escalated","remediated"]},"reason":{"type":"string"},"confidence":{"type":"number","minimum":0,"maximum":1}}}'
+binary = "{{TOOL_BIN_DIR}}/mallcop-investigate-tools"
+binary_args = ["--tool", "resolve-finding"]
+
+[[tool_defs]]
+name = "escalate-to-stage-c"
+description = "Escalate to stage-C when all 3 deep workers disagree (system genuinely uncertain). Use action_class=ambiguous and flags=[system-genuinely-uncertain]. Include all 3 evidence chains in reason. Call before resolve-finding in the all-disagree path."
+input_schema = '{"type":"object","required":["finding_id","reason","action_class"],"properties":{"finding_id":{"type":"string"},"reason":{"type":"string"},"action_class":{"type":"string","enum":["auto-safe","needs-approval","informational","ambiguous"]},"flags":{"type":"array","items":{"type":"string"}}}}'
+binary = "{{TOOL_BIN_DIR}}/mallcop-investigate-tools"
+binary_args = ["--tool", "escalate-to-stage-c"]
+
+# task:escalate capability seed — F1F: 4-branch policy + F1G-c operator/escalation tools
