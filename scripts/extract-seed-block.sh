@@ -55,19 +55,28 @@ for i, m in enumerate(matches):
     if name_match.group(1) != target_name:
         continue
 
-    # Found the block. Two transformations:
-    #   1) Drop [capabilities.seed.behaviors.*] subblocks entirely.
-    #      They are dead chart-side config — nothing in legion reads them
+    # Found the block. Transformations:
+    #   1) Drop [capabilities.seed.behaviors.*] subblocks entirely. They
+    #      are dead chart-side config — nothing in legion reads them
     #      (verified 2026-06-05, mallcoppro-83a). Including them would
     #      cause `we capability propose --file` to reject the TOML with
     #      "unknown fields".
-    #   2) Dedent [[capabilities.seed.tool_defs]] → [[tool_defs]] and the
+    #   2) Drop top-level `max_iters` lines. Same situation — chart sets
+    #      max_iters per-skill (triage=3, investigate=10, etc) but
+    #      legion's capabilityPayloadTOML schema has no MaxIters field
+    #      and grep finds no consumer in legion source. Per-capability
+    #      iteration capping comes from the tool_loop turn cap.
+    #   3) Dedent [[capabilities.seed.tool_defs]] → [[tool_defs]] and the
     #      fields beneath it so the standalone TOML is flush-left.
     out_lines = []
     in_tool_def = False
     in_dead_behaviors = False
     for line in block_body.splitlines():
         stripped = line.strip()
+
+        # Drop dead top-level `max_iters` lines.
+        if re.match(r"^\s*max_iters\s*=", line) and not in_tool_def:
+            continue
 
         # Detect entry/exit of dead behaviors subblock.
         if re.match(r"^\s*\[capabilities\.seed\.behaviors", line):
