@@ -161,13 +161,18 @@ func run(args []string) error {
 	// They read input from the trailing positional JSON argument (set by the
 	// API tool executor) and emit side-effects via cf + rd.
 	if actionTools[*tool] {
-		// Collect the positional JSON input (last arg, if present and JSON-shaped).
+		// Collect the positional JSON input (last arg).
+		//
+		// mallcoppro-e32: previously this filtered for arguments starting
+		// with '{', dropping anything else on the floor. That dropped
+		// llama-style markdown-wrapped JSON ("```json\n{...}\n```") before
+		// it reached stripMarkdownFences in the F1G handlers, resurfacing
+		// as "missing positional argument" errors. We now pass the raw last
+		// arg through; each handler strips fences and validates JSON shape
+		// via json.Unmarshal, with a clear error on shape mismatch.
 		var inputJSON string
 		if rest := fs.Args(); len(rest) > 0 {
-			last := rest[len(rest)-1]
-			if len(last) > 0 && last[0] == '{' {
-				inputJSON = last
-			}
+			inputJSON = rest[len(rest)-1]
 		}
 		return dispatchActionTool(*tool, inputJSON)
 	}

@@ -256,11 +256,14 @@ func nowRFC3339() string {
 // ---- F1G-a: Finding-state tools -----------------------------------------------
 
 // resolveInput is the input_schema for resolve-finding.
+//
+// Confidence uses flexibleFloat (mallcoppro-e32) so llama-3.3-70b's habit
+// of emitting "confidence":"0.9" (string-quoted) doesn't crash the tool.
 type resolveInput struct {
-	FindingID  string  `json:"finding_id"`
-	Action     string  `json:"action"`
-	Reason     string  `json:"reason"`
-	Confidence float64 `json:"confidence,omitempty"`
+	FindingID  string        `json:"finding_id"`
+	Action     string        `json:"action"`
+	Reason     string        `json:"reason"`
+	Confidence flexibleFloat `json:"confidence,omitempty"`
 }
 
 // resolveOutput is the JSON output for resolve-finding.
@@ -274,12 +277,17 @@ type resolveOutput struct {
 
 func runResolveFinding(inputJSON string) error {
 	var input resolveInput
+	// mallcoppro-e32: strip markdown code fences before parsing. Llama
+	// sometimes wraps tool args in ```json ... ``` blocks; bare JSON is
+	// untouched. Also normalize verb-form actions ("resolve" → "resolved").
+	inputJSON = stripMarkdownFences(inputJSON)
 	if inputJSON == "" {
 		return errors.New("resolve-finding: input JSON required (missing positional argument)")
 	}
 	if err := json.Unmarshal([]byte(inputJSON), &input); err != nil {
 		return fmt.Errorf("resolve-finding: parse input: %w", err)
 	}
+	input.Action = normalizeAction(input.Action)
 	if input.FindingID == "" {
 		return errors.New("resolve-finding: finding_id is required")
 	}
@@ -319,7 +327,7 @@ func runResolveFinding(inputJSON string) error {
 		FindingID:  input.FindingID,
 		Action:     input.Action,
 		Reason:     input.Reason,
-		Confidence: input.Confidence,
+		Confidence: float64(input.Confidence),
 		Timestamp:  nowRFC3339(),
 	}
 	payload, err := json.Marshal(output)
@@ -375,6 +383,7 @@ type annotateInput struct {
 
 func runAnnotateFinding(inputJSON string) error {
 	var input annotateInput
+	inputJSON = stripMarkdownFences(inputJSON) // mallcoppro-e32
 	if inputJSON == "" {
 		return errors.New("annotate-finding: input JSON required (missing positional argument)")
 	}
@@ -596,13 +605,14 @@ func resolveRunID(findingID string) string {
 
 // escalateToInvestigatorInput is the input_schema for escalate-to-investigator.
 type escalateToInvestigatorInput struct {
-	FindingID  string  `json:"finding_id"`
-	Reason     string  `json:"reason"`
-	Confidence float64 `json:"confidence,omitempty"`
+	FindingID  string        `json:"finding_id"`
+	Reason     string        `json:"reason"`
+	Confidence flexibleFloat `json:"confidence,omitempty"` // mallcoppro-e32
 }
 
 func runEscalateToInvestigator(inputJSON string) error {
 	var input escalateToInvestigatorInput
+	inputJSON = stripMarkdownFences(inputJSON) // mallcoppro-e32
 	if inputJSON == "" {
 		return errors.New("escalate-to-investigator: input JSON required")
 	}
@@ -661,6 +671,7 @@ type escalateToStageCInput struct {
 
 func runEscalateToStageC(inputJSON string) error {
 	var input escalateToStageCInput
+	inputJSON = stripMarkdownFences(inputJSON) // mallcoppro-e32
 	if inputJSON == "" {
 		return errors.New("escalate-to-stage-c: input JSON required")
 	}
@@ -721,6 +732,7 @@ type escalateToDeepInput struct {
 
 func runEscalateToDeep(inputJSON string) error {
 	var input escalateToDeepInput
+	inputJSON = stripMarkdownFences(inputJSON) // mallcoppro-e32
 	if inputJSON == "" {
 		return errors.New("escalate-to-deep: input JSON required")
 	}
