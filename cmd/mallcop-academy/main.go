@@ -282,12 +282,25 @@ func (c closePayload) resolvedItemID() string {
 
 // terminalActions are work:close actions that indicate chain completion.
 // Any action not in this set is treated as intermediate (follow-on work expected).
+//
+// "abandoned" is emitted by legion (cmd/we) when a worker exits end_turn
+// without ever invoking a tool — InferResult.ToolCallCount == 0. Prior
+// behaviour was to emit resolution:done in that case, which left the chain
+// open and forced the academy to wait on the lane wall. Treating "abandoned"
+// as terminal short-circuits the chain and grades the scenario as a fail
+// immediately (because expected.chain_action is always one of resolved /
+// escalated / remediated, never abandoned). RCA: this caused every recent
+// llama-3.3-70b lane to look like a "timeout" — model returned end_turn
+// with zero tool calls in 42-48% of investigate workers, but the chain
+// stayed open until the 60m wall fired. See docs/bakeoff/bakeoff-20260610*
+// for the empirical breakdown.
 var terminalActions = map[string]bool{
-	"resolved":    true,
-	"escalated":   true,
-	"remediated":  true,
+	"resolved":       true,
+	"escalated":      true,
+	"remediated":     true,
 	"false-positive": true,
-	"closed":      true,
+	"closed":         true,
+	"abandoned":      true,
 }
 
 // ---- Academy sender interface (for testing) -----------------------------------
