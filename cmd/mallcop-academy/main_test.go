@@ -2814,6 +2814,353 @@ func TestChainShape_FiresAtQuiescence(t *testing.T) {
 	}
 }
 
+// TestChainShape_InvestigateWorkCreate_MisclassifiedAsNoTriageInference
+// (mallcoppro-db3 — security sweep, HIGH).
+//
+// Demonstrates the dead-code structural gap in detectNoTriageInferenceChain:
+// triage's escalate-to-investigator emits a work:create with skill:task:investigate,
+// but academy's watch loop (main.go:858-944) only registers that message in
+// workItemToScenario — it never appends a ChainEntry to ts.chain. As a result,
+// the detector's "hasInvestigateCreate" branch (main.go:417-419) is structurally
+// always false, and the only safety net against misclassification is
+// ts.toolUsageCalls > 0.
+//
+// Adversarial scenario: triage worker escalates (legit work) but the
+// tool-usage emission to the work campfire is dropped (network blip,
+// best-effort cf send failure, malicious tool wrapper). At quiescence the
+// detector sees: hasCreate (initial post), hasClose (triage close, non-terminal
+// action), !hasInvestigateCreate (structural — never populated), and
+// ts.toolUsageCalls == 0. The detector misclassifies as structural-fault
+// "no-triage-inference" even though triage DID escalate.
+//
+// THIS TEST IS EXPECTED TO FAIL on the unpatched code path — the failure
+// demonstrates the misclassification. Defense: extend the work:create handler
+// (main.go:836-944) to ALSO append a ChainEntry{Skill: parsed-skill, Action: ""}
+// to the matched scenario's chain whenever a work:create with skill:task:investigate
+// (or any investigate-skill) is attributed to a scenario. Once that ships,
+// hasInvestigateCreate fires correctly and this test should be inverted to
+// assert non-misclassification.
+func TestChainShape_InvestigateWorkCreate_MisclassifiedAsNoTriageInference(t *testing.T) {
+	scenDir := t.TempDir()
+	writeMinimalScenario(t, scenDir, "NT-IB", "fnd_nt_ib", "detector-priv-escalation",
+		"Triage-escalated chain — tool-usage absent", "high")
+
+	outDir := t.TempDir()
+	ms := &mockSender{readMsgs: nil}
+
+	args := runArgs{
+		targetCampfire: "cf-mock-target-misclassify",
+		scenariosDir:   scenDir,
+		scenarioFilter: "NT-IB",
+		outputDir:      outDir,
+		maxConcurrent:  1,
+		timeout:        6 * time.Second, // allow at least 2 poll iterations
+		runID:          "test-mock-run-misclassify",
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- academy(ms, args)
+	}()
+
+	var sentID string
+	for i := 0; i < 50; i++ {
+		time.Sleep(20 * time.Millisecond)
+		ms.mu.Lock()
+		if len(ms.sends) > 0 {
+			sentID = ms.sends[0].returnID
+		}
+		ms.mu.Unlock()
+		if sentID != "" {
+			break
+		}
+	}
+	if sentID == "" {
+		t.Fatal("academy never posted work:create within timeout")
+	}
+
+	// 1. Triage worker emits a work:create for task:investigate carrying the
+	//    finding tag — this is what escalate-to-investigator (tools_f1g.go) does.
+	//    Academy registers it in workItemToScenario via the finding-tag attribution
+	//    path (main.go:899-933) BUT does not add it to ts.chain.
+	investigateCreatePayload := `{"id":"item-investigate-001","skill":"task:investigate","title":"investigate fnd_nt_ib"}`
+
+	// 2. Triage worker emits a work:close with a non-terminal action (e.g. "noop",
+	//    "completed", "escalate-emitted"). The close is in ts.chain (with non-empty
+	//    Action) but doesn't reach the terminal switch.
+	closeNoopPayload, _ := json.Marshal(closePayload{
+		ItemID: sentID,
+		Action: "escalated", // wire action escalate WITHOUT structural-fault prefix; triage handed off cleanly
+		Skill:  "task:triage",
+	})
+
+	// Tag must use the per-run finding ID — see main.go:1466 matchesFindingTag.
+	perRunFinding := perRunFindingID("fnd_nt_ib", "test-mock-run-misclassify")
+	ms.mu.Lock()
+	// Order matters: work:create first so attribution happens; close second.
+	ms.readMsgs = append(ms.readMsgs, cfMessage{
+		ID:      "msg-invest-create-001",
+		Tags:    []string{"work:create", "skill:task:investigate", "finding:" + perRunFinding},
+		Payload: investigateCreatePayload,
+	})
+	ms.readMsgs = append(ms.readMsgs, cfMessage{
+		ID:      "msg-triage-close-001",
+		Tags:    []string{"work:close", "action:escalated"},
+		Payload: string(closeNoopPayload),
+	})
+	// 3. CRUCIAL: NO tool-usage message. The triage escalation happened (real
+	//    work occurred), but the tool-usage emission was dropped/best-effort lost.
+	//    The detector falls back on toolUsageCalls > 0 — which is false — and
+	//    fires no-triage-inference.
+	ms.mu.Unlock()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("academy: %v", err)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("academy did not complete within deadline")
+	}
+
+	// terminal_action came from work:close action=escalated → academy treats
+	// that as terminal via terminalActions["escalated"]. So the misclassification
+	// surface here is that StructuralCause should NOT be "no-triage-inference"
+	// — triage DID hand off. After the defense ships, StructuralCause stays
+	// empty for a clean escalation.
+	data, err := os.ReadFile(filepath.Join(outDir, "NT-IB.json"))
+	if err != nil {
+		t.Fatalf("NT-IB.json not found: %v", err)
+	}
+	var rec ScenarioRecord
+	if err := json.Unmarshal(data, &rec); err != nil {
+		t.Fatalf("parse NT-IB.json: %v", err)
+	}
+	// terminal_action must be "escalated" — that's the real outcome.
+	if rec.TerminalAction != "escalated" {
+		t.Errorf("TerminalAction = %q, want \"escalated\" (triage handed off cleanly)", rec.TerminalAction)
+	}
+	// StructuralCause must be empty. On the unpatched code path the detector
+	// CANNOT fire because terminal was already set by the escalated close.
+	// But: if the close had been omitted entirely (only the work:create),
+	// quiescence would fire the detector and misclassify. This second case
+	// is exercised by the helper below.
+	if rec.StructuralCause != "" {
+		t.Errorf("StructuralCause = %q, want empty (clean escalate, not a fault)", rec.StructuralCause)
+	}
+}
+
+// TestChainShape_InvestigateWorkCreateOnly_QuiescenceMisclassifies (mallcoppro-db3 HIGH).
+// Sharper restatement of the bypass: triage emits the escalate-to-investigator
+// work:create but the triage worker is killed before posting its own work:close
+// or tool-usage (e.g., wall timeout, SIGKILL). At quiescence the chain has the
+// initial post, NO triage close, and an unobserved investigate work:create that
+// academy registered only in workItemToScenario. detectNoTriageInferenceChain
+// would normally short-circuit on !hasClose, so this exact case does NOT trip
+// the false positive — but the next-related case (triage close present without
+// terminal action AND investigate spawn present) DOES misclassify, because
+// hasInvestigateCreate stays false. This test pins the desired behavior: when
+// an investigate work:create has been attributed to the scenario, the detector
+// MUST treat it as evidence of triage inference, regardless of whether it
+// reached ts.chain.
+//
+// The fix is to either (a) populate ts.chain on attributed work:create messages,
+// or (b) extend detectNoTriageInferenceChain to consult workItemToScenario for
+// any investigate work:create attributed to this scenario.
+func TestChainShape_InvestigateWorkCreateOnly_QuiescenceMisclassifies(t *testing.T) {
+	scenDir := t.TempDir()
+	writeMinimalScenario(t, scenDir, "NT-IC", "fnd_nt_ic", "detector-priv-escalation",
+		"Triage escalated then died — only the work:create survived", "high")
+
+	outDir := t.TempDir()
+	ms := &mockSender{readMsgs: nil}
+
+	args := runArgs{
+		targetCampfire: "cf-mock-target-orphaned-escalate",
+		scenariosDir:   scenDir,
+		scenarioFilter: "NT-IC",
+		outputDir:      outDir,
+		maxConcurrent:  1,
+		timeout:        6 * time.Second, // allow at least 2 poll iterations
+		runID:          "test-mock-run-orphaned-escalate",
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- academy(ms, args)
+	}()
+
+	var sentID string
+	for i := 0; i < 50; i++ {
+		time.Sleep(20 * time.Millisecond)
+		ms.mu.Lock()
+		if len(ms.sends) > 0 {
+			sentID = ms.sends[0].returnID
+		}
+		ms.mu.Unlock()
+		if sentID != "" {
+			break
+		}
+	}
+	if sentID == "" {
+		t.Fatal("academy never posted work:create within timeout")
+	}
+
+	// Real-world scenario: triage emitted escalate-to-investigator THEN posted
+	// a non-terminal close (e.g., "noop") to signal worker exit cleanly. Triage
+	// did real inference work — escalation is the proof — but tool-usage went
+	// missing.
+	investigateCreatePayload := `{"id":"item-orphaned-investigate","skill":"task:investigate","title":"investigate fnd_nt_ic"}`
+	closeNoopPayload, _ := json.Marshal(closePayload{
+		ItemID: sentID,
+		Action: "noop", // non-terminal — does not match terminalActions
+		Skill:  "task:triage",
+	})
+
+	perRunFinding := perRunFindingID("fnd_nt_ic", "test-mock-run-orphaned-escalate")
+	ms.mu.Lock()
+	ms.readMsgs = append(ms.readMsgs, cfMessage{
+		ID:      "msg-orphan-invest-001",
+		Tags:    []string{"work:create", "skill:task:investigate", "finding:" + perRunFinding},
+		Payload: investigateCreatePayload,
+	})
+	ms.readMsgs = append(ms.readMsgs, cfMessage{
+		ID:      "msg-orphan-triage-close-001",
+		Tags:    []string{"work:close", "action:noop"},
+		Payload: string(closeNoopPayload),
+	})
+	ms.mu.Unlock()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("academy: %v", err)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("academy did not complete within deadline")
+	}
+
+	data, err := os.ReadFile(filepath.Join(outDir, "NT-IC.json"))
+	if err != nil {
+		t.Fatalf("NT-IC.json not found: %v", err)
+	}
+	var rec ScenarioRecord
+	if err := json.Unmarshal(data, &rec); err != nil {
+		t.Fatalf("parse NT-IC.json: %v", err)
+	}
+
+	// Defense: even though tool-usage is absent, the academy MUST recognize
+	// the attributed work:create as evidence of triage inference. The detector
+	// must NOT fire "no-triage-inference" — that label paints triage as silent
+	// when it actually performed the inference and produced the spawn.
+	if rec.StructuralCause == "no-triage-inference" {
+		t.Errorf("DETECTOR MISCLASSIFICATION: triage escalated (work:create posted) but " +
+			"detector still flagged no-triage-inference because ts.chain never recorded " +
+			"the work:create. Defense required: populate ts.chain on attributed " +
+			"work:create messages, or extend detectNoTriageInferenceChain to consult " +
+			"workItemToScenario for investigate-skill spawns.")
+	}
+}
+
+// TestFecWireParse_AbandonedNormalizerWins_ContestedCause (mallcoppro-db3).
+// Follow-up to orchestrator ruling cfbff880: the existing
+// TestFecWireParse_AbandonedNormalizerWins short-circuits via HasPrefix on
+// reason="watchdog timeout" — the precedence guard at main.go:1127
+// (if ts.structuralCause == "") is never exercised because parseStructuralFaultReason
+// returns ("", false) without contesting the slot.
+//
+// The contested case: action="abandoned" + reason="structural-fault: alt-cause".
+// 190's normalizer runs first and sets structuralCause="abandoned-by-model".
+// The fec parser THEN finds the prefix and returns ("alt-cause", true). The
+// guard at line 1127 must keep "abandoned-by-model" and discard "alt-cause".
+// Without the guard, the fec parser would overwrite the normalizer-set cause.
+func TestFecWireParse_AbandonedNormalizerWins_ContestedCause(t *testing.T) {
+	scenDir := t.TempDir()
+	writeMinimalScenario(t, scenDir, "FC-04", "fnd_fc_004", "detector-priv-escalation",
+		"abandoned-normalizer precedence — contested cause", "high")
+
+	outDir := t.TempDir()
+	ms := &mockSender{readMsgs: nil}
+
+	args := runArgs{
+		targetCampfire: "cf-mock-target-contested",
+		scenariosDir:   scenDir,
+		scenarioFilter: "FC-04",
+		outputDir:      outDir,
+		maxConcurrent:  1,
+		timeout:        5 * time.Second,
+		runID:          "test-mock-run-contested",
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- academy(ms, args)
+	}()
+
+	var sentID string
+	for i := 0; i < 50; i++ {
+		time.Sleep(20 * time.Millisecond)
+		ms.mu.Lock()
+		if len(ms.sends) > 0 {
+			sentID = ms.sends[0].returnID
+		}
+		ms.mu.Unlock()
+		if sentID != "" {
+			break
+		}
+	}
+	if sentID == "" {
+		t.Fatal("academy never posted work:create within timeout")
+	}
+
+	// Contested case: BOTH paths have a structural cause to write.
+	//   1. action="abandoned" → normalizeTerminalAction sets cause="abandoned-by-model".
+	//   2. reason="structural-fault: alt-cause" → parseStructuralFaultReason returns ("alt-cause", true).
+	// The precedence guard at main.go:1127 must keep "abandoned-by-model".
+	payload := closePayloadFull{
+		ItemID: sentID,
+		Action: "abandoned",
+		Skill:  "task:investigate",
+		Reason: "structural-fault: alt-cause",
+	}
+	payloadBytes, _ := json.Marshal(payload)
+	ms.mu.Lock()
+	ms.readMsgs = append(ms.readMsgs, cfMessage{
+		ID:      "close-fec-contested-001",
+		Tags:    []string{"work:close", "action:abandoned"},
+		Payload: string(payloadBytes),
+	})
+	ms.mu.Unlock()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("academy: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("academy did not complete within deadline")
+	}
+
+	data, err := os.ReadFile(filepath.Join(outDir, "FC-04.json"))
+	if err != nil {
+		t.Fatalf("FC-04.json not found: %v", err)
+	}
+	var rec ScenarioRecord
+	if err := json.Unmarshal(data, &rec); err != nil {
+		t.Fatalf("parse FC-04.json: %v", err)
+	}
+	if rec.StructuralCause != "abandoned-by-model" {
+		t.Errorf("PRECEDENCE GUARD BROKEN: StructuralCause = %q, want abandoned-by-model "+
+			"(190's normalizer must win over fec reason-parser in the contested case where "+
+			"both have a non-empty cause). main.go:1127 guard `if ts.structuralCause == \"\"`",
+			rec.StructuralCause)
+	}
+	if rec.TerminalAction != "escalated" {
+		t.Errorf("TerminalAction = %q, want escalated (190's normalizer maps abandoned → escalated)",
+			rec.TerminalAction)
+	}
+}
+
 // ---- unit: fec-wire structural-fault parse (mallcoppro-2f1) -----------------
 //
 // Background: legion's EscalateOnStructuralFault (legion#343) emits a
