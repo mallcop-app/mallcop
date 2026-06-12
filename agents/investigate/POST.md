@@ -19,6 +19,29 @@ Cross-reference, corroborate, and look for disconfirming evidence.
 You have more tools and more iterations than triage. Use them to build
 a complete picture, not to confirm a hypothesis.
 
+### Check the operator-decisions corpus
+
+Before doing deep investigation, call **lookup-rules** with the finding's
+detector family and any observable metadata flags you have already gathered
+(from finding.metadata or from a first search-events call). The corpus
+contains pre-seeded operator decisions for known benign patterns
+(maintenance windows, scheduled batches, fat-finger logins, password-reset
+recoveries, business travel). If a rule matches, you can cite its `id` in
+resolve-finding as `rule_id` — that citation counts toward the F2A gate's
+evidence requirement.
+
+The `finding_metadata` you pass should be a flat string map of the
+observable flags you have actually seen — for example
+`{"maintenance_window": "true"}` when you have confirmed the events carry
+that flag, or `{"resolution_event": "login_success"}` when search-events
+surfaced a login_success event following an auth failure burst. Only pass
+flags you have direct evidence for; the rule corpus is a contract about
+what the worker has observed, not a hypothesis about what might be true.
+
+If lookup-rules returns no match, continue with the normal investigation
+workflow below. The rule corpus is a shortcut, not a substitute for
+evidence-grounded reasoning.
+
 ### Chase provenance
 Don't stop at surface signals. Trace the chain:
 - A new CI actor at 2am — who merged the code that triggered it? Is

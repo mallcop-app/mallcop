@@ -120,6 +120,22 @@ for d in "${DISPOSITIONS[@]}"; do
 done
 note "disposition POST.md specs linked from ${REPO_ROOT}/agents/"
 
+# 3b. Operator-decisions rule corpus symlink (mallcoppro-df1).
+# The lookup-rules tool reads agents/rules/operator-decisions.yaml relative
+# to its CWD (resolveRepoRoot → MALLCOP_REPO_ROOT env or os.Getwd()). Workers
+# spawn with CWD = MALLCOP_HOME, and MALLCOP_HOME/agents → .mallcop/agents
+# already exists from the disposition symlinks above. Add a rules/ entry so
+# the worker resolves agents/rules/operator-decisions.yaml to the live file
+# in the legion bundle.
+rules_src="${REPO_ROOT}/agents/rules"
+rules_dst="${DEPLOY_DIR}/agents/rules"
+if [[ -d "${rules_src}" ]]; then
+  ln -sfn "${rules_src}" "${rules_dst}"
+  note "operator-decisions rule corpus linked from ${rules_src}"
+else
+  note "  warning: ${rules_src} missing — lookup-rules will return empty results"
+fi
+
 # 4. Work campfire — created via rd init (canonical mallcop work source).
 # rd init writes .campfire/root in MALLCOP_HOME and admits the operator/
 # automaton identity. Legion v0.7.3+ handles store-side membership

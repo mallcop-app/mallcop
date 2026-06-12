@@ -11,6 +11,22 @@ Look at the actor and action in the finding. Call check-baseline.
 Search for events related to this finding. Look for upstream triggers
 (deploys, merges, onboarding) and other actions by the same actor.
 
+### Step 2b (optional): Call lookup-rules
+If the events you surfaced contain a recognizable benign-pattern flag
+(events with `maintenance_window=true` and a matching `window_id`,
+events with `scheduled=true` plus a `job_id`, an auth-failure burst
+followed by a `login_success` from the same IP, an auth-failure burst
+followed by a `password_reset` event then a `login_success`, or
+events that carry both `location` and `usual_location`), call
+lookup-rules with finding_family=<detector> and finding_metadata=<flat
+map of the observable flags you found>. If a rule comes back, you may
+cite its `id` as `rule_id` on resolve-finding — this satisfies the
+F2A citation requirement.
+
+Only pass metadata keys you have actually observed in the surfaced
+events. Do not invent fields. Skip this step when no benign-pattern
+flag is present.
+
 ### Step 3: Analyze
 
 Answer these questions using the data from steps 1-2:
