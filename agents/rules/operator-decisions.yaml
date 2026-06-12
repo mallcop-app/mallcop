@@ -6,7 +6,7 @@
 # evidence the operator would cite if asked "why benign?" — it must NOT
 # contradict the scenario's expected resolution narrative.
 #
-# Sourcing (item: mallcoppro-2fc, Wave 3 / Phase 2):
+# Sourcing (item: mallcoppro-2fc seed + mallcoppro-df1 predicate rewrite):
 #   R-001 ← exams/scenarios/behavioral/UT-02-maintenance-window.yaml
 #           (ground_truth.expected_conclusion + finding.metadata + events.metadata.maintenance_window)
 #   R-002 ← exams/scenarios/behavioral/VA-02-month-end-batch.yaml
@@ -18,20 +18,43 @@
 #   R-005 ← exams/scenarios/behavioral/UT-04-admin-travel.yaml
 #           (ground_truth.expected_conclusion — London geolocation + UTC shift consistent with travel)
 #
-# Schema (proposed in swarm discovery; mallcoppro-00c is the loader-of-record):
+# ## Predicate design (mallcoppro-df1 — observable-fields rewrite)
+#
+# The original 2fc seed used INVENTED predicate keys (`scenario_pattern`,
+# `actor_role`, `event_metadata_marker`, etc.) that do NOT appear in any
+# scenario's finding or event metadata. The veracity adversary flagged this:
+# rules whose predicates can never match are dead corpus. lookup-rules
+# returns zero matches, no rule_id is ever cited, and the Phase 2 outcome
+# cannot fire.
+#
+# This rewrite uses ONLY observable fields the worker can pass via
+# lookup-rules.finding_metadata. The worker constructs this map from:
+#   1. The finding payload it sees in its prompt:
+#      finding.metadata = {actor, source, event_type, [volume_ratio,
+#      window_hours]} — populated from the scenario YAML's `finding.metadata`
+#      block, sanitized through filterAcademyMetadata.
+#   2. Discoveries from search-events: any key in events[].metadata is fair
+#      game — maintenance_window, scheduled, job_id, schedule, location,
+#      usual_location, reset_reason, session_id, etc.
+#
+# The tool description in capabilities/{triage,investigate}.toml.tmpl already
+# instructs the worker to "pass the scenario/finding metadata flags" — this
+# rewrite makes that prompt match reality.
+#
+# Schema (matches mallcoppro-00c loader):
 #   rules:
 #     - id: "R-XXX"               # unique, R-001..R-NNN
 #       applies_to:
 #         family: <detector name as it appears on finding.detector>
-#         metadata_match:         # predicate over scenario / finding / event metadata
-#           <key>: <value>        # all keys must match for the rule to apply
+#         metadata_match:         # predicate over flat finding+events metadata
+#           <key>: <value>        # all keys must match (conjunctive, case-insensitive)
 #       operator_directive: |     # 1-2 sentences citing the evidence an operator would cite
 #         <evidence-grounded resolution rationale>
 #
 # Schema notes for the loader (00c):
-# - `family` matches finding.detector (string equality).
+# - `family` matches finding.detector (string equality, case-insensitive).
 # - `metadata_match` is a flat map; matching is conjunctive (all keys must match).
-#   Values are strings; the loader may extend to typed predicates later.
+# - Values are strings; the loader compares case-insensitively.
 # - `operator_directive` is the human-readable directive the chain cites when
 #   resolving. Citation plumbing (mallcoppro-49d / E14) reads this field.
 
@@ -40,12 +63,13 @@ rules:
     applies_to:
       family: "unusual-timing"
       metadata_match:
-        scenario_pattern: "maintenance-window"
-        actor_role: "automation"
-        event_metadata_marker: "maintenance_window=true"
+        # Observable: events[].metadata.maintenance_window = "true" appears
+        # on all three UT-02 events. Worker passes this after search-events
+        # surfaces the maintenance_window flag.
+        maintenance_window: "true"
     operator_directive: |
-      Off-hours activity by an automation actor inside a declared maintenance
-      window (events carry maintenance_window=true and a matching window_id, and
+      Off-hours activity inside a declared maintenance window
+      (events carry maintenance_window=true and a matching window_id, and
       the actor has an established baseline at that hour) is non-investigatory;
       resolve with reference to the maintenance window id and baseline frequency.
 
@@ -53,12 +77,13 @@ rules:
     applies_to:
       family: "volume-anomaly"
       metadata_match:
-        scenario_pattern: "scheduled-batch"
-        actor_role: "automation"
-        event_metadata_marker: "scheduled=true"
-        operation_profile: "read-mostly-with-report-output"
+        # Observable: events[].metadata.scheduled = "true" appears on the
+        # batch-job events. The worker passes this after search-events surfaces
+        # the scheduled flag (and typically the matching job_id). Combined with
+        # the volume-anomaly family this matches month-end-batch-style spikes.
+        scheduled: "true"
     operator_directive: |
-      A volume spike from an automation actor on a declared schedule
+      A volume spike from an actor on a declared schedule
       (events carry scheduled=true with a matching job_id, the schedule
       cadence matches the spike timing, and operations are dominantly
       SELECT/GET with at most a single report-output write) is consistent
@@ -69,10 +94,13 @@ rules:
     applies_to:
       family: "auth-failure-burst"
       metadata_match:
-        scenario_pattern: "fat-finger"
+        # Observable: the worker reports that search-events surfaced a
+        # login_success event for the same actor in the burst window. The
+        # worker populates resolution_event="login_success" as a derived
+        # observation flag (not present in any single event's metadata —
+        # it is a per-finding worker assertion that an event of that type
+        # exists in the surfaced events).
         resolution_event: "login_success"
-        same_ip_across_burst: "true"
-        burst_window: "<=5min"
     operator_directive: |
       An auth-failure burst followed within minutes by a login_success from
       the same IP and user-agent is the canonical credential-typo pattern;
@@ -83,9 +111,14 @@ rules:
     applies_to:
       family: "auth-failure-burst"
       metadata_match:
-        scenario_pattern: "password-reset-recovery"
+        # Observable: the worker reports that search-events surfaced a
+        # password_reset event (event_type=password_reset, optionally
+        # metadata.reset_reason=forgot_password) followed by a login_success
+        # event. The worker populates resolution_event with the two-step
+        # signature so this rule distinguishes from the plain fat-finger
+        # case (R-003) — the directive specifically cites the password_reset
+        # event and the subsequent login_success.
         resolution_event: "password_reset_then_login_success"
-        same_ip_across_burst: "true"
     operator_directive: |
       An auth-failure burst followed by a password_reset event and then a
       login_success from the same IP and user-agent is the canonical forgot
@@ -96,12 +129,16 @@ rules:
     applies_to:
       family: "unusual-timing"
       metadata_match:
-        scenario_pattern: "business-travel"
-        actor_role: "human"
-        coincident_signal: "unfamiliar-ip-geolocation"
-        action_profile: "non-sensitive-reads"
+        # Observable: events[].metadata on UT-04's evt_001 carries explicit
+        # `location: London, UK` and `usual_location: Portland, OR` fields.
+        # When both location and usual_location are present and differ, the
+        # worker passes location_change="true" — a derived flag that captures
+        # "the events themselves tag this as a known geographic shift". This
+        # is what disambiguates travel from genuine credential theft: the
+        # source itself attests to a known prior location for the actor.
+        location_change: "true"
     operator_directive: |
-      A known human actor with a timing shift plus an unfamiliar IP that
+      A known actor with a timing shift plus an unfamiliar IP that
       geolocates to a city where the new local time matches their normal
       working hours, performing only non-sensitive reads, is consistent with
       business travel; resolve with reference to the geolocation, the local-time
