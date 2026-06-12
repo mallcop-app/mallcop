@@ -671,3 +671,120 @@ func TestConfidenceGate_RemediatedAction_PassesThrough(t *testing.T) {
 		t.Errorf("expected NO work:create for action=remediated; got %d messages", len(workMsgs))
 	}
 }
+
+// ---- mallcoppro-276: Phase 1 asymmetric gate defaults ------------------------
+
+// TestPhase1Defaults_EnabledAndFloor locks in the binary defaults for the
+// Phase 1 asymmetric gate (mallcoppro-276). Without env-var overrides — which
+// legion's apiToolEnv does NOT pass through to tool subprocesses — these are
+// what runs in production bakeoffs.
+//
+// If this test fails, the chain redesign Phase 1 OUTCOME is broken: fan-out
+// will not fire on B1 scenarios because the gate defaults to disabled.
+func TestPhase1Defaults_EnabledAndFloor(t *testing.T) {
+	cfg := defaultGateConfig()
+
+	if !cfg.Enabled {
+		t.Errorf("default Enabled = false, want true (mallcoppro-276 Phase 1 asymmetric gate). "+
+			"Without env-var passthrough in legion, this default is what runs in the bakeoff.")
+	}
+	if cfg.ScoreFloor != 0.40 {
+		t.Errorf("default ScoreFloor = %.4f, want 0.40 (mallcoppro-276 Phase 1)", cfg.ScoreFloor)
+	}
+}
+
+// TestPhase1Defaults_LoadGateConfig_NoEnv verifies loadGateConfig returns the
+// new defaults when no env vars are set. This is the worker-spawned case
+// because legion's apiToolEnv strips MALLCOP_CONFIDENCE_GATED_CLOSE_* env vars.
+func TestPhase1Defaults_LoadGateConfig_NoEnv(t *testing.T) {
+	// Clear all MALLCOP_CONFIDENCE_GATED_CLOSE_* env vars in the test process.
+	for _, k := range []string{
+		"MALLCOP_CONFIDENCE_GATED_CLOSE_ENABLED",
+		"MALLCOP_CONFIDENCE_GATED_CLOSE_SCORE_FLOOR",
+		"MALLCOP_CONFIDENCE_GATED_CLOSE_TOOL_CALL_WEIGHT",
+		"MALLCOP_CONFIDENCE_GATED_CLOSE_TOOL_CALL_CAP",
+		"MALLCOP_CONFIDENCE_GATED_CLOSE_DISTINCT_WEIGHT",
+		"MALLCOP_CONFIDENCE_GATED_CLOSE_DISTINCT_CAP",
+		"MALLCOP_CONFIDENCE_GATED_CLOSE_CITATION_WEIGHT",
+		"MALLCOP_CONFIDENCE_GATED_CLOSE_CITATION_CAP",
+		"MALLCOP_CONFIDENCE_GATED_CLOSE_ITER_PENALTY",
+		"MALLCOP_CONFIDENCE_GATED_CLOSE_ITER_THRESHOLD",
+	} {
+		t.Setenv(k, "")
+	}
+
+	cfg := loadGateConfig()
+
+	if !cfg.Enabled {
+		t.Errorf("loadGateConfig() Enabled = false, want true (mallcoppro-276 Phase 1)")
+	}
+	if cfg.ScoreFloor != 0.40 {
+		t.Errorf("loadGateConfig() ScoreFloor = %.4f, want 0.40 (mallcoppro-276 Phase 1)", cfg.ScoreFloor)
+	}
+}
+
+// TestPhase1Defaults_ZeroCitationStillFires verifies the zero-citation hard
+// floor at gate.go:428 still fires regardless of the new defaults. The score
+// floor change does NOT relax the zero-citation requirement: even if score
+// would clear the floor on tool volume + breadth alone, zero citations
+// unconditionally fire the gate.
+//
+// This is the integration test the spec's done condition (4) calls for.
+func TestPhase1Defaults_ZeroCitationStillFires(t *testing.T) {
+	cfBin, cfHome, campfireID, workCampfireID := newTestCampfirePair(t)
+
+	// Seed 8 tool calls across 4 distinct tools — would clear 0.40 floor on
+	// score alone: 8*0.04 + 4*0.08 = 0.32 + 0.32 = 0.64 (with 0 iter penalty,
+	// 0 citations). Score 0.64 >= 0.40 floor, but zero citations must still
+	// fire the gate unconditionally.
+	toolNames := []string{
+		"check-baseline", "search-events", "search-findings", "read-config",
+		"check-baseline", "search-events", "search-findings", "read-config",
+	}
+	seedToolUseMsgs(t, cfBin, cfHome, campfireID, toolNames)
+
+	// Reason has NO citations (no evt_*, fnd-*, etc. that match retrieved IDs).
+	reason := "Investigation complete. No anomaly. Standard activity pattern."
+
+	// Use the NEW defaults — pass empty env for gate vars so loadGateConfig
+	// returns the binary defaults (Enabled=true, ScoreFloor=0.40).
+	envPairs := []string{
+		"MALLCOP_SKILL", "task:investigate",
+		"MALLCOP_CAMPFIRE_ID", campfireID,
+		"MALLCOP_WORK_CAMPFIRE_ID", workCampfireID,
+		"CF_HOME", cfHome,
+	}
+
+	out := captureStdout(t, func() {
+		input, _ := json.Marshal(map[string]interface{}{
+			"finding_id": "fnd-phase1-zero-cite",
+			"action":     "resolved",
+			"reason":     reason,
+		})
+		err := runToolWithEnv(t, "resolve-finding", string(input), envPairs...)
+		if err != nil {
+			t.Errorf("resolve-finding: unexpected error: %v", err)
+		}
+	})
+
+	var result map[string]interface{}
+	if err := json.Unmarshal([]byte(out), &result); err != nil {
+		t.Fatalf("parse output JSON: %v\nout=%q", err, out)
+	}
+
+	// Gate MUST fire — zero citation hard floor at gate.go:428.
+	if result["gate_fired"] != true {
+		t.Errorf("expected gate_fired=true on zero-citation resolve (gate.go:428 hard floor); got %v", result)
+	}
+	if cc, ok := result["citation_count"]; ok {
+		if n, _ := cc.(float64); n != 0 {
+			t.Errorf("expected citation_count=0, got %v", cc)
+		}
+	}
+
+	// Fan-out work:create must be posted.
+	workMsgs := readCampfireMessages(t, cfBin, cfHome, workCampfireID)
+	if !hasTagInMessages(workMsgs, "work:create") {
+		t.Errorf("expected work:create in work campfire (fan-out fired); got %d messages", len(workMsgs))
+	}
+}

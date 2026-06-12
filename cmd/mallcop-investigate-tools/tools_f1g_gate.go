@@ -15,11 +15,21 @@
 //
 // # Configuration
 //
-// Weights and thresholds are read from environment variables injected by the
-// chart at deploy time. Prefix: MALLCOP_CONFIDENCE_GATED_CLOSE_
+// Weights and thresholds are read from environment variables. Prefix:
+// MALLCOP_CONFIDENCE_GATED_CLOSE_
 //
-//	MALLCOP_CONFIDENCE_GATED_CLOSE_ENABLED          bool   (default: false)
-//	MALLCOP_CONFIDENCE_GATED_CLOSE_SCORE_FLOOR      float  (default: 0.55)
+// NOTE (mallcoppro-276): legion's apiToolEnv (worker.go:94-144) does NOT pass
+// MALLCOP_CONFIDENCE_GATED_CLOSE_* env vars to tool subprocesses — the
+// passthrough list is hard-coded to ANTHROPIC_*, FORGE_*, GRAPH_*, MALLCOP_RUN_ID.
+// As a result, env-var overrides only take effect for direct CLI / unit-test
+// invocations of the binary. For worker-spawned invocations, the binary defaults
+// below are what runs. We therefore default Enabled=true + ScoreFloor=0.40 so the
+// gate fires in the bakeoff (Phase 1 of the chain-redesign — Decision B,
+// asymmetric gate). When legion grows env-var passthrough or a per-skill env
+// block, these defaults can flip back to off and the chart can carry the policy.
+//
+//	MALLCOP_CONFIDENCE_GATED_CLOSE_ENABLED          bool   (default: true,  was false pre-mallcoppro-276)
+//	MALLCOP_CONFIDENCE_GATED_CLOSE_SCORE_FLOOR      float  (default: 0.40, was 0.55 pre-mallcoppro-276)
 //	MALLCOP_CONFIDENCE_GATED_CLOSE_TOOL_CALL_WEIGHT float  (default: 0.04)
 //	MALLCOP_CONFIDENCE_GATED_CLOSE_TOOL_CALL_CAP    int    (default: 8)
 //	MALLCOP_CONFIDENCE_GATED_CLOSE_DISTINCT_WEIGHT  float  (default: 0.08)
@@ -67,10 +77,16 @@ type confidenceGateConfig struct {
 }
 
 // defaultGateConfig returns the default gate configuration.
+//
+// mallcoppro-276 (Phase 1, asymmetric gate): Enabled defaults true and
+// ScoreFloor defaults 0.40 so the gate fires by default in the bakeoff
+// without requiring env-var passthrough (which legion's apiToolEnv does
+// not currently support — see file header). The zero-citation hard floor
+// at gate.go:428 remains an unconditional fire regardless of score.
 func defaultGateConfig() confidenceGateConfig {
 	return confidenceGateConfig{
-		Enabled:        false,
-		ScoreFloor:     0.55,
+		Enabled:        true,
+		ScoreFloor:     0.40,
 		ToolCallWeight: 0.04,
 		ToolCallCap:    8,
 		DistinctWeight: 0.08,
