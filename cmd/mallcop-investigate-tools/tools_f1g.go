@@ -75,6 +75,9 @@ func dispatchActionTool(tool, inputJSON string) error {
 	// F2B: Engagement-campfire watcher — detects direct cf-send bypass of F2A gate
 	case "watch-engagement-campfire":
 		return runWatchEngagementCampfire(inputJSON)
+	// mallcoppro-00c: operator-decisions rule lookup (read-only).
+	case "lookup-rules":
+		return runLookupRules(inputJSON)
 	default:
 		return fmt.Errorf("unknown action tool %q", tool)
 	}
@@ -259,20 +262,36 @@ func nowRFC3339() string {
 //
 // Confidence uses flexibleFloat (mallcoppro-e32) so llama-3.3-70b's habit
 // of emitting "confidence":"0.9" (string-quoted) doesn't crash the tool.
+//
+// mallcoppro-00c: RuleID is an optional citation of an operator-decision
+// rule from agents/rules/operator-decisions.yaml. When supplied and the
+// rule_id loads successfully from the YAML, the F2A confidence gate treats
+// it as a satisfied citation: counts as +1 toward citation_count AND
+// bypasses the zero-citation hard floor at gate.go.
+//
+// Forgery defence: an invented rule_id ("R-999") does NOT bypass the gate.
+// The gate validates the rule_id against the YAML loader; only IDs that
+// actually load from the file are credited.
 type resolveInput struct {
 	FindingID  string        `json:"finding_id"`
 	Action     string        `json:"action"`
 	Reason     string        `json:"reason"`
 	Confidence flexibleFloat `json:"confidence,omitempty"`
+	RuleID     string        `json:"rule_id,omitempty"`
 }
 
 // resolveOutput is the JSON output for resolve-finding.
+//
+// mallcoppro-00c: RuleID is emitted on the work:output payload when supplied
+// by the agent so downstream consumers (academy, judges) can attribute the
+// resolution to a specific operator-decision rule.
 type resolveOutput struct {
-	FindingID string  `json:"finding_id"`
-	Action    string  `json:"action"`
-	Reason    string  `json:"reason"`
+	FindingID  string  `json:"finding_id"`
+	Action     string  `json:"action"`
+	Reason     string  `json:"reason"`
 	Confidence float64 `json:"confidence,omitempty"`
-	Timestamp string  `json:"timestamp"`
+	RuleID     string  `json:"rule_id,omitempty"`
+	Timestamp  string  `json:"timestamp"`
 }
 
 func runResolveFinding(inputJSON string) error {
@@ -311,7 +330,11 @@ func runResolveFinding(inputJSON string) error {
 	// The gate lives here in binary code — the agent CANNOT skip it from a prompt.
 	// For non-investigate skills or disabled config, checkConfidenceGate returns
 	// gateResult{Fired: false} immediately with no campfire I/O.
-	gr, gateErr := checkConfidenceGate(campfireID, input.Action, input.Reason)
+	//
+	// mallcoppro-00c: pass input.RuleID so the gate can credit a valid
+	// operator-decision rule citation toward citation_count and bypass the
+	// zero-citation hard floor.
+	gr, gateErr := checkConfidenceGate(campfireID, input.Action, input.Reason, input.RuleID)
 	if gateErr != nil {
 		// Fail open: log to stderr but do not block the worker.
 		fmt.Fprintf(os.Stderr, "resolve-finding: confidence gate check failed (failing open): %v\n", gateErr)
@@ -328,6 +351,7 @@ func runResolveFinding(inputJSON string) error {
 		Action:     input.Action,
 		Reason:     input.Reason,
 		Confidence: float64(input.Confidence),
+		RuleID:     input.RuleID,
 		Timestamp:  nowRFC3339(),
 	}
 	payload, err := json.Marshal(output)
@@ -365,13 +389,20 @@ func runResolveFinding(inputJSON string) error {
 		emitScenarioTerminalWorkOutput(workCampfireID, input.FindingID, input.Action, input.Reason, os.Getenv("MALLCOP_ITEM_ID"))
 	}
 
-	return emitJSON(map[string]interface{}{
+	// mallcoppro-00c: echo rule_id (when supplied) on the tool's stdout result
+	// so the spawning worker and tests can verify it round-tripped through the
+	// gate path.
+	result := map[string]interface{}{
 		"finding_id": input.FindingID,
 		"action":     input.Action,
 		"reason":     input.Reason,
 		"timestamp":  output.Timestamp,
 		"message_id": msgID,
-	})
+	}
+	if input.RuleID != "" {
+		result["rule_id"] = input.RuleID
+	}
+	return emitJSON(result)
 }
 
 // annotateInput is the input_schema for annotate-finding.

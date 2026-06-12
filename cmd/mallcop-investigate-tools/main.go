@@ -262,6 +262,12 @@ var actionTools = map[string]bool{
 	"spawn-claude-code-fix": true,
 	// F2B: Engagement-campfire watcher — detects direct cf-send bypass of F2A gate
 	"watch-engagement-campfire": true,
+	// mallcoppro-00c: Pre-seeded operator-decision rules lookup (read-only,
+	// reads agents/rules/operator-decisions.yaml). Despite being read-only, it
+	// is dispatched as an action tool so it shares the JSON-positional-arg
+	// convention with the other agent-facing tools and skips fixture-dir
+	// resolution.
+	"lookup-rules": true,
 }
 
 // safeOpen resolves path relative to baseDir, rejects symlink escapes, and

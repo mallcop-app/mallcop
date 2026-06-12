@@ -11,6 +11,9 @@ tools = [
   "escalate-to-deep", "create-investigate-merge",
   # F2B: engagement-campfire watcher — detects direct cf-send bypass of F2A gate
   "watch-engagement-campfire",
+  # mallcoppro-00c: lookup pre-seeded operator-decision rules; citing a
+  # returned rule_id in resolve-finding satisfies the F2A citation requirement.
+  "lookup-rules",
 ]
 model     = "{{MODEL}}"
 
@@ -64,8 +67,8 @@ binary_args = ["--tool", "load-skill"]
 # F1G-a: Finding-state tools
 [[tool_defs]]
 name = "resolve-finding"
-description = "Close a finding with a resolution action (resolved|escalated|remediated). Emits work:output to the engagement campfire with the action tag so downstream can filter. This is the agent's final action on a finding — call last."
-input_schema = '{"type":"object","required":["finding_id","action","reason"],"properties":{"finding_id":{"type":"string"},"action":{"type":"string","enum":["resolved","escalated","remediated"]},"reason":{"type":"string"},"confidence":{"type":"number","minimum":1,"maximum":5}}}'
+description = "Close a finding with a resolution action (resolved|escalated|remediated). Emits work:output to the engagement campfire with the action tag so downstream can filter. This is the agent's final action on a finding — call last. Optional rule_id cites a pre-seeded operator-decision rule (from lookup-rules) — a valid rule_id satisfies the F2A citation requirement without requiring a retrieved event ID in the reason field."
+input_schema = '{"type":"object","required":["finding_id","action","reason"],"properties":{"finding_id":{"type":"string"},"action":{"type":"string","enum":["resolved","escalated","remediated"]},"reason":{"type":"string"},"confidence":{"type":"number","minimum":1,"maximum":5},"rule_id":{"type":"string","description":"optional operator-decision rule_id returned by lookup-rules; when valid, satisfies the F2A citation requirement"}}}'
 binary = "{{TOOL_BIN_DIR}}/mallcop-investigate-tools"
 binary_args = ["--tool", "resolve-finding"]
 
@@ -112,5 +115,13 @@ description = "Scan the engagement campfire for work:output messages that were p
 input_schema = '{"type":"object","properties":{"campfire_id":{"type":"string","description":"engagement campfire ID (defaults to MALLCOP_CAMPFIRE_ID)"}}}'
 binary = "{{TOOL_BIN_DIR}}/mallcop-investigate-tools"
 binary_args = ["--tool", "watch-engagement-campfire"]
+
+# mallcoppro-00c: Operator-decision rule lookup
+[[tool_defs]]
+name = "lookup-rules"
+description = "Look up pre-seeded operator-decision rules from agents/rules/operator-decisions.yaml. Pass finding_family (the detector family, e.g. \"unusual-timing\", \"auth-failure-burst\") and finding_metadata (the scenario/finding metadata flags) to receive zero or more matching rule entries with id, applies_to, and operator_directive. When a returned rule matches the situation, pass its id to resolve-finding as rule_id — this satisfies the F2A citation requirement without requiring you to embed retrieved event IDs in the reason field."
+input_schema = '{"type":"object","required":["finding_id","finding_family"],"properties":{"finding_id":{"type":"string"},"finding_family":{"type":"string","description":"detector family or finding.detector value"},"finding_metadata":{"type":"object","additionalProperties":{"type":"string"},"description":"flat map of metadata values to match against rules.applies_to.metadata_match (case-insensitive, conjunctive)"}}}'
+binary = "{{TOOL_BIN_DIR}}/mallcop-investigate-tools"
+binary_args = ["--tool", "lookup-rules"]
 
 # task:deep-investigate capability seed — F1D: hypothesis-directed investigation

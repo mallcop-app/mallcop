@@ -423,8 +423,19 @@ type gateResult struct {
 //   - citations >= 1 AND score >= effective_floor
 //
 // The gate fires (Fired=true) when:
-//   - action == "resolved" AND citations == 0 (hard requirement — tool volume alone is not evidence)
-//   - action == "resolved" AND score < effective_floor
+//   - action == "resolved" AND citations == 0 AND ruleID is empty/invalid
+//     (hard requirement — tool volume alone is not evidence)
+//   - action == "resolved" AND score < effective_floor (after rule_id citation bonus)
+//
+// mallcoppro-00c: ruleID is the optional rule_id from resolve-finding input.
+// When ruleID is non-empty AND loads successfully from
+// agents/rules/operator-decisions.yaml, the gate:
+//
+//   - Adds 1 to citation_count for score computation.
+//   - Bypasses the zero-citation hard floor.
+//
+// An invalid rule_id (one that does not load from the YAML) is silently
+// ignored — the agent does not get to forge a citation by inventing IDs.
 //
 // effective_floor:
 //   - cfg.ScoreFloor       when skill = task:investigate
@@ -447,7 +458,7 @@ type gateResult struct {
 // Exception: MALLCOP_GATE_ALLOW_NO_CF=1 disables the fail-closed behaviour for
 // test environments that do not have cf on PATH. This env var must never be set
 // in production worker jails.
-func checkConfidenceGate(campfireID, action, reason string) (gateResult, error) {
+func checkConfidenceGate(campfireID, action, reason, ruleID string) (gateResult, error) {
 	// Action check: only gate on "resolved" — escalations need no double-check
 	// (escalate is already a system PASS). Restores March rung-3 semantic.
 	if action != "resolved" {
@@ -501,6 +512,25 @@ func checkConfidenceGate(campfireID, action, reason string) (gateResult, error) 
 	// Count citations in the reason field (only retrieved IDs count).
 	citationCount := countCitations(reason, retrievedIDs)
 
+	// mallcoppro-00c: rule_id citation path. When the resolve-finding caller
+	// supplied a rule_id AND that rule_id loads from
+	// agents/rules/operator-decisions.yaml, count it as +1 toward the score
+	// AND treat it as evidence for the zero-citation hard floor below.
+	//
+	// Forgery defence: only IDs that successfully load from the YAML count.
+	// An invented "R-999" silently contributes nothing — the agent still has
+	// to retrieve real evidence or call lookup-rules and cite the result.
+	if ruleID != "" {
+		repoRoot, rrErr := resolveRepoRoot()
+		if rrErr == nil {
+			if rules, lrErr := loadOperatorRules(repoRoot); lrErr == nil {
+				if _, ok := findRuleByID(rules, ruleID); ok {
+					citationCount++
+				}
+			}
+		}
+	}
+
 	// Hard citation requirement: zero citations → gate fires unconditionally.
 	// Tool volume and breadth alone (tool_call_weight + distinct_weight) are not
 	// sufficient to satisfy the "evidence-grounded reasoning" spec intent.
@@ -510,6 +540,11 @@ func checkConfidenceGate(campfireID, action, reason string) (gateResult, error) 
 	//
 	// mallcoppro-499: this hard floor applies to BOTH task:investigate and
 	// task:triage. "No evidence = no resolve" is a universal invariant.
+	//
+	// mallcoppro-00c: a valid rule_id contributes to citationCount above and
+	// thus also satisfies this hard floor — citing an operator-decision rule
+	// is evidence-grounded reasoning, just with a different evidence source
+	// (the pre-seeded operator corpus) than retrieved event IDs.
 	if citationCount == 0 {
 		score := computeConfidenceScore(cfg, stats, 0)
 		return gateResult{
