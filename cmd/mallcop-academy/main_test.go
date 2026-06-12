@@ -3106,3 +3106,123 @@ func TestFecWireParse_AbandonedNormalizerWins(t *testing.T) {
 	}
 }
 
+
+// ---- mallcoppro-c6a defense: ts.chain population on attributed investigate work:create ----
+
+// TestChainShape_InvestigateAttributed_PopulatesChain verifies the Defense 2
+// invariant (mallcoppro-c6a): when a work:create message carrying a
+// skill:task:investigate tag is attributed to a tracked scenario (via the
+// finding-tag attribution path), the academy MUST append a ChainEntry to
+// ts.chain so the chain-shape detector at quiescence sees the investigate
+// dispatch and correctly skips the no-triage-inference verdict.
+//
+// Companion to TestChainShape_InvestigateWorkCreateOnly_QuiescenceMisclassifies
+// in PR #101 — that test exercises the misclassification end-to-end; this test
+// pins the specific population behavior so a future refactor that drops the
+// chain append regresses visibly here, not only through the higher-level test.
+func TestChainShape_InvestigateAttributed_PopulatesChain(t *testing.T) {
+	scenDir := t.TempDir()
+	writeMinimalScenario(t, scenDir, "NT-CP", "fnd_nt_cp", "detector-priv-escalation",
+		"Investigate spawn must reach ts.chain", "high")
+
+	outDir := t.TempDir()
+	ms := &mockSender{readMsgs: nil}
+
+	args := runArgs{
+		targetCampfire: "cf-mock-target-chain-populate",
+		scenariosDir:   scenDir,
+		scenarioFilter: "NT-CP",
+		outputDir:      outDir,
+		maxConcurrent:  1,
+		timeout:        6 * time.Second,
+		runID:          "test-mock-run-chain-populate",
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- academy(ms, args)
+	}()
+
+	var sentID string
+	for i := 0; i < 50; i++ {
+		time.Sleep(20 * time.Millisecond)
+		ms.mu.Lock()
+		if len(ms.sends) > 0 {
+			sentID = ms.sends[0].returnID
+		}
+		ms.mu.Unlock()
+		if sentID != "" {
+			break
+		}
+	}
+	if sentID == "" {
+		t.Fatal("academy never posted work:create within timeout")
+	}
+
+	// Triage emits an investigate work:create (the canonical
+	// escalate-to-investigator handoff shape: skill tag + finding tag).
+	// Inject a triage close with non-terminal action ("noop") so the chain
+	// quiesces without reaching the terminal switch — exercising the
+	// quiescence detector path. The detector must NOT fire because the
+	// investigate work:create populates ts.chain.
+	investigateCreatePayload := `{"id":"item-attrib-invest-001","skill":"task:investigate","title":"investigate fnd_nt_cp"}`
+	closeNoopPayload, _ := json.Marshal(closePayload{
+		ItemID: sentID,
+		Action: "noop",
+		Skill:  "task:triage",
+	})
+
+	perRunFinding := perRunFindingID("fnd_nt_cp", "test-mock-run-chain-populate")
+	ms.mu.Lock()
+	ms.readMsgs = append(ms.readMsgs, cfMessage{
+		ID:      "msg-chain-populate-invest-001",
+		Tags:    []string{"work:create", "skill:task:investigate", "finding:" + perRunFinding},
+		Payload: investigateCreatePayload,
+	})
+	ms.readMsgs = append(ms.readMsgs, cfMessage{
+		ID:      "msg-chain-populate-close-001",
+		Tags:    []string{"work:close", "action:noop"},
+		Payload: string(closeNoopPayload),
+	})
+	ms.mu.Unlock()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("academy: %v", err)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("academy did not complete within deadline")
+	}
+
+	data, err := os.ReadFile(filepath.Join(outDir, "NT-CP.json"))
+	if err != nil {
+		t.Fatalf("NT-CP.json not found: %v", err)
+	}
+	var rec ScenarioRecord
+	if err := json.Unmarshal(data, &rec); err != nil {
+		t.Fatalf("parse NT-CP.json: %v", err)
+	}
+
+	// Defense: ts.chain MUST contain a ChainEntry with skill=task:investigate
+	// and empty Action (work:create). FullChain is the on-disk projection.
+	foundInvestigateCreate := false
+	for _, ce := range rec.FullChain {
+		if ce.Action == "" && isInvestigateSkill(ce.Skill) {
+			foundInvestigateCreate = true
+			break
+		}
+	}
+	if !foundInvestigateCreate {
+		t.Errorf("DEFENSE BROKEN: attributed work:create with skill:task:investigate did NOT "+
+			"reach ts.chain. Chain entries: %+v. The chain-shape detector cannot "+
+			"distinguish a triage that DID escalate from one that didn't — Defense 2 "+
+			"(mallcoppro-c6a) is bypassed.", rec.FullChain)
+	}
+
+	// And: detector must NOT have classified this as no-triage-inference.
+	if rec.StructuralCause == "no-triage-inference" {
+		t.Errorf("Defense 2 regression: detector still classified as no-triage-inference "+
+			"despite investigate work:create being attributed. record=%+v", rec)
+	}
+}

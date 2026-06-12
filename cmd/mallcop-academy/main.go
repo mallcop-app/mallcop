@@ -832,6 +832,16 @@ func academy(sender Sender, args runArgs) error {
 		// (work:create from escalations) before processing closes.
 		// For each work:create that chains from a known scenario item, register
 		// both the message ID and the "id" field so downstream closes can be matched.
+		//
+		// mallcoppro-c6a (security defense, HIGH): after attribution succeeds, if
+		// the work:create carries skill:task:investigate (or any investigate skill
+		// tag), append a ChainEntry to that scenario's chain. The detector at
+		// quiescence reads ts.chain to decide whether triage actually invoked
+		// inference. Previously the create message was only registered in
+		// workItemToScenario, never in ts.chain — so a triage that DID escalate
+		// but whose worker crashed before posting tool-usage / its own close
+		// was misclassified as no-triage-inference. Populating ts.chain on
+		// attributed investigate-skill work:create closes that misclassification.
 		postMu.Lock()
 		for _, msg := range msgs {
 			if !hasTag(msg.Tags, "work:create") {
@@ -848,6 +858,7 @@ func academy(sender Sender, args runArgs) error {
 				ID      string `json:"id"`
 				ItemID  string `json:"item_id"` // legacy
 				Context string `json:"context"`
+				Skill   string `json:"skill"`
 			}
 			if err2 := json.Unmarshal([]byte(msg.Payload), &p); err2 != nil {
 				continue
@@ -938,6 +949,40 @@ func academy(sender Sender, args runArgs) error {
 								"msg_id", msg.ID,
 								"work_create_id", workCreateID,
 							)
+						}
+					}
+				}
+			}
+
+			// mallcoppro-c6a (security defense): if this work:create was
+			// attributed to a tracked scenario AND it carries an investigate-skill
+			// tag, append a ChainEntry to that scenario's chain. This closes the
+			// chain-shape detector misclassification path documented at
+			// detectNoTriageInferenceChain (hasInvestigateCreate could never fire
+			// because attributed work:create messages were registered only in
+			// workItemToScenario and never propagated into ts.chain).
+			if workCreateID != "" {
+				if scenIDKey, attributed := workItemToScenario[workCreateID]; attributed {
+					skill := extractInvestigateSkillFromMessage(msg, p.Skill)
+					if skill != "" {
+						if tsRef, ok := tracked[scenIDKey]; ok && tsRef != nil {
+							tsRef.mu.Lock()
+							// Avoid duplicates: a previous poll iteration may
+							// have already registered this entry.
+							already := false
+							for _, ce := range tsRef.chain {
+								if ce.ItemID == workCreateID && ce.Action == "" {
+									already = true
+									break
+								}
+							}
+							if !already {
+								tsRef.chain = append(tsRef.chain, ChainEntry{
+									ItemID: workCreateID,
+									Skill:  skill,
+								})
+							}
+							tsRef.mu.Unlock()
 						}
 					}
 				}
@@ -1351,6 +1396,33 @@ func isTriageSkill(skill string) bool {
 func isInvestigateSkill(skill string) bool {
 	return skill == "task:investigate" || skill == "task:deep-investigate" ||
 		skill == "task:investigate-merge"
+}
+
+// extractInvestigateSkillFromMessage returns the investigate skill name (e.g.
+// "task:investigate") if the work:create message advertises one — either
+// through a skill:* tag on the message or via the payload's parsed skill field.
+// Returns "" if no investigate skill is present.
+//
+// mallcoppro-c6a: used by the work:create attribution path to decide whether
+// to append a ChainEntry to the matched scenario's chain. Without this, the
+// chain-shape detector's hasInvestigateCreate branch is structurally always
+// false (see detectNoTriageInferenceChain).
+func extractInvestigateSkillFromMessage(msg cfMessage, payloadSkill string) string {
+	// Prefer a skill:* tag (canonical on triage's escalate-to-investigator output).
+	for _, tag := range msg.Tags {
+		if strings.HasPrefix(tag, "skill:") {
+			skill := strings.TrimPrefix(tag, "skill:")
+			if isInvestigateSkill(skill) {
+				return skill
+			}
+		}
+	}
+	// Fallback: parsed skill field from the payload (handoff helpers that
+	// haven't been migrated to the tag-style yet).
+	if isInvestigateSkill(payloadSkill) {
+		return payloadSkill
+	}
+	return ""
 }
 
 // ---- Tool-usage accumulation (mallcoppro-237 A2) --------------------------------

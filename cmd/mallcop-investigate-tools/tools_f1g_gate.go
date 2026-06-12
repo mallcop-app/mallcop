@@ -242,14 +242,108 @@ func readEngagementTranscript(campfireID string) (transcriptStats, []cfMessage, 
 	return parseTranscriptStats(msgs), msgs, nil
 }
 
-// extractRetrievedIDs scans all campfire message payloads for citation-pattern
-// IDs (same regex as countCitations). Only IDs that appear in at least one
-// message payload are considered "retrieved" — i.e., were actually seen by a
-// tool call during the investigation.
+// allowedRetrievalTags is the set of campfire tags whose payloads can contribute
+// IDs to the retrieved-evidence set. Restricting to this allowlist closes the
+// citation-fabrication bypass (mallcoppro-a5d, originally surfaced as
+// mallcoppro-db3 HIGH-severity finding "Bypass 6"):
+//
+// Before the allowlist, extractRetrievedIDs scanned every payload — including
+// model-controlled tool output (annotate-finding, write-partial-transcript,
+// the worker's own free-form notes). A malicious worker could pre-write
+// citation-shape tokens via annotate-finding ("see fnd_shk_999 for evidence"),
+// then cite them in resolve-finding. The retrieved-ID cross-check from
+// mallcoppro-467 (Bypass 5 defense) trusted the campfire as a witness of
+// tool-retrieved data, but a model-driven write made the worker its own
+// witness.
+//
+// The fix is provenance-based: only payloads tagged with a TRUSTED retrieval
+// tool can contribute retrieved IDs. The retrieval-tool tags are:
+//
+//	tool:check-baseline      — baseline-stats lookup
+//	tool:search-events       — event-store retrieval
+//	tool:search-findings     — finding-store retrieval
+//	tool:lookup-rules        — operator-decisions rule retrieval
+//	tool:read-finding        — single-finding read
+//	tool:baseline-stats      — alias for check-baseline (compat)
+//	tool:result              — generic retrieval-result wrapper (emitted by
+//	                            legion's tool-result side-channel alongside a
+//	                            specific tool:<name> tag; presence alone is
+//	                            sufficient because legion only emits tool:result
+//	                            for retrieval-tool outputs, never for
+//	                            model-controlled tools like annotate-finding)
+//
+// Conservative interpretation for multi-tag messages: a message contributes
+// retrieved IDs IFF at least one of its tags is in the allowlist AND it carries
+// NO tags from the model-controlled denylist (finding:annotation,
+// transcript:partial, transcript:annotate, etc). Untagged messages contribute
+// nothing (no provenance = no trust). See isAllowedRetrievalMessage for the
+// exact rule.
+var allowedRetrievalTags = map[string]struct{}{
+	"tool:check-baseline":  {},
+	"tool:search-events":   {},
+	"tool:search-findings": {},
+	"tool:lookup-rules":    {},
+	"tool:read-finding":    {},
+	"tool:baseline-stats":  {},
+	"tool:result":          {},
+}
+
+// modelControlledTags identifies tags applied by tools whose payload content is
+// fully model-controlled (the agent writes the body). These tags must NEVER
+// contribute retrieved-evidence IDs, even when a retrieval-tag also appears.
+// This is the denylist half of the mallcoppro-a5d defense.
+var modelControlledTags = map[string]struct{}{
+	"finding:annotation":   {}, // annotate-finding payload (note field is model-controlled)
+	"transcript:partial":   {}, // write-partial-transcript payload
+	"transcript:annotate":  {}, // legacy annotate transcript tag
+}
+
+// isAllowedRetrievalMessage reports whether a campfire message's tags qualify
+// its payload as retrieved-evidence. The rule is:
+//
+//   - At least one tag must be in allowedRetrievalTags (positive provenance), AND
+//   - No tag may be in modelControlledTags (negative provenance).
+//
+// Untagged messages contribute nothing (no provenance = no trust). Companion
+// tags posted alongside retrieval-tool outputs (tool_use, the specific
+// tool:<name> tag) are tolerated as long as they are not in the denylist.
+//
+// This is the conservative interpretation called out in mallcoppro-a5d. A
+// payload that simultaneously carries a retrieval-tool tag AND a model-
+// controlled tag (e.g., a misbehaving tool wrapper) is treated as untrusted
+// — defense-in-depth against future tool refactors that might collide tags.
+func isAllowedRetrievalMessage(tags []string) bool {
+	hasAllowed := false
+	for _, tag := range tags {
+		if _, denied := modelControlledTags[tag]; denied {
+			return false
+		}
+		if _, ok := allowedRetrievalTags[tag]; ok {
+			hasAllowed = true
+		}
+	}
+	return hasAllowed
+}
+
+// extractRetrievedIDs scans campfire message payloads for citation-pattern IDs
+// (same regex as countCitations) and returns the set of IDs that appear in
+// payloads from TRUSTED retrieval tools (see allowedRetrievalTags). Payloads
+// from model-controlled tools (annotate-finding, write-partial-transcript) or
+// untagged payloads are skipped — they cannot contribute "retrieved" evidence
+// because the worker can write to them at will.
+//
+// mallcoppro-a5d (security defense): before this restriction, a worker could
+// write citation-shape tokens via annotate-finding and then cite them in
+// resolve-finding; the cross-check from mallcoppro-467 would falsely match.
+// The allowlist closes that hole: only payloads with positive retrieval
+// provenance count.
 func extractRetrievedIDs(msgs []cfMessage) map[string]struct{} {
 	retrieved := make(map[string]struct{})
 	for _, msg := range msgs {
 		if msg.Payload == "" {
+			continue
+		}
+		if !isAllowedRetrievalMessage(msg.Tags) {
 			continue
 		}
 		for _, id := range citationPattern.FindAllString(msg.Payload, -1) {

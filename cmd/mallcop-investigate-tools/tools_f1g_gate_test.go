@@ -1177,3 +1177,99 @@ func TestForceEscalateToInvestigator(t *testing.T) {
 		}
 	}
 }
+
+// ---- mallcoppro-a5d defenses: extractRetrievedIDs tag-prefix allowlist -------
+
+// TestExtractRetrievedIDs_AllowlistedTagsOnly verifies the Defense 1 invariant
+// (mallcoppro-a5d): payloads tagged with allowlisted retrieval tools contribute
+// IDs, payloads tagged with model-controlled tools (annotate-finding,
+// write-partial-transcript) do NOT, even when the worker writes a citation-
+// shape token into the payload body.
+//
+// Companion to TestVeracity_Bypass6_CitationFabricationViaAnnotate (in PR #101)
+// which exercises the end-to-end resolve-finding path.
+func TestExtractRetrievedIDs_AllowlistedTagsOnly(t *testing.T) {
+	msgs := []cfMessage{
+		// Allowlisted retrieval tool — contributes.
+		{
+			ID:      "msg-search-events",
+			Tags:    []string{"tool_use", "tool:search-events", "tool:result"},
+			Payload: `{"events":[{"id":"evt-001"}]}`,
+		},
+		// Allowlisted retrieval tool — contributes.
+		{
+			ID:      "msg-check-baseline",
+			Tags:    []string{"tool_use", "tool:check-baseline"},
+			Payload: `{"baseline":"evt-002"}`,
+		},
+		// Allowlisted lookup-rules — contributes.
+		{
+			ID:      "msg-lookup-rules",
+			Tags:    []string{"tool:lookup-rules"},
+			Payload: `{"rule":"rule-abc"}`,
+		},
+		// Model-controlled annotate-finding — MUST NOT contribute.
+		{
+			ID:      "msg-annotate",
+			Tags:    []string{"finding:annotation", "finding:fnd-x"},
+			Payload: `{"note":"see evt-fake999 for evidence"}`,
+		},
+		// Model-controlled partial transcript — MUST NOT contribute.
+		{
+			ID:      "msg-partial",
+			Tags:    []string{"transcript:partial"},
+			Payload: `{"content":"evt-fake888 looks bad"}`,
+		},
+	}
+
+	got := extractRetrievedIDs(msgs)
+
+	// Allowlisted IDs must be present.
+	for _, want := range []string{"evt-001", "evt-002", "rule-abc"} {
+		if _, ok := got[want]; !ok {
+			t.Errorf("expected retrieved IDs to include %q (from allowlisted payload); got %v", want, got)
+		}
+	}
+
+	// Model-controlled tokens must be absent.
+	for _, denied := range []string{"evt-fake999", "evt-fake888"} {
+		if _, ok := got[denied]; ok {
+			t.Errorf("model-controlled token %q leaked into retrieved IDs — allowlist bypass. got=%v", denied, got)
+		}
+	}
+}
+
+// TestExtractRetrievedIDs_UntaggedSkipped verifies the conservative invariant
+// for messages with no tags: no provenance = no trust (mallcoppro-a5d).
+// A message with a citation-shape token but zero tags must not contribute
+// anything to the retrieved set, even if it would have under the old
+// scan-everything implementation.
+func TestExtractRetrievedIDs_UntaggedSkipped(t *testing.T) {
+	msgs := []cfMessage{
+		// Untagged — no provenance, must skip.
+		{
+			ID:      "msg-untagged-ambient",
+			Tags:    nil,
+			Payload: `evt-untagged-1 looks suspicious`,
+		},
+		// Empty tag slice — also no provenance.
+		{
+			ID:      "msg-empty-tags",
+			Tags:    []string{},
+			Payload: `evt-untagged-2 trash`,
+		},
+		// Tagged with a NON-allowlisted, non-denylisted tag (e.g. a
+		// hypothetical future tool that wasn't added to either list) —
+		// also skipped: positive allowlist match is required.
+		{
+			ID:      "msg-unknown-tool",
+			Tags:    []string{"tool:future-experimental"},
+			Payload: `evt-untagged-3 lurks`,
+		},
+	}
+
+	got := extractRetrievedIDs(msgs)
+	if len(got) != 0 {
+		t.Errorf("untagged / non-allowlisted payloads contributed retrieved IDs — provenance check broken. got=%v", got)
+	}
+}
