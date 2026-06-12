@@ -4,16 +4,21 @@
 // synthetic tool_use messages to simulate investigate worker sessions.
 // No mocks — the gate reads real cf campfire data.
 //
-// Test plan (8 tests):
+// Test plan:
 //
 //  1. TestConfidenceGate_Disabled_PassesThrough — enabled=false → normal work:output.
-//  2. TestConfidenceGate_OtherSkill_PassesThrough — MALLCOP_SKILL != task:investigate → normal close.
+//  2. TestConfidenceGate_OtherSkill_PassesThrough — MALLCOP_SKILL not in {investigate, triage} → normal close.
 //  3. TestConfidenceGate_HighScore_PassesThrough — 8 tool calls, 4 distinct, citation → score ≥ 0.55.
 //  4. TestConfidenceGate_LowScore_FiresFanOut — 1 tool call, no citations, 5 iterations → gate fires.
 //  5. TestConfidenceGate_VerifyFanOutShape — all 3 hypotheses present, merge has 3 deep ids.
 //  6. TestConfidenceGate_IterationPenalty — high tool count + many iterations → gate fires.
 //  7. TestConfidenceGate_EscalatedAction_PassesThrough — action=escalated + low evidence → no fan-out (rung-3 semantic).
 //  8. TestConfidenceGate_RemediatedAction_PassesThrough — action=remediated + low evidence → no fan-out (rung-3 semantic).
+//  9. TestConfidenceGate_TriageSkill_Fires — MALLCOP_SKILL=task:triage + 1 tool + 0 citations → fires, triage fan-out.
+// 10. TestConfidenceGate_TriageSkill_NormalResolveDoesNotFire — 2 tools + 1 citation → score above triage floor, no fire.
+// 11. TestConfidenceGate_TriageScoreFloor_EnvOverride — env var overrides TriageScoreFloor.
+// 12. TestForceEscalateToInvestigator — gate-fired triage emits exactly one task:investigate work:create.
+// 13. TestPhase1Defaults_ZeroCitationStillFires_Triage — zero-citation hard floor applies to triage skill too.
 package main
 
 import (
@@ -100,7 +105,17 @@ func seedToolResultMsg(t *testing.T, cfBin, cfHome, campfireID, resultPayload st
 }
 
 // gateEnvPairs returns the env key=value pairs for the confidence gate config.
+//
+// Uses the default TriageScoreFloor (0.18) — triage-specific tests that need a
+// custom floor should use gateEnvPairsTriage.
 func gateEnvPairs(enabled bool, scoreFloor float64) []string {
+	return gateEnvPairsTriage(enabled, scoreFloor, 0.18)
+}
+
+// gateEnvPairsTriage is gateEnvPairs with an explicit TriageScoreFloor.
+// Used by mallcoppro-499 triage tests that need to exercise the triage-specific
+// floor independently of the investigate floor.
+func gateEnvPairsTriage(enabled bool, scoreFloor, triageScoreFloor float64) []string {
 	enabledStr := "false"
 	if enabled {
 		enabledStr = "true"
@@ -108,6 +123,7 @@ func gateEnvPairs(enabled bool, scoreFloor float64) []string {
 	return []string{
 		"MALLCOP_CONFIDENCE_GATED_CLOSE_ENABLED", enabledStr,
 		"MALLCOP_CONFIDENCE_GATED_CLOSE_SCORE_FLOOR", fmt.Sprintf("%.4f", scoreFloor),
+		"MALLCOP_CONFIDENCE_GATED_CLOSE_TRIAGE_SCORE_FLOOR", fmt.Sprintf("%.4f", triageScoreFloor),
 		"MALLCOP_CONFIDENCE_GATED_CLOSE_TOOL_CALL_WEIGHT", "0.04",
 		"MALLCOP_CONFIDENCE_GATED_CLOSE_TOOL_CALL_CAP", "8",
 		"MALLCOP_CONFIDENCE_GATED_CLOSE_DISTINCT_WEIGHT", "0.08",
@@ -169,16 +185,19 @@ func TestConfidenceGate_Disabled_PassesThrough(t *testing.T) {
 }
 
 // ---- TestConfidenceGate_OtherSkill_PassesThrough ------------------------------
-
+//
+// mallcoppro-499 update: task:triage is now a gated skill. This test uses
+// task:escalate (a non-gated skill) to preserve "non-gated skill" coverage.
+// Gated-skill behavior (investigate, triage) is covered by their own tests.
 func TestConfidenceGate_OtherSkill_PassesThrough(t *testing.T) {
 	cfBin, cfHome, campfireID, workCampfireID := newTestCampfirePair(t)
 
 	// Seed a low-score transcript.
 	seedToolUseMsgs(t, cfBin, cfHome, campfireID, []string{"search-events"})
 
-	// Gate is enabled but skill is NOT task:investigate.
+	// Gate is enabled but skill is NOT in {task:investigate, task:triage}.
 	envPairs := append(gateEnvPairs(true, 0.55),
-		"MALLCOP_SKILL", "task:triage",  // not investigate → pass through
+		"MALLCOP_SKILL", "task:escalate", // non-gated skill → pass through
 		"MALLCOP_CAMPFIRE_ID", campfireID,
 		"MALLCOP_WORK_CAMPFIRE_ID", workCampfireID,
 		"CF_HOME", cfHome,
@@ -186,7 +205,7 @@ func TestConfidenceGate_OtherSkill_PassesThrough(t *testing.T) {
 
 	out := captureStdout(t, func() {
 		err := runToolWithEnv(t, "resolve-finding",
-			`{"finding_id":"fnd-gate-skill-001","action":"resolved","reason":"Triage resolved."}`,
+			`{"finding_id":"fnd-gate-skill-001","action":"resolved","reason":"Escalate-stage resolved."}`,
 			envPairs...,
 		)
 		if err != nil {
@@ -199,9 +218,9 @@ func TestConfidenceGate_OtherSkill_PassesThrough(t *testing.T) {
 		t.Fatalf("parse output JSON: %v\nout=%q", err, out)
 	}
 
-	// Must NOT have gate_fired: skill is not task:investigate.
+	// Must NOT have gate_fired: skill is not in the gated set.
 	if _, fired := result["gate_fired"]; fired {
-		t.Errorf("expected normal close output for non-investigate skill, but got gate_fired: %v", result)
+		t.Errorf("expected normal close output for non-gated skill, but got gate_fired: %v", result)
 	}
 	if result["finding_id"] != "fnd-gate-skill-001" {
 		t.Errorf("finding_id = %v, want fnd-gate-skill-001", result["finding_id"])
@@ -210,7 +229,7 @@ func TestConfidenceGate_OtherSkill_PassesThrough(t *testing.T) {
 	// work:output must be present in campfire.
 	msgs := readCampfireMessages(t, cfBin, cfHome, campfireID)
 	if !hasTagInMessages(msgs, "work:output") {
-		t.Errorf("expected work:output in campfire for non-investigate skill; got %d messages", len(msgs))
+		t.Errorf("expected work:output in campfire for non-gated skill; got %d messages", len(msgs))
 	}
 }
 
@@ -691,6 +710,10 @@ func TestPhase1Defaults_EnabledAndFloor(t *testing.T) {
 	if cfg.ScoreFloor != 0.40 {
 		t.Errorf("default ScoreFloor = %.4f, want 0.40 (mallcoppro-276 Phase 1)", cfg.ScoreFloor)
 	}
+	// mallcoppro-499 Phase 2: TriageScoreFloor default for triage's 2-tool flow.
+	if cfg.TriageScoreFloor != 0.18 {
+		t.Errorf("default TriageScoreFloor = %.4f, want 0.18 (mallcoppro-499 RPT-structural)", cfg.TriageScoreFloor)
+	}
 }
 
 // TestPhase1Defaults_LoadGateConfig_NoEnv verifies loadGateConfig returns the
@@ -701,6 +724,7 @@ func TestPhase1Defaults_LoadGateConfig_NoEnv(t *testing.T) {
 	for _, k := range []string{
 		"MALLCOP_CONFIDENCE_GATED_CLOSE_ENABLED",
 		"MALLCOP_CONFIDENCE_GATED_CLOSE_SCORE_FLOOR",
+		"MALLCOP_CONFIDENCE_GATED_CLOSE_TRIAGE_SCORE_FLOOR",
 		"MALLCOP_CONFIDENCE_GATED_CLOSE_TOOL_CALL_WEIGHT",
 		"MALLCOP_CONFIDENCE_GATED_CLOSE_TOOL_CALL_CAP",
 		"MALLCOP_CONFIDENCE_GATED_CLOSE_DISTINCT_WEIGHT",
@@ -721,43 +745,222 @@ func TestPhase1Defaults_LoadGateConfig_NoEnv(t *testing.T) {
 	if cfg.ScoreFloor != 0.40 {
 		t.Errorf("loadGateConfig() ScoreFloor = %.4f, want 0.40 (mallcoppro-276 Phase 1)", cfg.ScoreFloor)
 	}
+	if cfg.TriageScoreFloor != 0.18 {
+		t.Errorf("loadGateConfig() TriageScoreFloor = %.4f, want 0.18 (mallcoppro-499)", cfg.TriageScoreFloor)
+	}
 }
 
 // TestPhase1Defaults_ZeroCitationStillFires verifies the zero-citation hard
-// floor at gate.go:428 still fires regardless of the new defaults. The score
+// floor at gate.go:444 still fires regardless of the new defaults. The score
 // floor change does NOT relax the zero-citation requirement: even if score
 // would clear the floor on tool volume + breadth alone, zero citations
 // unconditionally fire the gate.
 //
+// mallcoppro-499: this invariant applies to BOTH task:investigate and
+// task:triage. The "no evidence = no resolve" rule is universal — neither
+// skill gets to short-circuit citations.
+//
 // This is the integration test the spec's done condition (4) calls for.
 func TestPhase1Defaults_ZeroCitationStillFires(t *testing.T) {
+	for _, skill := range []string{"task:investigate", "task:triage"} {
+		skill := skill
+		t.Run(skill, func(t *testing.T) {
+			cfBin, cfHome, campfireID, workCampfireID := newTestCampfirePair(t)
+
+			// Seed 8 tool calls across 4 distinct tools — would clear BOTH the 0.40
+			// investigate floor (8*0.04 + 4*0.08 = 0.64) and the 0.18 triage floor on
+			// score alone. Zero citations must still fire the gate unconditionally.
+			toolNames := []string{
+				"check-baseline", "search-events", "search-findings", "read-config",
+				"check-baseline", "search-events", "search-findings", "read-config",
+			}
+			seedToolUseMsgs(t, cfBin, cfHome, campfireID, toolNames)
+
+			// Reason has NO citations (no evt_*, fnd-*, etc. that match retrieved IDs).
+			reason := "Investigation complete. No anomaly. Standard activity pattern."
+
+			// Use the NEW defaults — pass empty env for gate vars so loadGateConfig
+			// returns the binary defaults (Enabled=true, ScoreFloor=0.40, TriageScoreFloor=0.18).
+			envPairs := []string{
+				"MALLCOP_SKILL", skill,
+				"MALLCOP_CAMPFIRE_ID", campfireID,
+				"MALLCOP_WORK_CAMPFIRE_ID", workCampfireID,
+				"CF_HOME", cfHome,
+			}
+
+			out := captureStdout(t, func() {
+				input, _ := json.Marshal(map[string]interface{}{
+					"finding_id": "fnd-phase1-zero-cite",
+					"action":     "resolved",
+					"reason":     reason,
+				})
+				err := runToolWithEnv(t, "resolve-finding", string(input), envPairs...)
+				if err != nil {
+					t.Errorf("resolve-finding: unexpected error: %v", err)
+				}
+			})
+
+			var result map[string]interface{}
+			if err := json.Unmarshal([]byte(out), &result); err != nil {
+				t.Fatalf("parse output JSON: %v\nout=%q", err, out)
+			}
+
+			// Gate MUST fire — zero citation hard floor at gate.go:444.
+			if result["gate_fired"] != true {
+				t.Errorf("expected gate_fired=true on zero-citation resolve for skill=%s (gate.go:444 hard floor); got %v",
+					skill, result)
+			}
+			if cc, ok := result["citation_count"]; ok {
+				if n, _ := cc.(float64); n != 0 {
+					t.Errorf("expected citation_count=0, got %v", cc)
+				}
+			}
+
+			// Fan-out work:create must be posted.
+			workMsgs := readCampfireMessages(t, cfBin, cfHome, workCampfireID)
+			if !hasTagInMessages(workMsgs, "work:create") {
+				t.Errorf("expected work:create in work campfire for skill=%s (fan-out fired); got %d messages",
+					skill, len(workMsgs))
+			}
+		})
+	}
+}
+
+// ---- mallcoppro-499: Phase 2 triage-tier gate tests --------------------------
+//
+// These tests pin the new MALLCOP_SKILL=task:triage gate behavior:
+//   - The gate fires on triage workers with low evidence.
+//   - The gate does NOT fire on legitimate triage resolves (2-tool flow + citation).
+//   - The TriageScoreFloor is independently configurable via env var.
+//   - The triage fan-out emits exactly one task:investigate handoff (force escalate).
+//
+// These complement the investigate-skill tests above and prove that the gate
+// fires on the CLAIM-OF-RESOLUTION regardless of which worker tier emits it
+// (the RPT-structural insight that produced mallcoppro-499).
+
+// TestConfidenceGate_TriageSkill_Fires verifies the gate fires on a low-evidence
+// triage resolve. Mirrors TestConfidenceGate_LowScore_FiresFanOut but with
+// MALLCOP_SKILL=task:triage. The fan-out must be the triage-specific
+// force-escalate-to-investigator (NOT deep×3 + merge).
+func TestConfidenceGate_TriageSkill_Fires(t *testing.T) {
 	cfBin, cfHome, campfireID, workCampfireID := newTestCampfirePair(t)
 
-	// Seed 8 tool calls across 4 distinct tools — would clear 0.40 floor on
-	// score alone: 8*0.04 + 4*0.08 = 0.32 + 0.32 = 0.64 (with 0 iter penalty,
-	// 0 citations). Score 0.64 >= 0.40 floor, but zero citations must still
-	// fire the gate unconditionally.
-	toolNames := []string{
-		"check-baseline", "search-events", "search-findings", "read-config",
-		"check-baseline", "search-events", "search-findings", "read-config",
-	}
-	seedToolUseMsgs(t, cfBin, cfHome, campfireID, toolNames)
+	// Low evidence: 1 tool call, no citations. Score = 0.04 + 0.08 + 0 = 0.12,
+	// well below the triage floor of 0.18. AND zero citations triggers the
+	// universal hard floor regardless of score — either path fires the gate.
+	seedToolUseMsgs(t, cfBin, cfHome, campfireID, []string{"search-events"})
 
-	// Reason has NO citations (no evt_*, fnd-*, etc. that match retrieved IDs).
-	reason := "Investigation complete. No anomaly. Standard activity pattern."
-
-	// Use the NEW defaults — pass empty env for gate vars so loadGateConfig
-	// returns the binary defaults (Enabled=true, ScoreFloor=0.40).
-	envPairs := []string{
-		"MALLCOP_SKILL", "task:investigate",
+	envPairs := append(gateEnvPairsTriage(true, 0.40, 0.18),
+		"MALLCOP_SKILL", "task:triage",
 		"MALLCOP_CAMPFIRE_ID", campfireID,
 		"MALLCOP_WORK_CAMPFIRE_ID", workCampfireID,
 		"CF_HOME", cfHome,
-	}
+	)
 
 	out := captureStdout(t, func() {
 		input, _ := json.Marshal(map[string]interface{}{
-			"finding_id": "fnd-phase1-zero-cite",
+			"finding_id": "fnd-gate-triage-fire-001",
+			"action":     "resolved",
+			"reason":     "Looks normal, no anomaly observed.",
+		})
+		err := runToolWithEnv(t, "resolve-finding", string(input), envPairs...)
+		if err != nil {
+			t.Errorf("resolve-finding: unexpected error: %v", err)
+		}
+	})
+
+	var result map[string]interface{}
+	if err := json.Unmarshal([]byte(out), &result); err != nil {
+		t.Fatalf("parse output JSON: %v\nout=%q", err, out)
+	}
+
+	if result["gate_fired"] != true {
+		t.Errorf("expected gate_fired=true on triage short-circuit; got result=%v", result)
+	}
+	// Triage fan-out emits fanout_action=escalate-to-investigator, not the
+	// investigate fan-out's deep-investigate-panel.
+	if action, _ := result["fanout_action"].(string); action != "escalate-to-investigator" {
+		t.Errorf("expected fanout_action=escalate-to-investigator on triage gate fire; got %q", action)
+	}
+	// Triage fan-out must NOT emit deep_item_ids or merge_item_id (those are
+	// investigate-fan-out keys).
+	if _, has := result["deep_item_ids"]; has {
+		t.Errorf("triage fan-out must not emit deep_item_ids; got %v", result["deep_item_ids"])
+	}
+	if _, has := result["merge_item_id"]; has {
+		t.Errorf("triage fan-out must not emit merge_item_id; got %v", result["merge_item_id"])
+	}
+	// The handoff item ID must be present and non-empty.
+	itemID, _ := result["item_id"].(string)
+	if itemID == "" {
+		t.Errorf("expected non-empty item_id from triage fan-out (force escalate-to-investigator); got %v", result["item_id"])
+	}
+
+	// Exactly one work:create in the work campfire, tagged skill:task:investigate.
+	workMsgs := readCampfireMessages(t, cfBin, cfHome, workCampfireID)
+	investigateCreates := 0
+	deepCreates := 0
+	for _, msg := range workMsgs {
+		tagsRaw, _ := msg["tags"].([]interface{})
+		isWorkCreate := false
+		isInvestigate := false
+		isDeep := false
+		for _, tagRaw := range tagsRaw {
+			tag, _ := tagRaw.(string)
+			switch tag {
+			case "work:create":
+				isWorkCreate = true
+			case "skill:task:investigate":
+				isInvestigate = true
+			case "skill:task:deep-investigate":
+				isDeep = true
+			}
+		}
+		if isWorkCreate && isInvestigate {
+			investigateCreates++
+		}
+		if isWorkCreate && isDeep {
+			deepCreates++
+		}
+	}
+	if investigateCreates != 1 {
+		t.Errorf("expected exactly 1 work:create with skill:task:investigate (triage fan-out); got %d", investigateCreates)
+	}
+	if deepCreates != 0 {
+		t.Errorf("expected 0 work:create with skill:task:deep-investigate (deep panel is investigate-only); got %d", deepCreates)
+	}
+}
+
+// TestConfidenceGate_TriageSkill_NormalResolveDoesNotFire verifies that a
+// legitimate triage resolve (2 tools + 1 valid citation) does NOT fire the gate.
+//
+// Score: 0.04*2 + 0.08*2 + 0.04*1 = 0.08 + 0.16 + 0.04 = 0.28, comfortably
+// above the 0.18 triage floor. The gate must pass through to normal close.
+//
+// This discriminates "I executed the rubric" from "I short-circuited" —
+// the false-fire test that proves the triage floor is calibrated correctly.
+func TestConfidenceGate_TriageSkill_NormalResolveDoesNotFire(t *testing.T) {
+	cfBin, cfHome, campfireID, workCampfireID := newTestCampfirePair(t)
+
+	// 2 tools (check-baseline + search-events) — the classic triage rubric.
+	seedToolUseMsgs(t, cfBin, cfHome, campfireID, []string{"check-baseline", "search-events"})
+	// Seed a tool result payload containing evt_001 so the citation cross-check
+	// recognizes it as a real retrieved ID (not a hallucinated citation).
+	seedToolResultMsg(t, cfBin, cfHome, campfireID,
+		`{"tool_result":true,"tool":"search-events","events":[{"id":"evt_001","actor":"alice@example.com"}]}`)
+
+	reason := "Triage complete: baseline matched, event evt_001 confirms benign pattern."
+
+	envPairs := append(gateEnvPairsTriage(true, 0.40, 0.18),
+		"MALLCOP_SKILL", "task:triage",
+		"MALLCOP_CAMPFIRE_ID", campfireID,
+		"MALLCOP_WORK_CAMPFIRE_ID", workCampfireID,
+		"CF_HOME", cfHome,
+	)
+
+	out := captureStdout(t, func() {
+		input, _ := json.Marshal(map[string]interface{}{
+			"finding_id": "fnd-gate-triage-normal-001",
 			"action":     "resolved",
 			"reason":     reason,
 		})
@@ -772,19 +975,205 @@ func TestPhase1Defaults_ZeroCitationStillFires(t *testing.T) {
 		t.Fatalf("parse output JSON: %v\nout=%q", err, out)
 	}
 
-	// Gate MUST fire — zero citation hard floor at gate.go:428.
-	if result["gate_fired"] != true {
-		t.Errorf("expected gate_fired=true on zero-citation resolve (gate.go:428 hard floor); got %v", result)
+	if gf, ok := result["gate_fired"]; ok && gf == true {
+		t.Errorf("expected gate to NOT fire for legitimate triage resolve (2 tools + 1 citation); got gate_fired=true. result=%v", result)
 	}
-	if cc, ok := result["citation_count"]; ok {
-		if n, _ := cc.(float64); n != 0 {
-			t.Errorf("expected citation_count=0, got %v", cc)
-		}
+	if result["finding_id"] != "fnd-gate-triage-normal-001" {
+		t.Errorf("finding_id = %v, want fnd-gate-triage-normal-001", result["finding_id"])
+	}
+	if result["action"] != "resolved" {
+		t.Errorf("action = %v, want resolved", result["action"])
 	}
 
-	// Fan-out work:create must be posted.
+	// Normal close: work:output in engagement campfire, no work:create in work.
+	engMsgs := readCampfireMessages(t, cfBin, cfHome, campfireID)
+	if !hasTagInMessages(engMsgs, "work:output") {
+		t.Errorf("expected work:output in engagement campfire for legitimate triage resolve; got %d messages", len(engMsgs))
+	}
 	workMsgs := readCampfireMessages(t, cfBin, cfHome, workCampfireID)
-	if !hasTagInMessages(workMsgs, "work:create") {
-		t.Errorf("expected work:create in work campfire (fan-out fired); got %d messages", len(workMsgs))
+	if hasTagInMessages(workMsgs, "work:create") {
+		t.Errorf("expected NO work:create when triage gate passes; got %d messages", len(workMsgs))
+	}
+}
+
+// TestConfidenceGate_TriageScoreFloor_EnvOverride verifies that
+// MALLCOP_CONFIDENCE_GATED_CLOSE_TRIAGE_SCORE_FLOOR is honored independently
+// of the investigate-tier MALLCOP_CONFIDENCE_GATED_CLOSE_SCORE_FLOOR.
+//
+// The same transcript (1 tool + 1 valid citation, score = 0.04 + 0.08 + 0.04 = 0.16)
+// fires the gate at floor=0.40 (default investigate floor we set here too) AND
+// at the default triage floor of 0.18 — to prove the env var actually takes
+// effect, we lower the triage floor to 0.05 and confirm the gate does NOT fire.
+func TestConfidenceGate_TriageScoreFloor_EnvOverride(t *testing.T) {
+	cfBin, cfHome, campfireID, workCampfireID := newTestCampfirePair(t)
+
+	// 1 tool + 1 valid citation. Score = 0.04*1 + 0.08*1 + 0.04*1 = 0.16.
+	seedToolUseMsgs(t, cfBin, cfHome, campfireID, []string{"search-events"})
+	seedToolResultMsg(t, cfBin, cfHome, campfireID,
+		`{"tool_result":true,"tool":"search-events","events":[{"id":"evt_042","actor":"bob@example.com"}]}`)
+
+	reason := "Triage: event evt_042 explains the anomaly."
+
+	// Override TriageScoreFloor to 0.05 — well below the 0.16 score, so the
+	// gate must pass through. This proves the env var is plumbed through
+	// loadGateConfig() into checkConfidenceGate's effective-floor selection.
+	envPairs := append(gateEnvPairsTriage(true, 0.40, 0.05),
+		"MALLCOP_SKILL", "task:triage",
+		"MALLCOP_CAMPFIRE_ID", campfireID,
+		"MALLCOP_WORK_CAMPFIRE_ID", workCampfireID,
+		"CF_HOME", cfHome,
+	)
+
+	out := captureStdout(t, func() {
+		input, _ := json.Marshal(map[string]interface{}{
+			"finding_id": "fnd-gate-triage-envoverride-001",
+			"action":     "resolved",
+			"reason":     reason,
+		})
+		err := runToolWithEnv(t, "resolve-finding", string(input), envPairs...)
+		if err != nil {
+			t.Errorf("resolve-finding: unexpected error: %v", err)
+		}
+	})
+
+	var result map[string]interface{}
+	if err := json.Unmarshal([]byte(out), &result); err != nil {
+		t.Fatalf("parse output JSON: %v\nout=%q", err, out)
+	}
+
+	if gf, ok := result["gate_fired"]; ok && gf == true {
+		t.Errorf("expected gate to NOT fire with TRIAGE_SCORE_FLOOR=0.05 (score=0.16); got gate_fired=true. result=%v", result)
+	}
+
+	// Now rerun with a HIGHER triage floor (0.30) on the same transcript shape —
+	// gate must fire. This proves the env var actively controls the decision in
+	// both directions, not just the permissive direction above. Use a fresh
+	// campfire pair (with its own cfHome) so the second resolve-finding call
+	// doesn't see the first call's persisted state.
+	cfBin2, cfHome2, campfireID2, workCampfireID2 := newTestCampfirePair(t)
+	seedToolUseMsgs(t, cfBin2, cfHome2, campfireID2, []string{"search-events"})
+	seedToolResultMsg(t, cfBin2, cfHome2, campfireID2,
+		`{"tool_result":true,"tool":"search-events","events":[{"id":"evt_042","actor":"bob@example.com"}]}`)
+
+	envPairs2 := append(gateEnvPairsTriage(true, 0.40, 0.30),
+		"MALLCOP_SKILL", "task:triage",
+		"MALLCOP_CAMPFIRE_ID", campfireID2,
+		"MALLCOP_WORK_CAMPFIRE_ID", workCampfireID2,
+		"CF_HOME", cfHome2,
+	)
+
+	out2 := captureStdout(t, func() {
+		input, _ := json.Marshal(map[string]interface{}{
+			"finding_id": "fnd-gate-triage-envoverride-002",
+			"action":     "resolved",
+			"reason":     reason,
+		})
+		err := runToolWithEnv(t, "resolve-finding", string(input), envPairs2...)
+		if err != nil {
+			t.Errorf("resolve-finding: unexpected error: %v", err)
+		}
+	})
+
+	var result2 map[string]interface{}
+	if err := json.Unmarshal([]byte(out2), &result2); err != nil {
+		t.Fatalf("parse output JSON (rerun): %v\nout=%q", err, out2)
+	}
+
+	if result2["gate_fired"] != true {
+		t.Errorf("expected gate to fire with TRIAGE_SCORE_FLOOR=0.30 (score=0.16 < 0.30); got result=%v", result2)
+	}
+}
+
+// TestForceEscalateToInvestigator verifies the triage fan-out helper directly:
+// it emits a work:create message tagged skill:task:investigate (the canonical
+// handoff to the investigator tier), carries the finding tag, and reports an
+// item_id back to the caller.
+//
+// This is the integration test for the new fan-out helper. The helper is
+// exercised indirectly by TestConfidenceGate_TriageSkill_Fires, but this test
+// pins the call surface so a refactor can't silently break the handoff
+// without a test failure.
+func TestForceEscalateToInvestigator(t *testing.T) {
+	cfBin, cfHome, campfireID, workCampfireID := newTestCampfirePair(t)
+
+	// Drive the helper through the normal resolve-finding entry point so we
+	// exercise the runConfidenceGateFanOut → forceEscalateToInvestigator path
+	// the production code uses. Low-evidence transcript → gate fires.
+	seedToolUseMsgs(t, cfBin, cfHome, campfireID, []string{"check-baseline"})
+
+	envPairs := append(gateEnvPairsTriage(true, 0.40, 0.18),
+		"MALLCOP_SKILL", "task:triage",
+		"MALLCOP_CAMPFIRE_ID", campfireID,
+		"MALLCOP_WORK_CAMPFIRE_ID", workCampfireID,
+		"MALLCOP_ITEM_ID", "parent-item-499-test",
+		"CF_HOME", cfHome,
+	)
+
+	out := captureStdout(t, func() {
+		input, _ := json.Marshal(map[string]interface{}{
+			"finding_id": "fnd-force-escalate-001",
+			"action":     "resolved",
+			"reason":     "Triage short-circuit.",
+		})
+		err := runToolWithEnv(t, "resolve-finding", string(input), envPairs...)
+		if err != nil {
+			t.Errorf("resolve-finding: unexpected error: %v", err)
+		}
+	})
+
+	var result map[string]interface{}
+	if err := json.Unmarshal([]byte(out), &result); err != nil {
+		t.Fatalf("parse output JSON: %v\nout=%q", err, out)
+	}
+
+	if result["gate_fired"] != true {
+		t.Fatalf("expected gate_fired=true; got %v", result)
+	}
+	if action, _ := result["fanout_action"].(string); action != "escalate-to-investigator" {
+		t.Errorf("expected fanout_action=escalate-to-investigator; got %q", action)
+	}
+	itemID, _ := result["item_id"].(string)
+	if itemID == "" {
+		t.Fatalf("expected non-empty item_id in fan-out output; got %v", result)
+	}
+
+	// Verify the work:create message carries the right tags.
+	workMsgs := readCampfireMessages(t, cfBin, cfHome, workCampfireID)
+	var found bool
+	for _, msg := range workMsgs {
+		tagsRaw, _ := msg["tags"].([]interface{})
+		hasWorkCreate := false
+		hasInvestigateSkill := false
+		hasFindingTag := false
+		for _, tagRaw := range tagsRaw {
+			tag, _ := tagRaw.(string)
+			switch tag {
+			case "work:create":
+				hasWorkCreate = true
+			case "skill:task:investigate":
+				hasInvestigateSkill = true
+			case "finding:fnd-force-escalate-001":
+				hasFindingTag = true
+			}
+		}
+		if hasWorkCreate && hasInvestigateSkill && hasFindingTag {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected a work:create message with tags [work:create, skill:task:investigate, finding:fnd-force-escalate-001]; got %d messages", len(workMsgs))
+	}
+
+	// No deep-investigate or investigate-merge messages allowed (triage fan-out
+	// must NOT spawn the panel).
+	for _, msg := range workMsgs {
+		tagsRaw, _ := msg["tags"].([]interface{})
+		for _, tagRaw := range tagsRaw {
+			tag, _ := tagRaw.(string)
+			if tag == "skill:task:deep-investigate" || tag == "skill:task:investigate-merge" {
+				t.Errorf("triage fan-out must not spawn %s; got message tags=%v", tag, tagsRaw)
+			}
+		}
 	}
 }
