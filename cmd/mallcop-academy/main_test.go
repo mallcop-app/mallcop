@@ -2547,3 +2547,562 @@ func TestScenarioRecord_StructuralCauseOmitemptyWhenAbsent(t *testing.T) {
 	}
 }
 
+// ---- unit: chain-shape detector (mallcoppro-2f1) ----------------------------
+//
+// Background: a "no-triage-inference" chain is one where the academy posted a
+// work:create + a triage worker emitted a work:close, but the triage worker
+// never spawned an investigate work item AND never called resolve-finding
+// (toolUsageCalls == 0). Before mallcoppro-2f1 this surfaced silently as
+// terminal_action=null + forge_calls=0. Now the academy classifies the
+// scenario at chain quiescence as escalated/no-triage-inference.
+
+// TestChainShape_NoTriageInference_Escalates: synthetic chain with only the
+// academy's task:triage work:create + a triage worker's task:triage work:close
+// (no investigate spawn, no resolve-finding). Drive the academy() main loop
+// to wall-timeout quiescence and assert the on-disk record. This exercises
+// the full consumption path: mockSender → watch loop → quiescence path.
+func TestChainShape_NoTriageInference_Escalates(t *testing.T) {
+	scenDir := t.TempDir()
+	writeMinimalScenario(t, scenDir, "NT-01", "fnd_nt_001", "detector-priv-escalation",
+		"No triage inference", "high")
+
+	outDir := t.TempDir()
+	ms := &mockSender{readMsgs: nil}
+
+	args := runArgs{
+		targetCampfire: "cf-mock-target-no-triage",
+		scenariosDir:   scenDir,
+		scenarioFilter: "NT-01",
+		outputDir:      outDir,
+		maxConcurrent:  1,
+		// Short timeout to drive quiescence (wall-timeout exit), but long
+		// enough that the watch loop polls AT LEAST twice: once before we
+		// inject the noop close, once after. The loop sleeps 2s between
+		// iterations, so 5s gives us two read-iterations comfortably.
+		timeout: 5 * time.Second,
+		runID:   "test-mock-run-no-triage",
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- academy(ms, args)
+	}()
+
+	// Wait for the work:create post.
+	var sentID string
+	for i := 0; i < 50; i++ {
+		time.Sleep(20 * time.Millisecond)
+		ms.mu.Lock()
+		if len(ms.sends) > 0 {
+			sentID = ms.sends[0].returnID
+		}
+		ms.mu.Unlock()
+		if sentID != "" {
+			break
+		}
+	}
+	if sentID == "" {
+		t.Fatal("academy never posted work:create within timeout")
+	}
+
+	// Do NOT inject a terminal work:close. The watch loop will time out;
+	// chain-shape detector should fire at quiescence and classify the
+	// scenario as escalated/no-triage-inference.
+	//
+	// Note: the academy adds a task:triage work:create entry to ts.chain at
+	// post time. For chain-shape to match we also need a triage work:close
+	// in the chain. Synthesize one — a triage worker that terminated without
+	// inference would emit exactly this shape on the wire.
+	closePayloadBytes, _ := json.Marshal(closePayload{
+		ItemID: sentID,
+		Action: "noop", // non-terminal action (not in terminalActions map)
+		Skill:  "task:triage",
+	})
+	ms.mu.Lock()
+	ms.readMsgs = append(ms.readMsgs, cfMessage{
+		ID:      "close-noop-001",
+		Tags:    []string{"work:close", "action:noop"},
+		Payload: string(closePayloadBytes),
+	})
+	ms.mu.Unlock()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("academy: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("academy did not complete within deadline")
+	}
+
+	data, err := os.ReadFile(filepath.Join(outDir, "NT-01.json"))
+	if err != nil {
+		t.Fatalf("NT-01.json not found: %v", err)
+	}
+	var raw map[string]interface{}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("parse NT-01.json: %v", err)
+	}
+	if got := raw["terminal_action"]; got != "escalated" {
+		t.Errorf("JSON terminal_action = %v, want \"escalated\" (chain-shape detector)", got)
+	}
+	if got := raw["structural_cause"]; got != "no-triage-inference" {
+		t.Errorf("JSON structural_cause = %v, want \"no-triage-inference\"", got)
+	}
+	var rec ScenarioRecord
+	if err := json.Unmarshal(data, &rec); err != nil {
+		t.Fatalf("parse NT-01.json as ScenarioRecord: %v", err)
+	}
+	if rec.TerminalAction != "escalated" {
+		t.Errorf("ScenarioRecord.TerminalAction = %q, want escalated", rec.TerminalAction)
+	}
+	if rec.StructuralCause != "no-triage-inference" {
+		t.Errorf("ScenarioRecord.StructuralCause = %q, want no-triage-inference", rec.StructuralCause)
+	}
+	if rec.TerminalAt == nil {
+		t.Error("terminal_at must not be nil for chain-shape promoted scenario")
+	}
+}
+
+// TestChainShape_NormalChainNotAffected: when a chain includes a triage
+// escalate-to-investigator (investigate work:create) followed by an investigate
+// resolve-finding (terminal work:close, action=escalated), the chain-shape
+// detector must NOT override the normal terminal classification. The terminal
+// action stays "escalated" with empty structural_cause.
+func TestChainShape_NormalChainNotAffected(t *testing.T) {
+	// Unit-level: detector should return false for a normal chain that
+	// reached terminal via the message-arrival path. ts.terminal=true is
+	// the short-circuit guarding "already classified" scenarios.
+	ts := &trackedScenario{
+		scenarioID: "NT-02",
+		workItemID: "msg-triage-01",
+		terminal:   true, // normal terminal close already processed
+		chain: []ChainEntry{
+			{ItemID: "msg-triage-01", Skill: "task:triage"},                      // academy post
+			{ItemID: "msg-invest-01", Skill: "task:investigate"},                 // triage escalated
+			{ItemID: "msg-invest-01", Skill: "task:investigate", Action: "escalated"}, // resolve-finding
+		},
+		toolUsageCalls: 1, // resolve-finding tool call observed
+	}
+	if detectNoTriageInferenceChain(ts) {
+		t.Error("detector fired on a normal chain that already reached terminal — must not fire")
+	}
+
+	// Also: even without ts.terminal=true, a chain that has an investigate
+	// work:create must not be classified as no-triage-inference.
+	ts2 := &trackedScenario{
+		scenarioID: "NT-02b",
+		workItemID: "msg-triage-02",
+		terminal:   false,
+		chain: []ChainEntry{
+			{ItemID: "msg-triage-02", Skill: "task:triage"},
+			{ItemID: "msg-invest-02", Skill: "task:investigate"},
+			{ItemID: "msg-triage-02", Skill: "task:triage", Action: "completed"}, // triage close (non-terminal)
+		},
+	}
+	if detectNoTriageInferenceChain(ts2) {
+		t.Error("detector fired on a chain that includes an investigate work:create — must not fire")
+	}
+
+	// And: a chain with resolve-finding tool usage (toolUsageCalls > 0)
+	// must not be classified as no-triage-inference even if the investigate
+	// work:create is absent (triage resolved directly).
+	ts3 := &trackedScenario{
+		scenarioID: "NT-02c",
+		workItemID: "msg-triage-03",
+		terminal:   false,
+		chain: []ChainEntry{
+			{ItemID: "msg-triage-03", Skill: "task:triage"},
+			{ItemID: "msg-triage-03", Skill: "task:triage", Action: "noop"},
+		},
+		toolUsageCalls: 2, // triage called resolve-finding
+	}
+	if detectNoTriageInferenceChain(ts3) {
+		t.Error("detector fired on a chain with toolUsageCalls > 0 — must not fire")
+	}
+}
+
+// TestChainShape_FiresAtQuiescence: the detector must NOT fire on every
+// message arrival in the watch loop — only at chain quiescence (the
+// wall-timeout exit path). Verify by driving academy with a fast terminal
+// resolved close mid-flight: the chain-shape detector must not preempt the
+// normal terminal classification, even though the no-investigate-spawn
+// condition is briefly true while messages stream in.
+func TestChainShape_FiresAtQuiescence(t *testing.T) {
+	scenDir := t.TempDir()
+	writeMinimalScenario(t, scenDir, "NT-03", "fnd_nt_003", "detector-priv-escalation",
+		"Quiescence-only firing", "high")
+
+	outDir := t.TempDir()
+	ms := &mockSender{readMsgs: nil}
+
+	args := runArgs{
+		targetCampfire: "cf-mock-target-quiescence",
+		scenariosDir:   scenDir,
+		scenarioFilter: "NT-03",
+		outputDir:      outDir,
+		maxConcurrent:  1,
+		// Long timeout: if chain-shape fired on every poll, the test would
+		// pass quickly with no-triage-inference set, but we want the normal
+		// terminal close to win.
+		timeout: 30 * time.Second,
+		runID:   "test-mock-run-quiescence",
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- academy(ms, args)
+	}()
+
+	var sentID string
+	for i := 0; i < 50; i++ {
+		time.Sleep(20 * time.Millisecond)
+		ms.mu.Lock()
+		if len(ms.sends) > 0 {
+			sentID = ms.sends[0].returnID
+		}
+		ms.mu.Unlock()
+		if sentID != "" {
+			break
+		}
+	}
+	if sentID == "" {
+		t.Fatal("academy never posted work:create within timeout")
+	}
+
+	// Inject a normal terminal resolved close — no investigate spawn, no
+	// resolve-finding tool-usage message. If chain-shape fired on message
+	// arrival, the detector's match condition would be true at this point
+	// (no investigate work:create, toolUsageCalls=0) and the scenario would
+	// land as escalated/no-triage-inference. It must NOT — the watch loop's
+	// terminal classification must win.
+	closePayloadBytes, _ := json.Marshal(closePayload{
+		ItemID: sentID,
+		Action: "resolved",
+		Skill:  "task:triage",
+	})
+	ms.mu.Lock()
+	ms.readMsgs = append(ms.readMsgs, cfMessage{
+		ID:      "close-resolved-q-001",
+		Tags:    []string{"work:close", "action:resolved"},
+		Payload: string(closePayloadBytes),
+	})
+	ms.mu.Unlock()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("academy: %v", err)
+		}
+	case <-time.After(60 * time.Second):
+		t.Fatal("academy did not complete within deadline")
+	}
+
+	data, err := os.ReadFile(filepath.Join(outDir, "NT-03.json"))
+	if err != nil {
+		t.Fatalf("NT-03.json not found: %v", err)
+	}
+	var rec ScenarioRecord
+	if err := json.Unmarshal(data, &rec); err != nil {
+		t.Fatalf("parse NT-03.json: %v", err)
+	}
+	if rec.TerminalAction != "resolved" {
+		t.Errorf("TerminalAction = %q, want resolved (chain-shape must not preempt normal terminal close)", rec.TerminalAction)
+	}
+	if rec.StructuralCause != "" {
+		t.Errorf("StructuralCause = %q, want empty (no normalization on a normal resolved close)", rec.StructuralCause)
+	}
+}
+
+// ---- unit: fec-wire structural-fault parse (mallcoppro-2f1) -----------------
+//
+// Background: legion's EscalateOnStructuralFault (legion#343) emits a
+// work:close payload with action="escalated" and reason="structural-fault: <cause>".
+// The academy must lift <cause> onto ScenarioRecord.StructuralCause, except
+// when 190's normalizer already set the cause from the wire action.
+
+func TestParseStructuralFaultReason_Prefix(t *testing.T) {
+	cause, ok := parseStructuralFaultReason("structural-fault: no-tool-use")
+	if !ok {
+		t.Fatal("ok = false, want true for valid prefix")
+	}
+	if cause != "no-tool-use" {
+		t.Errorf("cause = %q, want \"no-tool-use\"", cause)
+	}
+}
+
+func TestParseStructuralFaultReason_NoPrefix(t *testing.T) {
+	if cause, ok := parseStructuralFaultReason("resolved cleanly with citations"); ok {
+		t.Errorf("ok = true for non-prefixed reason; cause = %q", cause)
+	}
+}
+
+func TestParseStructuralFaultReason_EmptyAfterPrefix(t *testing.T) {
+	// Prefix present but no cause token — must not match (we don't emit empty
+	// structural_cause).
+	if cause, ok := parseStructuralFaultReason("structural-fault: "); ok {
+		t.Errorf("ok = true for empty-cause prefix; cause = %q", cause)
+	}
+}
+
+// TestFecWireParse_StructuralFaultPrefix: end-to-end via academy(). Feed a
+// work:close with action=escalated and reason="structural-fault: no-tool-use".
+// Assert ScenarioRecord.structural_cause == "no-tool-use" on disk.
+func TestFecWireParse_StructuralFaultPrefix(t *testing.T) {
+	scenDir := t.TempDir()
+	writeMinimalScenario(t, scenDir, "FC-01", "fnd_fc_001", "detector-priv-escalation",
+		"fec structural-fault wire parse", "high")
+
+	outDir := t.TempDir()
+	ms := &mockSender{readMsgs: nil}
+
+	args := runArgs{
+		targetCampfire: "cf-mock-target-fec",
+		scenariosDir:   scenDir,
+		scenarioFilter: "FC-01",
+		outputDir:      outDir,
+		maxConcurrent:  1,
+		timeout:        5 * time.Second,
+		runID:          "test-mock-run-fec",
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- academy(ms, args)
+	}()
+
+	var sentID string
+	for i := 0; i < 50; i++ {
+		time.Sleep(20 * time.Millisecond)
+		ms.mu.Lock()
+		if len(ms.sends) > 0 {
+			sentID = ms.sends[0].returnID
+		}
+		ms.mu.Unlock()
+		if sentID != "" {
+			break
+		}
+	}
+	if sentID == "" {
+		t.Fatal("academy never posted work:create within timeout")
+	}
+
+	// fec wire format: action=escalated, reason="structural-fault: <cause>".
+	// Use the closePayloadFull shape directly to carry the reason field — the
+	// parsing path in extractTerminalReason unmarshals this exact shape.
+	payload := closePayloadFull{
+		ItemID: sentID,
+		Action: "escalated",
+		Skill:  "task:triage",
+		Reason: "structural-fault: no-tool-use",
+	}
+	payloadBytes, _ := json.Marshal(payload)
+	ms.mu.Lock()
+	ms.readMsgs = append(ms.readMsgs, cfMessage{
+		ID:      "close-fec-001",
+		Tags:    []string{"work:close", "action:escalated"},
+		Payload: string(payloadBytes),
+	})
+	ms.mu.Unlock()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("academy: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("academy did not complete within deadline")
+	}
+
+	data, err := os.ReadFile(filepath.Join(outDir, "FC-01.json"))
+	if err != nil {
+		t.Fatalf("FC-01.json not found: %v", err)
+	}
+	var raw map[string]interface{}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("parse FC-01.json as map: %v", err)
+	}
+	// Guard struct-tag regressions: assert the JSON key spelling.
+	if got := raw["structural_cause"]; got != "no-tool-use" {
+		t.Errorf("JSON structural_cause = %v, want \"no-tool-use\"", got)
+	}
+	if got := raw["terminal_action"]; got != "escalated" {
+		t.Errorf("JSON terminal_action = %v, want \"escalated\"", got)
+	}
+	var rec ScenarioRecord
+	if err := json.Unmarshal(data, &rec); err != nil {
+		t.Fatalf("parse FC-01.json as ScenarioRecord: %v", err)
+	}
+	if rec.StructuralCause != "no-tool-use" {
+		t.Errorf("ScenarioRecord.StructuralCause = %q, want no-tool-use", rec.StructuralCause)
+	}
+}
+
+// TestFecWireParse_NoStructuralFaultPrefix: a normal resolved close whose
+// reason does NOT start with the structural-fault prefix must leave
+// ScenarioRecord.structural_cause empty (no false-positive parsing).
+func TestFecWireParse_NoStructuralFaultPrefix(t *testing.T) {
+	scenDir := t.TempDir()
+	writeMinimalScenario(t, scenDir, "FC-02", "fnd_fc_002", "detector-priv-escalation",
+		"non-fec reason leaves structural_cause empty", "high")
+
+	outDir := t.TempDir()
+	ms := &mockSender{readMsgs: nil}
+
+	args := runArgs{
+		targetCampfire: "cf-mock-target-fec-noprefix",
+		scenariosDir:   scenDir,
+		scenarioFilter: "FC-02",
+		outputDir:      outDir,
+		maxConcurrent:  1,
+		timeout:        5 * time.Second,
+		runID:          "test-mock-run-fec-noprefix",
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- academy(ms, args)
+	}()
+
+	var sentID string
+	for i := 0; i < 50; i++ {
+		time.Sleep(20 * time.Millisecond)
+		ms.mu.Lock()
+		if len(ms.sends) > 0 {
+			sentID = ms.sends[0].returnID
+		}
+		ms.mu.Unlock()
+		if sentID != "" {
+			break
+		}
+	}
+	if sentID == "" {
+		t.Fatal("academy never posted work:create within timeout")
+	}
+
+	payload := closePayloadFull{
+		ItemID: sentID,
+		Action: "escalated",
+		Skill:  "task:triage",
+		Reason: "resolved cleanly with citations",
+	}
+	payloadBytes, _ := json.Marshal(payload)
+	ms.mu.Lock()
+	ms.readMsgs = append(ms.readMsgs, cfMessage{
+		ID:      "close-fec-noprefix-001",
+		Tags:    []string{"work:close", "action:escalated"},
+		Payload: string(payloadBytes),
+	})
+	ms.mu.Unlock()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("academy: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("academy did not complete within deadline")
+	}
+
+	data, err := os.ReadFile(filepath.Join(outDir, "FC-02.json"))
+	if err != nil {
+		t.Fatalf("FC-02.json not found: %v", err)
+	}
+	var raw map[string]interface{}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("parse FC-02.json: %v", err)
+	}
+	if _, present := raw["structural_cause"]; present {
+		t.Errorf("structural_cause must be omitted (omitempty) for non-fec reason; got %v", raw["structural_cause"])
+	}
+	if got := raw["terminal_action"]; got != "escalated" {
+		t.Errorf("JSON terminal_action = %v, want \"escalated\"", got)
+	}
+}
+
+// TestFecWireParse_AbandonedNormalizerWins: when wire action="abandoned" with
+// a non-prefix reason ("watchdog timeout"), 190's normalizer sets
+// structural_cause="abandoned-by-model" and the fec reason-parser must NOT
+// overwrite that (precedence: normalizer wins over reason).
+func TestFecWireParse_AbandonedNormalizerWins(t *testing.T) {
+	scenDir := t.TempDir()
+	writeMinimalScenario(t, scenDir, "FC-03", "fnd_fc_003", "detector-priv-escalation",
+		"abandoned-normalizer precedence", "high")
+
+	outDir := t.TempDir()
+	ms := &mockSender{readMsgs: nil}
+
+	args := runArgs{
+		targetCampfire: "cf-mock-target-fec-abandoned",
+		scenariosDir:   scenDir,
+		scenarioFilter: "FC-03",
+		outputDir:      outDir,
+		maxConcurrent:  1,
+		timeout:        5 * time.Second,
+		runID:          "test-mock-run-fec-abandoned",
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- academy(ms, args)
+	}()
+
+	var sentID string
+	for i := 0; i < 50; i++ {
+		time.Sleep(20 * time.Millisecond)
+		ms.mu.Lock()
+		if len(ms.sends) > 0 {
+			sentID = ms.sends[0].returnID
+		}
+		ms.mu.Unlock()
+		if sentID != "" {
+			break
+		}
+	}
+	if sentID == "" {
+		t.Fatal("academy never posted work:create within timeout")
+	}
+
+	// wire action="abandoned" + reason="watchdog timeout" — the normalizer
+	// sets structural_cause="abandoned-by-model" before the fec parser sees
+	// the reason; precedence must be preserved.
+	payload := closePayloadFull{
+		ItemID: sentID,
+		Action: "abandoned",
+		Skill:  "task:investigate",
+		Reason: "watchdog timeout",
+	}
+	payloadBytes, _ := json.Marshal(payload)
+	ms.mu.Lock()
+	ms.readMsgs = append(ms.readMsgs, cfMessage{
+		ID:      "close-fec-abandoned-001",
+		Tags:    []string{"work:close", "action:abandoned"},
+		Payload: string(payloadBytes),
+	})
+	ms.mu.Unlock()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("academy: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("academy did not complete within deadline")
+	}
+
+	data, err := os.ReadFile(filepath.Join(outDir, "FC-03.json"))
+	if err != nil {
+		t.Fatalf("FC-03.json not found: %v", err)
+	}
+	var rec ScenarioRecord
+	if err := json.Unmarshal(data, &rec); err != nil {
+		t.Fatalf("parse FC-03.json: %v", err)
+	}
+	if rec.StructuralCause != "abandoned-by-model" {
+		t.Errorf("ScenarioRecord.StructuralCause = %q, want abandoned-by-model (190's normalizer must win over fec reason-parser)", rec.StructuralCause)
+	}
+	if rec.TerminalAction != "escalated" {
+		t.Errorf("ScenarioRecord.TerminalAction = %q, want escalated (190's normalizer maps abandoned → escalated)", rec.TerminalAction)
+	}
+}
+

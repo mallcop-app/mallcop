@@ -341,6 +341,91 @@ func normalizeTerminalAction(action string) (normalized string, structuralCause 
 	}
 }
 
+// structuralFaultPrefix is the literal prefix legion's EscalateOnStructuralFault
+// (fec, legion#343) emits in the reason field of a work:close payload when the
+// chain is escalated due to a structural fault (e.g. tool not used). The suffix
+// after the prefix is the cause token to be lifted onto
+// ScenarioRecord.StructuralCause. Format: "structural-fault: <cause>".
+//
+// (mallcoppro-2f1)
+const structuralFaultPrefix = "structural-fault: "
+
+// parseStructuralFaultReason extracts the cause token from a fec wire-format
+// reason field. It returns ("<cause>", true) if reason begins with the
+// structural-fault prefix, ("", false) otherwise. Empty causes (the prefix with
+// nothing after it) are treated as no-match — we will not synthesize an empty
+// structural_cause.
+//
+// (mallcoppro-2f1)
+func parseStructuralFaultReason(reason string) (cause string, ok bool) {
+	if !strings.HasPrefix(reason, structuralFaultPrefix) {
+		return "", false
+	}
+	cause = strings.TrimSpace(strings.TrimPrefix(reason, structuralFaultPrefix))
+	if cause == "" {
+		return "", false
+	}
+	return cause, true
+}
+
+// detectNoTriageInferenceChain inspects a tracked scenario's accumulated chain
+// at chain quiescence (wall-timeout exit) and reports whether the chain
+// matches the "triage never invoked inference" structural fault: the scenario
+// has at least one work:create from the academy + at least one work:close, but
+// triage never spawned an investigate work:create AND no resolve-finding tool
+// call was observed (forge_calls=0).
+//
+// Returns true if the scenario should be reclassified as
+// terminal_action="escalated" with structural_cause="no-triage-inference".
+//
+// Caller must hold ts.mu.
+//
+// (mallcoppro-2f1)
+func detectNoTriageInferenceChain(ts *trackedScenario) bool {
+	// Detector only runs for posted, non-terminal scenarios. Scenarios that
+	// already reached a terminal classification (resolved, normal escalate,
+	// abandoned→escalated via 190's normalizer, fec structural-fault via the
+	// reason-parser) keep that classification — chain-shape only fires when
+	// the chain quiesced WITHOUT any terminal close.
+	if ts.workItemID == "" || ts.terminal {
+		return false
+	}
+	// Require at least one work:create + one work:close in the chain. The
+	// initial post adds a task:triage work:create; a triage worker that
+	// processed the finding and exited would add a task:triage work:close.
+	// A chain with neither is not a "no-triage-inference" — it's a posting
+	// failure or a worker that never started.
+	hasCreate := false
+	hasClose := false
+	hasInvestigateCreate := false
+	for _, ce := range ts.chain {
+		if ce.Action == "" {
+			hasCreate = true
+			if isInvestigateSkill(ce.Skill) {
+				hasInvestigateCreate = true
+			}
+		} else {
+			hasClose = true
+		}
+	}
+	if !hasCreate || !hasClose {
+		return false
+	}
+	// Triage spawned an investigate work item → triage DID invoke inference
+	// (escalate-to-investigator is a tool call). Not a no-triage-inference
+	// chain.
+	if hasInvestigateCreate {
+		return false
+	}
+	// resolve-finding tool call observed (forge_calls > 0 via tool-usage
+	// messages) → triage DID invoke inference. Not a no-triage-inference
+	// chain.
+	if ts.toolUsageCalls > 0 {
+		return false
+	}
+	return true
+}
+
 // ---- Academy sender interface (for testing) -----------------------------------
 
 // Sender abstracts campfire send/readAll so tests can inject a real isolated
@@ -1032,6 +1117,18 @@ func academy(sender Sender, args runArgs) error {
 				if structCause != "" {
 					ts.structuralCause = structCause
 				}
+				// mallcoppro-2f1: fec wire-format parse. Legion's
+				// EscalateOnStructuralFault (legion#343) encodes the structural
+				// cause inside the reason field as "structural-fault: <cause>".
+				// Lift it onto ts.structuralCause when it isn't already set by
+				// 190's normalizer (the normalizer for action="abandoned" takes
+				// precedence). This unifies fec's reason-encoded cause and 190's
+				// normalizer-derived cause under one structural_cause field.
+				if ts.structuralCause == "" {
+					if cause, fec := parseStructuralFaultReason(ts.terminalReason); fec {
+						ts.structuralCause = cause
+					}
+				}
 				ts.terminalItemID = itemID
 				ts.mu.Unlock()
 
@@ -1087,13 +1184,54 @@ func academy(sender Sender, args runArgs) error {
 
 	if !allTerminal {
 		fmt.Fprintf(os.Stderr, "WARN: timeout reached — some scenarios did not reach terminal state\n")
-		// Write partial records for non-terminal scenarios.
+		// Chain-shape detector (mallcoppro-2f1). Quiescence event: the watch
+		// loop exited because the wall timeout fired before all scenarios
+		// reached a terminal close. For each posted, non-terminal scenario,
+		// inspect the accumulated chain. If it matches the "no triage
+		// inference" structural fault (work:create + work:close from triage
+		// only, no investigate spawn, no resolve-finding tool call), grade
+		// the scenario as terminal_action="escalated" with
+		// structural_cause="no-triage-inference" before the partial-record
+		// write. This converts a silent "forge_calls=0 + terminal_action=null"
+		// outcome into a structured grading signal for bakeoff F4B.
+		//
+		// Detector runs at quiescence ONLY (here, post-loop) — not on every
+		// message arrival in the watch loop — so a normal chain mid-flight is
+		// never misclassified while still in progress.
+		// Two-phase: first run the chain-shape detector (which may flip some
+		// non-terminal scenarios to terminal with structural_cause set), then
+		// write a record for every posted-but-not-yet-written scenario.
+		// chainShapeFlipped tracks scenarios the detector promoted so the
+		// partial-record write loop knows to include them.
+		chainShapeFlipped := make(map[string]bool)
+		for _, ts := range tracked {
+			ts.mu.Lock()
+			if detectNoTriageInferenceChain(ts) {
+				now := time.Now()
+				ts.terminal = true
+				ts.terminalAt = now
+				ts.terminalAction = "escalated"
+				ts.structuralCause = "no-triage-inference"
+				// terminalItemID intentionally left empty: there is no
+				// terminal close message; the academy synthesized the
+				// classification at chain quiescence.
+				chainShapeFlipped[ts.scenarioID] = true
+				fmt.Fprintf(os.Stderr, "scenario %s chain-shape: action=escalated cause=no-triage-inference\n",
+					ts.scenarioID)
+			}
+			ts.mu.Unlock()
+		}
+
+		// Write partial records for non-terminal scenarios. Scenarios the
+		// chain-shape detector just promoted to terminal must also write
+		// here — they had not written on the message-arrival path because
+		// no terminal close ever arrived.
 		for _, ts := range tracked {
 			ts.mu.Lock()
 			posted := ts.workItemID != ""
 			terminal := ts.terminal
 			ts.mu.Unlock()
-			if posted && !terminal {
+			if posted && (!terminal || chainShapeFlipped[ts.scenarioID]) {
 				if err := writeScenarioRecord(ts, args.runID, args.targetCampfire, args.outputDir, args.usage); err != nil {
 					fmt.Fprintf(os.Stderr, "WARN: write partial scenario record for %s: %v\n", ts.scenarioID, err)
 				}
