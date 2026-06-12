@@ -5,7 +5,7 @@
 #   sed 's/{{MODEL}}/claude-sonnet-4-5/g; s/{{RUN_ID}}/20260414/g; s|{{FORGE_API_URL}}|${FORGE_BASE_URL:-https://forge.3dl.dev}|g; s|{{FORGE_API_KEY}}|mallcop-sk-...|g; s|{{TOOL_BIN_DIR}}|/path/to/bin|g' \
 #     charts/mallcop-operational.toml.tmpl > mallcop-operational.toml
 #
-# Confidence gate (F2A — Phase 1 asymmetric gate, mallcoppro-276):
+# Confidence gate (F2A — asymmetric gate, mallcoppro-276 + mallcoppro-499):
 #   The gate is configured via MALLCOP_CONFIDENCE_GATED_CLOSE_* env vars read
 #   by cmd/mallcop-investigate-tools/tools_f1g_gate.go at tool invocation.
 #   IMPORTANT: legion's apiToolEnv (3dl-dev/legion: internal/worker/worker.go
@@ -14,10 +14,15 @@
 #   GRAPH_*, MALLCOP_RUN_ID). Setting [env] here, or exporting them in the
 #   activate envelope, does NOT reach the gate. The binary defaults in
 #   tools_f1g_gate.go's defaultGateConfig are the effective configuration for
-#   worker-spawned invocations. Phase 1 binary defaults: Enabled=true,
-#   ScoreFloor=0.40. If legion grows env-var passthrough for the
-#   MALLCOP_CONFIDENCE_GATED_CLOSE_* prefix, the defaults can be flipped back
-#   and policy can move into [env] here.
+#   worker-spawned invocations. Binary defaults:
+#     - Enabled=true
+#     - ScoreFloor=0.40         (task:investigate — multi-tool flow, ~4 tools typical)
+#     - TriageScoreFloor=0.18   (task:triage    — 2-tool flow, score ~0.24 typical)
+#   The gate fires on both task:investigate and task:triage resolved-actions.
+#   On triage, the fan-out is a single force escalate-to-investigator handoff
+#   (not the investigate-tier deep×3 + merge panel). If legion grows env-var
+#   passthrough for the MALLCOP_CONFIDENCE_GATED_CLOSE_* prefix, the defaults
+#   can be flipped back and policy can move into [env] here.
 
 [identity]
 name     = "mallcop-operational-{{RUN_ID}}"

@@ -1,15 +1,23 @@
 // tools_f1g_gate.go — F2A confidence-score pre-close gate for resolve-finding.
 //
-// When MALLCOP_SKILL=task:investigate, runResolveFinding calls checkConfidenceGate
-// before emitting work:output. If the structural confidence score for the session
-// is below the configured floor, the gate fires and emits 4 work:create messages
-// instead of the normal close:
+// When MALLCOP_SKILL=task:investigate OR task:triage, runResolveFinding calls
+// checkConfidenceGate before emitting work:output. If the structural confidence
+// score for the session is below the configured floor, the gate fires.
 //
-//  1. write-partial-transcript
-//  2. escalate-to-deep (benign)
-//  3. escalate-to-deep (malicious)
-//  4. escalate-to-deep (incomplete)
-//  5. create-investigate-merge wired to the 3 deep ids
+// The fan-out semantic depends on the skill that fired the gate:
+//
+//   - task:investigate (existing): emits 4 work:create messages
+//     1. write-partial-transcript
+//     2. escalate-to-deep (benign)
+//     3. escalate-to-deep (malicious)
+//     4. escalate-to-deep (incomplete)
+//     5. create-investigate-merge wired to the 3 deep ids
+//
+//   - task:triage (mallcoppro-499): emits 1 work:create — a force escalate-to-
+//     investigator handoff. Triage is a 2-tool flow; spending fan-out donuts on
+//     a 3-way deep-investigate panel for a triage short-circuit is overkill.
+//     The correct structural response to "triage resolved with insufficient
+//     evidence" is "make the investigator do the work," not "spawn a panel."
 //
 // The gate decision lives in binary code — the agent CANNOT skip it from prompt.
 //
@@ -28,16 +36,31 @@
 // asymmetric gate). When legion grows env-var passthrough or a per-skill env
 // block, these defaults can flip back to off and the chart can carry the policy.
 //
-//	MALLCOP_CONFIDENCE_GATED_CLOSE_ENABLED          bool   (default: true,  was false pre-mallcoppro-276)
-//	MALLCOP_CONFIDENCE_GATED_CLOSE_SCORE_FLOOR      float  (default: 0.40, was 0.55 pre-mallcoppro-276)
-//	MALLCOP_CONFIDENCE_GATED_CLOSE_TOOL_CALL_WEIGHT float  (default: 0.04)
-//	MALLCOP_CONFIDENCE_GATED_CLOSE_TOOL_CALL_CAP    int    (default: 8)
-//	MALLCOP_CONFIDENCE_GATED_CLOSE_DISTINCT_WEIGHT  float  (default: 0.08)
-//	MALLCOP_CONFIDENCE_GATED_CLOSE_DISTINCT_CAP     int    (default: 4)
-//	MALLCOP_CONFIDENCE_GATED_CLOSE_CITATION_WEIGHT  float  (default: 0.04)
-//	MALLCOP_CONFIDENCE_GATED_CLOSE_CITATION_CAP     int    (default: 5)
-//	MALLCOP_CONFIDENCE_GATED_CLOSE_ITER_PENALTY     float  (default: -0.02)
-//	MALLCOP_CONFIDENCE_GATED_CLOSE_ITER_THRESHOLD   int    (default: 3)
+//	MALLCOP_CONFIDENCE_GATED_CLOSE_ENABLED              bool   (default: true,  was false pre-mallcoppro-276)
+//	MALLCOP_CONFIDENCE_GATED_CLOSE_SCORE_FLOOR          float  (default: 0.40, was 0.55 pre-mallcoppro-276)
+//	MALLCOP_CONFIDENCE_GATED_CLOSE_TRIAGE_SCORE_FLOOR   float  (default: 0.18, added in mallcoppro-499)
+//	MALLCOP_CONFIDENCE_GATED_CLOSE_TOOL_CALL_WEIGHT     float  (default: 0.04)
+//	MALLCOP_CONFIDENCE_GATED_CLOSE_TOOL_CALL_CAP        int    (default: 8)
+//	MALLCOP_CONFIDENCE_GATED_CLOSE_DISTINCT_WEIGHT      float  (default: 0.08)
+//	MALLCOP_CONFIDENCE_GATED_CLOSE_DISTINCT_CAP         int    (default: 4)
+//	MALLCOP_CONFIDENCE_GATED_CLOSE_CITATION_WEIGHT      float  (default: 0.04)
+//	MALLCOP_CONFIDENCE_GATED_CLOSE_CITATION_CAP         int    (default: 5)
+//	MALLCOP_CONFIDENCE_GATED_CLOSE_ITER_PENALTY         float  (default: -0.02)
+//	MALLCOP_CONFIDENCE_GATED_CLOSE_ITER_THRESHOLD       int    (default: 3)
+//
+// # TriageScoreFloor calibration (mallcoppro-499)
+//
+// Triage uses a 2-tool flow (check-baseline + search-events). Typical legitimate
+// triage resolve scores ~0.24 (2 tools, 0-2 citations). The investigate-tuned
+// floor of 0.40 would false-fire on ~90% of legitimate triage resolves.
+//
+// TriageScoreFloor defaults to 0.18 to discriminate between:
+//   - "I executed the rubric" (2 tools + at least 1 citation, score ≥ ~0.20) → pass
+//   - "I short-circuited" (1 tool + 0 citations, score ~0.04, or 0 citations
+//     hitting the universal hard floor) → fire
+//
+// The zero-citation hard floor (at gate.go:444) applies to BOTH skills — "no
+// evidence = no resolve" is a universal invariant, not a skill-specific check.
 //
 // # Transcript source
 //
@@ -66,6 +89,11 @@ import (
 type confidenceGateConfig struct {
 	Enabled           bool
 	ScoreFloor        float64
+	// TriageScoreFloor is the floor used when MALLCOP_SKILL=task:triage.
+	// Triage's 2-tool flow produces lower typical scores than investigate's
+	// 4+ tool flow, so it needs its own calibration. See file header for the
+	// rationale behind the 0.18 default.
+	TriageScoreFloor  float64
 	ToolCallWeight    float64
 	ToolCallCap       int
 	DistinctWeight    float64
@@ -82,19 +110,25 @@ type confidenceGateConfig struct {
 // ScoreFloor defaults 0.40 so the gate fires by default in the bakeoff
 // without requiring env-var passthrough (which legion's apiToolEnv does
 // not currently support — see file header). The zero-citation hard floor
-// at gate.go:428 remains an unconditional fire regardless of score.
+// at gate.go:444 remains an unconditional fire regardless of score.
+//
+// mallcoppro-499 (RPT-structural follow-up): TriageScoreFloor defaults to
+// 0.18 so the gate also fires on task:triage short-circuit resolves without
+// false-firing on legitimate 2-tool triage flows. See file header for the
+// calibration rationale.
 func defaultGateConfig() confidenceGateConfig {
 	return confidenceGateConfig{
-		Enabled:        true,
-		ScoreFloor:     0.40,
-		ToolCallWeight: 0.04,
-		ToolCallCap:    8,
-		DistinctWeight: 0.08,
-		DistinctCap:    4,
-		CitationWeight: 0.04,
-		CitationCap:    5,
-		IterPenalty:    -0.02,
-		IterThreshold:  3,
+		Enabled:          true,
+		ScoreFloor:       0.40,
+		TriageScoreFloor: 0.18,
+		ToolCallWeight:   0.04,
+		ToolCallCap:      8,
+		DistinctWeight:   0.08,
+		DistinctCap:      4,
+		CitationWeight:   0.04,
+		CitationCap:      5,
+		IterPenalty:      -0.02,
+		IterThreshold:    3,
 	}
 }
 
@@ -109,6 +143,11 @@ func loadGateConfig() confidenceGateConfig {
 	if v := os.Getenv("MALLCOP_CONFIDENCE_GATED_CLOSE_SCORE_FLOOR"); v != "" {
 		if f, err := strconv.ParseFloat(v, 64); err == nil {
 			cfg.ScoreFloor = f
+		}
+	}
+	if v := os.Getenv("MALLCOP_CONFIDENCE_GATED_CLOSE_TRIAGE_SCORE_FLOOR"); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			cfg.TriageScoreFloor = f
 		}
 	}
 	if v := os.Getenv("MALLCOP_CONFIDENCE_GATED_CLOSE_TOOL_CALL_WEIGHT"); v != "" {
@@ -362,6 +401,15 @@ type gateResult struct {
 	Stats transcriptStats
 	// CitationCount is the number of citations found in the reason field.
 	CitationCount int
+	// EffectiveFloor is the floor that was applied (ScoreFloor for investigate,
+	// TriageScoreFloor for triage). Recorded so the fan-out payload reports the
+	// floor that actually fired the gate, not whichever skill's floor we look
+	// up later.
+	EffectiveFloor float64
+	// TriageMode is true when the gate fired on MALLCOP_SKILL=task:triage.
+	// The fan-out helper dispatches to forceEscalateToInvestigator instead of
+	// the investigate-tuned deep×3 + merge panel.
+	TriageMode bool
 }
 
 // checkConfidenceGate evaluates the confidence gate for a resolve-finding call.
@@ -370,13 +418,20 @@ type gateResult struct {
 //
 // The gate is a no-op (Fired=false) when:
 //   - action != "resolved" (escalations and remediations skip the gate — see below)
-//   - MALLCOP_SKILL != "task:investigate"
+//   - MALLCOP_SKILL is not in {task:investigate, task:triage}
 //   - config.Enabled == false
-//   - citations >= 1 AND score >= score_floor
+//   - citations >= 1 AND score >= effective_floor
 //
 // The gate fires (Fired=true) when:
 //   - action == "resolved" AND citations == 0 (hard requirement — tool volume alone is not evidence)
-//   - action == "resolved" AND score < score_floor
+//   - action == "resolved" AND score < effective_floor
+//
+// effective_floor:
+//   - cfg.ScoreFloor       when skill = task:investigate
+//   - cfg.TriageScoreFloor when skill = task:triage
+//
+// When the gate fires on task:triage, gateResult.TriageMode=true and the caller
+// dispatches forceEscalateToInvestigator instead of the deep×3 + merge panel.
 //
 // Action gating (rung 3 — restored from March pipeline.py:221-243):
 // The consensus check exists to second-guess the LLM when it claims a finding is
@@ -399,14 +454,23 @@ func checkConfidenceGate(campfireID, action, reason string) (gateResult, error) 
 		return gateResult{Fired: false}, nil
 	}
 
-	// Skill check: only gate on task:investigate workers.
+	// Skill check: gate fires on task:investigate (multi-tool flow) and
+	// task:triage (2-tool flow) with skill-specific floor + fan-out.
 	skill := os.Getenv("MALLCOP_SKILL")
-	if skill != "task:investigate" {
+	cfg := loadGateConfig()
+	var effectiveFloor float64
+	var triageMode bool
+	switch skill {
+	case "task:investigate":
+		effectiveFloor = cfg.ScoreFloor
+	case "task:triage":
+		effectiveFloor = cfg.TriageScoreFloor
+		triageMode = true
+	default:
 		return gateResult{Fired: false}, nil
 	}
 
 	// Config check: gate must be enabled.
-	cfg := loadGateConfig()
 	if !cfg.Enabled {
 		return gateResult{Fired: false}, nil
 	}
@@ -423,8 +487,10 @@ func checkConfidenceGate(campfireID, action, reason string) (gateResult, error) 
 		}
 		readErr := fmt.Errorf("confidence gate: read transcript: %w", err)
 		return gateResult{
-			Fired: true,
-			Score: 0,
+			Fired:          true,
+			Score:          0,
+			EffectiveFloor: effectiveFloor,
+			TriageMode:     triageMode,
 		}, readErr
 	}
 
@@ -441,39 +507,55 @@ func checkConfidenceGate(campfireID, action, reason string) (gateResult, error) 
 	// An agent making 8 calls across 4 distinct tools scores 0.64 on those
 	// components alone, clearing the 0.55 floor with zero evidence anchoring.
 	// Requiring at least one citation closes this score-cap bypass.
+	//
+	// mallcoppro-499: this hard floor applies to BOTH task:investigate and
+	// task:triage. "No evidence = no resolve" is a universal invariant.
 	if citationCount == 0 {
 		score := computeConfidenceScore(cfg, stats, 0)
 		return gateResult{
-			Fired:         true,
-			Score:         score,
-			Stats:         stats,
-			CitationCount: 0,
+			Fired:          true,
+			Score:          score,
+			Stats:          stats,
+			CitationCount:  0,
+			EffectiveFloor: effectiveFloor,
+			TriageMode:     triageMode,
 		}, nil
 	}
 
 	// Compute score.
 	score := computeConfidenceScore(cfg, stats, citationCount)
 
-	if score >= cfg.ScoreFloor {
+	if score >= effectiveFloor {
 		return gateResult{
-			Fired:         false,
-			Score:         score,
-			Stats:         stats,
-			CitationCount: citationCount,
+			Fired:          false,
+			Score:          score,
+			Stats:          stats,
+			CitationCount:  citationCount,
+			EffectiveFloor: effectiveFloor,
+			TriageMode:     triageMode,
 		}, nil
 	}
 
 	// Gate fires.
 	return gateResult{
-		Fired:         true,
-		Score:         score,
-		Stats:         stats,
-		CitationCount: citationCount,
+		Fired:          true,
+		Score:          score,
+		Stats:          stats,
+		CitationCount:  citationCount,
+		EffectiveFloor: effectiveFloor,
+		TriageMode:     triageMode,
 	}, nil
 }
 
-// runConfidenceGateFanOut emits the 4 fan-out work:create messages when the gate fires.
-// The sequence is:
+// runConfidenceGateFanOut dispatches the fan-out emission when the gate fires.
+//
+// When gr.TriageMode is true (mallcoppro-499), this delegates to
+// forceEscalateToInvestigator: a single work:create handoff to a fresh
+// task:investigate worker. Triage's 2-tool flow does not warrant the
+// investigate-tuned deep×3 + merge panel; the structural response to "triage
+// short-circuited" is "make the investigator do the work."
+//
+// Otherwise (task:investigate), emits the 4-message investigate fan-out:
 //  1. write-partial-transcript — saves the partial reasoning chain.
 //  2. escalate-to-deep × 3 — creates deep-investigate items for each hypothesis.
 //  3. create-investigate-merge — creates the merge item wired to the 3 deep ids.
@@ -481,6 +563,10 @@ func checkConfidenceGate(campfireID, action, reason string) (gateResult, error) 
 // Returns an error only if a critical step fails (transcript write or all 3 deep
 // escalations fail). The merge item creation is best-effort.
 func runConfidenceGateFanOut(findingID, reason string, gr gateResult) error {
+	if gr.TriageMode {
+		return forceEscalateToInvestigator(findingID, reason, gr)
+	}
+
 	workCampfireID, err := requireEnv("MALLCOP_WORK_CAMPFIRE_ID")
 	if err != nil {
 		return fmt.Errorf("confidence gate fan-out: %w", err)
@@ -492,7 +578,7 @@ func runConfidenceGateFanOut(findingID, reason string, gr gateResult) error {
 		"score: %.4f (floor: %.4f)\n"+
 		"tool_calls: %d, distinct_tools: %d, citations: %d, iterations: %d\n\n"+
 		"## Reason from investigate worker\n\n%s\n",
-		findingID, gr.Score, loadGateConfig().ScoreFloor,
+		findingID, gr.Score, gr.EffectiveFloor,
 		gr.Stats.ToolCallCount, gr.Stats.DistinctToolCount, gr.CitationCount, gr.Stats.Iterations,
 		reason)
 
@@ -571,11 +657,14 @@ func runConfidenceGateFanOut(findingID, reason string, gr gateResult) error {
 	}
 
 	// Emit the gate-fired summary as our output (replaces work:output).
+	// gr.EffectiveFloor is the floor that actually fired the gate (investigate's
+	// ScoreFloor here — kept in the result so the report matches the decision
+	// even if config is reloaded between check and report).
 	return emitJSON(map[string]interface{}{
 		"gate_fired":          true,
 		"finding_id":          findingID,
 		"score":               gr.Score,
-		"score_floor":         loadGateConfig().ScoreFloor,
+		"score_floor":         gr.EffectiveFloor,
 		"tool_calls":          gr.Stats.ToolCallCount,
 		"distinct_tools":      gr.Stats.DistinctToolCount,
 		"citations":           gr.CitationCount,
@@ -583,7 +672,68 @@ func runConfidenceGateFanOut(findingID, reason string, gr gateResult) error {
 		"partial_transcript":  transcriptPath,
 		"deep_item_ids":       deepItemIDs,
 		"merge_item_id":       mergeItemID,
+		"fanout_action":       "deep-investigate-panel",
 		"reason":              "confidence gate fired — score below floor; fan-out to deep-investigate",
+	})
+}
+
+// forceEscalateToInvestigator is the task:triage fan-out (mallcoppro-499).
+//
+// When the gate fires on a triage worker, the structural problem is "triage
+// claimed resolution without doing the work." The cheapest correct fix is to
+// hand the finding off to a fresh investigator with the full investigate tool
+// set — not to spawn a 3-way deep-investigate panel.
+//
+// This emits ONE work:create message via cfWorkCreate: a fresh task:investigate
+// item whose context records that it was force-escalated by the gate. It does
+// NOT emit a synthetic terminal work:output for the original triage scenario —
+// the investigator that picks up this item will emit its own resolve-finding
+// terminal carrying the same finding:<id> tag (same pattern as the
+// runEscalateToInvestigator handoff). Academy attributes the chain via the
+// finding-tag path (mallcoppro-60e).
+//
+// Returns the gate-fired summary as the worker's stdout (replaces work:output).
+func forceEscalateToInvestigator(findingID, reason string, gr gateResult) error {
+	workCampfireID, err := requireEnv("MALLCOP_WORK_CAMPFIRE_ID")
+	if err != nil {
+		return fmt.Errorf("confidence gate fan-out (triage): %w", err)
+	}
+	parentItemID := os.Getenv("MALLCOP_ITEM_ID")
+
+	title := fmt.Sprintf("investigate: %s (gate:triage)", findingID)
+	gateContext := fmt.Sprintf(
+		"confidence-gate fired on triage: score=%.4f floor=%.4f tool_calls=%d distinct_tools=%d citations=%d iterations=%d",
+		gr.Score, gr.EffectiveFloor,
+		gr.Stats.ToolCallCount, gr.Stats.DistinctToolCount, gr.CitationCount, gr.Stats.Iterations,
+	)
+	ctx := fmt.Sprintf("skill=task:investigate finding_id=%s reason=%s parent_item_id=%s gate=%s",
+		findingID, reason, parentItemID, gateContext)
+
+	itemID, err := cfWorkCreate(workCampfireID, "task:investigate", title, ctx, findingID)
+	if err != nil {
+		return fmt.Errorf("confidence gate fan-out (triage): %w", err)
+	}
+
+	// Emit tool-usage so academy counts this dispatch as a forge_call.
+	// Do NOT emit a synthetic scenario terminal — the downstream investigate
+	// worker will produce its own resolve-finding terminal that academy
+	// attributes back to this finding (see runEscalateToInvestigator for the
+	// same handoff pattern, and mallcoppro-2d4 for the bug a synthetic
+	// terminal here would reintroduce).
+	emitToolUsage(workCampfireID, findingID, parentItemID)
+
+	return emitJSON(map[string]interface{}{
+		"gate_fired":     true,
+		"finding_id":     findingID,
+		"score":          gr.Score,
+		"score_floor":    gr.EffectiveFloor,
+		"tool_calls":     gr.Stats.ToolCallCount,
+		"distinct_tools": gr.Stats.DistinctToolCount,
+		"citations":      gr.CitationCount,
+		"iterations":     gr.Stats.Iterations,
+		"item_id":        itemID,
+		"fanout_action":  "escalate-to-investigator",
+		"reason":         "confidence gate fired on triage — force escalate-to-investigator",
 	})
 }
 
