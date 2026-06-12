@@ -2367,3 +2367,183 @@ func TestWorkItemToScenario_TagAttribution_SkipsUnpostedScenarios(t *testing.T) 
 	}
 }
 
+// ---- unit: normalizeTerminalAction (mallcoppro-190) -------------------------
+//
+// Background: legion (cmd/we) emits action="abandoned" on the wire when a
+// worker exits end_turn without invoking any tool. The academy normalizes
+// that into the security-domain terminal vocabulary as "escalated" plus a
+// structural cause "abandoned-by-model". Other actions pass through unchanged.
+
+func TestNormalizeTerminalAction_AbandonedBecomesEscalated(t *testing.T) {
+	normalized, cause := normalizeTerminalAction("abandoned")
+	if normalized != "escalated" {
+		t.Errorf("normalized = %q, want escalated", normalized)
+	}
+	if cause != "abandoned-by-model" {
+		t.Errorf("structural_cause = %q, want abandoned-by-model", cause)
+	}
+}
+
+func TestNormalizeTerminalAction_ResolvedPassthrough(t *testing.T) {
+	normalized, cause := normalizeTerminalAction("resolved")
+	if normalized != "resolved" {
+		t.Errorf("normalized = %q, want resolved", normalized)
+	}
+	if cause != "" {
+		t.Errorf("structural_cause = %q, want empty for pass-through", cause)
+	}
+}
+
+func TestNormalizeTerminalAction_EscalatedPassthrough(t *testing.T) {
+	normalized, cause := normalizeTerminalAction("escalated")
+	if normalized != "escalated" {
+		t.Errorf("normalized = %q, want escalated", normalized)
+	}
+	if cause != "" {
+		t.Errorf("structural_cause = %q, want empty for pass-through", cause)
+	}
+}
+
+// TestAcademyMock_AbandonedNormalizedAtConsumption is the end-to-end gate:
+// feed academy a real work:close with action="abandoned" and assert the
+// emitted ScenarioRecord JSON has terminal_action="escalated" and
+// structural_cause="abandoned-by-model". This exercises the consumption site
+// in the watch loop, not just the normalizer in isolation.
+func TestAcademyMock_AbandonedNormalizedAtConsumption(t *testing.T) {
+	scenDir := t.TempDir()
+	writeMinimalScenario(t, scenDir, "AB-01", "fnd_ab_001", "detector-priv-escalation",
+		"Abandoned-by-model normalization", "high")
+
+	outDir := t.TempDir()
+	ms := &mockSender{readMsgs: nil}
+
+	args := runArgs{
+		targetCampfire: "cf-mock-target-abandoned",
+		scenariosDir:   scenDir,
+		scenarioFilter: "AB-01",
+		outputDir:      outDir,
+		maxConcurrent:  1,
+		timeout:        5 * time.Second,
+		runID:          "test-mock-run-abandoned",
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- academy(ms, args)
+	}()
+
+	// Wait for the work:create.
+	var sentID string
+	for i := 0; i < 50; i++ {
+		time.Sleep(20 * time.Millisecond)
+		ms.mu.Lock()
+		if len(ms.sends) > 0 {
+			sentID = ms.sends[0].returnID
+		}
+		ms.mu.Unlock()
+		if sentID != "" {
+			break
+		}
+	}
+	if sentID == "" {
+		t.Fatal("academy never posted work:create within timeout")
+	}
+
+	// Inject a terminal work:close with action="abandoned" — the wire form
+	// emitted by legion when a worker exits end_turn without any tool call.
+	closePayloadBytes, _ := json.Marshal(closePayload{
+		ItemID: sentID,
+		Action: "abandoned",
+		Skill:  "task:investigate",
+	})
+	ms.mu.Lock()
+	ms.readMsgs = append(ms.readMsgs, cfMessage{
+		ID:      "close-abandoned-001",
+		Tags:    []string{"work:close", "action:abandoned"},
+		Payload: string(closePayloadBytes),
+	})
+	ms.mu.Unlock()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("academy: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("academy did not complete within deadline")
+	}
+
+	// Read AB-01.json off disk — assert the encoded JSON, not just struct
+	// fields. structural_cause must appear; terminal_action must be normalized.
+	data, err := os.ReadFile(filepath.Join(outDir, "AB-01.json"))
+	if err != nil {
+		t.Fatalf("AB-01.json not found: %v", err)
+	}
+
+	// Assert against the raw JSON map first — catches struct-tag regressions
+	// (e.g. structural_cause field renamed without updating json tag).
+	var raw map[string]interface{}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("parse AB-01.json as map: %v", err)
+	}
+	if got := raw["terminal_action"]; got != "escalated" {
+		t.Errorf("JSON terminal_action = %v, want \"escalated\"", got)
+	}
+	if got := raw["structural_cause"]; got != "abandoned-by-model" {
+		t.Errorf("JSON structural_cause = %v, want \"abandoned-by-model\"", got)
+	}
+
+	// Also decode through the struct to confirm the typed field carries
+	// the normalized value.
+	var rec ScenarioRecord
+	if err := json.Unmarshal(data, &rec); err != nil {
+		t.Fatalf("parse AB-01.json as ScenarioRecord: %v", err)
+	}
+	if rec.TerminalAction != "escalated" {
+		t.Errorf("ScenarioRecord.TerminalAction = %q, want escalated", rec.TerminalAction)
+	}
+	if rec.StructuralCause != "abandoned-by-model" {
+		t.Errorf("ScenarioRecord.StructuralCause = %q, want abandoned-by-model", rec.StructuralCause)
+	}
+	if rec.TerminalAt == nil {
+		t.Error("terminal_at must not be nil for normalized terminal close")
+	}
+}
+
+// TestScenarioRecord_StructuralCauseOmitemptyWhenAbsent confirms the
+// structural_cause JSON tag uses omitempty — a resolved scenario without
+// normalization must not emit a "structural_cause": "" key.
+func TestScenarioRecord_StructuralCauseOmitemptyWhenAbsent(t *testing.T) {
+	outDir := t.TempDir()
+	now := time.Now()
+	termAt := now.Add(2 * time.Second)
+
+	ts := &trackedScenario{
+		scenarioID:     "AC-99",
+		findingID:      "academy-run-099-AC-99",
+		workItemID:     "msg-99",
+		postedAt:       now,
+		chain:          []ChainEntry{{ItemID: "msg-99", Skill: "task:triage"}},
+		terminal:       true,
+		terminalAt:     termAt,
+		terminalAction: "resolved",
+		terminalItemID: "msg-99",
+		// structuralCause intentionally unset.
+	}
+
+	if err := writeScenarioRecord(ts, "run-099", "cf-x", outDir); err != nil {
+		t.Fatalf("writeScenarioRecord: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(outDir, "AC-99.json"))
+	if err != nil {
+		t.Fatalf("AC-99.json not found: %v", err)
+	}
+	var raw map[string]interface{}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("parse AC-99.json: %v", err)
+	}
+	if _, present := raw["structural_cause"]; present {
+		t.Errorf("structural_cause must be omitted (omitempty) when empty; got %v", raw["structural_cause"])
+	}
+}
+

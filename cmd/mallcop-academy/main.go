@@ -171,6 +171,14 @@ type ScenarioRecord struct {
 	WallSeconds     float64         `json:"wall_seconds,omitempty"`
 	TerminalAction  string          `json:"terminal_action,omitempty"`
 	TerminalItemID  string          `json:"terminal_item_id,omitempty"`
+	// StructuralCause carries an academy-side interpretation of the raw close
+	// action when the action was normalized to a different security-domain
+	// terminal. Example: a worker that exits end_turn without invoking a tool
+	// emits action="abandoned" on the wire; the academy normalizes that to
+	// terminal_action="escalated" and records structural_cause="abandoned-by-model"
+	// so downstream graders can distinguish a real escalation from a model that
+	// gave up. Empty when no normalization occurred. (mallcoppro-190)
+	StructuralCause string          `json:"structural_cause,omitempty"`
 	FullChain       []ChainEntry    `json:"full_chain"`
 
 	// Forge metering: real per-scenario token and call counts from GET /v1/usage.
@@ -223,6 +231,12 @@ type trackedScenario struct {
 	terminalAt     time.Time
 	terminalAction string
 	terminalItemID string
+	// structuralCause is the academy-side interpretation of the raw close action
+	// (e.g. "abandoned-by-model" when legion's wire action="abandoned" was
+	// normalized to terminal_action="escalated"). Empty when no normalization
+	// occurred. Populated by normalizeTerminalAction at the consumption site.
+	// (mallcoppro-190)
+	structuralCause string
 
 	// F4B grading inputs — accumulated during the watch loop.
 	terminalReason      string // reason field from the terminal close payload
@@ -283,24 +297,48 @@ func (c closePayload) resolvedItemID() string {
 // terminalActions are work:close actions that indicate chain completion.
 // Any action not in this set is treated as intermediate (follow-on work expected).
 //
-// "abandoned" is emitted by legion (cmd/we) when a worker exits end_turn
-// without ever invoking a tool — InferResult.ToolCallCount == 0. Prior
-// behaviour was to emit resolution:done in that case, which left the chain
-// open and forced the academy to wait on the lane wall. Treating "abandoned"
-// as terminal short-circuits the chain and grades the scenario as a fail
-// immediately (because expected.chain_action is always one of resolved /
-// escalated / remediated, never abandoned). RCA: this caused every recent
-// llama-3.3-70b lane to look like a "timeout" — model returned end_turn
-// with zero tool calls in 42-48% of investigate workers, but the chain
-// stayed open until the 60m wall fired. See docs/bakeoff/bakeoff-20260610*
-// for the empirical breakdown.
+// The set is the security-domain terminal vocabulary. Legion may emit
+// additional close actions on the wire (e.g. "abandoned" — see
+// normalizeTerminalAction) that the academy maps onto this vocabulary
+// before classification. Legion's wire format is therefore unchanged by
+// this set; mapping happens here.
 var terminalActions = map[string]bool{
 	"resolved":       true,
 	"escalated":      true,
 	"remediated":     true,
 	"false-positive": true,
 	"closed":         true,
-	"abandoned":      true,
+}
+
+// normalizeTerminalAction maps a raw work:close action emitted on the wire
+// into the academy's security-domain terminal vocabulary, plus an optional
+// structural cause that records the original wire action when normalization
+// occurred.
+//
+// Current mappings:
+//   - "abandoned" → ("escalated", "abandoned-by-model"): legion (cmd/we)
+//     emits action="abandoned" when a worker exits end_turn without invoking
+//     a tool (InferResult.ToolCallCount == 0). Treating this as a security-
+//     domain escalation lets the chain terminate immediately while preserving
+//     the distinction (structural_cause="abandoned-by-model") so graders can
+//     tell a real escalation from a model that gave up. This avoids both
+//     (a) the 60m lane-wall waits we used to take when abandoned was treated
+//     as intermediate (see docs/bakeoff/bakeoff-20260610*), and (b) emitting
+//     terminal_action="abandoned" — a value outside the security-domain
+//     vocabulary that downstream rubric/grading code does not understand.
+//
+// Any action not explicitly mapped is passed through unchanged with an empty
+// structural cause. Callers should then check terminalActions[normalized] to
+// decide whether the close terminates the chain.
+//
+// (mallcoppro-190)
+func normalizeTerminalAction(action string) (normalized string, structuralCause string) {
+	switch action {
+	case "abandoned":
+		return "escalated", "abandoned-by-model"
+	default:
+		return action, ""
+	}
 }
 
 // ---- Academy sender interface (for testing) -----------------------------------
@@ -971,18 +1009,29 @@ func academy(sender Sender, args runArgs) error {
 				ts.triageCloseAction = action
 			}
 
+			// mallcoppro-190: normalize the raw wire action into the academy's
+			// security-domain terminal vocabulary before classification. The
+			// raw action (`action`) is still used elsewhere (e.g. chain entry,
+			// triage close); only the terminal classification uses `normalized`.
+			// Insertion point for future detectors (chain-shape, etc.) is
+			// between this normalization and the terminal classification below.
+			normalized, structCause := normalizeTerminalAction(action)
+
 			// F4B: capture reason from close payload for mention/no-mention checks.
-			if terminalActions[action] && ts.terminalReason == "" {
+			if terminalActions[normalized] && ts.terminalReason == "" {
 				ts.terminalReason = extractTerminalReason(msg.Payload)
 			}
 
 			// Classify as terminal: terminal action AND no follow-on work:create
 			// from this close observed yet.
-			if !ts.terminal && terminalActions[action] {
+			if !ts.terminal && terminalActions[normalized] {
 				ts.terminal = true
 				now := time.Now()
 				ts.terminalAt = now
-				ts.terminalAction = action
+				ts.terminalAction = normalized
+				if structCause != "" {
+					ts.structuralCause = structCause
+				}
 				ts.terminalItemID = itemID
 				ts.mu.Unlock()
 
@@ -1005,8 +1054,13 @@ func academy(sender Sender, args runArgs) error {
 				if err := writeScenarioRecord(ts, args.runID, args.targetCampfire, args.outputDir, args.usage); err != nil {
 					fmt.Fprintf(os.Stderr, "WARN: write scenario record for %s: %v\n", scenID, err)
 				} else {
-					fmt.Fprintf(os.Stderr, "scenario %s terminal: action=%s item=%s\n",
-						scenID, action, itemID)
+					if structCause != "" {
+						fmt.Fprintf(os.Stderr, "scenario %s terminal: action=%s (raw=%s, cause=%s) item=%s\n",
+							scenID, normalized, action, structCause, itemID)
+					} else {
+						fmt.Fprintf(os.Stderr, "scenario %s terminal: action=%s item=%s\n",
+							scenID, normalized, itemID)
+					}
 				}
 			} else {
 				ts.mu.Unlock()
@@ -1305,6 +1359,7 @@ func writeScenarioRecord(ts *trackedScenario, runID, targetCampfire, outputDir s
 		rec.WallSeconds = ts.terminalAt.Sub(ts.postedAt).Seconds()
 		rec.TerminalAction = ts.terminalAction
 		rec.TerminalItemID = ts.terminalItemID
+		rec.StructuralCause = ts.structuralCause
 	}
 
 	// Forge metering: prefer campfire-sourced usage (mallcoppro-237 A2) over the
