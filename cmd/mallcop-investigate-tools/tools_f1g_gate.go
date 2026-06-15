@@ -83,7 +83,65 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync/atomic"
 )
+
+// lookupRulesSkipPenalty is the soft penalty subtracted from the structural
+// confidence score when MALLCOP_SKILL=task:investigate AND the worker resolved
+// without ever invoking the lookup-rules tool AND did not cite a valid rule_id.
+//
+// mallcoppro-8b0: Wave 4 evidence showed investigate workers writing prose like
+// "events carry maintenance_window=true ... which match a benign-pattern flag
+// suitable for lookup-rules" and then escalating WITHOUT actually invoking the
+// tool. Across all B1 scenarios, 0/3 had rule_id citations — the operator-
+// decisions infrastructure shipped in Waves 2-3 was dead code because nothing
+// enforced tool usage.
+//
+// The penalty is a *soft* signal, not a hard verdict:
+//
+//   - Scores well above the floor (pre-penalty ≥ floor+0.10) remain above the
+//     floor after the penalty — the resolve still passes (some legitimate
+//     resolves genuinely have no matching rule and the worker has strong
+//     direct evidence; we do not want to false-fire those).
+//   - Scores below the floor (pre-penalty < floor) already fire — the penalty
+//     is redundant but doesn't change the outcome.
+//   - Borderline scores (pre-penalty ∈ [floor, floor+0.10)) flip from pass to
+//     fire — the worker's confidence claim is weaker when they had a tool that
+//     could have produced a citation and chose not to use it.
+//
+// 0.10 is a conservative default: it equals the citation weight (0.04) times
+// 2.5, i.e. "two and a half missing citations' worth of evidence weight." A
+// stronger penalty (0.20 or hard fire) would over-fire on legitimate resolves
+// where no rule applied; a weaker penalty would barely move the gate decision.
+const lookupRulesSkipPenalty = 0.10
+
+// lookupRulesSkippedResolves counts resolves where the gate observed a
+// lookup-rules skip (worker did not invoke lookup-rules AND did not supply a
+// valid rule_id). Used for bakeoff-level adoption tracking — incremented
+// whenever the soft penalty path is taken regardless of whether the gate
+// ultimately fired. Read via test helpers; not exposed on stdout.
+var lookupRulesSkippedResolves int64
+
+// lookupRulesInvoked reports whether the worker's chain contains at least one
+// invocation of the lookup-rules tool. Detection is tag-based: legion emits a
+// tool:lookup-rules tag on the tool_use record for each call (see
+// tools_f1g_gate.go::allowedRetrievalTags — lookup-rules is already in the
+// retrieval allowlist for citation cross-checking).
+//
+// The function only checks message tags; payload content is not consulted
+// because a model-controlled payload could mention the string "lookup-rules"
+// without ever invoking the tool. Tag presence requires legion's tool
+// infrastructure to have actually fired the tool — the model cannot forge it.
+func lookupRulesInvoked(msgs []cfMessage) bool {
+	for _, msg := range msgs {
+		for _, tag := range msg.Tags {
+			if tag == "tool:lookup-rules" {
+				return true
+			}
+		}
+	}
+	return false
+}
 
 // confidenceGateConfig holds the parsed configuration for the gate.
 type confidenceGateConfig struct {
@@ -504,6 +562,14 @@ type gateResult struct {
 	// The fan-out helper dispatches to forceEscalateToInvestigator instead of
 	// the investigate-tuned deep×3 + merge panel.
 	TriageMode bool
+	// SkippedLookup is true when the worker resolved on task:investigate
+	// without invoking the lookup-rules tool AND without citing a valid
+	// rule_id. Recorded for logging and metrics — the soft penalty has
+	// already been applied to Score by the time this flag is set.
+	// mallcoppro-8b0: the structural signal that the operator-decisions
+	// corpus is dead code in production because the worker is not querying
+	// it. Drives the lookupRulesSkippedResolves counter.
+	SkippedLookup bool
 }
 
 // checkConfidenceGate evaluates the confidence gate for a resolve-finding call.
@@ -614,12 +680,19 @@ func checkConfidenceGate(campfireID, action, reason, ruleID string) (gateResult,
 	// Forgery defence: only IDs that successfully load from the YAML count.
 	// An invented "R-999" silently contributes nothing — the agent still has
 	// to retrieve real evidence or call lookup-rules and cite the result.
+	//
+	// mallcoppro-8b0: track validRuleIDCited so the lookup-rules-skip penalty
+	// can distinguish "worker did the work and cited a rule" from "worker
+	// invented an ID that happens to not load." Only valid rule_id citations
+	// exempt the worker from the soft penalty below.
+	validRuleIDCited := false
 	if ruleID != "" {
 		repoRoot, rrErr := resolveRepoRoot()
 		if rrErr == nil {
 			if rules, lrErr := loadOperatorRules(repoRoot); lrErr == nil {
 				if _, ok := findRuleByID(rules, ruleID); ok {
 					citationCount++
+					validRuleIDCited = true
 				}
 			}
 		}
@@ -654,6 +727,42 @@ func checkConfidenceGate(campfireID, action, reason, ruleID string) (gateResult,
 	// Compute score.
 	score := computeConfidenceScore(cfg, stats, citationCount)
 
+	// mallcoppro-8b0: lookup-rules-skip soft penalty (task:investigate only).
+	//
+	// When the investigate worker resolved WITHOUT invoking lookup-rules AND
+	// did NOT cite a valid rule_id, subtract lookupRulesSkipPenalty from the
+	// score. This tips borderline scores (pre-penalty ∈ [floor, floor+0.10))
+	// from pass to fire, without affecting:
+	//
+	//   - high scores ≥ floor+0.10 (which absorb the penalty and still pass)
+	//   - already-firing scores < floor (penalty redundant, same outcome)
+	//   - the zero-citation hard floor above (already fired)
+	//
+	// Triage is exempt because triage's Step 2b is correctly advisory — the
+	// triage rubric uses lookup-rules only when the worker has already
+	// observed a benign-pattern flag, so a triage resolve without lookup-rules
+	// is not by itself a process violation. Investigate, by contrast, is the
+	// stage where unresolved triage findings land, and skipping the corpus
+	// query there means the Wave 2-3 infrastructure isn't being used.
+	//
+	// A valid rule_id citation exempts the worker because citing a rule from
+	// the corpus proves they queried it (the rule_id had to come from
+	// somewhere). Forged rule_ids are silently filtered above (validRuleIDCited
+	// stays false), so they do not provide the exemption.
+	skippedLookup := false
+	if skill == "task:investigate" && !validRuleIDCited && !lookupRulesInvoked(msgs) {
+		skippedLookup = true
+		score -= lookupRulesSkipPenalty
+		atomic.AddInt64(&lookupRulesSkippedResolves, 1)
+		// Structured log — surfaces in worker stderr and bakeoff logs so the
+		// operator can see when the borderline tip fires. The "fired" decision
+		// is made by the floor comparison below; this log records the signal.
+		fmt.Fprintf(os.Stderr,
+			"gate: skipped-lookup-rules penalty applied "+
+				"(skill=task:investigate score_after=%.4f floor=%.4f citation_count=%d)\n",
+			score, effectiveFloor, citationCount)
+	}
+
 	if score >= effectiveFloor {
 		return gateResult{
 			Fired:          false,
@@ -662,10 +771,17 @@ func checkConfidenceGate(campfireID, action, reason, ruleID string) (gateResult,
 			CitationCount:  citationCount,
 			EffectiveFloor: effectiveFloor,
 			TriageMode:     triageMode,
+			SkippedLookup:  skippedLookup,
 		}, nil
 	}
 
 	// Gate fires.
+	if skippedLookup {
+		fmt.Fprintf(os.Stderr,
+			"gate: skipped-lookup-rules borderline tip → FIRED "+
+				"(skill=task:investigate score=%.4f floor=%.4f)\n",
+			score, effectiveFloor)
+	}
 	return gateResult{
 		Fired:          true,
 		Score:          score,
@@ -673,6 +789,7 @@ func checkConfidenceGate(campfireID, action, reason, ruleID string) (gateResult,
 		CitationCount:  citationCount,
 		EffectiveFloor: effectiveFloor,
 		TriageMode:     triageMode,
+		SkippedLookup:  skippedLookup,
 	}, nil
 }
 
