@@ -19,16 +19,23 @@ Cross-reference, corroborate, and look for disconfirming evidence.
 You have more tools and more iterations than triage. Use them to build
 a complete picture, not to confirm a hypothesis.
 
-### Check the operator-decisions corpus
+### Check the operator-decisions corpus (REQUIRED)
 
-Before doing deep investigation, call **lookup-rules** with the finding's
-detector family and any observable metadata flags you have already gathered
-(from finding.metadata or from a first search-events call). The corpus
-contains pre-seeded operator decisions for known benign patterns
-(maintenance windows, scheduled batches, fat-finger logins, password-reset
-recoveries, business travel). If a rule matches, you can cite its `id` in
-resolve-finding as `rule_id` — that citation counts toward the F2A gate's
-evidence requirement.
+You **MUST** call `lookup-rules` BEFORE deciding to resolve a finding. This
+is a process step the F2A gate enforces — workers that resolve without
+calling lookup-rules are penalized at gate-evaluation time even when their
+score would otherwise clear the floor (mallcoppro-8b0). Calling it once
+with arguments that reflect the finding's actual family and observed flags
+is sufficient; you do not need to call it repeatedly.
+
+Pass the finding's detector family and any observable metadata flags you
+have already gathered (from finding.metadata or from a first search-events
+call). The corpus contains pre-seeded operator decisions for known benign
+patterns (maintenance windows, scheduled batches, fat-finger logins,
+password-reset recoveries, business travel). If a rule matches, you MUST
+cite its `id` in resolve-finding as `rule_id` — that citation counts toward
+the F2A gate's evidence requirement and is the strongest form of
+evidence-grounded resolution.
 
 The `finding_metadata` you pass should be a flat string map of the
 observable flags you have actually seen — for example
@@ -38,9 +45,16 @@ surfaced a login_success event following an auth failure burst. Only pass
 flags you have direct evidence for; the rule corpus is a contract about
 what the worker has observed, not a hypothesis about what might be true.
 
+Calling lookup-rules with no arguments OR with arguments that do not match
+the finding metadata is a process violation — be precise.
+
 If lookup-rules returns no match, continue with the normal investigation
-workflow below. The rule corpus is a shortcut, not a substitute for
-evidence-grounded reasoning.
+workflow below. The rule corpus is a shortcut for known patterns, not a
+substitute for evidence-grounded reasoning when no rule applies — but the
+*call itself* is the process step the gate looks for, not the match result.
+A resolve-finding that follows a lookup-rules call with no match must still
+cite at least one retrieved evt_/finding_ ID per the existing zero-citation
+hard floor.
 
 ### Chase provenance
 Don't stop at surface signals. Trace the chain:

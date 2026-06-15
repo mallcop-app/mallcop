@@ -242,9 +242,14 @@ func TestConfidenceGate_HighScore_PassesThrough(t *testing.T) {
 	// evt_001 must be seeded in a tool result payload so the cross-check passes.
 	// Score: 0.04*8 + 0.08*4 + 0.04*1 - 0.02*max(8-3,0)
 	//      = 0.32  + 0.32  + 0.04  - 0.10 = 0.58 ≥ 0.55 ✓
+	//
+	// mallcoppro-8b0: includes lookup-rules in the chain so the soft penalty
+	// for skipping the operator-decisions corpus query does not apply. A high-
+	// score worker that DID call lookup-rules and has a real retrieval citation
+	// is exactly the "did the work" case the gate is supposed to pass through.
 	toolNames := []string{
-		"check-baseline", "search-events", "search-findings", "read-config",
-		"check-baseline", "search-events", "search-findings", "read-config",
+		"check-baseline", "search-events", "search-findings", "lookup-rules",
+		"check-baseline", "search-events", "search-findings", "lookup-rules",
 	}
 	seedToolUseMsgs(t, cfBin, cfHome, campfireID, toolNames)
 
