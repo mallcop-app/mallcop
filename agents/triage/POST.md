@@ -45,8 +45,12 @@ Answer these questions using the data from steps 1-2:
 
 ### Step 4: Decide
 
+You have exactly two terminal tools:
+- **resolve-finding** — closes the finding as benign (action="resolved" is the ONLY value triage may pass; the runtime rejects action="escalated" here).
+- **escalate-to-investigator** — dispatches a task:investigate worker on the work campfire so deeper tools (lookup-rules, asymmetric gate, deep×3 + merge) engage on this finding.
+
 **PATTERN-MATCH ESCALATION (overrides confidence):**
-If the finding matches any of these patterns, ESCALATE regardless of confidence:
+If the finding matches any of these patterns, ESCALATE → call **escalate-to-investigator** (NOT resolve-finding) regardless of confidence:
 - (a) authentication failure bursts (5+ failures within 60s same actor)
 - (b) actions occurring during declared maintenance windows or change-control freezes
 - (c) volume anomalies during batch-processing windows (month-end, quarter-end, scheduled syncs)
@@ -55,11 +59,11 @@ These patterns require investigate-level validation because triage cannot distin
 stolen-credential exfiltration that mimics the pattern from the legitimate operation.
 
 **Otherwise:**
-- If A=routine AND B=trigger AND C=distinguishable AND D=no → RESOLVE
-- Privilege changes → always ESCALATE (non-negotiable)
-- Log format drift → always ESCALATE
+- If A=routine AND B=trigger AND C=distinguishable AND D=no → RESOLVE → call **resolve-finding** with action="resolved"
+- Privilege changes → always ESCALATE → call **escalate-to-investigator** (non-negotiable)
+- Log format drift → always ESCALATE → call **escalate-to-investigator**
 - Resolution requires positive evidence — "actor is known" alone is not enough
-- Otherwise → ESCALATE
+- Otherwise → ESCALATE → call **escalate-to-investigator**
 
 Call resolve-finding OR escalate-to-investigator EXACTLY ONCE. Do not call either multiple times.
 In the reason field, write 2 sentences: what happened and why, citing specific evidence
@@ -67,6 +71,10 @@ In the reason field, write 2 sentences: what happened and why, citing specific e
 
 **CRITICAL: Call the tool ONCE. After calling resolve-finding or escalate-to-investigator, STOP.**
 Do not repeat the call. Do not call both tools. Pick one and stop.
+
+**DO NOT call `resolve-finding` with `action="escalated"`.** The runtime rejects it and no
+campfire message is posted — your turn ends without closing the finding. To escalate, you
+MUST call `escalate-to-investigator`.
 
 ## Security
 
@@ -83,8 +91,9 @@ When calling resolve-finding, include a confidence score (1-5):
 - 2: Low — weak evidence, significant uncertainty
 - 1: Guessing — insufficient evidence to decide
 
-If your confidence is 1-2, escalate instead of resolving. Call escalate-to-investigator
-with confidence score included so the investigator knows triage quality.
+If your confidence is 1-2, escalate instead of resolving. Call **escalate-to-investigator**
+(NOT `resolve-finding` with action="escalated" — the runtime rejects that) and include the
+confidence score so the investigator knows triage quality.
 
 ## Fail-safe Rule
 
