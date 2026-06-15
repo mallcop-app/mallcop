@@ -12,10 +12,13 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"gopkg.in/yaml.v3"
@@ -378,5 +381,103 @@ func TestGate_RuleIDCountsAsCitation(t *testing.T) {
 	}
 	if gr3.CitationCount != 0 {
 		t.Errorf("empty rule_id: citation_count = %d, want 0", gr3.CitationCount)
+	}
+}
+
+// ---- TestLoadOperatorRules_ChecksumMismatch_Errors --------------------------
+//
+// Security test (mallcoppro-b92): when sha256 enforcement is on, a corpus
+// whose hash does not match the expected value MUST fail to load. This is the
+// belt+suspenders defence against a tampered operator-decisions.yaml that
+// would otherwise grant gate-bypassing rule_id citations.
+func TestLoadOperatorRules_ChecksumMismatch_Errors(t *testing.T) {
+	resetRulesCache := func() {
+		rulesCacheMu.Lock()
+		rulesCacheData = nil
+		rulesCacheErr = nil
+		rulesCacheKey = ""
+		rulesCacheOnce = sync.Once{}
+		rulesCacheMu.Unlock()
+	}
+
+	// (a) Wrong hash via MALLCOP_RULES_SHA256 override → expect error.
+	resetRulesCache()
+	repoRoot := writeRulesFixture(t, fixtureRulesYAML)
+	t.Setenv("MALLCOP_RULES_SHA256", "0000000000000000000000000000000000000000000000000000000000000000")
+	t.Setenv("MALLCOP_RULES_SHA256_ENFORCE", "")
+	if _, err := loadOperatorRules(repoRoot); err == nil {
+		t.Errorf("expected load error on sha256 mismatch (override), got nil")
+	} else if !strings.Contains(err.Error(), "sha256 mismatch") {
+		t.Errorf("expected 'sha256 mismatch' in error, got: %v", err)
+	}
+
+	// (b) Correct hash via override → expect success.
+	resetRulesCache()
+	repoRoot2 := writeRulesFixture(t, fixtureRulesYAML)
+	sum := sha256.Sum256([]byte(fixtureRulesYAML))
+	t.Setenv("MALLCOP_RULES_SHA256", hex.EncodeToString(sum[:]))
+	if rules, err := loadOperatorRules(repoRoot2); err != nil {
+		t.Errorf("expected load success with matching override hash, got: %v", err)
+	} else if len(rules) != 3 {
+		t.Errorf("expected 3 rules, got %d", len(rules))
+	}
+
+	// (c) MALLCOP_RULES_SHA256_ENFORCE=1 with no override → expected hash is the
+	// pinned constant; the test fixture's content differs from the shipped
+	// corpus so the load must fail.
+	resetRulesCache()
+	repoRoot3 := writeRulesFixture(t, fixtureRulesYAML)
+	t.Setenv("MALLCOP_RULES_SHA256", "")
+	t.Setenv("MALLCOP_RULES_SHA256_ENFORCE", "1")
+	if _, err := loadOperatorRules(repoRoot3); err == nil {
+		t.Errorf("expected load error: fixture YAML hash != pinned constant; got nil")
+	} else if !strings.Contains(err.Error(), "sha256 mismatch") {
+		t.Errorf("expected 'sha256 mismatch' in error, got: %v", err)
+	}
+
+	// (d) No enforcement (both env vars empty) → load succeeds regardless.
+	resetRulesCache()
+	repoRoot4 := writeRulesFixture(t, fixtureRulesYAML)
+	t.Setenv("MALLCOP_RULES_SHA256", "")
+	t.Setenv("MALLCOP_RULES_SHA256_ENFORCE", "")
+	if _, err := loadOperatorRules(repoRoot4); err != nil {
+		t.Errorf("expected load success with enforcement off, got: %v", err)
+	}
+}
+
+// ---- TestExpectedOperatorRulesSHA256_MatchesShippedCorpus -------------------
+//
+// Regression guard (mallcoppro-b92): expectedOperatorRulesSHA256 must equal
+// the sha256 of the repo's agents/rules/operator-decisions.yaml. If they
+// diverge, the build/release process forgot to regenerate the constant after
+// editing the corpus — production deploys with MALLCOP_RULES_SHA256_ENFORCE=1
+// would then refuse to load rules.
+func TestExpectedOperatorRulesSHA256_MatchesShippedCorpus(t *testing.T) {
+	// Walk up from CWD until we find go.mod, which is robust against package
+	// restructures. go test's CWD is the package directory.
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	repoRoot := cwd
+	for i := 0; i < 8; i++ {
+		if _, err := os.Stat(filepath.Join(repoRoot, "go.mod")); err == nil {
+			break
+		}
+		parent := filepath.Dir(repoRoot)
+		if parent == repoRoot {
+			t.Fatalf("could not locate repo root (go.mod) from %s", cwd)
+		}
+		repoRoot = parent
+	}
+	corpus := filepath.Join(repoRoot, "agents", "rules", "operator-decisions.yaml")
+	data, err := os.ReadFile(corpus)
+	if err != nil {
+		t.Fatalf("read shipped corpus: %v", err)
+	}
+	sum := sha256.Sum256(data)
+	got := hex.EncodeToString(sum[:])
+	if got != expectedOperatorRulesSHA256 {
+		t.Errorf("expectedOperatorRulesSHA256 is stale.\n  shipped corpus: %s\n  constant:       %s\n  fix: update expectedOperatorRulesSHA256 in tools_lookup_rules.go to the shipped hash and commit.", got, expectedOperatorRulesSHA256)
 	}
 }

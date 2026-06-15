@@ -120,20 +120,46 @@ for d in "${DISPOSITIONS[@]}"; do
 done
 note "disposition POST.md specs linked from ${REPO_ROOT}/agents/"
 
-# 3b. Operator-decisions rule corpus symlink (mallcoppro-df1).
-# The lookup-rules tool reads agents/rules/operator-decisions.yaml relative
-# to its CWD (resolveRepoRoot → MALLCOP_REPO_ROOT env or os.Getwd()). Workers
-# spawn with CWD = MALLCOP_HOME, and MALLCOP_HOME/agents → .mallcop/agents
-# already exists from the disposition symlinks above. Add a rules/ entry so
-# the worker resolves agents/rules/operator-decisions.yaml to the live file
-# in the legion bundle.
-rules_src="${REPO_ROOT}/agents/rules"
-rules_dst="${DEPLOY_DIR}/agents/rules"
-if [[ -d "${rules_src}" ]]; then
-  ln -sfn "${rules_src}" "${rules_dst}"
-  note "operator-decisions rule corpus linked from ${rules_src}"
+# 3b. Operator-decisions rule corpus — hermetic copy (mallcoppro-df1, hardened mallcoppro-b92).
+#
+# The lookup-rules tool reads agents/rules/operator-decisions.yaml relative to
+# its CWD (resolveRepoRoot → MALLCOP_REPO_ROOT env or os.Getwd()). Workers spawn
+# with CWD = MALLCOP_HOME.
+#
+# Previously this was a directory symlink to ${REPO_ROOT}/agents/rules. That
+# leaves a TOCTOU window: an attacker briefly able to write to ${REPO_ROOT}
+# during deploy (e.g. a malicious git checkout, an unprivileged process racing
+# the symlink) could swap operator-decisions.yaml for a corpus that whitelists
+# attacker behaviour, and the gate's rule_id citation path would accept it.
+#
+# Defence: copy the YAML file into the deployment as a real (non-symlink) file
+# using a tmpfile + atomic rename. Defence-in-depth at load time via sha256
+# pinning lives in cmd/mallcop-investigate-tools/tools_lookup_rules.go.
+rules_src_file="${REPO_ROOT}/agents/rules/operator-decisions.yaml"
+rules_dst_dir="${DEPLOY_DIR}/agents/rules"
+rules_dst_file="${rules_dst_dir}/operator-decisions.yaml"
+if [[ -f "${rules_src_file}" ]]; then
+  # If the destination already exists as a symlink (legacy deployments), remove
+  # it before mkdir so we end up with a real directory.
+  if [[ -L "${rules_dst_dir}" ]]; then
+    rm -f "${rules_dst_dir}"
+  fi
+  mkdir -p "${rules_dst_dir}"
+  # Atomic install: copy to a sibling tmpfile, then rename. mv(1) on the same
+  # filesystem is a single rename(2) syscall — readers see either the old file
+  # or the new file, never a partial write.
+  rules_tmp="${rules_dst_file}.tmp.$$"
+  cp -f "${rules_src_file}" "${rules_tmp}"
+  chmod 0644 "${rules_tmp}"
+  mv -f "${rules_tmp}" "${rules_dst_file}"
+  # Belt+suspenders: the destination must be a real file, not a symlink. If a
+  # later step or operator process recreates the symlink, abort the deploy.
+  if [[ -L "${rules_dst_file}" ]]; then
+    err "operator-decisions.yaml at ${rules_dst_file} is a symlink after install; refusing to proceed"
+  fi
+  note "operator-decisions rule corpus copied (atomic) from ${rules_src_file}"
 else
-  note "  warning: ${rules_src} missing — lookup-rules will return empty results"
+  note "  warning: ${rules_src_file} missing — lookup-rules will return empty results"
 fi
 
 # 4. Work campfire — created via rd init (canonical mallcop work source).

@@ -35,6 +35,8 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -45,6 +47,34 @@ import (
 
 	"gopkg.in/yaml.v3"
 )
+
+// expectedOperatorRulesSHA256 pins the sha256 of agents/rules/operator-decisions.yaml.
+//
+// Belt+suspenders defence (mallcoppro-b92) against tampering of the rule corpus
+// after deploy. The primary defence is hermetic copy + atomic rename in
+// scripts/bootstrap-deploy.sh; this is a runtime check that any tampering
+// surfaces as a load error rather than a silent gate bypass via fabricated rules.
+//
+// MAINTENANCE: this constant MUST be regenerated whenever
+// agents/rules/operator-decisions.yaml changes. Recompute with:
+//
+//	sha256sum agents/rules/operator-decisions.yaml
+//
+// TestExpectedOperatorRulesSHA256_MatchesShippedCorpus enforces the regen as a
+// regression guard — CI fails if the constant and the shipped corpus diverge.
+//
+// The verification is OPTIONAL at runtime — it is enforced only when
+// MALLCOP_RULES_SHA256_ENFORCE is truthy or MALLCOP_RULES_SHA256 is set to a
+// non-empty value. Default is permissive so dev/test workflows that edit the
+// corpus on the fly are not broken; production deploys set the enforce flag in
+// the activate envelope. This matches the existing security posture in
+// tools_f1g_gate.go where bypass gates default off and are enabled per-deploy.
+//
+// When MALLCOP_RULES_SHA256 is set it overrides this constant (lets the build/
+// release process pin a corpus that wasn't yet hardcoded). Mismatch in either
+// path returns an error from loadOperatorRules, which surfaces as a
+// resolve-finding gate fire (lookup-rules emits an error result).
+const expectedOperatorRulesSHA256 = "b5b9d30505a4c5e7a59ecb74388999cfbe196beb384271abaf1e4b5e19ac9656"
 
 // operatorRule is a single rule loaded from operator-decisions.yaml.
 type operatorRule struct {
@@ -133,6 +163,14 @@ func loadOperatorRules(repoRoot string) ([]operatorRule, error) {
 			rulesCacheErr = fmt.Errorf("read operator-decisions.yaml: %w", err)
 			return
 		}
+		// Belt+suspenders sha256 check (mallcoppro-b92). Enforced only when
+		// MALLCOP_RULES_SHA256_ENFORCE is truthy or MALLCOP_RULES_SHA256 is
+		// set. Mismatch surfaces as a load error so a tampered corpus cannot
+		// silently grant rule_id citations at the gate.
+		if err := verifyOperatorRulesChecksum(data); err != nil {
+			rulesCacheErr = err
+			return
+		}
 		var file operatorRulesFile
 		if err := yaml.Unmarshal(data, &file); err != nil {
 			rulesCacheErr = fmt.Errorf("parse operator-decisions.yaml: %w", err)
@@ -143,6 +181,54 @@ func loadOperatorRules(repoRoot string) ([]operatorRule, error) {
 	})
 
 	return rulesCacheData, rulesCacheErr
+}
+
+// verifyOperatorRulesChecksum enforces the sha256 pin on the operator-decisions
+// corpus when configured to do so. Returns nil when no enforcement is active or
+// the checksum matches; returns a non-nil error on mismatch.
+//
+// Enforcement modes:
+//
+//   - MALLCOP_RULES_SHA256 set to a non-empty value → that hex digest is the
+//     expected hash (overrides expectedOperatorRulesSHA256). Enforcement is
+//     implicitly on.
+//   - MALLCOP_RULES_SHA256_ENFORCE in {"1","true","yes","on"} (case-insensitive)
+//     → expectedOperatorRulesSHA256 is the expected hash. Enforcement is on.
+//   - Otherwise → enforcement is off (returns nil regardless of file content).
+//
+// The permissive default mirrors the gate's other env-toggled defences and
+// keeps test fixtures (writeRulesFixture writes a 3-rule fixture with a
+// different hash than the shipped corpus) working without ceremony.
+func verifyOperatorRulesChecksum(data []byte) error {
+	override := strings.TrimSpace(os.Getenv("MALLCOP_RULES_SHA256"))
+	enforce := false
+	expected := ""
+	switch {
+	case override != "":
+		expected = strings.ToLower(override)
+		enforce = true
+	case isTruthyEnv(os.Getenv("MALLCOP_RULES_SHA256_ENFORCE")):
+		expected = strings.ToLower(expectedOperatorRulesSHA256)
+		enforce = true
+	}
+	if !enforce {
+		return nil
+	}
+	sum := sha256.Sum256(data)
+	got := hex.EncodeToString(sum[:])
+	if got != expected {
+		return fmt.Errorf("operator-decisions.yaml sha256 mismatch: expected %s, got %s (corpus may be tampered; regenerate expectedOperatorRulesSHA256 or check MALLCOP_RULES_SHA256)", expected, got)
+	}
+	return nil
+}
+
+// isTruthyEnv returns true for common truthy env values, case-insensitive.
+func isTruthyEnv(v string) bool {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
 }
 
 // matchesRule returns true when the given finding family + metadata satisfy
