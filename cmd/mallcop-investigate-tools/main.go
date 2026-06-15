@@ -81,8 +81,8 @@ func run(args []string) error {
 	// search-events flags
 	actor := fs.String("actor", "", "actor filter (search-events, search-findings)")
 	evtType := fs.String("type", "", "event_type filter (search-events, optional)")
-	since := fs.String("since", "", "RFC3339 start time inclusive (search-events, search-findings)")
-	until := fs.String("until", "", "RFC3339 end time inclusive (search-events)")
+	since := fs.String("since", "", "start time inclusive (search-events, search-findings); RFC3339 or natural-language (e.g. \"10 weeks ago\", \"yesterday\")")
+	until := fs.String("until", "", "end time inclusive (search-events); RFC3339 or natural-language (e.g. \"2 days ago\", \"now\")")
 
 	// read-finding flags
 	findingID := fs.String("finding-id", "", "finding ID to read (read-finding)")
@@ -535,14 +535,14 @@ func searchEvents(fixtureDir, actor, source, evtType, since, until string) error
 
 	var sinceT, untilT time.Time
 	if since != "" {
-		t, err := time.Parse(time.RFC3339, since)
+		t, err := parseTimeArg(since, time.Now())
 		if err != nil {
 			return fmt.Errorf("parse --since: %w", err)
 		}
 		sinceT = t
 	}
 	if until != "" {
-		t, err := time.Parse(time.RFC3339, until)
+		t, err := parseTimeArg(until, time.Now())
 		if err != nil {
 			return fmt.Errorf("parse --until: %w", err)
 		}
@@ -601,7 +601,7 @@ func searchFindings(fixtureDir, actor, source, since string) error {
 
 	var sinceT time.Time
 	if since != "" {
-		t, err := time.Parse(time.RFC3339, since)
+		t, err := parseTimeArg(since, time.Now())
 		if err != nil {
 			return fmt.Errorf("parse --since: %w", err)
 		}
