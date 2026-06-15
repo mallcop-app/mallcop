@@ -162,6 +162,71 @@ type confidenceGateConfig struct {
 	IterThreshold     int
 }
 
+// Fan-out mode identifiers. These are the values runConfidenceGateFanOut
+// dispatches on. New skill registry entries reference one of these values
+// (or add a new one paired with a dispatch branch in runConfidenceGateFanOut).
+const (
+	// fanoutModeDeepX3Merge is the task:investigate fan-out: write-partial-
+	// transcript + escalate-to-deep ×3 + create-investigate-merge wiring the 3
+	// deep ids. Spent fan-out donuts on a 3-way deep-investigate panel.
+	fanoutModeDeepX3Merge = "deep_x3_merge"
+	// fanoutModeEscalateToInvestigator is the task:triage fan-out: a single
+	// work:create handoff to a fresh task:investigate worker. The triage
+	// rubric's 2-tool flow is too thin to warrant a deep panel; the structural
+	// fix for "triage short-circuited" is "make the investigator do the work."
+	fanoutModeEscalateToInvestigator = "escalate_to_investigator"
+)
+
+// skillGateConfig holds per-skill gate parameters. Add new entries to
+// confidenceGateConfig.skillRegistry to gate additional skills without
+// touching the dispatch logic.
+//
+// mallcoppro-801d (chain-redesign Wave 5 follow-up): replaces the hardcoded
+// `switch skill { ... }` block in checkConfidenceGate so a 3rd gated skill
+// (e.g., task:deep_investigate) can be added by appending one map entry.
+type skillGateConfig struct {
+	// floor is the effective score floor below which the gate fires.
+	floor float64
+	// fanoutMode names the fan-out dispatch branch in runConfidenceGateFanOut.
+	// One of: fanoutModeDeepX3Merge, fanoutModeEscalateToInvestigator.
+	fanoutMode string
+	// applyLookupPenalty controls whether the lookupRulesSkipPenalty
+	// (mallcoppro-8b0) applies when the worker resolved without invoking
+	// lookup-rules AND without citing a valid rule_id.
+	//
+	// Currently true only for task:investigate. Triage is exempt because the
+	// triage rubric's Step 2b uses lookup-rules only when the worker has
+	// already observed a benign-pattern flag — a triage resolve without
+	// lookup-rules is not by itself a process violation. Investigate, by
+	// contrast, is the stage where unresolved triage findings land, and
+	// skipping the corpus query there means the Wave 2-3 operator-decisions
+	// infrastructure isn't being used.
+	applyLookupPenalty bool
+}
+
+// skillRegistry returns the per-skill gate configuration table. Lookup keys
+// are MALLCOP_SKILL values (e.g., "task:investigate", "task:triage"). A
+// missing key means the gate is a no-op for that skill (returns Fired=false
+// in checkConfidenceGate before any campfire I/O).
+//
+// The registry is computed from the parsed confidenceGateConfig each call so
+// env-var overrides of ScoreFloor / TriageScoreFloor flow through to the
+// effective floor on the next invocation.
+func (cfg confidenceGateConfig) skillRegistry() map[string]skillGateConfig {
+	return map[string]skillGateConfig{
+		"task:investigate": {
+			floor:              cfg.ScoreFloor,
+			fanoutMode:         fanoutModeDeepX3Merge,
+			applyLookupPenalty: true,
+		},
+		"task:triage": {
+			floor:              cfg.TriageScoreFloor,
+			fanoutMode:         fanoutModeEscalateToInvestigator,
+			applyLookupPenalty: false,
+		},
+	}
+}
+
 // defaultGateConfig returns the default gate configuration.
 //
 // mallcoppro-276 (Phase 1, asymmetric gate): Enabled defaults true and
@@ -558,10 +623,14 @@ type gateResult struct {
 	// floor that actually fired the gate, not whichever skill's floor we look
 	// up later.
 	EffectiveFloor float64
-	// TriageMode is true when the gate fired on MALLCOP_SKILL=task:triage.
-	// The fan-out helper dispatches to forceEscalateToInvestigator instead of
-	// the investigate-tuned deep×3 + merge panel.
-	TriageMode bool
+	// FanoutMode names the fan-out dispatch branch the gate selected for this
+	// skill (one of fanoutMode* constants). runConfidenceGateFanOut dispatches
+	// on this value instead of skill identity, so adding a 3rd gated skill is
+	// a registry entry change rather than a switch-statement change.
+	//
+	// mallcoppro-801d: replaces the previous TriageMode bool field. The triage
+	// case now sets FanoutMode == fanoutModeEscalateToInvestigator.
+	FanoutMode string
 	// SkippedLookup is true when the worker resolved on task:investigate
 	// without invoking the lookup-rules tool AND without citing a valid
 	// rule_id. Recorded for logging and metrics — the soft penalty has
@@ -625,21 +694,16 @@ func checkConfidenceGate(campfireID, action, reason, ruleID string) (gateResult,
 		return gateResult{Fired: false}, nil
 	}
 
-	// Skill check: gate fires on task:investigate (multi-tool flow) and
-	// task:triage (2-tool flow) with skill-specific floor + fan-out.
+	// Skill check: dispatch via the per-skill registry (mallcoppro-801d).
+	// Adding a new gated skill is a registry entry — this block is invariant.
 	skill := os.Getenv("MALLCOP_SKILL")
 	cfg := loadGateConfig()
-	var effectiveFloor float64
-	var triageMode bool
-	switch skill {
-	case "task:investigate":
-		effectiveFloor = cfg.ScoreFloor
-	case "task:triage":
-		effectiveFloor = cfg.TriageScoreFloor
-		triageMode = true
-	default:
+	skillCfg, ok := cfg.skillRegistry()[skill]
+	if !ok {
 		return gateResult{Fired: false}, nil
 	}
+	effectiveFloor := skillCfg.floor
+	fanoutMode := skillCfg.fanoutMode
 
 	// Config check: gate must be enabled.
 	if !cfg.Enabled {
@@ -661,7 +725,7 @@ func checkConfidenceGate(campfireID, action, reason, ruleID string) (gateResult,
 			Fired:          true,
 			Score:          0,
 			EffectiveFloor: effectiveFloor,
-			TriageMode:     triageMode,
+			FanoutMode:     fanoutMode,
 		}, readErr
 	}
 
@@ -720,7 +784,7 @@ func checkConfidenceGate(campfireID, action, reason, ruleID string) (gateResult,
 			Stats:          stats,
 			CitationCount:  0,
 			EffectiveFloor: effectiveFloor,
-			TriageMode:     triageMode,
+			FanoutMode:     fanoutMode,
 		}, nil
 	}
 
@@ -749,8 +813,13 @@ func checkConfidenceGate(campfireID, action, reason, ruleID string) (gateResult,
 	// the corpus proves they queried it (the rule_id had to come from
 	// somewhere). Forged rule_ids are silently filtered above (validRuleIDCited
 	// stays false), so they do not provide the exemption.
+	// mallcoppro-801d: penalty applicability is now a registry field, not a
+	// literal skill check. Only skills whose skillGateConfig.applyLookupPenalty
+	// is true take the penalty path. Currently that is task:investigate only;
+	// triage stays exempt by registry. The rest of the condition (valid rule_id
+	// citation + lookup-rules invocation) is unchanged from mallcoppro-8b0.
 	skippedLookup := false
-	if skill == "task:investigate" && !validRuleIDCited && !lookupRulesInvoked(msgs) {
+	if skillCfg.applyLookupPenalty && !validRuleIDCited && !lookupRulesInvoked(msgs) {
 		skippedLookup = true
 		score -= lookupRulesSkipPenalty
 		atomic.AddInt64(&lookupRulesSkippedResolves, 1)
@@ -759,8 +828,8 @@ func checkConfidenceGate(campfireID, action, reason, ruleID string) (gateResult,
 		// is made by the floor comparison below; this log records the signal.
 		fmt.Fprintf(os.Stderr,
 			"gate: skipped-lookup-rules penalty applied "+
-				"(skill=task:investigate score_after=%.4f floor=%.4f citation_count=%d)\n",
-			score, effectiveFloor, citationCount)
+				"(skill=%s score_after=%.4f floor=%.4f citation_count=%d)\n",
+			skill, score, effectiveFloor, citationCount)
 	}
 
 	if score >= effectiveFloor {
@@ -770,7 +839,7 @@ func checkConfidenceGate(campfireID, action, reason, ruleID string) (gateResult,
 			Stats:          stats,
 			CitationCount:  citationCount,
 			EffectiveFloor: effectiveFloor,
-			TriageMode:     triageMode,
+			FanoutMode:     fanoutMode,
 			SkippedLookup:  skippedLookup,
 		}, nil
 	}
@@ -779,8 +848,8 @@ func checkConfidenceGate(campfireID, action, reason, ruleID string) (gateResult,
 	if skippedLookup {
 		fmt.Fprintf(os.Stderr,
 			"gate: skipped-lookup-rules borderline tip → FIRED "+
-				"(skill=task:investigate score=%.4f floor=%.4f)\n",
-			score, effectiveFloor)
+				"(skill=%s score=%.4f floor=%.4f)\n",
+			skill, score, effectiveFloor)
 	}
 	return gateResult{
 		Fired:          true,
@@ -788,28 +857,37 @@ func checkConfidenceGate(campfireID, action, reason, ruleID string) (gateResult,
 		Stats:          stats,
 		CitationCount:  citationCount,
 		EffectiveFloor: effectiveFloor,
-		TriageMode:     triageMode,
+		FanoutMode:     fanoutMode,
 		SkippedLookup:  skippedLookup,
 	}, nil
 }
 
 // runConfidenceGateFanOut dispatches the fan-out emission when the gate fires.
 //
-// When gr.TriageMode is true (mallcoppro-499), this delegates to
-// forceEscalateToInvestigator: a single work:create handoff to a fresh
-// task:investigate worker. Triage's 2-tool flow does not warrant the
-// investigate-tuned deep×3 + merge panel; the structural response to "triage
-// short-circuited" is "make the investigator do the work."
+// Dispatch is by gr.FanoutMode (mallcoppro-801d, replacing the previous
+// gr.TriageMode bool):
 //
-// Otherwise (task:investigate), emits the 4-message investigate fan-out:
-//  1. write-partial-transcript — saves the partial reasoning chain.
-//  2. escalate-to-deep × 3 — creates deep-investigate items for each hypothesis.
-//  3. create-investigate-merge — creates the merge item wired to the 3 deep ids.
+//   - fanoutModeEscalateToInvestigator (task:triage): delegates to
+//     forceEscalateToInvestigator — a single work:create handoff to a fresh
+//     task:investigate worker. Triage's 2-tool flow does not warrant the
+//     investigate-tuned deep×3 + merge panel; the structural response to
+//     "triage short-circuited" is "make the investigator do the work."
+//
+//   - fanoutModeDeepX3Merge (task:investigate): emits the 4-message
+//     investigate fan-out:
+//      1. write-partial-transcript — saves the partial reasoning chain.
+//      2. escalate-to-deep × 3 — creates deep-investigate items per hypothesis.
+//      3. create-investigate-merge — creates the merge item wired to the 3 deep ids.
+//
+// Unknown FanoutMode values fall through to the deep×3 + merge default to
+// preserve the historical behavior for any caller that constructs a gateResult
+// without populating FanoutMode (e.g., existing tests that build the struct
+// directly).
 //
 // Returns an error only if a critical step fails (transcript write or all 3 deep
 // escalations fail). The merge item creation is best-effort.
 func runConfidenceGateFanOut(findingID, reason string, gr gateResult) error {
-	if gr.TriageMode {
+	if gr.FanoutMode == fanoutModeEscalateToInvestigator {
 		return forceEscalateToInvestigator(findingID, reason, gr)
 	}
 
