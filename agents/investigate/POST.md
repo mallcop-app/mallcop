@@ -19,16 +19,14 @@ Cross-reference, corroborate, and look for disconfirming evidence.
 You have more tools and more iterations than triage. Use them to build
 a complete picture, not to confirm a hypothesis.
 
-### Check the operator-decisions corpus (REQUIRED FIRST STEP)
+### Check the operator-decisions corpus (REQUIRED)
 
-You **MUST** call `lookup-rules` as your **first tool call**, before any
-other investigation tool and before any decision (resolve OR escalate).
-The corpus is the canonical record of patterns the operator has already
-ruled benign — escalating a finding without first checking whether the
-operator already decided "this is fine" is a process violation that the
-F2A gate penalizes (mallcoppro-8b0). Call it once with arguments that
-reflect the finding's actual family and observed flags; you do not need
-to call it repeatedly.
+You **MUST** call `lookup-rules` BEFORE deciding to resolve a finding. This
+is a process step the F2A gate enforces — workers that resolve without
+calling lookup-rules are penalized at gate-evaluation time even when their
+score would otherwise clear the floor (mallcoppro-8b0). Calling it once
+with arguments that reflect the finding's actual family and observed flags
+is sufficient; you do not need to call it repeatedly.
 
 Pass the finding's detector family and any observable metadata flags you
 have already gathered (from finding.metadata or from a first search-events
