@@ -28,21 +28,17 @@ package main
 
 import (
 	"encoding/json"
+	"sync/atomic"
 	"testing"
 )
 
 // ---- TestSkillRegistry_ContainsInvestigateAndTriage ---------------------------
 //
 // Pins the registry shape: cfg.skillRegistry() returns entries for
-// task:investigate (deep×3 merge) and task:triage (escalate-to-investigator).
-// Adding a 3rd entry is a change to skillRegistry, not a change to
-// checkConfidenceGate's dispatch logic — and this test will alert if the
-// existing two entries are ever silently removed.
-//
-// mallcoppro-structural-lookup-enforce: the applyLookupPenalty field is gone
-// (hard runtime guards in runResolveFinding and runEscalateToStageC supersede
-// the soft per-resolve penalty). The shape assertions for that field have
-// been removed; the floor + fanoutMode invariants are unchanged.
+// task:investigate (deep×3 merge, penalty on) and task:triage (escalate-to-
+// investigator, penalty off). Adding a 3rd entry is a change to skillRegistry,
+// not a change to checkConfidenceGate's dispatch logic — and this test will
+// alert if the existing two entries are ever silently removed.
 func TestSkillRegistry_ContainsInvestigateAndTriage(t *testing.T) {
 	cfg := defaultGateConfig()
 	reg := cfg.skillRegistry()
@@ -57,6 +53,9 @@ func TestSkillRegistry_ContainsInvestigateAndTriage(t *testing.T) {
 	if inv.fanoutMode != fanoutModeDeepX3Merge {
 		t.Errorf("task:investigate fanoutMode = %q, want %q", inv.fanoutMode, fanoutModeDeepX3Merge)
 	}
+	if !inv.applyLookupPenalty {
+		t.Errorf("task:investigate applyLookupPenalty = false, want true (Wave B mallcoppro-8b0 invariant)")
+	}
 
 	tri, ok := reg["task:triage"]
 	if !ok {
@@ -67,6 +66,9 @@ func TestSkillRegistry_ContainsInvestigateAndTriage(t *testing.T) {
 	}
 	if tri.fanoutMode != fanoutModeEscalateToInvestigator {
 		t.Errorf("task:triage fanoutMode = %q, want %q", tri.fanoutMode, fanoutModeEscalateToInvestigator)
+	}
+	if tri.applyLookupPenalty {
+		t.Errorf("task:triage applyLookupPenalty = true, want false (triage is exempt from the lookup-rules penalty)")
 	}
 }
 
@@ -199,8 +201,6 @@ func TestFanoutMode_DispatchesCorrectly(t *testing.T) {
 
 			// Low evidence: 1 tool call, no citations → fires either skill.
 			seedToolUseMsgs(t, cfBin, cfHome, campfireID, []string{"search-events"})
-			// Satisfy the structural lookup-rules guard (mallcoppro-structural-lookup-enforce).
-			seedLookupRulesCall(t, cfBin, cfHome, campfireID)
 
 			envPairs := append(gateEnvPairsTriage(true, 0.40, 0.18),
 				"MALLCOP_SKILL", tc.skill,
@@ -269,10 +269,113 @@ func TestFanoutMode_DispatchesCorrectly(t *testing.T) {
 	}
 }
 
-// TestLookupRulesPenalty_InvestigateOnly was removed in mallcoppro-structural-
-// lookup-enforce: the soft per-resolve penalty it pinned has been replaced
-// with a hard runtime guard. The hard-guard refusal contract is tested by
-// tools_f1g_structural_enforcement_test.go.
+// ---- TestLookupRulesPenalty_InvestigateOnly ----------------------------------
+//
+// The mallcoppro-8b0 lookup-rules-skip soft penalty MUST apply only when the
+// per-skill registry says so (skillCfg.applyLookupPenalty). Currently that is
+// task:investigate only — triage is exempt because its 2-tool rubric uses
+// lookup-rules conditionally, not unconditionally.
+//
+// This test runs the same low-evidence + no-lookup-rules scenario under both
+// skills and asserts:
+//
+//   - investigate: gr.SkippedLookup=true; lookupRulesSkippedResolves counter
+//     incremented; gr.Fired=true.
+//   - triage:      gr.SkippedLookup=false; counter unchanged; gr.Fired=true
+//     (still fires on the zero-citation hard floor).
+//
+// This is the 801d guard for the Wave B invariant: the registry-driven check
+// must not accidentally exempt investigate or accidentally penalize triage.
+func TestLookupRulesPenalty_InvestigateOnly(t *testing.T) {
+	// --- investigate path: penalty applies ----------------------------------
+	t.Run("investigate path applies penalty", func(t *testing.T) {
+		cfBin, cfHome, campfireID, _ := newTestCampfirePair(t)
+		_ = cfBin
+		_ = cfHome
+
+		// 8 tool calls × 4 distinct (no lookup-rules), 1 valid retrieved citation.
+		// Pre-penalty score: 0.04*8 + 0.08*4 + 0.04*1 - 0.02*(8-3) = 0.32+0.32+0.04-0.10 = 0.58
+		// Investigate floor 0.55: borderline window [0.55, 0.65). Penalty flips to fire.
+		seedToolUseMsgs(t, cfBin, cfHome, campfireID, []string{
+			"check-baseline", "search-events", "search-findings", "read-config",
+			"check-baseline", "search-events", "search-findings", "read-config",
+		})
+		seedToolResultMsg(t, cfBin, cfHome, campfireID,
+			`{"tool_result":true,"tool":"search-events","events":[{"id":"evt_801di"}]}`)
+
+		t.Setenv("MALLCOP_SKILL", "task:investigate")
+		t.Setenv("MALLCOP_CONFIDENCE_GATED_CLOSE_ENABLED", "true")
+		t.Setenv("MALLCOP_CONFIDENCE_GATED_CLOSE_SCORE_FLOOR", "0.55")
+		t.Setenv("MALLCOP_CONFIDENCE_GATED_CLOSE_TRIAGE_SCORE_FLOOR", "0.18")
+
+		before := atomic.LoadInt64(&lookupRulesSkippedResolves)
+		gr, err := checkConfidenceGate(campfireID, "resolved",
+			"Investigate: evt_801di anchors the resolve.", "")
+		if err != nil {
+			t.Fatalf("checkConfidenceGate (investigate): %v", err)
+		}
+		after := atomic.LoadInt64(&lookupRulesSkippedResolves)
+
+		if !gr.SkippedLookup {
+			t.Errorf("expected gr.SkippedLookup=true for investigate without lookup-rules; got gr=%+v", gr)
+		}
+		if !gr.Fired {
+			t.Errorf("expected gr.Fired=true on borderline tip (post-penalty score < 0.55); got gr=%+v", gr)
+		}
+		if after-before != 1 {
+			t.Errorf("expected lookupRulesSkippedResolves +1 on investigate path; before=%d after=%d", before, after)
+		}
+	})
+
+	// --- triage path: penalty does NOT apply -------------------------------
+	t.Run("triage path skips penalty", func(t *testing.T) {
+		cfBin, cfHome, campfireID, _ := newTestCampfirePair(t)
+		_ = cfBin
+		_ = cfHome
+
+		// Same shape (no lookup-rules, no valid rule_id) but skill=task:triage.
+		// The counter must NOT advance and gr.SkippedLookup must be false.
+		// We use the same 8-call transcript to keep the inputs identical to the
+		// investigate sub-test — the only differentiator is MALLCOP_SKILL.
+		seedToolUseMsgs(t, cfBin, cfHome, campfireID, []string{
+			"check-baseline", "search-events", "search-findings", "read-config",
+			"check-baseline", "search-events", "search-findings", "read-config",
+		})
+		seedToolResultMsg(t, cfBin, cfHome, campfireID,
+			`{"tool_result":true,"tool":"search-events","events":[{"id":"evt_801dt"}]}`)
+
+		t.Setenv("MALLCOP_SKILL", "task:triage")
+		t.Setenv("MALLCOP_CONFIDENCE_GATED_CLOSE_ENABLED", "true")
+		// Set triage floor ABOVE the score so the gate still fires (lets us check
+		// SkippedLookup is independent of the fire decision). Score = 0.58, so
+		// floor 0.60 fires deterministically without the penalty path.
+		t.Setenv("MALLCOP_CONFIDENCE_GATED_CLOSE_SCORE_FLOOR", "0.55")
+		t.Setenv("MALLCOP_CONFIDENCE_GATED_CLOSE_TRIAGE_SCORE_FLOOR", "0.60")
+
+		before := atomic.LoadInt64(&lookupRulesSkippedResolves)
+		gr, err := checkConfidenceGate(campfireID, "resolved",
+			"Triage: evt_801dt anchors the resolve.", "")
+		if err != nil {
+			t.Fatalf("checkConfidenceGate (triage): %v", err)
+		}
+		after := atomic.LoadInt64(&lookupRulesSkippedResolves)
+
+		if gr.SkippedLookup {
+			t.Errorf("expected gr.SkippedLookup=false for triage (penalty is investigate-only); got gr=%+v", gr)
+		}
+		if after-before != 0 {
+			t.Errorf("expected lookupRulesSkippedResolves UNCHANGED on triage path; before=%d after=%d", before, after)
+		}
+		// The gate still fires because score 0.58 < triage floor 0.60.
+		if !gr.Fired {
+			t.Errorf("expected gr.Fired=true (score 0.58 < triage floor 0.60); got gr=%+v", gr)
+		}
+		// And FanoutMode must reflect the triage dispatch path.
+		if gr.FanoutMode != fanoutModeEscalateToInvestigator {
+			t.Errorf("expected gr.FanoutMode=%q on triage fire; got %q", fanoutModeEscalateToInvestigator, gr.FanoutMode)
+		}
+	})
+}
 
 // keysOf returns the keys of a string-keyed map in arbitrary order. Used only
 // by the test for human-readable failure messages when an expected registry

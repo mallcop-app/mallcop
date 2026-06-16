@@ -342,10 +342,6 @@ func TestHealE2E_Success(t *testing.T) {
 	// Inject a synthetic log_format_drift finding into the engagement campfire.
 	findingID := "e2e-lfd-001"
 	injectSyntheticFinding(t, cfBin, cfHome, engCampfire, findingID)
-	// Satisfy the structural lookup-rules guard (mallcoppro-structural-lookup-enforce):
-	// runHealWorkflow's simulated POST.md agent calls resolve-finding, which now
-	// requires a prior tool:lookup-rules in the engagement transcript.
-	seedLookupRulesCall(t, cfBin, cfHome, engCampfire)
 
 	// ── Core: call spawn-claude-code-fix ─────────────────────────────────────
 	input := spawnClaudeFixInput{
@@ -474,9 +470,6 @@ func TestHealE2E_Failure(t *testing.T) {
 	// Inject a synthetic finding.
 	findingID := "e2e-lfd-002"
 	injectSyntheticFinding(t, cfBin, cfHome, engCampfire, findingID)
-	// Satisfy the structural lookup-rules guard (mallcoppro-structural-lookup-enforce):
-	// runHealWorkflow's simulated POST.md agent calls resolve-finding.
-	seedLookupRulesCall(t, cfBin, cfHome, engCampfire)
 
 	// ── Core: call spawn-claude-code-fix ─────────────────────────────────────
 	input := spawnClaudeFixInput{

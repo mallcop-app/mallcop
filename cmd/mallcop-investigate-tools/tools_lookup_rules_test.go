@@ -215,8 +215,6 @@ func TestResolveFinding_RuleIDCitation(t *testing.T) {
 		"check-baseline", "search-events", "search-findings", "read-config",
 	}
 	seedToolUseMsgs(t, cfBin, cfHome, campfireID, toolNames)
-	// Satisfy the structural lookup-rules guard (mallcoppro-structural-lookup-enforce).
-	seedLookupRulesCall(t, cfBin, cfHome, campfireID)
 
 	// Reason has NO event-ID-style citations — the only citation source is rule_id.
 	reason := "Automation actor inside declared maintenance window; non-investigatory."
@@ -282,8 +280,6 @@ func TestResolveFinding_InvalidRuleID(t *testing.T) {
 		"check-baseline", "search-events", "search-findings", "read-config",
 	}
 	seedToolUseMsgs(t, cfBin, cfHome, campfireID, toolNames)
-	// Satisfy the structural lookup-rules guard.
-	seedLookupRulesCall(t, cfBin, cfHome, campfireID)
 
 	// No retrieved-ID citations in the reason. Forged rule_id.
 	reason := "Pattern matches operator decision rule (forged citation attempt)."
