@@ -219,6 +219,17 @@ const testEventsJSON = `{
 	]
 }`
 
+// decodeSearchEventsWrapped is a small test helper that parses the wrapped
+// {events, matched_rules} envelope that search-events always emits.
+func decodeSearchEventsWrapped(t *testing.T, out string) searchEventsResult {
+	t.Helper()
+	var result searchEventsResult
+	if err := json.Unmarshal([]byte(out), &result); err != nil {
+		t.Fatalf("parse wrapped output: %v\nraw=%s", err, out)
+	}
+	return result
+}
+
 func TestSearchEvents_HappyPath(t *testing.T) {
 	dir := makeFixtureDir(t, "", testEventsJSON, "")
 
@@ -237,16 +248,11 @@ func TestSearchEvents_HappyPath(t *testing.T) {
 		}
 	})
 
-	lines := strings.Split(strings.TrimSpace(out), "\n")
-	if len(lines) != 2 {
-		t.Errorf("want 2 events for alice on github on 2026-04-10, got %d\nout=%q", len(lines), out)
+	result := decodeSearchEventsWrapped(t, out)
+	if len(result.Events) != 2 {
+		t.Errorf("want 2 events for alice on github on 2026-04-10, got %d\nout=%q", len(result.Events), out)
 	}
-	for _, line := range lines {
-		var ev rawEvent
-		if err := json.Unmarshal([]byte(line), &ev); err != nil {
-			t.Errorf("parse event line: %v\nline=%q", err, line)
-			continue
-		}
+	for _, ev := range result.Events {
 		if !strings.EqualFold(ev.Actor, "alice@example.com") {
 			t.Errorf("got actor %q, want alice@example.com", ev.Actor)
 		}
@@ -271,8 +277,9 @@ func TestSearchEvents_ActorNotFound(t *testing.T) {
 		}
 	})
 
-	if strings.TrimSpace(out) != "" {
-		t.Errorf("expected empty output for unknown actor, got: %q", out)
+	result := decodeSearchEventsWrapped(t, out)
+	if len(result.Events) != 0 {
+		t.Errorf("expected zero events for unknown actor, got %d\nout=%q", len(result.Events), out)
 	}
 }
 
@@ -291,8 +298,12 @@ func TestSearchEvents_NoEventsFile(t *testing.T) {
 		}
 	})
 
-	if strings.TrimSpace(out) != "" {
-		t.Errorf("expected empty output when no events.json, got: %q", out)
+	result := decodeSearchEventsWrapped(t, out)
+	if len(result.Events) != 0 {
+		t.Errorf("expected zero events when no events.json, got %d\nout=%q", len(result.Events), out)
+	}
+	if len(result.MatchedRules) != 0 {
+		t.Errorf("expected zero matched_rules when no events.json, got %d", len(result.MatchedRules))
 	}
 }
 
@@ -312,16 +323,12 @@ func TestSearchEvents_TypeFilter(t *testing.T) {
 		}
 	})
 
-	lines := strings.Split(strings.TrimSpace(out), "\n")
-	if len(lines) != 1 {
-		t.Errorf("want 1 push event for alice, got %d\nout=%q", len(lines), out)
+	result := decodeSearchEventsWrapped(t, out)
+	if len(result.Events) != 1 {
+		t.Fatalf("want 1 push event for alice, got %d\nout=%q", len(result.Events), out)
 	}
-	var ev rawEvent
-	if err := json.Unmarshal([]byte(lines[0]), &ev); err != nil {
-		t.Fatalf("parse event: %v", err)
-	}
-	if ev.EventType != "push" {
-		t.Errorf("event_type = %q, want push", ev.EventType)
+	if result.Events[0].EventType != "push" {
+		t.Errorf("event_type = %q, want push", result.Events[0].EventType)
 	}
 }
 
@@ -1277,11 +1284,12 @@ func TestSearchEvents_ReturnsMatchedRules(t *testing.T) {
 	}
 }
 
-// TestSearchEvents_BackwardCompatLineDelimited verifies the legacy emission
-// shape (line-delimited rawEvent JSON, no wrapping) is preserved when
-// --finding-family is NOT supplied. This protects the existing tool_result
-// parsing path in the F1G gate registry and prior worker prompts.
-func TestSearchEvents_BackwardCompatLineDelimited(t *testing.T) {
+// TestSearchEvents_WrappedIsAlwaysEmitted verifies search-events emits the
+// wrapped {events, matched_rules} envelope even when --finding-family is not
+// supplied. PR #113 conditionally wrapped only when finding_family was set —
+// the model never passed that flag (0 transcripts in 55 scenarios at bakeoff
+// 5), so the wrap was structurally dead. The wrap is now non-negotiable.
+func TestSearchEvents_WrappedIsAlwaysEmitted(t *testing.T) {
 	dir := makeFixtureDir(t, "", testEventsJSON, "")
 
 	out := captureStdout(t, func() {
@@ -1290,22 +1298,24 @@ func TestSearchEvents_BackwardCompatLineDelimited(t *testing.T) {
 			"--mode", "exam",
 			"--fixture-dir", dir,
 			"--actor", "alice@example.com",
+			// Deliberately no --finding-family.
 		})
 		if err != nil {
 			t.Fatalf("run() returned error: %v", err)
 		}
 	})
 
-	// Output must be line-delimited rawEvent JSON, NOT a wrapping object.
 	trimmed := strings.TrimSpace(out)
-	if strings.HasPrefix(trimmed, "{\"events\"") || strings.HasPrefix(trimmed, "{ \"events\"") {
-		t.Fatalf("expected line-delimited output (legacy mode), got wrapped object: %s", out)
+	if !strings.HasPrefix(trimmed, "{") {
+		t.Fatalf("expected wrapped {events, matched_rules} object, got: %s", out)
 	}
-	for _, line := range strings.Split(trimmed, "\n") {
-		var ev rawEvent
-		if err := json.Unmarshal([]byte(line), &ev); err != nil {
-			t.Errorf("parse event line: %v\nline=%q", err, line)
-		}
+	result := decodeSearchEventsWrapped(t, out)
+	if len(result.Events) == 0 {
+		t.Errorf("expected at least one event for alice, got 0\nout=%q", out)
+	}
+	// MatchedRules must be a present (possibly empty) slice — never absent.
+	if result.MatchedRules == nil {
+		t.Errorf("matched_rules must be present (possibly empty) even without finding_family")
 	}
 }
 
@@ -1577,6 +1587,120 @@ func TestSearchEvents_JSONPositionalFindingFamily(t *testing.T) {
 		t.Errorf("matched rule id: got %q, want R-001", id)
 	}
 }
+
+// TestSearchEvents_AutoPopulateFindingFamilyFromItemID verifies that when the
+// caller does NOT pass --finding-family, search-events derives the family from
+// MALLCOP_ITEM_ID by looking up the scenario YAML and reading finding.detector.
+//
+// This is the path the live worker takes: the model never passes finding_family
+// (optional in schema), but MALLCOP_ITEM_ID is reliably set by legion's worker
+// jail. Without auto-derivation, matched_rules is always empty — which is what
+// bakeoff 5 measured (0 transcripts containing matched_rules in 55 scenarios).
+func TestSearchEvents_AutoPopulateFindingFamilyFromItemID(t *testing.T) {
+	// Seed the rules corpus AND a synthetic scenario YAML under the SAME
+	// MALLCOP_REPO_ROOT so resolveFindingFamilyFromScenario and
+	// loadOperatorRules walk the same fake tree.
+	fakeRepo := writeRulesFixture(t, searchEventsRulesFixture)
+
+	scenarioID := "TEST-autopop-unusual-timing"
+	scenarioPath := filepath.Join(fakeRepo, "exams", "scenarios", "_test", scenarioID+".yaml")
+	scenarioYAML := `id: TEST-autopop-unusual-timing
+detector: unusual-timing
+finding:
+  id: fnd_autopop_001
+  detector: unusual-timing
+  title: "autopop test"
+`
+	if err := os.MkdirAll(filepath.Dir(scenarioPath), 0o755); err != nil {
+		t.Fatalf("mkdir scenario _test: %v", err)
+	}
+	if err := os.WriteFile(scenarioPath, []byte(scenarioYAML), 0o644); err != nil {
+		t.Fatalf("write scenario yaml: %v", err)
+	}
+
+	eventsJSON := `{
+		"events": [
+			{
+				"id": "evt-001",
+				"timestamp": "2026-04-10T02:15:00Z",
+				"source": "azure",
+				"event_type": "container_restart",
+				"actor": "deploy-svc",
+				"metadata": {"maintenance_window": "true"}
+			}
+		]
+	}`
+	dir := makeFixtureDir(t, "", eventsJSON, "")
+
+	// MALLCOP_ITEM_ID format: academy-<run-id>-<scenario-id>. The resolver
+	// strips the academy- prefix and walks the run-id prefix away until it
+	// matches a scenario YAML basename.
+	t.Setenv("MALLCOP_ITEM_ID", "academy-run-abc-"+scenarioID)
+
+	out := captureStdout(t, func() {
+		err := run([]string{
+			"--tool", "search-events",
+			"--mode", "exam",
+			"--fixture-dir", dir,
+			"--actor", "deploy-svc",
+			// Deliberately no --finding-family. Must be derived from item ID.
+		})
+		if err != nil {
+			t.Fatalf("run() returned error: %v", err)
+		}
+	})
+
+	var result struct {
+		Events       []rawEvent       `json:"events"`
+		MatchedRules []map[string]any `json:"matched_rules"`
+	}
+	if err := json.Unmarshal([]byte(out), &result); err != nil {
+		t.Fatalf("parse wrapped output: %v\nraw=%s", err, out)
+	}
+	if len(result.MatchedRules) != 1 {
+		t.Fatalf("want 1 matched rule (R-001) via auto-derived finding_family, got %d\nraw=%s", len(result.MatchedRules), out)
+	}
+	if id, _ := result.MatchedRules[0]["id"].(string); id != "R-001" {
+		t.Errorf("matched rule id: got %q, want R-001", id)
+	}
+}
+
+// TestSearchEvents_WrappedEmptyWhenFamilyUnresolvable verifies the wrapped
+// envelope is still emitted (with empty matched_rules) when neither
+// --finding-family nor a resolvable MALLCOP_ITEM_ID is supplied. The wrap is
+// non-negotiable: consumers must never see a non-wrapped shape.
+func TestSearchEvents_WrappedEmptyWhenFamilyUnresolvable(t *testing.T) {
+	dir := makeFixtureDir(t, "", testEventsJSON, "")
+	t.Setenv("MALLCOP_ITEM_ID", "") // no item-id signal
+
+	out := captureStdout(t, func() {
+		err := run([]string{
+			"--tool", "search-events",
+			"--mode", "exam",
+			"--fixture-dir", dir,
+			"--actor", "alice@example.com",
+		})
+		if err != nil {
+			t.Fatalf("run() returned error: %v", err)
+		}
+	})
+
+	trimmed := strings.TrimSpace(out)
+	if !strings.HasPrefix(trimmed, "{") {
+		t.Fatalf("expected wrapped envelope even without finding_family, got: %s", out)
+	}
+	result := decodeSearchEventsWrapped(t, out)
+	if result.MatchedRules == nil {
+		t.Errorf("matched_rules must be a non-nil slice (possibly empty)")
+	}
+	if len(result.MatchedRules) != 0 {
+		t.Errorf("want zero matched_rules without family signal, got %d", len(result.MatchedRules))
+	}
+	if len(result.Events) == 0 {
+		t.Errorf("events should still be populated; got 0")
+	}
+}
+
 // TestCheckBaseline_FrequencyByType verifies that compound frequency-table
 // keys are split into per-event-type buckets. This is the channel triage uses
 // to answer "is this *action type* routine for this actor?" instead of

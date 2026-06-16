@@ -38,7 +38,7 @@ binary_args = ["--tool", "baseline-stats", "--mode", "exam", "--fixture-dir", "e
 
 [[tool_defs]]
 name = "search-events"
-description = "Search recent events by actor, type, or time range. Returns events AND any matched operator-decision rules; cite a matched rule_id in resolve-finding to satisfy F2A citation. When finding_family is provided, the response is a single JSON object {events, matched_rules}; without finding_family, returns a JSON array of matching events. Pass finding_family (the detector family) on every search to maximize rule citation."
+description = "Search recent events by actor, type, or time range. Returns a JSON object {events, matched_rules} — matched_rules lists any operator-decision rules that apply to the current finding (cite a matched rule_id in resolve-finding to satisfy F2A citation)."
 input_schema = '{"type":"object","properties":{"actor":{"type":"string"},"source":{"type":"string"},"type":{"type":"string"},"since":{"type":"string"},"until":{"type":"string"},"finding_family":{"type":"string","description":"detector family for the current finding (e.g. unusual-timing, auth-failure-burst, new-actor, volume-anomaly); when set, response includes matched operator-decision rules"},"finding_metadata":{"type":"object","additionalProperties":{"type":"string"},"description":"optional flat-map of finding metadata to include in rule matching"}}}'
 binary = "{{TOOL_BIN_DIR}}/mallcop-investigate-tools"
 binary_args = ["--tool", "search-events", "--mode", "exam", "--fixture-dir", "exams/fixtures/{{RUN_ID}}"]

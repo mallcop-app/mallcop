@@ -134,7 +134,7 @@ max_iters = 20
 
   [[capabilities.seed.tool_defs]]
   name = "search-events"
-  description = "Search recent events by actor, type, or time range. Returns JSON array of matching events."
+  description = "Search recent events by actor, type, or time range. Returns a JSON object {events, matched_rules} — matched_rules lists any operator-decision rules that apply to the current finding (cite a matched rule_id in resolve-finding to satisfy F2A citation)."
   input_schema = '{"type":"object","properties":{"actor":{"type":"string"},"source":{"type":"string"},"type":{"type":"string"},"since":{"type":"string"},"until":{"type":"string"}}}'
   binary = "{{TOOL_BIN_DIR}}/mallcop-investigate-tools"
   binary_args = ["--tool", "search-events", "--fixture-dir", "{{FIXTURE_DIR}}"]

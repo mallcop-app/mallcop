@@ -89,13 +89,19 @@ func run(args []string) error {
 	evtType := fs.String("type", "", "event_type filter (search-events, optional)")
 	since := fs.String("since", "", "start time inclusive (search-events, search-findings); RFC3339 or natural-language (e.g. \"10 weeks ago\", \"yesterday\")")
 	until := fs.String("until", "", "end time inclusive (search-events); RFC3339 or natural-language (e.g. \"2 days ago\", \"now\")")
-	// Fix 1 (mallcoppro-DB3): when finding-family is non-empty, search-events
-	// also matches the surfaced events + finding metadata against the operator-
-	// decisions rule corpus and emits a wrapped JSON object:
-	//   {"events":[...], "matched_rules":[{id, applies_to, operator_directive}]}
-	// Without finding-family, search-events keeps the legacy line-delimited
-	// event output for backward compatibility with existing tests/consumers.
-	findingFamily := fs.String("finding-family", "", "finding detector family (search-events, optional). When set, returns wrapped {events, matched_rules} JSON object using operator-decisions.yaml.")
+	// search-events ALWAYS emits the wrapped {events, matched_rules} JSON
+	// object. The model rarely passes finding_family (it's optional in the
+	// tool schema), so PR #113's conditional wrap was structurally dead —
+	// bakeoff 5 measured 0 transcripts containing 'matched_rules' across
+	// 55 scenarios. The wrap is now non-negotiable: matched_rules is
+	// always present, even if empty.
+	//
+	// When --finding-family is empty, the effective family is derived from
+	// the scenario YAML resolved via MALLCOP_ITEM_ID (the same env var
+	// used by resolveScenarioFixtureDir to pick the per-scenario fixture
+	// subdir). This auto-populates the family signal without requiring the
+	// model to remember the optional flag.
+	findingFamily := fs.String("finding-family", "", "finding detector family (search-events, optional). Auto-populated from scenario YAML when empty. Used to match operator-decisions rules.")
 	findingMetadataJSON := fs.String("finding-metadata-json", "", "finding metadata flat-map as JSON object (search-events, optional). Used together with --finding-family to seed rule matching with finding-side metadata.")
 
 	// read-finding flags
@@ -601,33 +607,46 @@ type rawEvent struct {
 	Raw        interface{}            `json:"raw,omitempty"`
 }
 
-// searchEventsResult is the wrapped output shape emitted when --finding-family
-// is supplied. It bundles the surfaced events with any matched operator-decision
-// rules so the model gets the rule citation in the same call.
+// searchEventsResult is the wrapped output shape search-events ALWAYS emits.
+// It bundles the surfaced events with any matched operator-decision rules so
+// the model gets rule citations in the same call.
 //
-// Fix 1 (mallcoppro-DB3): the lookup-rules side-channel has demonstrated 0%
-// reliability (2 calls in 8,300 campfires, both failed structurally). Folding
-// rule matching into search-events — a tool the model calls reliably (829 calls)
-// — makes citation the default behavior of the only tool the model uses to
-// retrieve evidence. The worker still has to cite a returned rule_id in
-// resolve-finding to satisfy F2A; this fix just makes the rule visible to
-// the worker without requiring a separate (and structurally fragile) call.
+// Fix 1 (mallcoppro-DB3) introduced this wrap conditionally on --finding-family.
+// Bakeoff 5 showed the model never passes finding_family (optional in schema),
+// so the wrap was dead in 100% of transcripts. We now always emit the wrap;
+// finding_family is auto-populated from MALLCOP_ITEM_ID → scenario YAML when
+// the caller omits the flag.
+//
+// The lookup-rules side-channel demonstrated ~0% reliability (2 calls in 8,300
+// campfires, both failed structurally). Folding rule matching into search-events
+// — the tool the model calls reliably (829 calls) — makes citation the default
+// behavior of the only retrieval path that consistently fires. The worker still
+// has to cite a returned rule_id in resolve-finding to satisfy F2A.
 type searchEventsResult struct {
 	Events       []rawEvent     `json:"events"`
 	MatchedRules []operatorRule `json:"matched_rules"`
 }
 
 func searchEvents(fixtureDir, actor, source, evtType, since, until, findingFamily, findingMetadataJSON string) error {
+	// Auto-populate finding_family from the scenario YAML resolved via
+	// MALLCOP_ITEM_ID. MALLCOP_FINDING_ID is not exported by legion's worker
+	// env (verified in legion/internal/worker/worker.go), but MALLCOP_ITEM_ID
+	// is reliably set as `academy-<run-id>-<scenario-id>`. The scenario YAML
+	// at exams/scenarios/**/<scenario-id>.yaml carries finding.detector,
+	// which is the effective family for rule matching.
+	//
+	// If the family cannot be derived (item ID empty, scenario YAML missing,
+	// or finding.detector absent), the matched_rules slice stays empty but
+	// the wrapped envelope is still emitted — the wrap is non-negotiable.
+	if findingFamily == "" {
+		findingFamily = resolveFindingFamilyFromScenario(os.Getenv("MALLCOP_ITEM_ID"))
+	}
+
 	f, err := safeOpen(fixtureDir, "events.json")
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			// Empty result is valid. When wrapped-mode was requested we still
-			// emit an empty {events,matched_rules} object so the model gets a
-			// consistent schema (rather than empty stdout).
-			if findingFamily != "" {
-				return emitJSON(searchEventsResult{Events: []rawEvent{}, MatchedRules: []operatorRule{}})
-			}
-			return nil
+			// Always emit the wrapped envelope, even when events.json is absent.
+			return emitJSON(searchEventsResult{Events: []rawEvent{}, MatchedRules: []operatorRule{}})
 		}
 		return fmt.Errorf("open events.json: %w", err)
 	}
@@ -701,33 +720,132 @@ func searchEvents(fixtureDir, actor, source, evtType, since, until, findingFamil
 		filtered = append(filtered, ev)
 	}
 
-	// Legacy mode: no finding-family supplied. Emit line-delimited events for
-	// backward compatibility with existing consumers/tests.
-	if findingFamily == "" {
-		enc := json.NewEncoder(os.Stdout)
-		for _, ev := range filtered {
-			if err := enc.Encode(ev); err != nil {
-				return fmt.Errorf("encode event: %w", err)
-			}
+	// Always emit the wrapped envelope. When finding_family is unknown (no
+	// item-id signal, no scenario YAML, etc.) matched_rules will be empty
+	// — but the schema stays {events, matched_rules} so consumers don't
+	// have to branch on shape.
+	matchedRules := []operatorRule{}
+	if findingFamily != "" {
+		matched, err := matchRulesAgainstSearchResult(findingFamily, findingMetadata, filtered)
+		if err != nil {
+			// Rule-corpus load errors are non-fatal: we still return the events
+			// so the worker isn't blocked. matched_rules just stays empty.
+			fmt.Fprintf(os.Stderr, "search-events: rule matching disabled: %v\n", err)
+		} else {
+			matchedRules = matched
 		}
-		return nil
-	}
-
-	// Wrapped mode: compute derived flags from the filtered events, run the
-	// operator-decisions rule matcher, and emit a single JSON object containing
-	// the events plus any matching rules.
-	matchedRules, err := matchRulesAgainstSearchResult(findingFamily, findingMetadata, filtered)
-	if err != nil {
-		// Rule-corpus load errors are non-fatal: we still return the events so
-		// the worker isn't blocked. matched_rules just stays empty.
-		fmt.Fprintf(os.Stderr, "search-events: rule matching disabled: %v\n", err)
-		matchedRules = []operatorRule{}
 	}
 
 	return emitJSON(searchEventsResult{
 		Events:       filtered,
 		MatchedRules: matchedRules,
 	})
+}
+
+// resolveFindingFamilyFromScenario derives the effective finding_family for
+// rule matching from MALLCOP_ITEM_ID. Returns "" when no scenario context can
+// be resolved — callers treat empty as "skip rule matching, emit empty
+// matched_rules".
+//
+// itemID format produced by mallcop-academy is `academy-<run-id>-<scenario-id>`
+// (e.g. `academy-bk-20260612-142412-UT-04-admin-travel`). The scenario-id
+// suffix uniquely identifies a YAML file under exams/scenarios/**/<id>.yaml
+// (each subdir is a category — behavioral/, access/, signature/, etc.).
+//
+// The YAML has finding.detector as the canonical family string. Some scenarios
+// also expose a top-level detector field; we prefer finding.detector.
+func resolveFindingFamilyFromScenario(itemID string) string {
+	if itemID == "" {
+		return ""
+	}
+	const prefix = "academy-"
+	if !strings.HasPrefix(itemID, prefix) {
+		return ""
+	}
+	// item ID shape: academy-<run-id>-<scenario-id>. The run-id and
+	// scenario-id can each contain hyphens, so we walk back from the end and
+	// try progressively longer scenario-id suffixes until a YAML matches.
+	rest := itemID[len(prefix):]
+
+	repoRoot, err := resolveRepoRoot()
+	if err != nil {
+		return ""
+	}
+	scenariosRoot := filepath.Join(repoRoot, "exams", "scenarios")
+
+	// Build the candidate scenario-id list: walk the hyphens from left so the
+	// LONGEST scenario-id (greedy) is tried first. The run-id is consumed as
+	// the leading prefix.
+	parts := strings.Split(rest, "-")
+	for i := 1; i < len(parts); i++ {
+		candidate := strings.Join(parts[i:], "-")
+		family := readDetectorFromScenarioYAML(scenariosRoot, candidate)
+		if family != "" {
+			return family
+		}
+	}
+	return ""
+}
+
+// scenarioFindingShape is a minimal YAML shape capturing only the fields the
+// family resolver needs. Avoids pulling in the heavyweight scenario type from
+// internal/exam (which has its own validation requirements).
+type scenarioFindingShape struct {
+	Detector string `yaml:"detector"`
+	Finding  struct {
+		Detector string `yaml:"detector"`
+		Family   string `yaml:"family"`
+	} `yaml:"finding"`
+}
+
+// readDetectorFromScenarioYAML walks the scenarios root looking for a file
+// whose basename (without extension) equals scenarioID. Returns the effective
+// family string (finding.detector preferred, then finding.family, then the
+// top-level detector). Returns "" when no scenario file matches or the YAML
+// has no detector field.
+func readDetectorFromScenarioYAML(scenariosRoot, scenarioID string) string {
+	if scenarioID == "" || scenariosRoot == "" {
+		return ""
+	}
+	var found string
+	walkErr := filepath.WalkDir(scenariosRoot, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil // skip unreadable entries; treat as not-found
+		}
+		if d.IsDir() {
+			return nil
+		}
+		if !strings.HasSuffix(path, ".yaml") {
+			return nil
+		}
+		base := filepath.Base(path)
+		name := strings.TrimSuffix(base, ".yaml")
+		if name != scenarioID {
+			return nil
+		}
+		data, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return nil
+		}
+		var shape scenarioFindingShape
+		if err := yaml.Unmarshal(data, &shape); err != nil {
+			return nil
+		}
+		switch {
+		case shape.Finding.Detector != "":
+			found = shape.Finding.Detector
+		case shape.Finding.Family != "":
+			found = shape.Finding.Family
+		case shape.Detector != "":
+			found = shape.Detector
+		}
+		// Stop walking once we found a match.
+		return filepath.SkipAll
+	})
+	if walkErr != nil {
+		return ""
+	}
+	return found
 }
 
 // coerceMetadataValue normalizes scalar JSON values into the string form that

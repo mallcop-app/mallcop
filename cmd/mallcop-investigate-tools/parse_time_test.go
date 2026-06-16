@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
@@ -130,9 +129,9 @@ func TestSearchEvents_SinceRFC3339_Parses(t *testing.T) {
 		}
 	})
 
-	lines := strings.Split(strings.TrimSpace(out), "\n")
-	if len(lines) != 2 {
-		t.Fatalf("want 2 events on 2026-04-10, got %d\nout=%q", len(lines), out)
+	result := decodeSearchEventsWrapped(t, out)
+	if len(result.Events) != 2 {
+		t.Fatalf("want 2 events on 2026-04-10, got %d\nout=%q", len(result.Events), out)
 	}
 }
 
@@ -172,24 +171,10 @@ func TestSearchEvents_SinceNaturalLanguage_Parses(t *testing.T) {
 				}
 			})
 
-			trimmed := strings.TrimSpace(out)
-			if trimmed == "" {
-				if tc.wantCount == 0 {
-					return
-				}
-				t.Fatalf("--since %q: empty output, wanted %d events", tc.since, tc.wantCount)
-			}
-			lines := strings.Split(trimmed, "\n")
-			if len(lines) != tc.wantCount {
+			result := decodeSearchEventsWrapped(t, out)
+			if len(result.Events) != tc.wantCount {
 				t.Errorf("--since %q: got %d events, want %d\nout=%q",
-					tc.since, len(lines), tc.wantCount, out)
-			}
-			// Sanity check: every emitted line is valid JSON.
-			for _, line := range lines {
-				var ev rawEvent
-				if err := json.Unmarshal([]byte(line), &ev); err != nil {
-					t.Errorf("parse event line: %v\nline=%q", err, line)
-				}
+					tc.since, len(result.Events), tc.wantCount, out)
 			}
 		})
 	}
