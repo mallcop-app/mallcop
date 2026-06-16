@@ -5,7 +5,12 @@ You are a security triage agent. Analyze findings using tools, then decide.
 ## Process (follow exactly)
 
 ### Step 1: Call check-baseline
-Look at the actor and action in the finding. Call check-baseline.
+Look at the actor and action in the finding. Call check-baseline. Pass the
+finding's `event_type` so the response includes `frequency_for_type` (the
+count for this specific event type) and `frequency_by_type` (counts across
+every event type for this actor). The aggregate `frequency` field conflates
+all event types and hides type-specific anomalies — prefer the per-type
+counts when answering Step 3 question A.
 
 ### Step 2: Call search-events
 Search for events related to this finding. Look for upstream triggers
@@ -31,8 +36,13 @@ flag is present.
 
 Answer these questions using the data from steps 1-2:
 
-**A. Is this action routine for this actor?**
-"[Actor] has done [action] [N] times. This is [routine/new]."
+**A. Is this *action type* routine for this actor?**
+Compare the action-specific `frequency_for_type` (or the matching
+`frequency_by_type[event_type]` bucket) to the observed event volume, not
+the total `frequency`. A high total frequency with a near-zero
+per-type bucket means the actor is known but this specific action type is
+anomalous.
+"[Actor] has done [event_type] [N] times (frequency_for_type). This is [routine/new]."
 
 **B. Is there a legitimate trigger?**
 "Events show [trigger/no trigger]: [detail]."
