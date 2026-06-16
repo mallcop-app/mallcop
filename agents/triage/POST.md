@@ -11,21 +11,28 @@ Look at the actor and action in the finding. Call check-baseline.
 Search for events related to this finding. Look for upstream triggers
 (deploys, merges, onboarding) and other actions by the same actor.
 
-### Step 2b (optional): Call lookup-rules
-If the events you surfaced contain a recognizable benign-pattern flag
-(events with `maintenance_window=true` and a matching `window_id`,
-events with `scheduled=true` plus a `job_id`, an auth-failure burst
-followed by a `login_success` from the same IP, an auth-failure burst
-followed by a `password_reset` event then a `login_success`, or
-events that carry both `location` and `usual_location`), call
-lookup-rules with finding_family=<detector> and finding_metadata=<flat
-map of the observable flags you found>. If a rule comes back, you may
-cite its `id` as `rule_id` on resolve-finding — this satisfies the
-F2A citation requirement.
+### Step 2b (REQUIRED): Call lookup-rules
+After search-events surfaces the finding's events, you **MUST** call
+`lookup-rules` before deciding either to resolve or to escalate. The
+operator-decisions corpus is the record of patterns already ruled
+benign — escalating without first checking whether the operator already
+decided "this is fine" is a process violation.
+
+Pass `finding_family=<detector>` and `finding_metadata=<flat map of the
+observable flags surfaced by search-events>`. Examples of observable
+flags: `maintenance_window=true` + `window_id`; `scheduled=true` +
+`job_id`; a `login_success` event following an auth-failure burst from
+the same IP; a `password_reset` event between an auth-failure burst and
+a `login_success`; `location` and `usual_location` both present.
 
 Only pass metadata keys you have actually observed in the surfaced
-events. Do not invent fields. Skip this step when no benign-pattern
-flag is present.
+events. Do not invent fields. If no flags are observable, still call
+lookup-rules with the empty metadata map — the call itself is the
+process step; a null match is a valid outcome.
+
+If lookup-rules returns a match, cite its `id` as `rule_id` on
+resolve-finding. If no match, continue to Step 3 and decide based on
+your own evidence.
 
 ### Step 3: Analyze
 
