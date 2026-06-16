@@ -34,8 +34,8 @@ binary_args = ["--tool", "search-findings", "--mode", "exam", "--fixture-dir", "
 # F1G-a: Finding-state tools for triage
 [[tool_defs]]
 name = "resolve-finding"
-description = "Close a finding as resolved (high-confidence benign). Triage's ONLY terminal-close action; the schema accepts action='resolved' only. To escalate, call escalate-to-investigator instead — do NOT pass action='escalated' here (the runtime will reject it). Call last after step-4 decision. Optional rule_id cites a pre-seeded operator-decision rule (from lookup-rules) — a valid rule_id satisfies the F2A citation requirement without requiring a retrieved event ID in the reason field."
-input_schema = '{"type":"object","required":["finding_id","action","reason"],"properties":{"finding_id":{"type":"string"},"action":{"type":"string","enum":["resolved"]},"reason":{"type":"string"},"confidence":{"type":"number","minimum":1,"maximum":5},"rule_id":{"type":"string","description":"optional operator-decision rule_id returned by lookup-rules; when valid, satisfies the F2A citation requirement"}}}'
+description = "Close a finding with a resolution action (resolved|escalated). Triage uses this only for high-confidence benign resolutions. Call last after step-4 decision. Optional rule_id cites a pre-seeded operator-decision rule (from lookup-rules) — a valid rule_id satisfies the F2A citation requirement without requiring a retrieved event ID in the reason field."
+input_schema = '{"type":"object","required":["finding_id","action","reason"],"properties":{"finding_id":{"type":"string"},"action":{"type":"string","enum":["resolved","escalated"]},"reason":{"type":"string"},"confidence":{"type":"number","minimum":1,"maximum":5},"rule_id":{"type":"string","description":"optional operator-decision rule_id returned by lookup-rules; when valid, satisfies the F2A citation requirement"}}}'
 binary = "{{TOOL_BIN_DIR}}/mallcop-investigate-tools"
 binary_args = ["--tool", "resolve-finding"]
 

@@ -318,23 +318,6 @@ func runResolveFinding(inputJSON string) error {
 		return errors.New("resolve-finding: reason is required")
 	}
 
-	// Force-escalate routing (post-merge bakeoff finding, 2026-06-15):
-	// task:triage workers were using resolve-finding(action="escalated") as a
-	// terminal close, which bypassed lookup-rules, the asymmetric gate, and
-	// dispatch of a task:investigate handoff — every Wave 1-5 / A+B+C
-	// over-escalation in bakeoff-20260615-163359-postmerge-full followed this
-	// shape. resolve-finding is now the ONLY benign-close route for triage;
-	// escalation MUST go through escalate-to-investigator, which posts a
-	// work:create on the work campfire and threads the chain forward.
-	//
-	// Other skills (task:investigate, task:investigate-merge, task:deep-investigate,
-	// task:heal, task:escalate) retain action="escalated" as a legitimate
-	// terminal close — they are not the over-escalation source and downstream
-	// readers depend on the action:escalated tag from those workers.
-	if input.Action == "escalated" && os.Getenv("MALLCOP_SKILL") == "task:triage" {
-		return errors.New("resolve-finding: triage cannot close a finding with action=escalated; use escalate-to-investigator for escalation (no campfire message posted)")
-	}
-
 	// resolve-finding emits the agent's final work:output JSON to the engagement
 	// campfire. The payload IS the structured output (becomes the agent's end_turn).
 	// The engagement campfire is MALLCOP_CAMPFIRE_ID.
