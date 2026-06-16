@@ -83,6 +83,14 @@ func run(args []string) error {
 	evtType := fs.String("type", "", "event_type filter (search-events, optional)")
 	since := fs.String("since", "", "start time inclusive (search-events, search-findings); RFC3339 or natural-language (e.g. \"10 weeks ago\", \"yesterday\")")
 	until := fs.String("until", "", "end time inclusive (search-events); RFC3339 or natural-language (e.g. \"2 days ago\", \"now\")")
+	// Fix 1 (mallcoppro-DB3): when finding-family is non-empty, search-events
+	// also matches the surfaced events + finding metadata against the operator-
+	// decisions rule corpus and emits a wrapped JSON object:
+	//   {"events":[...], "matched_rules":[{id, applies_to, operator_directive}]}
+	// Without finding-family, search-events keeps the legacy line-delimited
+	// event output for backward compatibility with existing tests/consumers.
+	findingFamily := fs.String("finding-family", "", "finding detector family (search-events, optional). When set, returns wrapped {events, matched_rules} JSON object using operator-decisions.yaml.")
+	findingMetadataJSON := fs.String("finding-metadata-json", "", "finding metadata flat-map as JSON object (search-events, optional). Used together with --finding-family to seed rule matching with finding-side metadata.")
 
 	// read-finding flags
 	findingID := fs.String("finding-id", "", "finding ID to read (read-finding)")
@@ -125,6 +133,14 @@ func run(args []string) error {
 				}
 				if v, ok := input["until"].(string); ok && *until == "" {
 					*until = v
+				}
+				if v, ok := input["finding_family"].(string); ok && *findingFamily == "" {
+					*findingFamily = v
+				}
+				if v, ok := input["finding_metadata"].(map[string]interface{}); ok && *findingMetadataJSON == "" {
+					if buf, err := json.Marshal(v); err == nil {
+						*findingMetadataJSON = string(buf)
+					}
 				}
 				if v, ok := input["hours"].(float64); ok && *hours == 168 {
 					*hours = int(v)
@@ -221,7 +237,7 @@ func run(args []string) error {
 	case "check-baseline":
 		return checkBaseline(absFixtureDir, *entity, *source, *hours)
 	case "search-events":
-		return searchEvents(absFixtureDir, *actor, *source, *evtType, *since, *until)
+		return searchEvents(absFixtureDir, *actor, *source, *evtType, *since, *until, *findingFamily, *findingMetadataJSON)
 	case "search-findings":
 		return searchFindings(absFixtureDir, *actor, *source, *since)
 	case "read-finding":
@@ -517,11 +533,32 @@ type rawEvent struct {
 	Raw        interface{}            `json:"raw,omitempty"`
 }
 
-func searchEvents(fixtureDir, actor, source, evtType, since, until string) error {
+// searchEventsResult is the wrapped output shape emitted when --finding-family
+// is supplied. It bundles the surfaced events with any matched operator-decision
+// rules so the model gets the rule citation in the same call.
+//
+// Fix 1 (mallcoppro-DB3): the lookup-rules side-channel has demonstrated 0%
+// reliability (2 calls in 8,300 campfires, both failed structurally). Folding
+// rule matching into search-events — a tool the model calls reliably (829 calls)
+// — makes citation the default behavior of the only tool the model uses to
+// retrieve evidence. The worker still has to cite a returned rule_id in
+// resolve-finding to satisfy F2A; this fix just makes the rule visible to
+// the worker without requiring a separate (and structurally fragile) call.
+type searchEventsResult struct {
+	Events       []rawEvent     `json:"events"`
+	MatchedRules []operatorRule `json:"matched_rules"`
+}
+
+func searchEvents(fixtureDir, actor, source, evtType, since, until, findingFamily, findingMetadataJSON string) error {
 	f, err := safeOpen(fixtureDir, "events.json")
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			// Empty result is valid.
+			// Empty result is valid. When wrapped-mode was requested we still
+			// emit an empty {events,matched_rules} object so the model gets a
+			// consistent schema (rather than empty stdout).
+			if findingFamily != "" {
+				return emitJSON(searchEventsResult{Events: []rawEvent{}, MatchedRules: []operatorRule{}})
+			}
 			return nil
 		}
 		return fmt.Errorf("open events.json: %w", err)
@@ -549,7 +586,21 @@ func searchEvents(fixtureDir, actor, source, evtType, since, until string) error
 		untilT = t
 	}
 
-	enc := json.NewEncoder(os.Stdout)
+	// Parse finding metadata (optional). Accepts a flat JSON object whose
+	// values are scalars; coerced to strings (lookup-rules predicate format).
+	findingMetadata := map[string]string{}
+	if findingMetadataJSON != "" {
+		var raw map[string]interface{}
+		if err := json.Unmarshal([]byte(findingMetadataJSON), &raw); err != nil {
+			return fmt.Errorf("parse --finding-metadata-json: %w", err)
+		}
+		for k, v := range raw {
+			findingMetadata[k] = coerceMetadataValue(v)
+		}
+	}
+
+	// Filter events.
+	filtered := []rawEvent{}
 	for _, ev := range ef.Events {
 		if actor != "" && !strings.EqualFold(ev.Actor, actor) {
 			continue
@@ -579,11 +630,281 @@ func searchEvents(fixtureDir, actor, source, evtType, since, until string) error
 				continue
 			}
 		}
-		if err := enc.Encode(ev); err != nil {
-			return fmt.Errorf("encode event: %w", err)
+		filtered = append(filtered, ev)
+	}
+
+	// Legacy mode: no finding-family supplied. Emit line-delimited events for
+	// backward compatibility with existing consumers/tests.
+	if findingFamily == "" {
+		enc := json.NewEncoder(os.Stdout)
+		for _, ev := range filtered {
+			if err := enc.Encode(ev); err != nil {
+				return fmt.Errorf("encode event: %w", err)
+			}
+		}
+		return nil
+	}
+
+	// Wrapped mode: compute derived flags from the filtered events, run the
+	// operator-decisions rule matcher, and emit a single JSON object containing
+	// the events plus any matching rules.
+	matchedRules, err := matchRulesAgainstSearchResult(findingFamily, findingMetadata, filtered)
+	if err != nil {
+		// Rule-corpus load errors are non-fatal: we still return the events so
+		// the worker isn't blocked. matched_rules just stays empty.
+		fmt.Fprintf(os.Stderr, "search-events: rule matching disabled: %v\n", err)
+		matchedRules = []operatorRule{}
+	}
+
+	return emitJSON(searchEventsResult{
+		Events:       filtered,
+		MatchedRules: matchedRules,
+	})
+}
+
+// coerceMetadataValue normalizes scalar JSON values into the string form that
+// the operator-decisions matcher consumes. Non-scalar values (objects/arrays)
+// are JSON-marshalled; nil yields the empty string.
+func coerceMetadataValue(v interface{}) string {
+	switch t := v.(type) {
+	case nil:
+		return ""
+	case string:
+		return t
+	case bool:
+		if t {
+			return "true"
+		}
+		return "false"
+	case float64:
+		// Always render as the most natural form; rules use exact-string match.
+		// Avoid scientific notation for sane integer/decimal values.
+		if t == float64(int64(t)) {
+			return fmt.Sprintf("%d", int64(t))
+		}
+		return fmt.Sprintf("%g", t)
+	default:
+		if buf, err := json.Marshal(v); err == nil {
+			return string(buf)
+		}
+		return ""
+	}
+}
+
+// matchRulesAgainstSearchResult loads the operator-decisions corpus and returns
+// the rules whose family + predicate match the union of finding metadata,
+// every event's metadata, and a set of derived flags computed from the events.
+//
+// Derived flags supplied to the matcher (only set when inferrable):
+//   - resolution_event: "login_success" when a login_success event appears
+//     among the filtered events. "password_reset_then_login_success" when a
+//     password_reset event precedes a login_success.
+//   - location_change: "true" when an event carries both `location` and
+//     `usual_location` keys with differing values.
+//   - automation_provenance: "terraform" when an event's user_agent starts
+//     with or contains "terraform" / "Terraform"; "github_actions" when
+//     user_agent contains "github-actions".
+//   - deploy_release: "true" when ≥2 events carry a non-empty `release` or
+//     `release_tag` metadata key with the same value, OR when an event
+//     metadata key `correlation_id` matches `release-*` / `deploy-*`.
+//   - sensitive_bulk_read: "true" when ≥100 events of type get_blob,
+//     get_object, or download appear within a 60-second window.
+//   - hr_provisioning: "true" when any event has source=hr-system AND
+//     event_type=user_provisioned (covers AC-05 contractor onboarding).
+//
+// The union map is built as: finding metadata FIRST (so finding-side keys win),
+// then event metadata layered in (only fills keys not already present), then
+// derived flags layered in last (always set — these are observed truths the
+// matcher derives in-process so the model doesn't have to).
+func matchRulesAgainstSearchResult(family string, findingMetadata map[string]string, events []rawEvent) ([]operatorRule, error) {
+	repoRoot, err := resolveRepoRoot()
+	if err != nil {
+		return nil, fmt.Errorf("resolve repo root: %w", err)
+	}
+	rules, err := loadOperatorRules(repoRoot)
+	if err != nil {
+		return nil, fmt.Errorf("load operator rules: %w", err)
+	}
+
+	// Build the merged metadata map.
+	merged := map[string]string{}
+	for k, v := range findingMetadata {
+		merged[k] = v
+	}
+	for _, ev := range events {
+		for k, v := range ev.Metadata {
+			if _, present := merged[k]; present {
+				continue
+			}
+			merged[k] = coerceMetadataValue(v)
 		}
 	}
-	return nil
+
+	// Layer derived flags last (overrides). These are the worker-assertable
+	// observations the matcher computes in-process so the model doesn't have
+	// to derive them itself.
+	for k, v := range deriveSearchEventFlags(events) {
+		merged[k] = v
+	}
+
+	matched := []operatorRule{}
+	for _, r := range rules {
+		if matchesRule(r, family, merged) {
+			matched = append(matched, r)
+		}
+	}
+	return matched, nil
+}
+
+// deriveSearchEventFlags walks the events and returns observation flags the
+// operator-decisions matcher can predicate on. Only sets keys when the
+// derivation is unambiguous; absent keys leave the predicate to fail naturally.
+func deriveSearchEventFlags(events []rawEvent) map[string]string {
+	out := map[string]string{}
+
+	// resolution_event: did we see a password_reset followed by a
+	// login_success, or just a login_success?
+	sawLoginSuccess := false
+	sawPasswordResetBeforeLogin := false
+	for _, ev := range events {
+		t := strings.ToLower(ev.EventType)
+		if t == "password_reset" && !sawLoginSuccess {
+			// password_reset seen before any login_success — flag the two-step
+			// signature if we see a login_success afterwards.
+			sawPasswordResetBeforeLogin = true
+		}
+		if t == "login_success" {
+			sawLoginSuccess = true
+		}
+	}
+	switch {
+	case sawLoginSuccess && sawPasswordResetBeforeLogin:
+		out["resolution_event"] = "password_reset_then_login_success"
+	case sawLoginSuccess:
+		out["resolution_event"] = "login_success"
+	}
+
+	// location_change: any event with both location + usual_location keys that
+	// differ. Case-insensitive value compare.
+	for _, ev := range events {
+		loc, locOk := eventMetadataString(ev, "location")
+		usual, usualOk := eventMetadataString(ev, "usual_location")
+		if locOk && usualOk && loc != "" && usual != "" && !strings.EqualFold(loc, usual) {
+			out["location_change"] = "true"
+			break
+		}
+	}
+
+	// automation_provenance: heuristic on user_agent.
+	for _, ev := range events {
+		ua, ok := eventMetadataString(ev, "user_agent")
+		if !ok || ua == "" {
+			continue
+		}
+		uaLower := strings.ToLower(ua)
+		switch {
+		case strings.Contains(uaLower, "terraform"):
+			out["automation_provenance"] = "terraform"
+		case strings.Contains(uaLower, "github-actions"), strings.Contains(uaLower, "github actions"):
+			if _, present := out["automation_provenance"]; !present {
+				out["automation_provenance"] = "github_actions"
+			}
+		}
+		if _, present := out["automation_provenance"]; present {
+			break
+		}
+	}
+
+	// deploy_release: ≥2 events share the same non-empty release/release_tag,
+	// OR an event has correlation_id matching release-*/deploy-*.
+	releaseCounts := map[string]int{}
+	for _, ev := range events {
+		for _, key := range []string{"release", "release_tag"} {
+			if v, ok := eventMetadataString(ev, key); ok && v != "" {
+				releaseCounts[v]++
+			}
+		}
+	}
+	for _, n := range releaseCounts {
+		if n >= 2 {
+			out["deploy_release"] = "true"
+			break
+		}
+	}
+	if _, present := out["deploy_release"]; !present {
+		for _, ev := range events {
+			cid, ok := eventMetadataString(ev, "correlation_id")
+			if !ok {
+				continue
+			}
+			low := strings.ToLower(cid)
+			if strings.HasPrefix(low, "release-") || strings.HasPrefix(low, "deploy-") {
+				out["deploy_release"] = "true"
+				break
+			}
+		}
+	}
+
+	// sensitive_bulk_read: ≥100 read-type events within a 60s window.
+	readTypes := map[string]bool{"get_blob": true, "get_object": true, "download": true}
+	readTimes := []time.Time{}
+	for _, ev := range events {
+		if !readTypes[strings.ToLower(ev.EventType)] {
+			continue
+		}
+		ts, err := time.Parse(time.RFC3339, ev.Timestamp)
+		if err != nil {
+			continue
+		}
+		readTimes = append(readTimes, ts)
+	}
+	if len(readTimes) >= 100 {
+		// Sort and check for any 100-event window within 60s.
+		sortedTimes := make([]time.Time, len(readTimes))
+		copy(sortedTimes, readTimes)
+		// Insertion-sort is fine for the small fixture sizes we see.
+		for i := 1; i < len(sortedTimes); i++ {
+			for j := i; j > 0 && sortedTimes[j].Before(sortedTimes[j-1]); j-- {
+				sortedTimes[j], sortedTimes[j-1] = sortedTimes[j-1], sortedTimes[j]
+			}
+		}
+		for i := 0; i+99 < len(sortedTimes); i++ {
+			if sortedTimes[i+99].Sub(sortedTimes[i]) <= 60*time.Second {
+				out["sensitive_bulk_read"] = "true"
+				break
+			}
+		}
+	}
+
+	// hr_provisioning: any event has source=hr-system AND
+	// event_type=user_provisioned. Covers AC-05 contractor onboarding pattern.
+	for _, ev := range events {
+		if strings.EqualFold(ev.Source, "hr-system") && strings.EqualFold(ev.EventType, "user_provisioned") {
+			out["hr_provisioning"] = "true"
+			break
+		}
+	}
+
+	return out
+}
+
+// eventMetadataString returns the case-insensitive string lookup of key within
+// ev.Metadata. Non-string scalars are coerced via coerceMetadataValue so
+// callers can treat the result as a string predicate.
+func eventMetadataString(ev rawEvent, key string) (string, bool) {
+	if ev.Metadata == nil {
+		return "", false
+	}
+	if v, ok := ev.Metadata[key]; ok {
+		return coerceMetadataValue(v), true
+	}
+	keyLower := strings.ToLower(key)
+	for k, v := range ev.Metadata {
+		if strings.ToLower(k) == keyLower {
+			return coerceMetadataValue(v), true
+		}
+	}
+	return "", false
 }
 
 // ---- search-findings -------------------------------------------------------
