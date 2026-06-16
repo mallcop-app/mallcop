@@ -177,12 +177,6 @@ func TestResolveFinding_PostsToCampfire(t *testing.T) {
 	cfBin := requireCFF(t)
 	cfHome, campfireID := newTestCampfire(t, cfBin)
 
-	// Satisfy the structural lookup-rules guard (mallcoppro-structural-lookup-
-	// enforce): runResolveFinding refuses to dispatch unless tool:lookup-rules
-	// is in the engagement transcript. This test exercises the post-guard close
-	// path, so we seed the tool_use before invoking the tool.
-	seedLookupRulesCall(t, cfBin, cfHome, campfireID)
-
 	out := captureStdout(t, func() {
 		err := runToolWithEnv(t, "resolve-finding",
 			`{"finding_id":"fnd-test-001","action":"resolved","reason":"Normal activity confirmed after cross-checking with ticket system.","confidence":4}`,
@@ -847,9 +841,6 @@ func toolUsagePayload(msg map[string]interface{}) (forgeCalls int, findingID str
 func TestToolEmitsToolUsage_ResolveFinding(t *testing.T) {
 	cfBin := requireCFF(t)
 	cfHome, campfireID := newTestCampfire(t, cfBin)
-
-	// Satisfy the structural lookup-rules guard (mallcoppro-structural-lookup-enforce).
-	seedLookupRulesCall(t, cfBin, cfHome, campfireID)
 
 	captureStdout(t, func() {
 		err := runToolWithEnv(t, "resolve-finding",
