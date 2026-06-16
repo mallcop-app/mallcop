@@ -48,6 +48,9 @@ func TestVeracity_Bypass1_AgentSelfOverride_GateStillFires(t *testing.T) {
 
 	// Genuinely low score: 1 tool call, no real citations.
 	seedToolUseMsgs(t, cfBin, cfHome, campfireID, []string{"search-events"})
+	// Satisfy the structural lookup-rules guard so we exercise the gate path
+	// the test is verifying (not the new pre-gate guard).
+	seedLookupRulesCall(t, cfBin, cfHome, campfireID)
 
 	// Reason field carries a prompt-injection-style override attempt.
 	// If the gate checks the reason as text (it shouldn't), this would skip it.
@@ -100,6 +103,8 @@ func TestVeracity_Bypass2_CraftedConfidenceField_GateUsesStructuralScore(t *test
 
 	// Only 1 tool call - genuinely low structural score.
 	seedToolUseMsgs(t, cfBin, cfHome, campfireID, []string{"check-baseline"})
+	// Satisfy the structural lookup-rules guard.
+	seedLookupRulesCall(t, cfBin, cfHome, campfireID)
 
 	// Agent claims max confidence (5) and gives a curt "all clear" reason.
 	// Reason has no event citations, so structural score is ~0.12.
@@ -227,6 +232,10 @@ func TestVeracity_Bypass4_ToolCountInflation_CapHolds(t *testing.T) {
 		tools[i] = "check-baseline"
 	}
 	seedToolUseMsgs(t, cfBin, cfHome, campfireID, tools)
+	// Satisfy the structural lookup-rules guard. With 20 same-tool + 1 lookup-rules:
+	// 21 calls (capped at 8) × 2 distinct tools. Score still capped, zero citations
+	// still fires the hard floor.
+	seedLookupRulesCall(t, cfBin, cfHome, campfireID)
 
 	envPairs := append(gateEnvPairs(true, 0.55),
 		"MALLCOP_SKILL", "task:investigate",
@@ -308,6 +317,10 @@ func TestVeracity_Bypass4b_MaxDistinctToolsNoCitations_GateFires(t *testing.T) {
 		"tool-alpha", "tool-beta", "tool-gamma", "tool-delta",
 	}
 	seedToolUseMsgs(t, cfBin, cfHome, campfireID, toolNames)
+	// Satisfy the structural lookup-rules guard. Adding lookup-rules ups distinct
+	// to 5 (capped at 4) and calls to 9 (capped at 8); zero citations still
+	// triggers the hard floor.
+	seedLookupRulesCall(t, cfBin, cfHome, campfireID)
 
 	envPairs := append(gateEnvPairs(true, 0.55),
 		"MALLCOP_SKILL", "task:investigate",
@@ -382,6 +395,8 @@ func TestVeracity_Bypass5_CitationInflation_Closed(t *testing.T) {
 		"check-baseline", "search-events", "search-findings", "read-config",
 	}
 	seedToolUseMsgs(t, cfBin, cfHome, campfireID, toolNames)
+	// Satisfy the structural lookup-rules guard.
+	seedLookupRulesCall(t, cfBin, cfHome, campfireID)
 
 	// Reason stuffed with fake event-ID-like tokens.
 	// None of these IDs appear in any campfire message payload.
@@ -520,6 +535,8 @@ func TestVeracity_Bypass6_CitationFabricationViaAnnotate(t *testing.T) {
 	seedToolUseMsgs(t, cfBin, cfHome, campfireID, []string{
 		"search-events", "check-baseline",
 	})
+	// Satisfy the structural lookup-rules guard.
+	seedLookupRulesCall(t, cfBin, cfHome, campfireID)
 
 	// Step 2: SIMULATED annotate-finding payload. annotate-finding's runtime
 	// behavior (tools_f1g.go:415-461) posts arbitrary note JSON to MALLCOP_CAMPFIRE_ID
@@ -596,6 +613,8 @@ func TestVeracity_Bypass6_RetrievalToolPayloadStillCounts(t *testing.T) {
 	// Real retrieval flow: 2 tool calls, last one returns a payload containing
 	// the citation-shape token under a tool:* tag.
 	seedToolUseMsgs(t, cfBin, cfHome, campfireID, []string{"check-baseline", "search-events"})
+	// Satisfy the structural lookup-rules guard.
+	seedLookupRulesCall(t, cfBin, cfHome, campfireID)
 
 	// Simulate the tool:search-events result payload that surfaced evt-555.
 	// This MUST still count toward retrievedIDs after the Bypass-6 defense.

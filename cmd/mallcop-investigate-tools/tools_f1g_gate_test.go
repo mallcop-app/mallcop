@@ -142,6 +142,8 @@ func TestConfidenceGate_Disabled_PassesThrough(t *testing.T) {
 
 	// Seed a low-score transcript (1 tool call, no citations, 5 iters).
 	seedToolUseMsgs(t, cfBin, cfHome, campfireID, []string{"search-events"})
+	// Satisfy the structural lookup-rules guard (mallcoppro-structural-lookup-enforce).
+	seedLookupRulesCall(t, cfBin, cfHome, campfireID)
 
 	// Call resolve-finding with MALLCOP_SKILL=task:investigate but enabled=false.
 	envPairs := append(gateEnvPairs(false, 0.55),
@@ -194,6 +196,8 @@ func TestConfidenceGate_OtherSkill_PassesThrough(t *testing.T) {
 
 	// Seed a low-score transcript.
 	seedToolUseMsgs(t, cfBin, cfHome, campfireID, []string{"search-events"})
+	// Satisfy the structural lookup-rules guard (mallcoppro-structural-lookup-enforce).
+	seedLookupRulesCall(t, cfBin, cfHome, campfireID)
 
 	// Gate is enabled but skill is NOT in {task:investigate, task:triage}.
 	envPairs := append(gateEnvPairs(true, 0.55),
@@ -310,6 +314,10 @@ func TestConfidenceGate_LowScore_FiresFanOut(t *testing.T) {
 	// BUT with only 1 tool, distinct_tool_count = 1, so:
 	// 0.04*1 + 0.08*1 + 0.04*0 = 0.04 + 0.08 = 0.12, minus 0.04 penalty = 0.08 < 0.55 ✓
 	seedToolUseMsgs(t, cfBin, cfHome, campfireID, []string{"search-events"})
+	// Satisfy the structural lookup-rules guard (mallcoppro-structural-lookup-enforce).
+	// Note: this adds 1 more tool message; the gate-firing math above still holds
+	// because we are well below the floor on every component.
+	seedLookupRulesCall(t, cfBin, cfHome, campfireID)
 	// Seed 4 extra non-tool messages to simulate iterations without tool calls.
 	// These are just plain messages (no tool_use tag) so they count as iterations.
 	for i := 0; i < 4; i++ {
@@ -379,6 +387,10 @@ func TestConfidenceGate_VerifyFanOutShape(t *testing.T) {
 
 	// Low score: 1 tool call, no citations.
 	seedToolUseMsgs(t, cfBin, cfHome, campfireID, []string{"check-baseline"})
+	// Satisfy the structural lookup-rules guard (mallcoppro-structural-lookup-enforce).
+	// Zero citations still fires the hard floor — adding lookup-rules does not
+	// change the gate outcome.
+	seedLookupRulesCall(t, cfBin, cfHome, campfireID)
 
 	envPairs := append(gateEnvPairs(true, 0.55),
 		"MALLCOP_SKILL", "task:investigate",
@@ -510,6 +522,10 @@ func TestConfidenceGate_IterationPenalty(t *testing.T) {
 		"check-baseline", "search-events", "read-config",
 	}
 	seedToolUseMsgs(t, cfBin, cfHome, campfireID, toolNamesFor6Calls)
+	// Satisfy the structural lookup-rules guard. With the extra tool: 7 calls,
+	// 4 distinct → score 0.04*7 + 0.08*4 + 0 = 0.60. With penalty -0.02*10 = -0.20
+	// final 0.40 < 0.55 → still fires (and zero-citation hard floor catches it first).
+	seedLookupRulesCall(t, cfBin, cfHome, campfireID)
 
 	// Seed 7 more non-tool-use messages to bring total messages to 13
 	// (6 tool_use + 7 plain assistant turns = 13 iterations).
@@ -583,6 +599,8 @@ func TestConfidenceGate_EscalatedAction_PassesThrough(t *testing.T) {
 	// Same low-evidence transcript as LowScore_FiresFanOut: 1 tool call, no citations.
 	// If the gate were not action-gated, this would fire fan-out.
 	seedToolUseMsgs(t, cfBin, cfHome, campfireID, []string{"search-events"})
+	// Satisfy the structural lookup-rules guard (mallcoppro-structural-lookup-enforce).
+	seedLookupRulesCall(t, cfBin, cfHome, campfireID)
 	for i := 0; i < 4; i++ {
 		_, _ = runCFCmd(cfBin, cfHome, "send", campfireID,
 			fmt.Sprintf(`{"assistant_turn":true,"turn":%d}`, i+2), "--tag", "assistant:turn")
@@ -659,6 +677,8 @@ func TestConfidenceGate_RemediatedAction_PassesThrough(t *testing.T) {
 
 	// Low-evidence transcript — same shape as the fan-out tests.
 	seedToolUseMsgs(t, cfBin, cfHome, campfireID, []string{"check-baseline"})
+	// Satisfy the structural lookup-rules guard (mallcoppro-structural-lookup-enforce).
+	seedLookupRulesCall(t, cfBin, cfHome, campfireID)
 
 	envPairs := append(gateEnvPairs(true, 0.55),
 		"MALLCOP_SKILL", "task:investigate",
@@ -780,6 +800,11 @@ func TestPhase1Defaults_ZeroCitationStillFires(t *testing.T) {
 				"check-baseline", "search-events", "search-findings", "read-config",
 			}
 			seedToolUseMsgs(t, cfBin, cfHome, campfireID, toolNames)
+			// Satisfy the structural lookup-rules guard (mallcoppro-structural-lookup-
+			// enforce). The zero-citation hard floor is the assertion under test —
+			// adding lookup-rules does not change the verdict (score caps + zero
+			// citations fire unconditionally).
+			seedLookupRulesCall(t, cfBin, cfHome, campfireID)
 
 			// Reason has NO citations (no evt_*, fnd-*, etc. that match retrieved IDs).
 			reason := "Investigation complete. No anomaly. Standard activity pattern."
@@ -854,6 +879,9 @@ func TestConfidenceGate_TriageSkill_Fires(t *testing.T) {
 	// well below the triage floor of 0.18. AND zero citations triggers the
 	// universal hard floor regardless of score — either path fires the gate.
 	seedToolUseMsgs(t, cfBin, cfHome, campfireID, []string{"search-events"})
+	// Satisfy the structural lookup-rules guard. The zero-citation hard floor
+	// fires regardless of the additional tool call.
+	seedLookupRulesCall(t, cfBin, cfHome, campfireID)
 
 	envPairs := append(gateEnvPairsTriage(true, 0.40, 0.18),
 		"MALLCOP_SKILL", "task:triage",
@@ -953,6 +981,9 @@ func TestConfidenceGate_TriageSkill_NormalResolveDoesNotFire(t *testing.T) {
 	// recognizes it as a real retrieved ID (not a hallucinated citation).
 	seedToolResultMsg(t, cfBin, cfHome, campfireID,
 		`{"tool_result":true,"tool":"search-events","events":[{"id":"evt_001","actor":"alice@example.com"}]}`)
+	// Satisfy the structural lookup-rules guard. With the extra tool:
+	// 3 calls, 3 distinct, 1 citation → score 0.12 + 0.24 + 0.04 = 0.40 ≥ 0.18 → still passes.
+	seedLookupRulesCall(t, cfBin, cfHome, campfireID)
 
 	reason := "Triage complete: baseline matched, event evt_001 confirms benign pattern."
 
@@ -1013,9 +1044,12 @@ func TestConfidenceGate_TriageScoreFloor_EnvOverride(t *testing.T) {
 	cfBin, cfHome, campfireID, workCampfireID := newTestCampfirePair(t)
 
 	// 1 tool + 1 valid citation. Score = 0.04*1 + 0.08*1 + 0.04*1 = 0.16.
+	// + structural-lookup-enforce guard tool → 2 tools, 2 distinct, 1 citation
+	// → score 0.04*2 + 0.08*2 + 0.04*1 = 0.28. Still below 0.30, above 0.05.
 	seedToolUseMsgs(t, cfBin, cfHome, campfireID, []string{"search-events"})
 	seedToolResultMsg(t, cfBin, cfHome, campfireID,
 		`{"tool_result":true,"tool":"search-events","events":[{"id":"evt_042","actor":"bob@example.com"}]}`)
+	seedLookupRulesCall(t, cfBin, cfHome, campfireID)
 
 	reason := "Triage: event evt_042 explains the anomaly."
 
@@ -1050,17 +1084,24 @@ func TestConfidenceGate_TriageScoreFloor_EnvOverride(t *testing.T) {
 		t.Errorf("expected gate to NOT fire with TRIAGE_SCORE_FLOOR=0.05 (score=0.16); got gate_fired=true. result=%v", result)
 	}
 
-	// Now rerun with a HIGHER triage floor (0.30) on the same transcript shape —
+	// Now rerun with a HIGHER triage floor (0.50) on the same transcript shape —
 	// gate must fire. This proves the env var actively controls the decision in
 	// both directions, not just the permissive direction above. Use a fresh
 	// campfire pair (with its own cfHome) so the second resolve-finding call
 	// doesn't see the first call's persisted state.
+	//
+	// Note: mallcoppro-structural-lookup-enforce adds a tool:lookup-rules seed
+	// (required by the runtime guard) plus the tool:result seed counts as a
+	// tool_use too, so the effective score is 0.04*3 + 0.08*3 + 0.04*1 = 0.40
+	// (not 0.16 as the pre-structural-enforce comment block above states for the
+	// no-seed version). Floor 0.50 still produces a clean fire (0.40 < 0.50).
 	cfBin2, cfHome2, campfireID2, workCampfireID2 := newTestCampfirePair(t)
 	seedToolUseMsgs(t, cfBin2, cfHome2, campfireID2, []string{"search-events"})
 	seedToolResultMsg(t, cfBin2, cfHome2, campfireID2,
 		`{"tool_result":true,"tool":"search-events","events":[{"id":"evt_042","actor":"bob@example.com"}]}`)
+	seedLookupRulesCall(t, cfBin2, cfHome2, campfireID2)
 
-	envPairs2 := append(gateEnvPairsTriage(true, 0.40, 0.30),
+	envPairs2 := append(gateEnvPairsTriage(true, 0.40, 0.50),
 		"MALLCOP_SKILL", "task:triage",
 		"MALLCOP_CAMPFIRE_ID", campfireID2,
 		"MALLCOP_WORK_CAMPFIRE_ID", workCampfireID2,
@@ -1085,7 +1126,7 @@ func TestConfidenceGate_TriageScoreFloor_EnvOverride(t *testing.T) {
 	}
 
 	if result2["gate_fired"] != true {
-		t.Errorf("expected gate to fire with TRIAGE_SCORE_FLOOR=0.30 (score=0.16 < 0.30); got result=%v", result2)
+		t.Errorf("expected gate to fire with TRIAGE_SCORE_FLOOR=0.50 (score≈0.40 < 0.50); got result=%v", result2)
 	}
 }
 
@@ -1105,6 +1146,8 @@ func TestForceEscalateToInvestigator(t *testing.T) {
 	// exercise the runConfidenceGateFanOut → forceEscalateToInvestigator path
 	// the production code uses. Low-evidence transcript → gate fires.
 	seedToolUseMsgs(t, cfBin, cfHome, campfireID, []string{"check-baseline"})
+	// Satisfy the structural lookup-rules guard.
+	seedLookupRulesCall(t, cfBin, cfHome, campfireID)
 
 	envPairs := append(gateEnvPairsTriage(true, 0.40, 0.18),
 		"MALLCOP_SKILL", "task:triage",

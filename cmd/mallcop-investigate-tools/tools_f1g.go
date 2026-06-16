@@ -326,6 +326,18 @@ func runResolveFinding(inputJSON string) error {
 		return fmt.Errorf("resolve-finding: %w", err)
 	}
 
+	// ── Hard runtime guard: lookup-rules must have been called ────────────────
+	// Three bakeoffs (0 lookup-rules invocations across 171 scenarios) proved
+	// prompt enforcement is ineffective. This guard is the mechanical backstop:
+	// refuse to dispatch unless the engagement transcript contains a prior
+	// tool_use tagged tool:lookup-rules. The model gets an actionable error,
+	// calls lookup-rules, then retries. See requireLookupRulesInvoked for
+	// the failure semantics (fails OPEN on read errors to preserve existing
+	// test environments; F2A gate's fail-closed path covers the bypass case).
+	if guardErr := requireLookupRulesInvoked(campfireID, "resolve-finding"); guardErr != nil {
+		return guardErr
+	}
+
 	// ── F2A confidence-gate (task:investigate only) ────────────────────────────
 	// The gate lives here in binary code — the agent CANNOT skip it from a prompt.
 	// For non-investigate skills or disabled config, checkConfidenceGate returns
@@ -721,6 +733,23 @@ func runEscalateToStageC(inputJSON string) error {
 	}
 	if !validClasses[input.ActionClass] {
 		return fmt.Errorf("escalate-to-stage-c: action_class must be one of auto-safe|needs-approval|informational|ambiguous, got %q", input.ActionClass)
+	}
+
+	// ── Hard runtime guard: lookup-rules must have been called ────────────────
+	// escalate-to-stage-c is a TERMINAL decision (the worker is committing to a
+	// remediation class, not deferring to another investigator). It carries the
+	// same lookup-rules requirement as resolve-finding. The peer handoff tool
+	// escalate-to-investigator is NOT gated — that one defers to a fresh
+	// investigator who will then be gated when it tries to terminally resolve
+	// or stage-c.
+	//
+	// The guard reads MALLCOP_CAMPFIRE_ID (the engagement campfire — set by
+	// legion in all worker jails). When unset (some tests, some non-bakeoff
+	// call sites), the guard fails open and lets the call proceed.
+	if engagementCampfireID := os.Getenv("MALLCOP_CAMPFIRE_ID"); engagementCampfireID != "" {
+		if guardErr := requireLookupRulesInvoked(engagementCampfireID, "escalate-to-stage-c"); guardErr != nil {
+			return guardErr
+		}
 	}
 
 	workCampfireID, err := requireEnv("MALLCOP_WORK_CAMPFIRE_ID")
