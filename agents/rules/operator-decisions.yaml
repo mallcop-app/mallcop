@@ -143,3 +143,80 @@ rules:
       working hours, performing only non-sensitive reads, is consistent with
       business travel; resolve with reference to the geolocation, the local-time
       alignment, and the absence of privilege actions.
+
+  - id: "R-006"
+    applies_to:
+      family: "new-external-access"
+      metadata_match:
+        # Sourced from exams/scenarios/access/AC-05-contractor-first-day.yaml.
+        # Observable: when search-events surfaces an hr-system event of
+        # event_type=user_provisioned for the same target/email AND its
+        # metadata carries contractor_email + ticket (HR-*) within the same
+        # hour as the external-access finding, the worker passes
+        # hr_provisioning="true" — a derived per-finding flag that asserts
+        # "an HR onboarding event for this external identity exists in the
+        # surfaced events". Same pattern as R-003/R-004's resolution_event
+        # flag: a worker-asserted observation grounded in observable event
+        # metadata (source=hr-system, event_type=user_provisioned, matching
+        # contractor_email / hr_ticket between the HR event and the GitHub
+        # org.member_added event).
+        hr_provisioning: "true"
+    operator_directive: |
+      A new external identity whose first access is preceded within the
+      same hour by an hr-system user_provisioned event (matching
+      contractor_email / hr_ticket linking the HR event to the GitHub
+      org.member_added event) is the canonical contractor onboarding
+      pattern; resolve with reference to the HR ticket id, the
+      provisioning event timestamp, and the contractor's manager of
+      record.
+
+  - id: "R-007"
+    applies_to:
+      family: "new-actor"
+      metadata_match:
+        # Sourced from exams/scenarios/identity/ID-02-new-actor-ci-bot-benign.yaml.
+        # Observable: all three ID-02 events carry
+        # metadata.user_agent="terraform-provider-azurerm/3.90.0 (+https://www.terraform.io)"
+        # and metadata.correlation_id="tf-run-20260310-0217". When the worker
+        # observes a user_agent prefix of "terraform-" (or containing
+        # "terraform.io") AND a matching correlation_id like "tf-run-*" across
+        # the surfaced events, it passes automation_provenance="terraform" —
+        # a derived flag asserting "the events themselves attest to terraform
+        # automation provenance". Same pattern as R-003/R-005's derived flags:
+        # the predicate is observable in event metadata; the worker just
+        # collapses the multi-field signal into a single citation flag.
+        automation_provenance: "terraform"
+    operator_directive: |
+      A new actor whose surfaced events all share a terraform user_agent
+      prefix and a single tf-run-* correlation_id, operating on
+      infrastructure targets already in a sibling automation actor's
+      baseline relationships (ci-bot, deploy-svc on the same resource
+      group), is consistent with infrastructure-as-code onboarding;
+      resolve with reference to the correlation_id, the terraform user_agent,
+      and the sibling-actor baseline on the targets.
+
+  - id: "R-008"
+    applies_to:
+      family: "volume-anomaly"
+      metadata_match:
+        # Sourced from exams/scenarios/behavioral/VA-01-deploy-burst.yaml.
+        # Observable: events evt_002..evt_005 carry metadata.release="v2.4.0"
+        # (and evt_001/evt_002/evt_004 carry metadata.image_tag="v2.4.0").
+        # When the worker observes 3+ surfaced events sharing a non-empty
+        # release tag (or matching image_tag) on event types from the
+        # {image_push, container_deploy, container_restart, health_check}
+        # deployment family, it passes deploy_release="true" — a derived
+        # flag asserting "the volume spike is composed of deployment
+        # operations for a single coherent release". Same pattern as R-002's
+        # scheduled flag: a worker-asserted observation grounded in
+        # observable event metadata. Distinct from R-002 (scheduled batch)
+        # because the spike is release-driven, not cron-driven.
+        deploy_release: "true"
+    operator_directive: |
+      A volume spike from a deployment service account composed entirely
+      of deployment-family operations (image_push, container_deploy,
+      container_restart, health_check) sharing a single release tag on
+      targets already in the actor's baseline relationships is the
+      canonical multi-service release pattern; resolve with reference to
+      the release tag, the deployment event-type composition, and the
+      baseline-known targets.
