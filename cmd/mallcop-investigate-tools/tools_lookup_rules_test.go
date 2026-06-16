@@ -121,8 +121,10 @@ func TestLookupRules_LoadsYaml(t *testing.T) {
 func TestLookupRules_MatchesFamily(t *testing.T) {
 	_ = writeRulesFixture(t, fixtureRulesYAML)
 
+	// mallcoppro-db3 Fix #6: flat named string predicates are the canonical
+	// shape. The nested finding_metadata object is back-compat only.
 	out := captureStdout(t, func() {
-		input := `{"finding_id":"fnd-001","finding_family":"unusual-timing","finding_metadata":{"scenario_pattern":"maintenance-window","actor_role":"automation"}}`
+		input := `{"finding_id":"fnd-001","finding_family":"unusual-timing","scenario_pattern":"maintenance-window","actor_role":"automation"}`
 		if err := runLookupRules(input); err != nil {
 			t.Errorf("runLookupRules: unexpected error: %v", err)
 		}
@@ -143,14 +145,36 @@ func TestLookupRules_MatchesFamily(t *testing.T) {
 	}
 }
 
+// TestLookupRules_MatchesFamily_LegacyNestedMetadata verifies the legacy
+// nested `finding_metadata` object still routes through assembleMetadata so
+// pre-Fix-#6 callers keep working during the transition.
+func TestLookupRules_MatchesFamily_LegacyNestedMetadata(t *testing.T) {
+	_ = writeRulesFixture(t, fixtureRulesYAML)
+
+	out := captureStdout(t, func() {
+		input := `{"finding_id":"fnd-001-legacy","finding_family":"unusual-timing","finding_metadata":{"scenario_pattern":"maintenance-window","actor_role":"automation"}}`
+		if err := runLookupRules(input); err != nil {
+			t.Errorf("runLookupRules (legacy nested): unexpected error: %v", err)
+		}
+	})
+
+	var result lookupRulesOutput
+	if err := json.Unmarshal([]byte(out), &result); err != nil {
+		t.Fatalf("parse output: %v\nout=%q", err, out)
+	}
+	if len(result.Rules) != 1 || result.Rules[0].ID != "R-001" {
+		t.Fatalf("legacy nested input did not match R-001 (got %d rules); back-compat shim regressed", len(result.Rules))
+	}
+}
+
 // ---- TestLookupRules_NoMatch -------------------------------------------------
 
 func TestLookupRules_NoMatch(t *testing.T) {
 	_ = writeRulesFixture(t, fixtureRulesYAML)
 
-	// (a) Unmatched family.
+	// (a) Unmatched family. Flat schema (Fix #6) — omit all predicate flags.
 	out := captureStdout(t, func() {
-		input := `{"finding_id":"fnd-002","finding_family":"privilege-escalation","finding_metadata":{}}`
+		input := `{"finding_id":"fnd-002","finding_family":"privilege-escalation"}`
 		if err := runLookupRules(input); err != nil {
 			t.Errorf("runLookupRules: unexpected error: %v", err)
 		}
@@ -164,8 +188,9 @@ func TestLookupRules_NoMatch(t *testing.T) {
 	}
 
 	// (b) Family matches but metadata mismatches — conjunctive predicate fails.
+	// Flat schema (Fix #6): supply scenario_pattern directly.
 	out2 := captureStdout(t, func() {
-		input := `{"finding_id":"fnd-003","finding_family":"unusual-timing","finding_metadata":{"scenario_pattern":"different-pattern"}}`
+		input := `{"finding_id":"fnd-003","finding_family":"unusual-timing","scenario_pattern":"different-pattern"}`
 		if err := runLookupRules(input); err != nil {
 			t.Errorf("runLookupRules: unexpected error: %v", err)
 		}

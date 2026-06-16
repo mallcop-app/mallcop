@@ -37,13 +37,16 @@ cite its `id` in resolve-finding as `rule_id` — that citation counts toward
 the F2A gate's evidence requirement and is the strongest form of
 evidence-grounded resolution.
 
-The `finding_metadata` you pass should be a flat string map of the
-observable flags you have actually seen — for example
-`{"maintenance_window": "true"}` when you have confirmed the events carry
-that flag, or `{"resolution_event": "login_success"}` when search-events
-surfaced a login_success event following an auth failure burst. Only pass
-flags you have direct evidence for; the rule corpus is a contract about
-what the worker has observed, not a hypothesis about what might be true.
+Pass observable flags as top-level named string arguments — for example
+`maintenance_window: "true"` when you have confirmed the events carry
+that flag, or `resolution_event: "login_success"` when search-events
+surfaced a login_success event following an auth failure burst. The
+available flag fields are `maintenance_window`, `scheduled`,
+`resolution_event`, `location_change`, `automation_provenance`,
+`deploy_release`, `sensitive_bulk_read`, `hr_provisioning`,
+`scenario_pattern`, and `actor_role`. Only pass flags you have direct
+evidence for; the rule corpus is a contract about what the worker has
+observed, not a hypothesis about what might be true.
 
 Calling lookup-rules with no arguments OR with arguments that do not match
 the finding metadata is a process violation — be precise.

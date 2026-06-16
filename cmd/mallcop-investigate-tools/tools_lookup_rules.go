@@ -102,13 +102,83 @@ type operatorRulesFile struct {
 // lookupRulesInput is the input_schema for the lookup-rules action tool.
 //
 // FindingFamily filters rules by AppliesTo.Family (case-insensitive equality).
-// FindingMetadata supplies the metadata predicate values — a rule's
-// metadata_match keys must all be present in FindingMetadata with matching
-// values (case-insensitive) for the rule to be returned.
+//
+// The metadata predicate is supplied as a flat set of named string fields,
+// not a nested object. This works around an empirically observed reliability
+// problem with the prior nested `finding_metadata: {type:object}` schema
+// (mallcoppro-db3 Fix #6 / Fix Schema): 2/2 historical lookup-rules calls
+// across 8,300 campfires failed with malformed-JSON / type-violation errors,
+// and at least one worker (GLM-5) reported the tool as "not available in
+// current environment" while it was correctly registered. Flat named string
+// properties are the schema shape every other reliably-called tool uses.
+//
+// Each known flag corresponds 1:1 with a metadata_match key currently used
+// by operator-decisions.yaml or by the rules added in Fix #2. Extending the
+// rule corpus with a new metadata predicate requires adding a new field
+// here (and to the input_schema in the capability templates).
+//
+// FindingMetadata is retained as a back-compatibility shim — when callers
+// (or tests) supply the legacy nested object, it is merged into the assembled
+// flat map. Direct flat fields take precedence over FindingMetadata entries
+// with the same key.
 type lookupRulesInput struct {
-	FindingID       string            `json:"finding_id"`
-	FindingFamily   string            `json:"finding_family"`
+	FindingID     string `json:"finding_id"`
+	FindingFamily string `json:"finding_family"`
+
+	// Flat named predicate fields (Fix #6 — the canonical shape).
+	MaintenanceWindow    string `json:"maintenance_window,omitempty"`
+	Scheduled            string `json:"scheduled,omitempty"`
+	ResolutionEvent      string `json:"resolution_event,omitempty"`
+	LocationChange       string `json:"location_change,omitempty"`
+	AutomationProvenance string `json:"automation_provenance,omitempty"`
+	DeployRelease        string `json:"deploy_release,omitempty"`
+	SensitiveBulkRead    string `json:"sensitive_bulk_read,omitempty"`
+	HrProvisioning       string `json:"hr_provisioning,omitempty"`
+	ScenarioPattern      string `json:"scenario_pattern,omitempty"`
+	ActorRole            string `json:"actor_role,omitempty"`
+
+	// FindingMetadata is the legacy nested-object input. Retained as a
+	// back-compatibility shim for existing tests + any in-flight callers.
+	// New callers should use the flat fields above.
 	FindingMetadata map[string]string `json:"finding_metadata,omitempty"`
+}
+
+// assembleMetadata builds the flat metadata map the rule matcher expects from
+// the input's named flat fields plus the legacy FindingMetadata map. Only
+// non-empty values are included so a worker that omits a flag does not match
+// rules that require that flag.
+//
+// Flat named fields take precedence over FindingMetadata entries with the
+// same key — the named field is the canonical surface and the legacy map is
+// a shim.
+func (in lookupRulesInput) assembleMetadata() map[string]string {
+	out := map[string]string{}
+	// Seed from legacy nested map first; flat fields will overwrite below.
+	for k, v := range in.FindingMetadata {
+		if v == "" {
+			continue
+		}
+		out[k] = v
+	}
+	flat := map[string]string{
+		"maintenance_window":    in.MaintenanceWindow,
+		"scheduled":             in.Scheduled,
+		"resolution_event":      in.ResolutionEvent,
+		"location_change":       in.LocationChange,
+		"automation_provenance": in.AutomationProvenance,
+		"deploy_release":        in.DeployRelease,
+		"sensitive_bulk_read":   in.SensitiveBulkRead,
+		"hr_provisioning":       in.HrProvisioning,
+		"scenario_pattern":      in.ScenarioPattern,
+		"actor_role":            in.ActorRole,
+	}
+	for k, v := range flat {
+		if v == "" {
+			continue
+		}
+		out[k] = v
+	}
+	return out
 }
 
 // lookupRulesOutput is the JSON output for lookup-rules.
@@ -312,9 +382,10 @@ func runLookupRules(inputJSON string) error {
 		return fmt.Errorf("lookup-rules: %w", err)
 	}
 
+	metadata := input.assembleMetadata()
 	matches := []operatorRule{}
 	for _, r := range rules {
-		if matchesRule(r, input.FindingFamily, input.FindingMetadata) {
+		if matchesRule(r, input.FindingFamily, metadata) {
 			matches = append(matches, r)
 		}
 	}

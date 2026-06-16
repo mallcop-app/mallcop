@@ -18,12 +18,16 @@ events with `scheduled=true` plus a `job_id`, an auth-failure burst
 followed by a `login_success` from the same IP, an auth-failure burst
 followed by a `password_reset` event then a `login_success`, or
 events that carry both `location` and `usual_location`), call
-lookup-rules with finding_family=<detector> and finding_metadata=<flat
-map of the observable flags you found>. If a rule comes back, you may
-cite its `id` as `rule_id` on resolve-finding — this satisfies the
-F2A citation requirement.
+lookup-rules with `finding_id`, `finding_family=<detector>`, and the
+observable flag(s) you found as top-level named string arguments
+(`maintenance_window`, `scheduled`, `resolution_event`,
+`location_change`, `automation_provenance`, `deploy_release`,
+`sensitive_bulk_read`, `hr_provisioning`, `scenario_pattern`,
+`actor_role`). If a rule comes back, you may cite its `id` as
+`rule_id` on resolve-finding — this satisfies the F2A citation
+requirement.
 
-Only pass metadata keys you have actually observed in the surfaced
+Only pass flag values you have actually observed in the surfaced
 events. Do not invent fields. Skip this step when no benign-pattern
 flag is present.
 
