@@ -1181,3 +1181,399 @@ func TestCheckBaseline_FrequencySumsCompoundKeys(t *testing.T) {
 	}
 }
 
+// ---- Fix 1 (mallcoppro-DB3) — search-events folds in matched_rules ---------
+
+// searchEventsRulesFixture mirrors the observable-predicate operator-decisions
+// schema (mallcoppro-df1). Predicates use only fields the matcher can derive
+// or that the worker can pass via finding_metadata.
+const searchEventsRulesFixture = `
+rules:
+  - id: "R-001"
+    applies_to:
+      family: "unusual-timing"
+      metadata_match:
+        maintenance_window: "true"
+    operator_directive: |
+      Off-hours activity inside a maintenance window is non-investigatory.
+
+  - id: "R-003"
+    applies_to:
+      family: "auth-failure-burst"
+      metadata_match:
+        resolution_event: "login_success"
+    operator_directive: |
+      An auth-failure burst followed by a login_success from the same IP is
+      the canonical credential-typo pattern.
+
+  - id: "R-007"
+    applies_to:
+      family: "new-actor"
+      metadata_match:
+        automation_provenance: "terraform"
+    operator_directive: |
+      A new actor whose surfaced events all carry terraform user-agent signals
+      is consistent with first-run IaC provisioning; resolve with reference
+      to the terraform correlation id and operation.
+`
+
+// TestSearchEvents_ReturnsMatchedRules verifies that when --finding-family is
+// supplied, search-events emits a single wrapped JSON object containing both
+// the filtered events AND any matching operator-decision rules.
+//
+// Fixture scenario: an unusual-timing finding whose events carry
+// maintenance_window=true — should match R-001.
+func TestSearchEvents_ReturnsMatchedRules(t *testing.T) {
+	_ = writeRulesFixture(t, searchEventsRulesFixture)
+
+	eventsJSON := `{
+		"events": [
+			{
+				"id": "evt-001",
+				"timestamp": "2026-04-10T02:15:00Z",
+				"source": "azure",
+				"event_type": "container_restart",
+				"actor": "deploy-svc",
+				"action": "restart",
+				"target": "prod-api",
+				"severity": "info",
+				"metadata": {
+					"maintenance_window": "true",
+					"window_id": "MW-2026-04-10",
+					"reason": "scheduled patch"
+				}
+			}
+		]
+	}`
+	dir := makeFixtureDir(t, "", eventsJSON, "")
+
+	out := captureStdout(t, func() {
+		err := run([]string{
+			"--tool", "search-events",
+			"--mode", "exam",
+			"--fixture-dir", dir,
+			"--actor", "deploy-svc",
+			"--finding-family", "unusual-timing",
+		})
+		if err != nil {
+			t.Fatalf("run() returned error: %v", err)
+		}
+	})
+
+	var result struct {
+		Events       []rawEvent       `json:"events"`
+		MatchedRules []map[string]any `json:"matched_rules"`
+	}
+	if err := json.Unmarshal([]byte(out), &result); err != nil {
+		t.Fatalf("parse wrapped output: %v\nraw=%s", err, out)
+	}
+	if len(result.Events) != 1 {
+		t.Errorf("want 1 event, got %d", len(result.Events))
+	}
+	if len(result.MatchedRules) != 1 {
+		t.Fatalf("want 1 matched rule, got %d (rules=%v)", len(result.MatchedRules), result.MatchedRules)
+	}
+	if id, _ := result.MatchedRules[0]["id"].(string); id != "R-001" {
+		t.Errorf("matched rule id: got %q, want R-001", id)
+	}
+}
+
+// TestSearchEvents_BackwardCompatLineDelimited verifies the legacy emission
+// shape (line-delimited rawEvent JSON, no wrapping) is preserved when
+// --finding-family is NOT supplied. This protects the existing tool_result
+// parsing path in the F1G gate registry and prior worker prompts.
+func TestSearchEvents_BackwardCompatLineDelimited(t *testing.T) {
+	dir := makeFixtureDir(t, "", testEventsJSON, "")
+
+	out := captureStdout(t, func() {
+		err := run([]string{
+			"--tool", "search-events",
+			"--mode", "exam",
+			"--fixture-dir", dir,
+			"--actor", "alice@example.com",
+		})
+		if err != nil {
+			t.Fatalf("run() returned error: %v", err)
+		}
+	})
+
+	// Output must be line-delimited rawEvent JSON, NOT a wrapping object.
+	trimmed := strings.TrimSpace(out)
+	if strings.HasPrefix(trimmed, "{\"events\"") || strings.HasPrefix(trimmed, "{ \"events\"") {
+		t.Fatalf("expected line-delimited output (legacy mode), got wrapped object: %s", out)
+	}
+	for _, line := range strings.Split(trimmed, "\n") {
+		var ev rawEvent
+		if err := json.Unmarshal([]byte(line), &ev); err != nil {
+			t.Errorf("parse event line: %v\nline=%q", err, line)
+		}
+	}
+}
+
+// TestSearchEvents_DerivedResolutionEvent verifies the matcher computes the
+// derived flag resolution_event="login_success" from a login_success event
+// surfaced in the filtered events — without the worker having to pass it.
+//
+// Fixture scenario: an auth-failure-burst finding whose events include a
+// login_success — should match R-003 via the in-process derivation.
+func TestSearchEvents_DerivedResolutionEvent(t *testing.T) {
+	_ = writeRulesFixture(t, searchEventsRulesFixture)
+
+	eventsJSON := `{
+		"events": [
+			{
+				"id": "evt-001",
+				"timestamp": "2026-04-10T10:00:00Z",
+				"source": "azure",
+				"event_type": "login_failure",
+				"actor": "alice@example.com",
+				"action": "user.login",
+				"target": "portal",
+				"severity": "low",
+				"metadata": {"ip": "10.0.0.5"}
+			},
+			{
+				"id": "evt-002",
+				"timestamp": "2026-04-10T10:02:00Z",
+				"source": "azure",
+				"event_type": "login_success",
+				"actor": "alice@example.com",
+				"action": "user.login",
+				"target": "portal",
+				"severity": "info",
+				"metadata": {"ip": "10.0.0.5"}
+			}
+		]
+	}`
+	dir := makeFixtureDir(t, "", eventsJSON, "")
+
+	out := captureStdout(t, func() {
+		err := run([]string{
+			"--tool", "search-events",
+			"--mode", "exam",
+			"--fixture-dir", dir,
+			"--actor", "alice@example.com",
+			"--finding-family", "auth-failure-burst",
+		})
+		if err != nil {
+			t.Fatalf("run() returned error: %v", err)
+		}
+	})
+
+	var result struct {
+		Events       []rawEvent       `json:"events"`
+		MatchedRules []map[string]any `json:"matched_rules"`
+	}
+	if err := json.Unmarshal([]byte(out), &result); err != nil {
+		t.Fatalf("parse wrapped output: %v\nraw=%s", err, out)
+	}
+	if len(result.MatchedRules) != 1 {
+		t.Fatalf("want 1 matched rule (R-003) via derived resolution_event flag, got %d", len(result.MatchedRules))
+	}
+	if id, _ := result.MatchedRules[0]["id"].(string); id != "R-003" {
+		t.Errorf("matched rule id: got %q, want R-003", id)
+	}
+}
+
+// TestSearchEvents_DerivedAutomationProvenance verifies the matcher computes
+// automation_provenance="terraform" from event.metadata.user_agent that
+// contains the substring "terraform" — covers the ID-02 new-actor CI bot
+// scenario (B1 over-escalation root cause #2).
+func TestSearchEvents_DerivedAutomationProvenance(t *testing.T) {
+	_ = writeRulesFixture(t, searchEventsRulesFixture)
+
+	eventsJSON := `{
+		"events": [
+			{
+				"id": "evt-001",
+				"timestamp": "2026-03-10T02:17:00Z",
+				"source": "azure",
+				"event_type": "resource_write",
+				"actor": "tf-automation",
+				"action": "create",
+				"target": "Microsoft.Storage/storageAccounts/foo",
+				"severity": "info",
+				"metadata": {
+					"user_agent": "terraform-provider-azurerm/3.90.0 (+https://www.terraform.io)",
+					"correlation_id": "tf-run-20260310-0217"
+				}
+			},
+			{
+				"id": "evt-002",
+				"timestamp": "2026-03-10T02:18:00Z",
+				"source": "azure",
+				"event_type": "resource_write",
+				"actor": "tf-automation",
+				"action": "create",
+				"target": "Microsoft.Network/virtualNetworks/bar",
+				"severity": "info",
+				"metadata": {
+					"user_agent": "terraform-provider-azurerm/3.90.0",
+					"correlation_id": "tf-run-20260310-0217"
+				}
+			}
+		]
+	}`
+	dir := makeFixtureDir(t, "", eventsJSON, "")
+
+	out := captureStdout(t, func() {
+		err := run([]string{
+			"--tool", "search-events",
+			"--mode", "exam",
+			"--fixture-dir", dir,
+			"--actor", "tf-automation",
+			"--finding-family", "new-actor",
+		})
+		if err != nil {
+			t.Fatalf("run() returned error: %v", err)
+		}
+	})
+
+	var result struct {
+		Events       []rawEvent       `json:"events"`
+		MatchedRules []map[string]any `json:"matched_rules"`
+	}
+	if err := json.Unmarshal([]byte(out), &result); err != nil {
+		t.Fatalf("parse wrapped output: %v\nraw=%s", err, out)
+	}
+	if len(result.MatchedRules) != 1 {
+		t.Fatalf("want 1 matched rule (R-007) via derived automation_provenance flag, got %d", len(result.MatchedRules))
+	}
+	if id, _ := result.MatchedRules[0]["id"].(string); id != "R-007" {
+		t.Errorf("matched rule id: got %q, want R-007", id)
+	}
+}
+
+// TestSearchEvents_FindingMetadataMergedIntoMatch verifies that a finding-side
+// metadata map passed via --finding-metadata-json is included in the predicate
+// match. This is the path the worker uses to assert "the finding itself says X"
+// without relying on derived-from-events flags.
+func TestSearchEvents_FindingMetadataMergedIntoMatch(t *testing.T) {
+	_ = writeRulesFixture(t, searchEventsRulesFixture)
+
+	eventsJSON := `{
+		"events": [
+			{
+				"id": "evt-001",
+				"timestamp": "2026-04-10T02:00:00Z",
+				"source": "azure",
+				"event_type": "container_restart",
+				"actor": "deploy-svc",
+				"action": "restart",
+				"target": "prod-api",
+				"severity": "info",
+				"metadata": {}
+			}
+		]
+	}`
+	dir := makeFixtureDir(t, "", eventsJSON, "")
+
+	out := captureStdout(t, func() {
+		err := run([]string{
+			"--tool", "search-events",
+			"--mode", "exam",
+			"--fixture-dir", dir,
+			"--actor", "deploy-svc",
+			"--finding-family", "unusual-timing",
+			"--finding-metadata-json", `{"maintenance_window":"true"}`,
+		})
+		if err != nil {
+			t.Fatalf("run() returned error: %v", err)
+		}
+	})
+
+	var result struct {
+		Events       []rawEvent       `json:"events"`
+		MatchedRules []map[string]any `json:"matched_rules"`
+	}
+	if err := json.Unmarshal([]byte(out), &result); err != nil {
+		t.Fatalf("parse wrapped output: %v\nraw=%s", err, out)
+	}
+	if len(result.MatchedRules) != 1 {
+		t.Fatalf("want 1 matched rule (R-001) via finding metadata, got %d", len(result.MatchedRules))
+	}
+	if id, _ := result.MatchedRules[0]["id"].(string); id != "R-001" {
+		t.Errorf("matched rule id: got %q, want R-001", id)
+	}
+}
+
+// TestSearchEvents_WrappedEmptyWhenNoEvents verifies that wrapped mode emits a
+// consistent empty {events,matched_rules} envelope when events.json is absent,
+// rather than empty stdout (which would break JSON-array consumers).
+func TestSearchEvents_WrappedEmptyWhenNoEvents(t *testing.T) {
+	_ = writeRulesFixture(t, searchEventsRulesFixture)
+	dir := makeFixtureDir(t, "", "", "")
+
+	out := captureStdout(t, func() {
+		err := run([]string{
+			"--tool", "search-events",
+			"--mode", "exam",
+			"--fixture-dir", dir,
+			"--actor", "alice@example.com",
+			"--finding-family", "auth-failure-burst",
+		})
+		if err != nil {
+			t.Fatalf("run() returned error: %v", err)
+		}
+	})
+
+	var result struct {
+		Events       []rawEvent       `json:"events"`
+		MatchedRules []map[string]any `json:"matched_rules"`
+	}
+	if err := json.Unmarshal([]byte(out), &result); err != nil {
+		t.Fatalf("parse wrapped output: %v\nraw=%s", err, out)
+	}
+	if len(result.Events) != 0 {
+		t.Errorf("want empty events, got %d", len(result.Events))
+	}
+	if len(result.MatchedRules) != 0 {
+		t.Errorf("want empty matched_rules, got %d", len(result.MatchedRules))
+	}
+}
+
+// TestSearchEvents_JSONPositionalFindingFamily verifies the JSON-positional-arg
+// path (used by the API tool executor) accepts finding_family / finding_metadata
+// keys and switches into wrapped mode.
+func TestSearchEvents_JSONPositionalFindingFamily(t *testing.T) {
+	_ = writeRulesFixture(t, searchEventsRulesFixture)
+
+	eventsJSON := `{
+		"events": [
+			{
+				"id": "evt-001",
+				"timestamp": "2026-04-10T02:15:00Z",
+				"source": "azure",
+				"event_type": "container_restart",
+				"actor": "deploy-svc",
+				"metadata": {"maintenance_window": "true"}
+			}
+		]
+	}`
+	dir := makeFixtureDir(t, "", eventsJSON, "")
+
+	out := captureStdout(t, func() {
+		err := run([]string{
+			"--tool", "search-events",
+			"--mode", "exam",
+			"--fixture-dir", dir,
+			`{"actor":"deploy-svc","finding_family":"unusual-timing"}`,
+		})
+		if err != nil {
+			t.Fatalf("run() returned error: %v", err)
+		}
+	})
+
+	var result struct {
+		Events       []rawEvent       `json:"events"`
+		MatchedRules []map[string]any `json:"matched_rules"`
+	}
+	if err := json.Unmarshal([]byte(out), &result); err != nil {
+		t.Fatalf("parse wrapped output: %v\nraw=%s", err, out)
+	}
+	if len(result.MatchedRules) != 1 {
+		t.Fatalf("want 1 matched rule via JSON-positional finding_family, got %d", len(result.MatchedRules))
+	}
+	if id, _ := result.MatchedRules[0]["id"].(string); id != "R-001" {
+		t.Errorf("matched rule id: got %q, want R-001", id)
+	}
+}
