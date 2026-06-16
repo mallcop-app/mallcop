@@ -4,6 +4,9 @@ match = ["task:escalate"]
 tools = [
   "list-actions", "remediate-action", "request-approval",
   "message-operator", "annotate-finding", "resolve-finding",
+  # mallcoppro-db3 Fix 3: lookup pre-seeded operator-decision rules; citing a
+  # returned rule_id in resolve-finding satisfies the F2A citation requirement.
+  "lookup-rules",
 ]
 model     = "{{MODEL}}"
 
@@ -38,8 +41,8 @@ binary_args = ["--tool", "message-operator"]
 
 [[tool_defs]]
 name = "resolve-finding"
-description = "Close a finding with a resolution action. Emits work:output to engagement campfire."
-input_schema = '{"type":"object","required":["finding_id","action","reason"],"properties":{"finding_id":{"type":"string"},"action":{"type":"string","enum":["resolved","escalated","remediated"]},"reason":{"type":"string"},"confidence":{"type":"number","minimum":1,"maximum":5}}}'
+description = "Close a finding with a resolution action. Emits work:output to engagement campfire. Optional rule_id cites a pre-seeded operator-decision rule (from lookup-rules) — a valid rule_id satisfies the F2A citation requirement without requiring a retrieved event ID in the reason field."
+input_schema = '{"type":"object","required":["finding_id","action","reason"],"properties":{"finding_id":{"type":"string"},"action":{"type":"string","enum":["resolved","escalated","remediated"]},"reason":{"type":"string"},"confidence":{"type":"number","minimum":1,"maximum":5},"rule_id":{"type":"string","description":"optional operator-decision rule_id returned by lookup-rules; when valid, satisfies the F2A citation requirement"}}}'
 binary = "{{TOOL_BIN_DIR}}/mallcop-investigate-tools"
 binary_args = ["--tool", "resolve-finding"]
 
@@ -49,6 +52,14 @@ description = "Add finding:annotation tagged note to engagement campfire."
 input_schema = '{"type":"object","required":["finding_id","note"],"properties":{"finding_id":{"type":"string"},"note":{"type":"string","maxLength":4096},"tags":{"type":"array","items":{"type":"string"}}}}'
 binary = "{{TOOL_BIN_DIR}}/mallcop-investigate-tools"
 binary_args = ["--tool", "annotate-finding"]
+
+# mallcoppro-db3 Fix 3: Operator-decision rule lookup
+[[tool_defs]]
+name = "lookup-rules"
+description = "Look up pre-seeded operator-decision rules from agents/rules/operator-decisions.yaml. Pass finding_family (the detector family, e.g. \"unusual-timing\", \"auth-failure-burst\") and finding_metadata (the scenario/finding metadata flags) to receive zero or more matching rule entries with id, applies_to, and operator_directive. When a returned rule matches the situation, pass its id to resolve-finding as rule_id — this satisfies the F2A citation requirement without requiring you to embed retrieved event IDs in the reason field."
+input_schema = '{"type":"object","required":["finding_id","finding_family"],"properties":{"finding_id":{"type":"string"},"finding_family":{"type":"string","description":"detector family or finding.detector value"},"finding_metadata":{"type":"object","additionalProperties":{"type":"string"},"description":"flat map of metadata values to match against rules.applies_to.metadata_match (case-insensitive, conjunctive)"}}}'
+binary = "{{TOOL_BIN_DIR}}/mallcop-investigate-tools"
+binary_args = ["--tool", "lookup-rules"]
 
 # F1G-d: approve-action (mallcop-side, fulfills request-approval gates)
 # NOTE: this tool is included in the escalate seed so the mallcop automaton
