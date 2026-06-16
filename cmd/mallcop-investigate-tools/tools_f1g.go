@@ -8,12 +8,12 @@
 //
 // Each tool reads context from env vars injected by the legion worker jail:
 //
-//   MALLCOP_CAMPFIRE_ID          — engagement campfire for the current item
-//   MALLCOP_WORK_CAMPFIRE_ID     — work campfire for work:create emissions
-//   MALLCOP_OPERATOR_CAMPFIRE_ID — operator campfire for approvals/messages
-//   MALLCOP_ITEM_ID              — current item ID (chain provenance)
-//   MALLCOP_RUN_ID               — operational run ID (transcript paths)
-//   CF_HOME                      — campfire home directory (standard cf env)
+//	MALLCOP_CAMPFIRE_ID          — engagement campfire for the current item
+//	MALLCOP_WORK_CAMPFIRE_ID     — work campfire for work:create emissions
+//	MALLCOP_OPERATOR_CAMPFIRE_ID — operator campfire for approvals/messages
+//	MALLCOP_ITEM_ID              — current item ID (chain provenance)
+//	MALLCOP_RUN_ID               — operational run ID (transcript paths)
+//	CF_HOME                      — campfire home directory (standard cf env)
 //
 // # Security note
 //
@@ -326,6 +326,17 @@ func runResolveFinding(inputJSON string) error {
 		return fmt.Errorf("resolve-finding: %w", err)
 	}
 
+	// ── Idempotency guard (mallcoppro-fix5) ────────────────────────────────────
+	// CO-02 race: a worker fired resolve-finding 7x in 24s; the first stray
+	// resolve overrode the correct verdict. Reject duplicate terminal calls for
+	// the same finding_id within the same engagement campfire scope. Fails open
+	// when cf is missing or the campfire is unreachable — see idempotencyGuard
+	// for the policy. Runs BEFORE the F2A confidence gate so a duplicate cannot
+	// even consume gate budget.
+	if dupErr := idempotencyGuard("resolve-finding", input.FindingID); dupErr != nil {
+		return dupErr
+	}
+
 	// ── F2A confidence-gate (task:investigate only) ────────────────────────────
 	// The gate lives here in binary code — the agent CANNOT skip it from a prompt.
 	// For non-investigate skills or disabled config, checkConfidenceGate returns
@@ -471,11 +482,11 @@ func runAnnotateFinding(inputJSON string) error {
 
 // workCreatePayload is the JSON body of a work:create message.
 type workCreatePayload struct {
-	Skill           string                 `json:"skill"`
-	FindingID       string                 `json:"finding_id"`
-	ParentItemID    string                 `json:"parent_item_id,omitempty"`
-	Metadata        map[string]interface{} `json:"metadata,omitempty"`
-	Timestamp       string                 `json:"timestamp"`
+	Skill        string                 `json:"skill"`
+	FindingID    string                 `json:"finding_id"`
+	ParentItemID string                 `json:"parent_item_id,omitempty"`
+	Metadata     map[string]interface{} `json:"metadata,omitempty"`
+	Timestamp    string                 `json:"timestamp"`
 }
 
 // cfWorkCreate posts a work:create message to the work campfire and returns
@@ -657,6 +668,16 @@ func runEscalateToInvestigator(inputJSON string) error {
 		return errors.New("escalate-to-investigator: reason is required")
 	}
 
+	// ── Idempotency guard (mallcoppro-fix5) ────────────────────────────────────
+	// Block duplicate chain-handoffs for the same finding_id within the same
+	// engagement campfire. A correct triage worker calls escalate-to-investigator
+	// once; a second call (or a resolve-finding after escalate) is a race.
+	// Fails open when cf is missing or the engagement campfire is unset —
+	// see idempotencyGuard.
+	if dupErr := idempotencyGuard("escalate-to-investigator", input.FindingID); dupErr != nil {
+		return dupErr
+	}
+
 	workCampfireID, err := requireEnv("MALLCOP_WORK_CAMPFIRE_ID")
 	if err != nil {
 		return fmt.Errorf("escalate-to-investigator: %w", err)
@@ -756,8 +777,8 @@ func runEscalateToStageC(inputJSON string) error {
 
 // escalateToDeepInput is the input_schema for escalate-to-deep.
 type escalateToDeepInput struct {
-	FindingID            string `json:"finding_id"`
-	Hypothesis           string `json:"hypothesis"`
+	FindingID             string `json:"finding_id"`
+	Hypothesis            string `json:"hypothesis"`
 	PartialTranscriptPath string `json:"partial_transcript_path"`
 }
 
@@ -803,12 +824,12 @@ func runEscalateToDeep(inputJSON string) error {
 	emitScenarioTerminalWorkOutput(workCampfireID, input.FindingID, "escalated", input.Hypothesis, parentItemID)
 
 	return emitJSON(map[string]interface{}{
-		"item_id":                itemID,
-		"finding_id":             input.FindingID,
-		"hypothesis":             input.Hypothesis,
+		"item_id":                 itemID,
+		"finding_id":              input.FindingID,
+		"hypothesis":              input.Hypothesis,
 		"partial_transcript_path": input.PartialTranscriptPath,
-		"skill":                  "task:deep-investigate",
-		"timestamp":              nowRFC3339(),
+		"skill":                   "task:deep-investigate",
+		"timestamp":               nowRFC3339(),
 	})
 }
 
@@ -1154,11 +1175,11 @@ func runRequestApproval(inputJSON string) error {
 	}
 
 	return emitJSON(map[string]interface{}{
-		"gate_id":    gateID,
-		"finding_id": input.FindingID,
+		"gate_id":     gateID,
+		"finding_id":  input.FindingID,
 		"action_name": input.ActionName,
-		"timestamp":  nowRFC3339(),
-		"status":     "pending",
+		"timestamp":   nowRFC3339(),
+		"status":      "pending",
 	})
 }
 
@@ -1188,7 +1209,7 @@ func runMessageOperator(inputJSON string) error {
 	}
 
 	validCategories := map[string]bool{
-		"": true, // optional
+		"":              true, // optional
 		"informational": true, "instruction": true,
 		"action-receipt": true, "open-question": true,
 	}
@@ -1282,12 +1303,12 @@ func runApproveAction(inputJSON string) error {
 
 	// ── Step 2: Find a valid operator approval message ────────────────────────
 	msg, findErr := findApproverMessage(ApproverSearchParams{
-		CampfireID:            operatorCampfireID,
-		OperatorPubkey:        trust.OperatorPubkey,
-		TrustedSenders:        trust.TrustedSenders,
-		GateID:                input.GateID,
-		RequireExplicitGateID: trust.RequireExplicitGateID,
-		OperatorReason:        input.OperatorReason,
+		CampfireID:                 operatorCampfireID,
+		OperatorPubkey:             trust.OperatorPubkey,
+		TrustedSenders:             trust.TrustedSenders,
+		GateID:                     input.GateID,
+		RequireExplicitGateID:      trust.RequireExplicitGateID,
+		OperatorReason:             input.OperatorReason,
 		KeyRotationGracePeriodSecs: trust.KeyRotationGracePeriodSecs,
 	})
 	if findErr != nil {
