@@ -77,6 +77,12 @@ func run(args []string) error {
 	entity := fs.String("entity", "", "entity ID or email to look up (check-baseline, baseline-stats)")
 	source := fs.String("source", "", "source connector (check-baseline, search-events, search-findings, baseline-stats, read-config)")
 	hours := fs.Int("hours", 168, "look-back window in hours (check-baseline)")
+	// event_type filter for check-baseline: when provided, the response includes
+	// frequency_for_type populated from frequency_by_type[event_type]. This is
+	// distinct from --type which is the search-events event_type filter, but
+	// callers passing a JSON positional argument set the same `event_type` key
+	// (see input-JSON parsing below).
+	cbEventType := fs.String("event-type", "", "event_type to compare baseline against (check-baseline, optional)")
 
 	// search-events flags
 	actor := fs.String("actor", "", "actor filter (search-events, search-findings)")
@@ -127,6 +133,19 @@ func run(args []string) error {
 				}
 				if v, ok := input["type"].(string); ok && *evtType == "" {
 					*evtType = v
+				}
+				// event_type JSON key: shared with check-baseline (cbEventType)
+				// and search-events (evtType) when the caller hasn't already set
+				// --type. Order matters: prefer the dedicated event_type key for
+				// check-baseline; fall back to mirroring it into the search
+				// filter only when --type is unset.
+				if v, ok := input["event_type"].(string); ok {
+					if *cbEventType == "" {
+						*cbEventType = v
+					}
+					if *evtType == "" {
+						*evtType = v
+					}
 				}
 				if v, ok := input["since"].(string); ok && *since == "" {
 					*since = v
@@ -235,7 +254,7 @@ func run(args []string) error {
 
 	switch *tool {
 	case "check-baseline":
-		return checkBaseline(absFixtureDir, *entity, *source, *hours)
+		return checkBaseline(absFixtureDir, *entity, *source, *cbEventType, *hours)
 	case "search-events":
 		return searchEvents(absFixtureDir, *actor, *source, *evtType, *since, *until, *findingFamily, *findingMetadataJSON)
 	case "search-findings":
@@ -389,14 +408,32 @@ type relationshipEntry struct {
 }
 
 // baselineResult is the JSON output contract for check-baseline.
+//
+// Frequency is preserved as the aggregate count across all event types for
+// backward compatibility with existing transcripts and tests.
+//
+// FrequencyByType breaks the aggregate down by event_type, parsed from the
+// compound `<source>:<event_type>:<actor>` frequency-table keys produced by
+// exam-seed. This lets triage compare an event-type-specific baseline against
+// the observed event-type volume rather than conflating all activity into a
+// single number — the failure mode that produced the CO-02 under-escalation
+// (bulk_read=2 baseline vs 842 observed was invisible when summed into a
+// single frequency).
+//
+// FrequencyForType is the count for the specific event_type the caller passed
+// in. When the caller omits event_type, FrequencyForType is zero — callers
+// should consult FrequencyByType in that case.
 type baselineResult struct {
-	Known     bool     `json:"known"`
-	LastSeen  string   `json:"last_seen"`
-	Frequency int      `json:"frequency"`
-	Roles     []string `json:"roles"`
+	Known            bool           `json:"known"`
+	LastSeen         string         `json:"last_seen"`
+	Frequency        int            `json:"frequency"`
+	FrequencyByType  map[string]int `json:"frequency_by_type"`
+	FrequencyForType int            `json:"frequency_for_type"`
+	EventType        string         `json:"event_type,omitempty"`
+	Roles            []string       `json:"roles"`
 }
 
-func checkBaseline(fixtureDir, entity, source string, hours int) error {
+func checkBaseline(fixtureDir, entity, source, eventType string, hours int) error {
 	if entity == "" {
 		return errors.New("--entity is required for check-baseline")
 	}
@@ -405,7 +442,12 @@ func checkBaseline(fixtureDir, entity, source string, hours int) error {
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			// No baseline file — entity is unknown.
-			return emitJSON(baselineResult{Known: false, Roles: []string{}})
+			return emitJSON(baselineResult{
+				Known:           false,
+				FrequencyByType: map[string]int{},
+				EventType:       eventType,
+				Roles:           []string{},
+			})
 		}
 		return fmt.Errorf("open baseline.json: %w", err)
 	}
@@ -454,12 +496,28 @@ func checkBaseline(fixtureDir, entity, source string, hours int) error {
 	// key, sum all matching counts. This gives the model a non-zero
 	// "this actor has been seen N times in baseline" signal, which combined
 	// with the metadata flags in events.json lets triage resolve confidently.
+	//
+	// We also bucket the per-event-type counts into FrequencyByType by parsing
+	// the compound `<source>:<event_type>:<actor>` keys. This lets triage
+	// answer "is this *action type* routine for this actor?" instead of
+	// conflating bulk_read=2 baseline into a 842-total Frequency that hides
+	// the 423x anomaly (CO-02 under-escalation root cause).
 	freq := 0
+	freqByType := map[string]int{}
 	if bl.FrequencyTables != nil {
 		entityLower := strings.ToLower(entity)
 		for key, v := range bl.FrequencyTables {
-			if strings.Contains(strings.ToLower(key), entityLower) {
-				freq += v
+			if !strings.Contains(strings.ToLower(key), entityLower) {
+				continue
+			}
+			freq += v
+			// Parse compound key shapes:
+			//   <source>:<event_type>:<actor>      (e.g. azure:container_restart:deploy-svc)
+			//   time:<hour>:<actor>                (skip — not an event_type bucket)
+			parts := strings.Split(key, ":")
+			if len(parts) >= 3 && parts[0] != "time" {
+				et := parts[1]
+				freqByType[et] += v
 			}
 		}
 		// Backwards compat: also allow a direct bare-entity key to override
@@ -468,6 +526,13 @@ func checkBaseline(fixtureDir, entity, source string, hours int) error {
 		if v, ok := bl.FrequencyTables[entity]; ok {
 			freq = v
 		}
+	}
+
+	// FrequencyForType: when the caller passed event_type, return the
+	// matching bucket (zero when no events of that type are baselined).
+	freqForType := 0
+	if eventType != "" {
+		freqForType = freqByType[eventType]
 	}
 
 	// Last seen: derive from relationships map (key = "actor:target" or "actor").
@@ -503,10 +568,13 @@ func checkBaseline(fixtureDir, entity, source string, hours int) error {
 	roles := []string{}
 
 	return emitJSON(baselineResult{
-		Known:     known,
-		LastSeen:  lastSeen,
-		Frequency: freq,
-		Roles:     roles,
+		Known:            known,
+		LastSeen:         lastSeen,
+		Frequency:        freq,
+		FrequencyByType:  freqByType,
+		FrequencyForType: freqForType,
+		EventType:        eventType,
+		Roles:            roles,
 	})
 }
 

@@ -18,8 +18,8 @@ model = "{{MODEL}}"
 
 [[tool_defs]]
 name = "check-baseline"
-description = "Check baseline frequency and history for an actor/entity. Returns JSON with known_user, action_count, last_seen, and baseline stats."
-input_schema = '{"type":"object","properties":{"entity":{"type":"string","description":"actor email or username"},"source":{"type":"string","description":"connector source (e.g. github)"}},"required":["entity"]}'
+description = "Check baseline frequency and history for an actor/entity, broken down by event_type. Returns frequency_by_type so you can compare the current event-type against its baseline. Pass event_type (the finding's event_type) to populate frequency_for_type with the matching count; otherwise consult frequency_by_type directly. The aggregate frequency field is preserved for back-compat but conflates all event types — prefer frequency_for_type or frequency_by_type when answering 'is this action type routine?'."
+input_schema = '{"type":"object","properties":{"entity":{"type":"string","description":"actor email or username"},"source":{"type":"string","description":"connector source (e.g. github)"},"event_type":{"type":"string","description":"finding event_type to compare against the baseline (optional; populates frequency_for_type)"}},"required":["entity"]}'
 binary = "{{TOOL_BIN_DIR}}/mallcop-investigate-tools"
 binary_args = ["--tool", "check-baseline", "--mode", "exam", "--fixture-dir", "exams/fixtures/{{RUN_ID}}"]
 

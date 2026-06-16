@@ -1162,7 +1162,7 @@ func TestCheckBaseline_FrequencySumsCompoundKeys(t *testing.T) {
 	// emits to stdout directly via emitJSON. For now exercise via the function
 	// and rely on no error + the run separately. Here we verify the sum logic.
 	captured := captureStdout(t, func() {
-		if err := checkBaseline(root, "deploy-svc", "", 168); err != nil {
+		if err := checkBaseline(root, "deploy-svc", "", "", 168); err != nil {
 			t.Fatalf("checkBaseline: %v", err)
 		}
 	})
@@ -1577,3 +1577,162 @@ func TestSearchEvents_JSONPositionalFindingFamily(t *testing.T) {
 		t.Errorf("matched rule id: got %q, want R-001", id)
 	}
 }
+// TestCheckBaseline_FrequencyByType verifies that compound frequency-table
+// keys are split into per-event-type buckets. This is the channel triage uses
+// to answer "is this *action type* routine for this actor?" instead of
+// conflating all event types into the aggregate Frequency field.
+func TestCheckBaseline_FrequencyByType(t *testing.T) {
+	root := t.TempDir()
+	baselineJSON := `{
+		"known_entities":{
+			"actors":["deploy-svc"],
+			"sources":["azure"]
+		},
+		"frequency_tables":{
+			"azure:config_update:deploy-svc":48,
+			"azure:container_restart:deploy-svc":156,
+			"azure:container_restart:deploy-svc-2":13,
+			"time:02:deploy-svc":24,
+			"azure:login:admin-user":340
+		}
+	}`
+	if err := os.WriteFile(filepath.Join(root, "baseline.json"), []byte(baselineJSON), 0o644); err != nil {
+		t.Fatalf("write baseline: %v", err)
+	}
+	captured := captureStdout(t, func() {
+		if err := checkBaseline(root, "deploy-svc", "", "", 168); err != nil {
+			t.Fatalf("checkBaseline: %v", err)
+		}
+	})
+	var got baselineResult
+	if err := json.Unmarshal([]byte(captured), &got); err != nil {
+		t.Fatalf("decode: %v\nraw: %s", err, captured)
+	}
+	if got.FrequencyByType == nil {
+		t.Fatalf("FrequencyByType missing from response")
+	}
+	// Substring-on-entity should pull in `deploy-svc` from config_update,
+	// container_restart, AND container_restart:deploy-svc-2 (substring match).
+	// time:02:deploy-svc is excluded because the first segment is "time".
+	if got.FrequencyByType["config_update"] != 48 {
+		t.Errorf("FrequencyByType[config_update] = %d, want 48", got.FrequencyByType["config_update"])
+	}
+	// container_restart: 156 (deploy-svc) + 13 (deploy-svc-2) = 169 (substring match)
+	if got.FrequencyByType["container_restart"] != 169 {
+		t.Errorf("FrequencyByType[container_restart] = %d, want 169 (156+13)", got.FrequencyByType["container_restart"])
+	}
+	// time-of-day bucket must NOT appear as an event_type.
+	if _, ok := got.FrequencyByType["02"]; ok {
+		t.Errorf("FrequencyByType must not contain time-of-day bucket key '02'")
+	}
+	// admin-user activity must not leak into deploy-svc's breakdown.
+	if _, ok := got.FrequencyByType["login"]; ok {
+		t.Errorf("FrequencyByType must not contain admin-user's 'login' bucket")
+	}
+	// Aggregate Frequency is preserved for back-compat: 48+156+13+24 = 241
+	// (substring match also catches deploy-svc-2 and time:02:deploy-svc).
+	if got.Frequency != 241 {
+		t.Errorf("Frequency aggregate = %d, want 241 (48+156+13+24)", got.Frequency)
+	}
+	// EventType not requested → empty echo, FrequencyForType zero.
+	if got.EventType != "" {
+		t.Errorf("EventType = %q, want empty (caller did not pass event_type)", got.EventType)
+	}
+	if got.FrequencyForType != 0 {
+		t.Errorf("FrequencyForType = %d, want 0 (no event_type passed)", got.FrequencyForType)
+	}
+}
+
+// TestCheckBaseline_FrequencyForType_WhenEventTypePassed verifies that when
+// the caller passes the finding's event_type, the response includes
+// frequency_for_type populated from the matching frequency_by_type bucket.
+// This is the path triage uses to answer "compare the action-specific count
+// to the observed event volume" (POST.md Step 3 question A).
+func TestCheckBaseline_FrequencyForType_WhenEventTypePassed(t *testing.T) {
+	root := t.TempDir()
+	// CO-02 shape: actor has heavy login activity but only 2 bulk_read events
+	// in baseline. The conflated `frequency` field hides the 423x anomaly
+	// when the observed volume is bulk_read=842.
+	baselineJSON := `{
+		"known_entities":{
+			"actors":["co-svc"],
+			"sources":["github"]
+		},
+		"frequency_tables":{
+			"github:login:co-svc":840,
+			"github:bulk_read:co-svc":2,
+			"github:push:co-svc":300
+		}
+	}`
+	if err := os.WriteFile(filepath.Join(root, "baseline.json"), []byte(baselineJSON), 0o644); err != nil {
+		t.Fatalf("write baseline: %v", err)
+	}
+	captured := captureStdout(t, func() {
+		if err := checkBaseline(root, "co-svc", "", "bulk_read", 168); err != nil {
+			t.Fatalf("checkBaseline: %v", err)
+		}
+	})
+	var got baselineResult
+	if err := json.Unmarshal([]byte(captured), &got); err != nil {
+		t.Fatalf("decode: %v\nraw: %s", err, captured)
+	}
+	if got.FrequencyForType != 2 {
+		t.Errorf("FrequencyForType for bulk_read = %d, want 2 (baseline buried under aggregate)", got.FrequencyForType)
+	}
+	if got.EventType != "bulk_read" {
+		t.Errorf("EventType echo = %q, want \"bulk_read\"", got.EventType)
+	}
+	// Aggregate frequency still conflates: 840 + 2 + 300 = 1142.
+	if got.Frequency != 1142 {
+		t.Errorf("Frequency aggregate = %d, want 1142", got.Frequency)
+	}
+	if got.FrequencyByType["bulk_read"] != 2 {
+		t.Errorf("FrequencyByType[bulk_read] = %d, want 2", got.FrequencyByType["bulk_read"])
+	}
+	if got.FrequencyByType["login"] != 840 {
+		t.Errorf("FrequencyByType[login] = %d, want 840", got.FrequencyByType["login"])
+	}
+}
+
+// TestCheckBaseline_EventTypeFromJSONPositional verifies that callers using
+// the JSON-positional-argument convention (API tool executor path) can pass
+// event_type alongside entity and source, and that the response includes
+// frequency_for_type. This is the path the model uses at runtime.
+func TestCheckBaseline_EventTypeFromJSONPositional(t *testing.T) {
+	root := t.TempDir()
+	baselineJSON := `{
+		"known_entities":{
+			"actors":["api-svc"],
+			"sources":["azure"]
+		},
+		"frequency_tables":{
+			"azure:resource_write:api-svc":100,
+			"azure:resource_read:api-svc":5
+		}
+	}`
+	if err := os.WriteFile(filepath.Join(root, "baseline.json"), []byte(baselineJSON), 0o644); err != nil {
+		t.Fatalf("write baseline: %v", err)
+	}
+	captured := captureStdout(t, func() {
+		err := run([]string{
+			"--tool", "check-baseline",
+			"--mode", "exam",
+			"--fixture-dir", root,
+			`{"entity":"api-svc","source":"azure","event_type":"resource_read"}`,
+		})
+		if err != nil {
+			t.Fatalf("run: %v", err)
+		}
+	})
+	var got baselineResult
+	if err := json.Unmarshal([]byte(captured), &got); err != nil {
+		t.Fatalf("decode: %v\nraw: %s", err, captured)
+	}
+	if got.FrequencyForType != 5 {
+		t.Errorf("FrequencyForType for resource_read = %d, want 5", got.FrequencyForType)
+	}
+	if got.EventType != "resource_read" {
+		t.Errorf("EventType echo = %q, want \"resource_read\"", got.EventType)
+	}
+}
+
