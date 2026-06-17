@@ -1,23 +1,19 @@
-// judge.go — F4C LLM-as-judge dispatch and rubric ingestion for mallcop-academy.
+// judge.go — F4C LLM-as-judge rubric ingestion for mallcop-academy.
 //
-// Architectural decision: Option A — academy-side judge dispatch.
+// HISTORICAL NOTE: judge dispatch was previously "Option A" — an academy-side
+// judge worker spawned via the external legion binary against a per-run
+// campfire, with the verdict read back from that campfire. That legion/`we`
+// runtime coupling has been removed (mallcop-legion no longer depends on the
+// legion engine). buildJudicator now returns nil, so the academy proceeds
+// without rubric axes (quality_floor "n/a"/"unavailable") until an in-process
+// judge pipeline lands. This is NOT a silent skip — the unavailable sentinel
+// is explicit downstream signal.
 //
-// The judge runs in a per-run academy-side campfire (separate from the
-// operational work campfire). This keeps the operational chart free of
-// exam:* skill grants. The academy spawns the judge via `we start` pointing
-// at an academy-side chart derived from charts/exam.toml.tmpl (with the judge
-// seed only), then reads the judge:verdict message back from the per-run
-// campfire.
-//
-// Cross-feed with F4B: judgeResult is returned to the caller so the structural
-// grader can fill in quality_floor on the first (and only) scenario record
-// write. Single-pass write: judge runs FIRST per scenario, then structural
-// grade is computed with the rubric score already known.
-//
-// If the judge binary (we) is not found or Option A fails to spawn, the
-// academy falls back gracefully: rubric fields are zero-valued, quality_floor
-// is "pending", and a warning is logged. This is NOT a silent skip — the
-// pending sentinel is explicit downstream signal.
+// The verdict-ingestion logic below (judicator.pollForVerdict, JudgeResult
+// parsing, judgeUnavailable) is retained and unit-tested so a future
+// in-process dispatch can reuse it. Cross-feed with F4B: judgeResult is
+// returned to the caller so the structural grader can fill in quality_floor
+// on the single-pass scenario record write.
 package main
 
 import (
@@ -25,7 +21,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"time"
 )
@@ -69,18 +64,12 @@ type judgeVerdictMessage struct {
 // JudgeResult with an error. Callers MUST NOT silently skip on error — they
 // should log the error and set quality_floor to "pending".
 type judicator struct {
-	// weBin is the path to the `we` (legion) binary.
-	weBin string
 	// cfBin is the path to the `cf` binary.
 	cfBin string
-	// judgeChartPath is the rendered judge-only chart to pass to `we start`.
-	judgeChartPath string
 	// academyCampfireID is the per-run campfire where verdicts are posted.
 	academyCampfireID string
 	// academyCFHome is the CF_HOME for the academy campfire.
 	academyCFHome string
-	// repoRoot is the working directory for `we start`.
-	repoRoot string
 	// timeout is the per-judgment poll timeout.
 	timeout time.Duration
 }
@@ -117,15 +106,11 @@ func (j *judicator) spawnAndCollect(scenarioID, findingID, operationalCampfireID
 		return nil, fmt.Errorf("cf send judge work:create: %w\nout: %s", err, out)
 	}
 
-	// Launch the judge worker.
-	weCmd := exec.Command(j.weBin, "start", "--chart", j.judgeChartPath, "--exit-on-idle", "-v")
-	weCmd.Env = setEnv(os.Environ(), "CF_HOME", j.academyCFHome)
-	weCmd.Dir = j.repoRoot
-	weOut, err := weCmd.CombinedOutput()
-	if err != nil {
-		// Non-fatal: we may still have a verdict if the worker posted before exiting.
-		fmt.Fprintf(os.Stderr, "WARN: judge worker exited with error: %v\noutput: %s\n", err, weOut)
-	}
+	// NOTE: The judge worker was previously dispatched in-process via the
+	// external legion binary (`we start --chart … --exit-on-idle`). That
+	// coupling has been removed; buildJudicator now returns nil so this method
+	// is not reached in production. The cf-based verdict ingestion below is
+	// retained (and unit-tested) for when an in-process judge dispatch lands.
 
 	// Poll for the judge:verdict message.
 	deadline := time.Now().Add(j.timeout)
@@ -193,139 +178,23 @@ func (j *judicator) pollForVerdict(scenarioID string) (*JudgeResult, error) {
 	return nil, nil
 }
 
-// buildJudicator constructs a judicator for the given run, or returns nil if
-// the judge prerequisites (we binary, cf binary, chart template) are not met.
+// buildJudicator previously dispatched an LLM-as-judge worker via the external
+// legion binary (`we start`) against a per-run campfire created with the `cf`
+// CLI. That legion/`we` runtime coupling has been removed as part of decoupling
+// mallcop-legion from the legion engine.
 //
-// Failure is non-fatal: the caller logs a warning and proceeds without a judge,
-// leaving quality_floor as "n/a" (no min_investigation_quality in scenario) or
-// "unavailable" (min set but judge couldn't run).
-func buildJudicator(args runArgs) *judicator {
-	// Require we binary.
-	weBin, err := exec.LookPath("we")
-	if err != nil {
-		// Also check bin/ relative to cwd.
-		if p, err2 := exec.LookPath("bin/we"); err2 == nil {
-			weBin = p
-		} else {
-			fmt.Fprintf(os.Stderr, "INFO: judge skipped — we binary not found on PATH (F4C disabled)\n")
-			return nil
-		}
-	}
-
-	// Require cf binary.
-	cfBin, err := exec.LookPath("cf")
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "INFO: judge skipped — cf binary not found on PATH\n")
-		return nil
-	}
-
-	// Resolve repo root for chart template.
-	repoRoot, err := repoRootFromExec()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "INFO: judge skipped — cannot resolve repo root: %v\n", err)
-		return nil
-	}
-
-	tmplPath := filepath.Join(repoRoot, "charts", "exam.toml.tmpl")
-	if _, err := os.Stat(tmplPath); err != nil {
-		fmt.Fprintf(os.Stderr, "INFO: judge skipped — chart template not found at %s\n", tmplPath)
-		return nil
-	}
-	// Skip judge in test environments where FORGE_API_KEY is unset — the
-	// rendered chart's [inference] block requires it, and spawnAndCollect
-	// would block on `we start` until the academy's outer timeout otherwise.
-	if os.Getenv("FORGE_API_KEY") == "" {
-		fmt.Fprintf(os.Stderr, "INFO: judge skipped — FORGE_API_KEY not set\n")
-		return nil
-	}
-
-	// Create per-run academy campfire in output dir.
-	judgeCFHome := filepath.Join(args.outputDir, ".judge-cf-"+args.runID)
-	if err := os.MkdirAll(judgeCFHome, 0o755); err != nil {
-		fmt.Fprintf(os.Stderr, "INFO: judge skipped — cannot create judge CF_HOME: %v\n", err)
-		return nil
-	}
-
-	// cf init
-	initCmd := exec.Command(cfBin, "init")
-	initCmd.Env = setEnv(os.Environ(), "CF_HOME", judgeCFHome)
-	if out, err := initCmd.CombinedOutput(); err != nil {
-		fmt.Fprintf(os.Stderr, "INFO: judge skipped — cf init failed: %v\n%s\n", err, out)
-		return nil
-	}
-
-	// cf create → get campfire ID
-	createCmd := exec.Command(cfBin, "create", "--description", "academy-judge-"+args.runID)
-	createCmd.Env = setEnv(os.Environ(), "CF_HOME", judgeCFHome)
-	createOut, err := createCmd.CombinedOutput()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "INFO: judge skipped — cf create failed: %v\n%s\n", err, createOut)
-		return nil
-	}
-	academyCampfireID := extractCampfireID(string(createOut))
-	if academyCampfireID == "" {
-		fmt.Fprintf(os.Stderr, "INFO: judge skipped — could not parse campfire ID from cf create output: %s\n", createOut)
-		return nil
-	}
-
-	// Render judge chart.
-	judgeChartPath := filepath.Join(args.outputDir, "judge-chart-"+args.runID+".toml")
-	forgeAPIURL := os.Getenv("FORGE_API_URL")
-	if forgeAPIURL == "" {
-		forgeAPIURL = "http://localhost:8080"
-	}
-	forgeAPIKey := os.Getenv("FORGE_API_KEY")
-	chartVars := map[string]string{
-		"RUN_ID":        args.runID,
-		"FORGE_API_URL": forgeAPIURL,
-		"FORGE_API_KEY": forgeAPIKey,
-		// Rewrite chart paths to point at the academy-side CF_HOME (just
-		// initialized via `cf init` above) and the academy campfire so the
-		// judge worker can read scenarios without depending on cwd.
-		"JUDGE_CF_HOME": judgeCFHome,
-		"WORK_CAMPFIRE": academyCampfireID,
-	}
-	if err := renderJudgeChart(tmplPath, judgeChartPath, chartVars); err != nil {
-		fmt.Fprintf(os.Stderr, "INFO: judge skipped — render chart: %v\n", err)
-		return nil
-	}
-
-	judgeTimeout := args.timeout
-	if judgeTimeout <= 0 {
-		judgeTimeout = 5 * time.Minute
-	}
-
-	fmt.Fprintf(os.Stderr, "INFO: judge enabled — academy campfire %s\n", academyCampfireID)
-	return &judicator{
-		weBin:             weBin,
-		cfBin:             cfBin,
-		judgeChartPath:    judgeChartPath,
-		academyCampfireID: academyCampfireID,
-		academyCFHome:     judgeCFHome,
-		repoRoot:          repoRoot,
-		timeout:           judgeTimeout,
-	}
-}
-
-// extractCampfireID scans cf create output for a 64-char hex campfire ID.
-func extractCampfireID(output string) string {
-	for _, line := range strings.Split(strings.TrimSpace(output), "\n") {
-		line = strings.TrimSpace(line)
-		if len(line) == 64 && isAllHex(line) {
-			return line
-		}
-	}
-	return ""
-}
-
-// isAllHex returns true if all characters in s are hex digits.
-func isAllHex(s string) bool {
-	for _, c := range s {
-		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
-			return false
-		}
-	}
-	return true
+// It now always returns nil: judge dispatch is disabled until an in-process
+// judge pipeline lands (pending core/pipeline). Returning nil is the existing
+// "judge unavailable" path — callers (main.go) guard with `if judge != nil`
+// and leave quality_floor as "n/a"/"unavailable", so grading proceeds without
+// the rubric axes rather than failing.
+//
+// The verdict-ingestion logic (judicator.pollForVerdict / spawnAndCollect's cf
+// poll) and the judgeUnavailable sentinel are retained and unit-tested so a
+// future in-process dispatch can reuse them.
+func buildJudicator(_ runArgs) *judicator {
+	fmt.Fprintf(os.Stderr, "INFO: judge disabled — legion `we` dispatch removed (pending in-process judge pipeline)\n")
+	return nil
 }
 
 // judgeUnavailable returns a zero JudgeResult with all axes at 0 (not scored).
@@ -340,36 +209,3 @@ func judgeUnavailable(reason string) *JudgeResult {
 	}
 }
 
-// renderJudgeChart renders a minimal judge-only chart to outPath using the
-// exam.toml.tmpl template. Only the exam:judge seed is needed.
-// vars must include: RUN_ID, FORGE_API_URL, FORGE_API_KEY.
-//
-// vars["JUDGE_CF_HOME"], when set, must be an absolute path to the academy-
-// side CF_HOME (created by cf init in setupJudge). Identity / transport_dir /
-// agents.dir paths in the rendered chart are rewritten to absolutes inside
-// that CF_HOME so `we start --chart <rendered>` resolves them regardless of
-// the cwd it inherits.
-// vars["WORK_CAMPFIRE"], when set, replaces the "exam-<RUN_ID>" campfire
-// alias with the academy-side campfire hex ID.
-func renderJudgeChart(tmplPath, outPath string, vars map[string]string) error {
-	b, err := os.ReadFile(tmplPath)
-	if err != nil {
-		return fmt.Errorf("read judge chart template: %w", err)
-	}
-	s := string(b)
-	for k, v := range vars {
-		s = strings.ReplaceAll(s, "{{"+k+"}}", v)
-	}
-	if jch := vars["JUDGE_CF_HOME"]; jch != "" {
-		runID := vars["RUN_ID"]
-		legacyIdentity := ".run/exam-" + runID + "/identity.json"
-		legacyTransport := ".run/exam-" + runID + "/campfires"
-		s = strings.ReplaceAll(s, legacyIdentity, jch+"/identity.json")
-		s = strings.ReplaceAll(s, legacyTransport, jch+"/campfires")
-	}
-	if wc := vars["WORK_CAMPFIRE"]; wc != "" {
-		runID := vars["RUN_ID"]
-		s = strings.ReplaceAll(s, "campfire = \"exam-"+runID+"\"", "campfire = \""+wc+"\"")
-	}
-	return os.WriteFile(outPath, []byte(s), 0o644)
-}

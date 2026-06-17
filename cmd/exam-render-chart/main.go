@@ -13,21 +13,22 @@
 //  2. Replaces {{RUN_ID}} with --run and {{FORGE_API_URL}} with --forge-url.
 //  3. Creates .run/exam-<run>/ directory.
 //  4. Generates a fresh ed25519 keypair and writes identity.json to
-//     .run/exam-<run>/identity.json using campfire identity.Generate()+Save().
-//     The file format is compatible with campfire identity.Load() and legion's
-//     loadIdentity helper: base64-encoded public_key, private_key, version=1,
-//     and created_at timestamp.
+//     .run/exam-<run>/identity.json in the version=1 plain-key format legion's
+//     loadIdentity helper consumes: base64-encoded public_key, private_key,
+//     version=1, and created_at timestamp.
 //  5. Writes the rendered chart to --out.
 package main
 
 import (
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
-
-	"github.com/campfire-net/campfire/pkg/identity"
+	"time"
 )
 
 func main() {
@@ -91,22 +92,45 @@ func renderTemplate(tmplPath, runID, forgeURL string) (string, error) {
 	return out, nil
 }
 
+// identityFile is the on-disk JSON representation of a generated identity.
+// The format is intentionally compatible with legion's loadIdentity helper:
+// version=1, public_key (base64), private_key (base64), created_at (Unix
+// nanoseconds). Go's encoding/json encodes []byte (and thus ed25519 keys) as
+// base64, so this matches the historical campfire identity file format without
+// depending on the campfire module (removed from the runtime).
+type identityFile struct {
+	Version    int               `json:"version"`
+	PublicKey  ed25519.PublicKey `json:"public_key"`
+	PrivateKey ed25519.PrivateKey `json:"private_key"`
+	CreatedAt  int64             `json:"created_at"`
+}
+
 // writeIdentity generates a fresh ed25519 keypair and writes identity.json
-// under runDir using the campfire identity package. The resulting file is
-// compatible with campfire identity.Load() (which legion's loadIdentity calls).
+// under runDir in the version=1 plain-key format described above.
 //
 // The file contains: version=1, public_key (base64), private_key (base64),
 // created_at (Unix nanoseconds). The hex-encoded format previously used was
 // incompatible — Go JSON decodes []byte as base64, so loading a hex string
 // into ed25519.PrivateKey yielded 96 bytes, failing the 64-byte size check.
 func writeIdentity(runDir string) error {
-	id, err := identity.Generate()
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		return fmt.Errorf("generating identity: %w", err)
 	}
 
+	f := identityFile{
+		Version:    1,
+		PublicKey:  pub,
+		PrivateKey: priv,
+		CreatedAt:  time.Now().UnixNano(),
+	}
+	data, err := json.MarshalIndent(f, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshaling identity: %w", err)
+	}
+
 	identityPath := filepath.Join(runDir, "identity.json")
-	if err := id.Save(identityPath); err != nil {
+	if err := os.WriteFile(identityPath, data, 0o600); err != nil {
 		return fmt.Errorf("saving identity to %s: %w", identityPath, err)
 	}
 	return nil

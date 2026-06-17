@@ -3,6 +3,7 @@
 // Usage:
 //
 //	mallcop scan   [--chart <path>] [--timeout <duration>] [--json]
+//	mallcop detect [--baseline <path>]   < events.jsonl   > findings.jsonl
 //	mallcop init   [--dir <path>]
 //	mallcop status [--chart <path>]
 //	mallcop config [--chart <path>]
@@ -30,6 +31,8 @@ func main() {
 	switch cmd {
 	case "scan":
 		err = runScan(args)
+	case "detect":
+		err = runDetect(args)
 	case "init":
 		err = runInit(args)
 	case "status":
@@ -60,6 +63,10 @@ Commands:
     --chart    Path to the legion chart TOML (default: charts/vertical-slice.toml)
     --timeout  Max time to wait for scan completion (default: 10m)
     --json     Output results as JSON
+
+  detect  Run offline detection over events JSONL on stdin (no inference key)
+    --baseline  Optional path to a baseline JSON file
+               Reads events JSONL from stdin, writes findings JSONL to stdout.
 
   init    Initialize a mallcop config directory
     --dir      Directory to initialize (default: current directory)

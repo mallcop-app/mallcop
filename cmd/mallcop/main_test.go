@@ -205,35 +205,6 @@ func TestIsFindingsError(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// resolveWe — PATH not present, bin/we fallback
-// ---------------------------------------------------------------------------
-
-func TestResolveWe_BinFallback(t *testing.T) {
-	// Clear PATH so resolveWe falls through to the bin/we fallback.
-	// (In a dev environment, ~/.local/bin/we may exist and would otherwise win.)
-	t.Setenv("PATH", "")
-
-	// Create a temp dir simulating repo root with bin/we.
-	tmp := t.TempDir()
-	binDir := tmp + "/bin"
-	os.MkdirAll(binDir, 0o755)
-	wePath := binDir + "/we"
-	os.WriteFile(wePath, []byte("#!/bin/sh\necho we"), 0o755)
-
-	chartPath := tmp + "/charts/scan.toml"
-	os.MkdirAll(tmp+"/charts", 0o755)
-	os.WriteFile(chartPath, []byte(""), 0o644)
-
-	got, err := resolveWe(chartPath)
-	if err != nil {
-		t.Fatalf("resolveWe failed: %v", err)
-	}
-	if got != wePath {
-		t.Errorf("expected %s, got %s", wePath, got)
-	}
-}
-
-// ---------------------------------------------------------------------------
 // loadCheckpoint
 // ---------------------------------------------------------------------------
 

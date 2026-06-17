@@ -1,15 +1,13 @@
-// tools_lookup_rules.go — lookup-rules action tool + operator-decisions.yaml loader.
+// lookup_rules.go — the lookup-rules pure read tool + operator-decisions.yaml
+// loader, ported from cmd/mallcop-investigate-tools/tools_lookup_rules.go.
 //
-// Implements mallcoppro-00c (Wave 3 / Phase 2): a flat-file operator decisions
-// rule store that investigate/triage workers can query to find a matching
-// operator directive for a finding. When a worker cites a matched rule_id in
-// the resolve-finding `reason` field (or the new `rule_id` parameter), the
-// confidence gate treats the citation as a SATISFIED CITATION:
+// LookupRules is a PURE function: given a repo root, a finding family, and a
+// flat metadata predicate, it returns the operator rules that match. It reads
+// only the flat-file rule corpus at agents/rules/operator-decisions.yaml. It
+// performs no inference, opens no channel, and produces no side effects beyond
+// reading the corpus from disk.
 //
-//   - rule_id counts as 1 citation toward the gate's citation_count.
-//   - rule_id bypasses the zero-citation hard floor at tools_f1g_gate.go:513.
-//
-// # YAML schema (matches mallcoppro-2fc's seed file)
+// # YAML schema
 //
 //	rules:
 //	  - id: "R-001"
@@ -23,21 +21,19 @@
 // # File location
 //
 // The rules file lives at agents/rules/operator-decisions.yaml (repo-relative).
-// The investigate sandbox already mounts agents/ read-only via the chart's
-// `extra_ro` list, so the worker subprocess can read the file natively.
+// The caller resolves the repo root and passes it in — this package does not
+// guess at process environment.
 //
 // # Security note
 //
-// rule_id forgery is prevented at the gate by requiring the cited rule_id to
-// actually load from the YAML file. A worker that invents "R-999" gets zero
-// citation credit from the rule_id path — it still has to find evidence the
-// regular way.
-package main
+// rule_id forgery is prevented downstream by requiring a cited rule_id to
+// actually load from the YAML file. A consumer that invents "R-999" gets zero
+// rules from LookupRules because no such rule exists in the corpus.
+package tools
 
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -50,82 +46,69 @@ import (
 
 // expectedOperatorRulesSHA256 pins the sha256 of agents/rules/operator-decisions.yaml.
 //
-// Belt+suspenders defence (mallcoppro-b92) against tampering of the rule corpus
-// after deploy. The primary defence is hermetic copy + atomic rename in
-// scripts/bootstrap-deploy.sh; this is a runtime check that any tampering
-// surfaces as a load error rather than a silent gate bypass via fabricated rules.
+// Belt+suspenders defence against tampering of the rule corpus after deploy.
+// The primary defence is hermetic copy + atomic rename at deploy time; this is
+// a runtime check that any tampering surfaces as a load error rather than a
+// silent gate bypass via fabricated rules.
 //
 // MAINTENANCE: this constant MUST be regenerated whenever
 // agents/rules/operator-decisions.yaml changes. Recompute with:
 //
 //	sha256sum agents/rules/operator-decisions.yaml
 //
-// TestExpectedOperatorRulesSHA256_MatchesShippedCorpus enforces the regen as a
-// regression guard — CI fails if the constant and the shipped corpus diverge.
-//
 // The verification is OPTIONAL at runtime — it is enforced only when
 // MALLCOP_RULES_SHA256_ENFORCE is truthy or MALLCOP_RULES_SHA256 is set to a
 // non-empty value. Default is permissive so dev/test workflows that edit the
-// corpus on the fly are not broken; production deploys set the enforce flag in
-// the activate envelope. This matches the existing security posture in
-// tools_f1g_gate.go where bypass gates default off and are enabled per-deploy.
+// corpus on the fly are not broken; production deploys set the enforce flag.
 //
 // When MALLCOP_RULES_SHA256 is set it overrides this constant (lets the build/
 // release process pin a corpus that wasn't yet hardcoded). Mismatch in either
-// path returns an error from loadOperatorRules, which surfaces as a
-// resolve-finding gate fire (lookup-rules emits an error result).
+// path returns an error from LoadOperatorRules.
 const expectedOperatorRulesSHA256 = "7818b0e01d2d4f5c2ce3e4b0474a1aef4c477dedbf22c636fd0d46c432f96a2b"
 
-// operatorRule is a single rule loaded from operator-decisions.yaml.
-type operatorRule struct {
-	ID         string         `yaml:"id" json:"id"`
-	AppliesTo  ruleAppliesTo  `yaml:"applies_to" json:"applies_to"`
-	OperatorDirective string `yaml:"operator_directive" json:"operator_directive"`
+// OperatorRule is a single rule loaded from operator-decisions.yaml.
+type OperatorRule struct {
+	ID                string        `yaml:"id" json:"id"`
+	AppliesTo         RuleAppliesTo `yaml:"applies_to" json:"applies_to"`
+	OperatorDirective string        `yaml:"operator_directive" json:"operator_directive"`
 }
 
-// ruleAppliesTo is the matching predicate for a rule.
+// RuleAppliesTo is the matching predicate for a rule.
 //
 // Family matches finding.detector (string equality, case-insensitive).
 // MetadataMatch is a conjunctive flat map: every (key, value) pair must appear
-// in the supplied finding_metadata for the rule to match. Values are compared
+// in the supplied finding metadata for the rule to match. Values are compared
 // case-insensitively as strings.
-type ruleAppliesTo struct {
+type RuleAppliesTo struct {
 	Family        string            `yaml:"family" json:"family"`
 	MetadataMatch map[string]string `yaml:"metadata_match,omitempty" json:"metadata_match,omitempty"`
 }
 
 // operatorRulesFile is the on-disk top-level shape of operator-decisions.yaml.
 type operatorRulesFile struct {
-	Rules []operatorRule `yaml:"rules"`
+	Rules []OperatorRule `yaml:"rules"`
 }
 
-// lookupRulesInput is the input_schema for the lookup-rules action tool.
+// LookupRulesInput is the input for LookupRules.
 //
+// FindingID identifies the finding being investigated (echoed back in output).
 // FindingFamily filters rules by AppliesTo.Family (case-insensitive equality).
 //
-// The metadata predicate is supplied as a flat set of named string fields,
-// not a nested object. This works around an empirically observed reliability
-// problem with the prior nested `finding_metadata: {type:object}` schema
-// (mallcoppro-db3 Fix #6 / Fix Schema): 2/2 historical lookup-rules calls
-// across 8,300 campfires failed with malformed-JSON / type-violation errors,
-// and at least one worker (GLM-5) reported the tool as "not available in
-// current environment" while it was correctly registered. Flat named string
-// properties are the schema shape every other reliably-called tool uses.
-//
-// Each known flag corresponds 1:1 with a metadata_match key currently used
-// by operator-decisions.yaml or by the rules added in Fix #2. Extending the
-// rule corpus with a new metadata predicate requires adding a new field
-// here (and to the input_schema in the capability templates).
+// The metadata predicate is supplied as a flat set of named string fields, not
+// a nested object. This works around a reliability problem with the prior
+// nested object schema: flat named string properties are the schema shape every
+// reliably-called tool uses. Each known flag corresponds 1:1 with a
+// metadata_match key currently used by operator-decisions.yaml.
 //
 // FindingMetadata is retained as a back-compatibility shim — when callers
-// (or tests) supply the legacy nested object, it is merged into the assembled
-// flat map. Direct flat fields take precedence over FindingMetadata entries
-// with the same key.
-type lookupRulesInput struct {
+// supply the legacy nested object, it is merged into the assembled flat map.
+// Direct flat fields take precedence over FindingMetadata entries with the same
+// key.
+type LookupRulesInput struct {
 	FindingID     string `json:"finding_id"`
 	FindingFamily string `json:"finding_family"`
 
-	// Flat named predicate fields (Fix #6 — the canonical shape).
+	// Flat named predicate fields (the canonical shape).
 	MaintenanceWindow    string `json:"maintenance_window,omitempty"`
 	Scheduled            string `json:"scheduled,omitempty"`
 	ResolutionEvent      string `json:"resolution_event,omitempty"`
@@ -138,20 +121,18 @@ type lookupRulesInput struct {
 	ActorRole            string `json:"actor_role,omitempty"`
 
 	// FindingMetadata is the legacy nested-object input. Retained as a
-	// back-compatibility shim for existing tests + any in-flight callers.
-	// New callers should use the flat fields above.
+	// back-compatibility shim. New callers should use the flat fields above.
 	FindingMetadata map[string]string `json:"finding_metadata,omitempty"`
 }
 
 // assembleMetadata builds the flat metadata map the rule matcher expects from
 // the input's named flat fields plus the legacy FindingMetadata map. Only
-// non-empty values are included so a worker that omits a flag does not match
+// non-empty values are included so a caller that omits a flag does not match
 // rules that require that flag.
 //
-// Flat named fields take precedence over FindingMetadata entries with the
-// same key — the named field is the canonical surface and the legacy map is
-// a shim.
-func (in lookupRulesInput) assembleMetadata() map[string]string {
+// Flat named fields take precedence over FindingMetadata entries with the same
+// key — the named field is the canonical surface and the legacy map is a shim.
+func (in LookupRulesInput) assembleMetadata() map[string]string {
 	out := map[string]string{}
 	// Seed from legacy nested map first; flat fields will overwrite below.
 	for k, v := range in.FindingMetadata {
@@ -181,40 +162,40 @@ func (in lookupRulesInput) assembleMetadata() map[string]string {
 	return out
 }
 
-// lookupRulesOutput is the JSON output for lookup-rules.
-type lookupRulesOutput struct {
+// LookupRulesOutput is the result of LookupRules: the finding id echoed back
+// and the matching rules (empty slice, never nil, on no matches).
+type LookupRulesOutput struct {
 	FindingID string         `json:"finding_id"`
-	Rules     []operatorRule `json:"rules"`
+	Rules     []OperatorRule `json:"rules"`
 }
 
-// rulesCachePath returns the absolute path to operator-decisions.yaml under
-// the repo root. The caller is responsible for resolving the repo root.
+// rulesCachePath returns the absolute path to operator-decisions.yaml under the
+// repo root. The caller is responsible for resolving the repo root.
 func rulesCachePath(repoRoot string) string {
 	return filepath.Join(repoRoot, "agents", "rules", "operator-decisions.yaml")
 }
 
-// rulesCache memoizes the parsed rules file for the lifetime of the process.
-// Each binary invocation is a fresh process, but within one process (e.g. the
-// gate-check + lookup-rules call paths in tests), we avoid re-parsing.
+// rulesCache memoizes the parsed rules file per source path. Within one process
+// (e.g. repeated LookupRules calls against the same corpus) we avoid re-parsing.
 var (
 	rulesCacheMu   sync.Mutex
 	rulesCacheOnce sync.Once
-	rulesCacheData []operatorRule
+	rulesCacheData []OperatorRule
 	rulesCacheErr  error
 	rulesCacheKey  string // path used for last load, to invalidate on path change
 )
 
-// loadOperatorRules reads operator-decisions.yaml from repoRoot and returns
-// the parsed rules. Returns an empty slice (not an error) when the file does
-// not exist — a missing file means "no pre-seeded rules" rather than an error.
-func loadOperatorRules(repoRoot string) ([]operatorRule, error) {
+// LoadOperatorRules reads operator-decisions.yaml from repoRoot and returns the
+// parsed rules. Returns an empty slice (not an error) when the file does not
+// exist — a missing file means "no pre-seeded rules" rather than an error.
+func LoadOperatorRules(repoRoot string) ([]OperatorRule, error) {
 	path := rulesCachePath(repoRoot)
 
 	rulesCacheMu.Lock()
 	defer rulesCacheMu.Unlock()
 
-	// Invalidate cache when the path changes (test isolation: each test sets
-	// MALLCOP_REPO_ROOT to a different t.TempDir).
+	// Invalidate cache when the path changes (test isolation: each test points
+	// at a different temp repo root).
 	if rulesCacheKey != path {
 		rulesCacheData = nil
 		rulesCacheErr = nil
@@ -226,17 +207,17 @@ func loadOperatorRules(repoRoot string) ([]operatorRule, error) {
 		data, err := os.ReadFile(path)
 		if err != nil {
 			if errors.Is(err, os.ErrNotExist) {
-				rulesCacheData = []operatorRule{}
+				rulesCacheData = []OperatorRule{}
 				rulesCacheErr = nil
 				return
 			}
 			rulesCacheErr = fmt.Errorf("read operator-decisions.yaml: %w", err)
 			return
 		}
-		// Belt+suspenders sha256 check (mallcoppro-b92). Enforced only when
-		// MALLCOP_RULES_SHA256_ENFORCE is truthy or MALLCOP_RULES_SHA256 is
-		// set. Mismatch surfaces as a load error so a tampered corpus cannot
-		// silently grant rule_id citations at the gate.
+		// Belt+suspenders sha256 check. Enforced only when
+		// MALLCOP_RULES_SHA256_ENFORCE is truthy or MALLCOP_RULES_SHA256 is set.
+		// Mismatch surfaces as a load error so a tampered corpus cannot silently
+		// grant rule_id citations downstream.
 		if err := verifyOperatorRulesChecksum(data); err != nil {
 			rulesCacheErr = err
 			return
@@ -266,9 +247,9 @@ func loadOperatorRules(repoRoot string) ([]operatorRule, error) {
 //     → expectedOperatorRulesSHA256 is the expected hash. Enforcement is on.
 //   - Otherwise → enforcement is off (returns nil regardless of file content).
 //
-// The permissive default mirrors the gate's other env-toggled defences and
-// keeps test fixtures (writeRulesFixture writes a 3-rule fixture with a
-// different hash than the shipped corpus) working without ceremony.
+// The permissive default mirrors other env-toggled defences and keeps test
+// fixtures (which write a corpus with a different hash than the shipped one)
+// working without ceremony.
 func verifyOperatorRulesChecksum(data []byte) error {
 	override := strings.TrimSpace(os.Getenv("MALLCOP_RULES_SHA256"))
 	enforce := false
@@ -301,15 +282,14 @@ func isTruthyEnv(v string) bool {
 	return false
 }
 
-// matchesRule returns true when the given finding family + metadata satisfy
-// the rule's applies_to predicate. Family is case-insensitive equality;
+// matchesRule returns true when the given finding family + metadata satisfy the
+// rule's applies_to predicate. Family is case-insensitive equality;
 // metadata_match is a conjunctive case-insensitive flat-map predicate.
 //
 // An empty rule.Family matches any family (defensive — a real rule should
-// always set family).
-// An empty rule.MetadataMatch matches any metadata (rule applies whenever
-// family matches).
-func matchesRule(rule operatorRule, family string, metadata map[string]string) bool {
+// always set family). An empty rule.MetadataMatch matches any metadata (rule
+// applies whenever family matches).
+func matchesRule(rule OperatorRule, family string, metadata map[string]string) bool {
 	if rule.AppliesTo.Family != "" && !strings.EqualFold(rule.AppliesTo.Family, family) {
 		return false
 	}
@@ -325,8 +305,8 @@ func matchesRule(rule operatorRule, family string, metadata map[string]string) b
 	return true
 }
 
-// lookupMetadataCaseInsensitive does a case-insensitive key lookup against
-// the supplied metadata map. Returns (value, true) on hit, ("", false) on miss.
+// lookupMetadataCaseInsensitive does a case-insensitive key lookup against the
+// supplied metadata map. Returns (value, true) on hit, ("", false) on miss.
 func lookupMetadataCaseInsensitive(metadata map[string]string, key string) (string, bool) {
 	if v, ok := metadata[key]; ok {
 		return v, true
@@ -340,58 +320,48 @@ func lookupMetadataCaseInsensitive(metadata map[string]string, key string) (stri
 	return "", false
 }
 
-// findRuleByID looks up a rule by its ID (case-insensitive). Returns the rule
+// FindRuleByID looks up a rule by its ID (case-insensitive). Returns the rule
 // and true on hit, or zero value and false on miss.
-func findRuleByID(rules []operatorRule, ruleID string) (operatorRule, bool) {
+func FindRuleByID(rules []OperatorRule, ruleID string) (OperatorRule, bool) {
 	for _, r := range rules {
 		if strings.EqualFold(r.ID, ruleID) {
 			return r, true
 		}
 	}
-	return operatorRule{}, false
+	return OperatorRule{}, false
 }
 
-// runLookupRules is the lookup-rules action tool handler.
+// LookupRules is the pure lookup-rules read tool.
 //
-// It reads finding_id + finding_family + finding_metadata from the input JSON
-// and emits a JSON object with the matching rules array. Empty array on no
-// matches; never an error for "no rules found."
-func runLookupRules(inputJSON string) error {
-	var input lookupRulesInput
-	inputJSON = stripMarkdownFences(inputJSON)
-	if inputJSON == "" {
-		return errors.New("lookup-rules: input JSON required (missing positional argument)")
-	}
-	if err := json.Unmarshal([]byte(inputJSON), &input); err != nil {
-		return fmt.Errorf("lookup-rules: parse input: %w", err)
-	}
+// Given a repo root and an input (finding id + family + metadata predicate), it
+// loads the operator-decisions corpus and returns the rules whose applies_to
+// predicate matches. An empty Rules slice (never nil) means "no rules matched"
+// — that is a valid result, never an error. LookupRules returns an error only
+// for a malformed input (missing finding_id / finding_family) or a corpus that
+// cannot be loaded (read error or sha256 mismatch when enforcement is on).
+func LookupRules(repoRoot string, input LookupRulesInput) (LookupRulesOutput, error) {
 	if input.FindingID == "" {
-		return errors.New("lookup-rules: finding_id is required")
+		return LookupRulesOutput{}, errors.New("lookup-rules: finding_id is required")
 	}
 	if input.FindingFamily == "" {
-		return errors.New("lookup-rules: finding_family is required")
+		return LookupRulesOutput{}, errors.New("lookup-rules: finding_family is required")
 	}
 
-	repoRoot, err := resolveRepoRoot()
+	rules, err := LoadOperatorRules(repoRoot)
 	if err != nil {
-		return fmt.Errorf("lookup-rules: resolve repo root: %w", err)
-	}
-
-	rules, err := loadOperatorRules(repoRoot)
-	if err != nil {
-		return fmt.Errorf("lookup-rules: %w", err)
+		return LookupRulesOutput{}, fmt.Errorf("lookup-rules: %w", err)
 	}
 
 	metadata := input.assembleMetadata()
-	matches := []operatorRule{}
+	matches := []OperatorRule{}
 	for _, r := range rules {
 		if matchesRule(r, input.FindingFamily, metadata) {
 			matches = append(matches, r)
 		}
 	}
 
-	return emitJSON(lookupRulesOutput{
+	return LookupRulesOutput{
 		FindingID: input.FindingID,
 		Rules:     matches,
-	})
+	}, nil
 }

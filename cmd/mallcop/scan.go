@@ -1,12 +1,10 @@
 package main
 
 import (
-	"bufio"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -28,111 +26,44 @@ type ScanSummary struct {
 	Resolved         int `json:"resolved"`
 }
 
-// scanOutput collects structured output emitted by `we start --exit-on-idle` to stdout.
-// Lines are JSONL; each line may be a Finding or a Resolution.
+// scanOutput collects structured Findings and Resolutions parsed from the
+// agentic scan pipeline output (JSONL). Each line may be a Finding or a
+// Resolution. Retained because the JSONL/output-dir parsing helpers below are
+// exercised by tests and will be reused when the in-process scan pipeline is
+// wired (pending core/pipeline).
 type scanOutput struct {
 	findings    []finding.Finding
 	resolutions []resolution.Resolution
 }
 
+// errScanPipelineNotWired is returned by runScan while the agentic scan path is
+// stubbed. The previous implementation exec'd the external legion binary
+// (`we start --chart … --exit-on-idle`); that coupling has been removed. The
+// in-process scan pipeline is a later item (pending core/pipeline).
+var errScanPipelineNotWired = fmt.Errorf(
+	"in-process scan pipeline not yet wired (pending core/pipeline); " +
+		"the legion-backed agentic scan path has been removed")
+
 func runScan(args []string) error {
 	fs := flag.NewFlagSet("scan", flag.ContinueOnError)
-	chartPath := fs.String("chart", defaultChart, "Path to the legion chart TOML")
-	timeoutStr := fs.String("timeout", "10m", "Max wait time for scan completion")
-	asJSON := fs.Bool("json", false, "Output results as JSON")
+	chartPath := fs.String("chart", defaultChart, "Path to the scan chart TOML")
+	_ = fs.String("timeout", "10m", "Max wait time for scan completion (reserved for the in-process pipeline)")
+	_ = fs.Bool("json", false, "Output results as JSON (reserved for the in-process pipeline)")
 
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 
-	timeout, err := time.ParseDuration(*timeoutStr)
-	if err != nil {
-		return fmt.Errorf("invalid --timeout %q: %w", *timeoutStr, err)
+	// Validate the chart path exists so the command fails fast and clearly,
+	// matching the deterministic-path UX, rather than only at pipeline wiring.
+	if _, err := os.Stat(*chartPath); err != nil {
+		return fmt.Errorf("scan chart %s: %w", *chartPath, err)
 	}
 
-	// Resolve we binary: prefer PATH, fall back to bin/we relative to chart dir.
-	weBin, err := resolveWe(*chartPath)
-	if err != nil {
-		return fmt.Errorf("cannot locate 'we' binary: %w", err)
-	}
-
-	// Build output directory path derived from chart location.
-	outDir := scanOutputDir(*chartPath)
-
-	// Invoke `we start --chart <chart> --exit-on-idle` — the agentic one-shot.
-	// `we` exits cleanly once the work queue is empty and no schedule entries
-	// remain, after draining active workers.
-	cmd := exec.Command(weBin, "start", "--chart", *chartPath, "--exit-on-idle")
-	cmd.Stderr = os.Stderr
-
-	// Capture stdout so we can parse JSONL findings.
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return fmt.Errorf("stdout pipe: %w", err)
-	}
-
-	// Run with timeout via a timer goroutine.
-	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("starting we: %w", err)
-	}
-
-	done := make(chan error, 1)
-	var out scanOutput
-
-	// Parse stdout lines in background.
-	go func() {
-		sc := bufio.NewScanner(stdout)
-		for sc.Scan() {
-			line := strings.TrimSpace(sc.Text())
-			if line == "" {
-				continue
-			}
-			// Echo the line so the operator can see live output.
-			fmt.Println(line)
-			// Try to decode as Finding or Resolution.
-			parseScanLine(line, &out)
-		}
-	}()
-
-	// Wait for process in background.
-	go func() {
-		done <- cmd.Wait()
-	}()
-
-	timer := time.NewTimer(timeout)
-	defer timer.Stop()
-
-	select {
-	case err := <-done:
-		if err != nil {
-			return fmt.Errorf("we exited with error: %w", err)
-		}
-	case <-timer.C:
-		_ = cmd.Process.Kill()
-		return fmt.Errorf("scan timed out after %s", timeout)
-	}
-
-	// If we binary emitted findings inline, use them.
-	// Otherwise fall back to reading from the output directory.
-	if len(out.findings) == 0 && outDir != "" {
-		out.findings = readFindingsDir(outDir)
-	}
-	if len(out.resolutions) == 0 && outDir != "" {
-		out.resolutions = readResolutionsDir(outDir)
-	}
-
-	summary := buildSummary(out)
-
-	if *asJSON {
-		return printJSON(summary)
-	}
-	printSummary(summary)
-
-	if summary.FindingsDetected > 0 {
-		// Exit code 1 signalled by returning a sentinel that main.go converts.
-		return errFindings
-	}
-	return nil
+	// The agentic scan path is intentionally a no-op until the in-process
+	// pipeline lands. Deterministic detection remains available via the
+	// standalone detector-* binaries. Return a clear, actionable error.
+	return errScanPipelineNotWired
 }
 
 // errFindings is returned by runScan when findings are present (exit code 1).
@@ -148,30 +79,9 @@ func isFindingsError(err error) bool {
 	return ok
 }
 
-// resolveWe finds the `we` binary. Checks PATH first, then bin/we relative to chart.
-func resolveWe(chartPath string) (string, error) {
-	if p, err := exec.LookPath("we"); err == nil {
-		return p, nil
-	}
-	// Try bin/we relative to directory containing the chart.
-	chartDir := filepath.Dir(chartPath)
-	candidate := filepath.Join(chartDir, "..", "bin", "we")
-	candidate = filepath.Clean(candidate)
-	if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
-		return candidate, nil
-	}
-	// Also try cwd/bin/we.
-	if cwd, err := os.Getwd(); err == nil {
-		candidate = filepath.Join(cwd, "bin", "we")
-		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
-			return candidate, nil
-		}
-	}
-	return "", fmt.Errorf("'we' not found in PATH or bin/we; install legion or add it to PATH")
-}
-
-// scanOutputDir returns the directory where we writes findings/resolutions,
-// derived from chart location. Returns "" if not determinable.
+// scanOutputDir returns the directory where the scan pipeline writes
+// findings/resolutions, derived from chart location. Returns "" if not
+// determinable.
 func scanOutputDir(chartPath string) string {
 	chartDir := filepath.Dir(chartPath)
 	candidate := filepath.Join(chartDir, "..", "output")

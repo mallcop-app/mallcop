@@ -17,14 +17,47 @@ package main
 
 import (
 	"crypto/ed25519"
+	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/BurntSushi/toml"
-	"github.com/campfire-net/campfire/pkg/identity"
 )
+
+// loadedIdentity is the minimal parse of the identity.json file written by
+// writeIdentity. It mirrors the version=1 plain-key format legion's
+// loadIdentity helper consumes. This replaces the campfire identity.Load call
+// (campfire was removed from the runtime); the format invariants asserted are
+// identical.
+type loadedIdentity struct {
+	Version    int                `json:"version"`
+	PublicKey  ed25519.PublicKey  `json:"public_key"`
+	PrivateKey ed25519.PrivateKey `json:"private_key"`
+	CreatedAt  int64              `json:"created_at"`
+}
+
+// loadIdentityFile reads and validates an identity.json written by
+// writeIdentity, enforcing the same key-size invariants legion does.
+func loadIdentityFile(path string) (*loadedIdentity, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var id loadedIdentity
+	if err := json.Unmarshal(data, &id); err != nil {
+		return nil, fmt.Errorf("parse identity %s: %w", path, err)
+	}
+	if len(id.PublicKey) != ed25519.PublicKeySize {
+		return nil, fmt.Errorf("public key size: got %d, want %d", len(id.PublicKey), ed25519.PublicKeySize)
+	}
+	if len(id.PrivateKey) != ed25519.PrivateKeySize {
+		return nil, fmt.Errorf("private key size: got %d, want %d", len(id.PrivateKey), ed25519.PrivateKeySize)
+	}
+	return &id, nil
+}
 
 // renderForTest is a test helper that calls renderTemplate with a temp out dir.
 func renderForTest(t *testing.T, runID, forgeURL string) (chartPath string, runDir string) {
@@ -165,20 +198,20 @@ func TestLegionChartParse(t *testing.T) {
 }
 
 // TestIdentityGeneration verifies that rendering creates .run/exam-<run>/identity.json
-// in a format that campfire identity.Load accepts, and that the loaded key can
-// sign and verify a test message. This test would have caught the original hex
-// encoding bug.
+// in the version=1 plain-key format legion's loadIdentity helper accepts, and
+// that the loaded key can sign and verify a test message. This test would have
+// caught the original hex encoding bug.
 func TestIdentityGeneration(t *testing.T) {
 	_, runDir := renderForTest(t, "R1", "")
 
 	identityPath := filepath.Join(runDir, "identity.json")
 
-	// Load the file using the REAL identity.Load — this is the same call
-	// legion's loadIdentity makes. Any format mismatch (wrong encoding,
-	// missing fields, wrong key size) surfaces here.
-	id, err := identity.Load(identityPath)
+	// Load the file via loadIdentityFile, which enforces the same key-size
+	// invariants legion's loadIdentity does. Any format mismatch (wrong
+	// encoding, missing fields, wrong key size) surfaces here.
+	id, err := loadIdentityFile(identityPath)
 	if err != nil {
-		t.Fatalf("identity.Load(%s) failed: %v", identityPath, err)
+		t.Fatalf("loadIdentityFile(%s) failed: %v", identityPath, err)
 	}
 
 	// Verify the key is usable: sign a test message and verify the signature.

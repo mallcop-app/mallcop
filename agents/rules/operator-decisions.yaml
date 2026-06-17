@@ -57,6 +57,102 @@
 # - Values are strings; the loader compares case-insensitively.
 # - `operator_directive` is the human-readable directive the chain cites when
 #   resolving. Citation plumbing (mallcoppro-49d / E14) reads this field.
+#
+# =============================================================================
+# escalate_routes — the DATA-DRIVEN PRE-LLM FLOOR
+# =============================================================================
+#
+# The operator REJECTED a static auto-escalate map hardcoded in Go. The floor
+# that ships is data: a finding whose family (and optional metadata predicate)
+# matches an always-escalate route here is FORCE-ESCALATED to a human BEFORE any
+# model call — the model literally never sees it, no donuts spent. Routes are a
+# MUTABLE corpus an operator (or a learning loop) extends by appending YAML —
+# never by editing Go. Appending a route here takes effect with NO code change
+# (the emergence property, proven by core/agent router_test.go).
+#
+# This is the union of the proven always-escalate families from the Python floor
+# (resolution_rules.ALWAYS_ESCALATE_DETECTORS / _NEVER_AUTO_RESOLVE that apply
+# per-finding) plus secrets-exposure. Day-one behavior is preserved: the same
+# four families the hardcoded map enforced are seeded below, so removing the Go
+# map does not lower the floor.
+#
+# Matching (core/agent router.go — NOT the core/tools lookup-rules loader):
+# - `family` matches finding.Type, hardened against case/whitespace/separator/
+#   alias evasion (the BYPASS defense): "Injection-Probe", "injection_probe",
+#   "  injection-probe  ", and the listed `aliases` all collapse onto the route.
+# - `metadata_match`, when present, is a conjunctive flat-map predicate over the
+#   finding's observable metadata (same shape as a resolve rule). When absent,
+#   the route fires on family match alone — that is the common case for a
+#   dangerous family (every privilege-escalation finding escalates, no predicate
+#   needed).
+# - `aliases` is an optional list of alternate spellings a sloppy or adversarial
+#   detector might emit for the same dangerous signature. They are normalized
+#   (case-folded, separators stripped) before comparison, so only the bare
+#   spelling needs listing.
+# - `reason` is the human-facing explanation surfaced on the escalation.
+#
+# Schema:
+#   escalate_routes:
+#     - id: "E-XXX"                 # unique, E-001..E-NNN
+#       family: <canonical dangerous family as it appears on finding.Type>
+#       aliases: [<alt-spelling>, ...]   # optional; alternate / evasion spellings
+#       metadata_match:             # optional; conjunctive predicate, omit to
+#         <key>: <value>            #   fire on family match alone
+#       reason: |                   # human-facing escalation explanation
+#         <why this always needs human review>
+
+escalate_routes:
+  - id: "E-001"
+    family: "priv-escalation"
+    aliases: ["privilege-escalation", "role-grant", "privesc", "privilege-esc", "permission-boundary-change"]
+    reason: |
+      Privilege escalation / role grant / permission-boundary change always
+      requires human audit. A model that pattern-matches "actor is a known
+      admin who grants permissions often" will resolve a genuine boundary
+      breach as routine; the floor removes that path. No LLM involved.
+
+  - id: "E-002"
+    family: "injection-probe"
+    aliases: ["prompt-injection", "injection-attempt", "injection"]
+    reason: |
+      Prompt-injection / probe attempts are the one thing a model is least able
+      to adjudicate about itself — the payload targets the adjudicator. Force
+      escalate deterministically; the model never reads the probe.
+
+  - id: "E-003"
+    family: "log-format-drift"
+    aliases: ["parser-mismatch", "log-drift", "unmatched-event-ratio-spike", "log-tampering"]
+    reason: |
+      Log-format drift / parser mismatch / unmatched-event-ratio spikes can mask
+      an attacker tampering with the audit trail. The detector cannot see what it
+      can no longer parse, so a model verdict over drifted logs is unsound;
+      escalate to a human who can inspect the raw stream.
+
+  - id: "E-004"
+    family: "secrets-exposure"
+    aliases: ["secret-exposure", "secrets-leak", "secret-leak", "credential-leak"]
+    reason: |
+      Credential / secret leakage must never be auto-resolved by a model —
+      auditing a leak through the model would itself risk re-exposing the
+      secret in inference logs. Force escalate.
+
+  - id: "E-005"
+    family: "boundary-violation"
+    aliases: ["boundary-breach", "access-boundary-breach"]
+    reason: |
+      Access-boundary breaches are exempt from squelch/budget in the Python
+      floor and always escalated. This route ALSO backs the volume
+      circuit-breaker: the synthetic mallcop-budget meta-finding (family
+      mallcop-budget, route E-006) is the breaker trip and force-escalates on
+      its own route.
+
+  - id: "E-006"
+    family: "mallcop-budget"
+    reason: |
+      Volume circuit-breaker tripped — too many findings for safe autonomous
+      handling. This is the synthetic meta-finding CheckCircuitBreaker emits; it
+      is force-escalated so a finding flood (e.g. attacker noise drowning a real
+      boundary violation) halts autonomous processing and reaches a human.
 
 rules:
   - id: "R-001"
