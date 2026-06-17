@@ -214,6 +214,25 @@ INVESTIGATE_MERGE_MODEL="${INVESTIGATE_MERGE_MODEL:-${MODEL}}"
 ESCALATE_MODEL="${ESCALATE_MODEL:-${MODEL}}"
 HEAL_MODEL="${HEAL_MODEL:-${MODEL}}"
 TOOL_BIN_DIR="${TOOL_BIN_DIR:-${REPO_ROOT}/bin}"
+
+# Build mallcop-investigate-tools and mallcop-academy if the source is newer
+# than the binary. Recurring failure mode: bakeoff runs against stale binaries
+# while capability templates are freshly rendered — model sees new tool
+# descriptions but binary returns old behavior. Verified silent for ~5 days
+# in mid-June 2026 (bakeoffs 5-8 ran against pre-PR-#113 binaries).
+mkdir -p "${TOOL_BIN_DIR}"
+for cmd in mallcop-investigate-tools mallcop-academy; do
+  src_dir="${REPO_ROOT}/cmd/${cmd}"
+  out="${TOOL_BIN_DIR}/${cmd}"
+  if [[ ! -f "${out}" ]] || find "${src_dir}" -newer "${out}" -name '*.go' -print -quit | grep -q .; then
+    note "building ${cmd} (source newer than binary or binary missing)"
+    (cd "${REPO_ROOT}" && go build -o "${out}" "./cmd/${cmd}") || {
+      echo "ERROR: failed to build ${cmd}" >&2
+      exit 1
+    }
+  fi
+done
+
 declare -A SYNC_MODEL_FOR=(
   [triage]="${TRIAGE_MODEL}"
   [investigate]="${INVESTIGATE_MODEL}"
