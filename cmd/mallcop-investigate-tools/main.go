@@ -607,6 +607,63 @@ type rawEvent struct {
 	Raw        interface{}            `json:"raw,omitempty"`
 }
 
+// UnmarshalJSON accepts both snake_case (event_type, ingested_at) and the
+// PascalCase shape produced by Go's default marshal of internal/exam types
+// (EventType, IngestedAt). Go's stdlib case-insensitive match compares the
+// JSON key to the struct tag after lowercasing both — but "EventType"
+// lowered is "eventtype" which does NOT equal "event_type", so multi-word
+// camelCase keys silently decode to the zero value. The bakeoff fixtures
+// were written with PascalCase keys; every event_type / ingested_at field
+// has been decoding as empty for the lifetime of the binary, which made
+// the model's --type filter exclude every event for any scenario whose
+// model passed an event_type argument (verified ID-02 + VA-01 in
+// bakeoff 10).
+func (e *rawEvent) UnmarshalJSON(data []byte) error {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	getStr := func(keys ...string) string {
+		for _, k := range keys {
+			if v, ok := raw[k]; ok {
+				var s string
+				if err := json.Unmarshal(v, &s); err == nil {
+					return s
+				}
+			}
+		}
+		return ""
+	}
+	e.ID = getStr("id", "ID")
+	e.Timestamp = getStr("timestamp", "Timestamp")
+	e.IngestedAt = getStr("ingested_at", "IngestedAt")
+	e.Source = getStr("source", "Source")
+	e.EventType = getStr("event_type", "EventType")
+	e.Actor = getStr("actor", "Actor")
+	e.Action = getStr("action", "Action")
+	e.Target = getStr("target", "Target")
+	e.Severity = getStr("severity", "Severity")
+	for _, k := range []string{"metadata", "Metadata"} {
+		if v, ok := raw[k]; ok {
+			var m map[string]interface{}
+			if err := json.Unmarshal(v, &m); err == nil && m != nil {
+				e.Metadata = m
+				break
+			}
+		}
+	}
+	for _, k := range []string{"raw", "Raw"} {
+		if v, ok := raw[k]; ok {
+			var anything interface{}
+			if err := json.Unmarshal(v, &anything); err == nil {
+				e.Raw = anything
+				break
+			}
+		}
+	}
+	return nil
+}
+
 // searchEventsResult is the wrapped output shape search-events ALWAYS emits.
 // It bundles the surfaced events with any matched operator-decision rules so
 // the model gets rule citations in the same call.
