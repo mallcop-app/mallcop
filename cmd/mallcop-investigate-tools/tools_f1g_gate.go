@@ -1023,6 +1023,9 @@ func forceEscalateToInvestigator(findingID, reason string, gr gateResult) error 
 		return fmt.Errorf("confidence gate fan-out (triage): %w", err)
 	}
 	parentItemID := os.Getenv("MALLCOP_ITEM_ID")
+	// Forward the academy scenario id so the spawned investigate worker can
+	// find its per-scenario fixture subdir (see scenario_id.go).
+	scenarioItemID := scenarioItemIDForHandoff()
 
 	title := fmt.Sprintf("investigate: %s (gate:triage)", findingID)
 	gateContext := fmt.Sprintf(
@@ -1030,8 +1033,8 @@ func forceEscalateToInvestigator(findingID, reason string, gr gateResult) error 
 		gr.Score, gr.EffectiveFloor,
 		gr.Stats.ToolCallCount, gr.Stats.DistinctToolCount, gr.CitationCount, gr.Stats.Iterations,
 	)
-	ctx := fmt.Sprintf("skill=task:investigate finding_id=%s reason=%s parent_item_id=%s gate=%s",
-		findingID, reason, parentItemID, gateContext)
+	ctx := fmt.Sprintf("skill=task:investigate finding_id=%s reason=%s scenario_item_id=%s parent_item_id=%s gate=%s",
+		findingID, reason, scenarioItemID, parentItemID, gateContext)
 
 	itemID, err := cfWorkCreate(workCampfireID, "task:investigate", title, ctx, findingID)
 	if err != nil {
