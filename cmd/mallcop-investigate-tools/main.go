@@ -254,7 +254,14 @@ func run(args []string) error {
 	// legion sets to the academy work item ID of the form
 	// `academy-<run-id>-<scenario-id>` (e.g.
 	// `academy-bk-open-20260603-220156-UT-02-maintenance-window`).
-	if scenarioDir := resolveScenarioFixtureDir(absFixtureDir, os.Getenv("MALLCOP_ITEM_ID")); scenarioDir != "" {
+	//
+	// Chain-handoff workers (investigate, escalate-to-deep, etc.) are spawned
+	// against a NEW item ID whose prefix is the project prefix, not
+	// `academy-`. resolveScenarioItemID falls back to the item's rd context
+	// `scenario_item_id=academy-...` token that the handoff tools embed so
+	// the resolution stays correct across arbitrarily-deep chains. See
+	// scenario_id.go for the full priority.
+	if scenarioDir := resolveScenarioFixtureDir(absFixtureDir, resolveScenarioItemID()); scenarioDir != "" {
 		absFixtureDir = scenarioDir
 	}
 
@@ -407,10 +414,60 @@ type knownEntities struct {
 }
 
 // relationshipEntry mirrors internal/exam.RelationshipEntry.
+//
+// internal/exam.RelationshipEntry declares yaml tags only; the academy
+// fixture writer (cmd/mallcop-academy/main.go materializeScenarioFixtures)
+// marshals it through encoding/json which falls back to the Go field name —
+// emitting `FirstSeen` / `LastSeen` (PascalCase) into baseline.json. Go's
+// stdlib case-insensitive json match compares `FirstSeen` lowered
+// (`firstseen`) against `first_seen` lowered (`first_seen`) and fails,
+// silently zeroing FirstSeen + LastSeen on read. This is the same bug
+// pattern that just bit rawEvent (mallcoppro-academy fix #118); the
+// audit flagged it as latent here too.
+//
+// UnmarshalJSON accepts both shapes so check-baseline's last_seen surfaces
+// real timestamps regardless of which side wrote the fixture.
 type relationshipEntry struct {
 	Count     int    `json:"count"`
 	FirstSeen string `json:"first_seen"`
 	LastSeen  string `json:"last_seen"`
+}
+
+// UnmarshalJSON accepts both snake_case (first_seen, last_seen) and the
+// PascalCase shape produced by Go's default marshal of internal/exam.
+// RelationshipEntry (FirstSeen, LastSeen). See the type doc-comment for the
+// failure-mode explanation.
+func (r *relationshipEntry) UnmarshalJSON(data []byte) error {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	getStr := func(keys ...string) string {
+		for _, k := range keys {
+			if v, ok := raw[k]; ok {
+				var s string
+				if err := json.Unmarshal(v, &s); err == nil {
+					return s
+				}
+			}
+		}
+		return ""
+	}
+	getInt := func(keys ...string) int {
+		for _, k := range keys {
+			if v, ok := raw[k]; ok {
+				var n int
+				if err := json.Unmarshal(v, &n); err == nil {
+					return n
+				}
+			}
+		}
+		return 0
+	}
+	r.Count = getInt("count", "Count")
+	r.FirstSeen = getStr("first_seen", "FirstSeen")
+	r.LastSeen = getStr("last_seen", "LastSeen")
+	return nil
 }
 
 // baselineResult is the JSON output contract for check-baseline.
@@ -696,7 +753,7 @@ func searchEvents(fixtureDir, actor, source, evtType, since, until, findingFamil
 	// or finding.detector absent), the matched_rules slice stays empty but
 	// the wrapped envelope is still emitted — the wrap is non-negotiable.
 	if findingFamily == "" {
-		findingFamily = resolveFindingFamilyFromScenario(os.Getenv("MALLCOP_ITEM_ID"))
+		findingFamily = resolveFindingFamilyFromScenario(resolveScenarioItemID())
 	}
 
 	f, err := safeOpen(fixtureDir, "events.json")

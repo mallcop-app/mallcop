@@ -1860,3 +1860,97 @@ func TestCheckBaseline_EventTypeFromJSONPositional(t *testing.T) {
 	}
 }
 
+// TestCheckBaseline_RelationshipPascalCaseKeys verifies the bug fix for the
+// PascalCase/snake_case mismatch in baseline.json's relationships entries.
+//
+// internal/exam.RelationshipEntry declares yaml tags only — its
+// encoding/json round-trip falls back to PascalCase field names
+// (FirstSeen / LastSeen). The fixture writer in
+// cmd/mallcop-academy/main.go materializeScenarioFixtures emits baseline.json
+// in that shape. Before the fix, the local `relationshipEntry` struct's
+// `json:"last_seen"` tag failed to bind through Go's case-insensitive
+// match (FirstSeen → firstseen vs first_seen → first_seen), and LastSeen
+// silently decoded to "". That blanked check-baseline's last_seen field,
+// hiding the actor's recency from the model.
+//
+// Same pattern, same fix (custom UnmarshalJSON) as rawEvent (PR #118).
+func TestCheckBaseline_RelationshipPascalCaseKeys(t *testing.T) {
+	baselineJSON := `{
+		"known_entities": {
+			"actors": ["alice@example.com"],
+			"sources": ["github"]
+		},
+		"frequency_tables": {"alice@example.com": 7},
+		"relationships": {
+			"alice@example.com": {
+				"Count": 7,
+				"FirstSeen": "2026-03-01T00:00:00Z",
+				"LastSeen": "2026-04-10T12:00:00Z"
+			}
+		}
+	}`
+	dir := makeFixtureDir(t, baselineJSON, "", "")
+
+	var result baselineResult
+	out := captureStdout(t, func() {
+		err := run([]string{
+			"--tool", "check-baseline",
+			"--mode", "exam",
+			"--fixture-dir", dir,
+			"--entity", "alice@example.com",
+			"--source", "github",
+		})
+		if err != nil {
+			t.Errorf("run() returned error: %v", err)
+		}
+	})
+
+	if err := json.Unmarshal([]byte(out), &result); err != nil {
+		t.Fatalf("parse output JSON: %v\nout=%q", err, out)
+	}
+	if result.LastSeen != "2026-04-10T12:00:00Z" {
+		t.Errorf("LastSeen = %q, want %q (PascalCase keys must decode)", result.LastSeen, "2026-04-10T12:00:00Z")
+	}
+}
+
+// TestRelationshipEntryUnmarshalJSON_BothShapes exercises the custom decoder
+// directly against both PascalCase (writer output today) and snake_case
+// (writer output if the upstream type ever adopts json tags). Both shapes
+// must populate Count, FirstSeen, LastSeen identically.
+func TestRelationshipEntryUnmarshalJSON_BothShapes(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  string
+	}{
+		{
+			name: "snake_case",
+			raw:  `{"count":3,"first_seen":"2026-01-01T00:00:00Z","last_seen":"2026-02-01T00:00:00Z"}`,
+		},
+		{
+			name: "PascalCase",
+			raw:  `{"Count":3,"FirstSeen":"2026-01-01T00:00:00Z","LastSeen":"2026-02-01T00:00:00Z"}`,
+		},
+		{
+			name: "mixed",
+			raw:  `{"count":3,"FirstSeen":"2026-01-01T00:00:00Z","last_seen":"2026-02-01T00:00:00Z"}`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var r relationshipEntry
+			if err := json.Unmarshal([]byte(tc.raw), &r); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			if r.Count != 3 {
+				t.Errorf("Count = %d, want 3", r.Count)
+			}
+			if r.FirstSeen != "2026-01-01T00:00:00Z" {
+				t.Errorf("FirstSeen = %q, want %q", r.FirstSeen, "2026-01-01T00:00:00Z")
+			}
+			if r.LastSeen != "2026-02-01T00:00:00Z" {
+				t.Errorf("LastSeen = %q, want %q", r.LastSeen, "2026-02-01T00:00:00Z")
+			}
+		})
+	}
+}
+

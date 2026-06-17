@@ -683,10 +683,17 @@ func runEscalateToInvestigator(inputJSON string) error {
 		return fmt.Errorf("escalate-to-investigator: %w", err)
 	}
 	parentItemID := os.Getenv("MALLCOP_ITEM_ID")
+	// scenarioItemID is the ORIGINAL academy-<run-id>-<scenario-id> the
+	// scenario started under. Embedding it in the new item's ctx is what
+	// lets the spawned investigate worker's resolveScenarioItemID() find
+	// the right fixture subdir and scenario YAML — its own MALLCOP_ITEM_ID
+	// will be the new rd ID (mallcoppro-...) which carries no academy prefix.
+	// See scenario_id.go for the resolution priority.
+	scenarioItemID := scenarioItemIDForHandoff()
 
 	title := fmt.Sprintf("investigate: %s", input.FindingID)
-	ctx := fmt.Sprintf("skill=task:investigate finding_id=%s reason=%s parent_item_id=%s",
-		input.FindingID, input.Reason, parentItemID)
+	ctx := fmt.Sprintf("skill=task:investigate finding_id=%s reason=%s scenario_item_id=%s parent_item_id=%s",
+		input.FindingID, input.Reason, scenarioItemID, parentItemID)
 	itemID, err := cfWorkCreate(workCampfireID, "task:investigate", title, ctx, input.FindingID)
 	if err != nil {
 		return fmt.Errorf("escalate-to-investigator: %w", err)
@@ -749,11 +756,12 @@ func runEscalateToStageC(inputJSON string) error {
 		return fmt.Errorf("escalate-to-stage-c: %w", err)
 	}
 	parentItemID := os.Getenv("MALLCOP_ITEM_ID")
+	scenarioItemID := scenarioItemIDForHandoff()
 
 	flagsStr := strings.Join(input.Flags, ",")
 	title := fmt.Sprintf("escalate: %s [%s]", input.FindingID, input.ActionClass)
-	ctx := fmt.Sprintf("skill=task:escalate finding_id=%s action_class=%s reason=%s flags=%s parent_item_id=%s",
-		input.FindingID, input.ActionClass, input.Reason, flagsStr, parentItemID)
+	ctx := fmt.Sprintf("skill=task:escalate finding_id=%s action_class=%s reason=%s flags=%s scenario_item_id=%s parent_item_id=%s",
+		input.FindingID, input.ActionClass, input.Reason, flagsStr, scenarioItemID, parentItemID)
 	itemID, err := cfWorkCreate(workCampfireID, "task:escalate", title, ctx, input.FindingID)
 	if err != nil {
 		return fmt.Errorf("escalate-to-stage-c: %w", err)
@@ -807,10 +815,11 @@ func runEscalateToDeep(inputJSON string) error {
 		return fmt.Errorf("escalate-to-deep: %w", err)
 	}
 	parentItemID := os.Getenv("MALLCOP_ITEM_ID")
+	scenarioItemID := scenarioItemIDForHandoff()
 
 	title := fmt.Sprintf("deep-investigate: %s [%s]", input.FindingID, input.Hypothesis)
-	ctx := fmt.Sprintf("skill=task:deep-investigate finding_id=%s hypothesis=%s partial_transcript_path=%s parent_item_id=%s",
-		input.FindingID, input.Hypothesis, input.PartialTranscriptPath, parentItemID)
+	ctx := fmt.Sprintf("skill=task:deep-investigate finding_id=%s hypothesis=%s partial_transcript_path=%s scenario_item_id=%s parent_item_id=%s",
+		input.FindingID, input.Hypothesis, input.PartialTranscriptPath, scenarioItemID, parentItemID)
 	itemID, err := cfWorkCreate(workCampfireID, "task:deep-investigate", title, ctx, input.FindingID)
 	if err != nil {
 		return fmt.Errorf("escalate-to-deep: %w", err)
@@ -868,10 +877,11 @@ func runCreateInvestigateMerge(inputJSON string) error {
 	if input.ParentInvestigateItemID != "" {
 		parentItemID = input.ParentInvestigateItemID
 	}
+	scenarioItemID := scenarioItemIDForHandoff()
 
 	title := fmt.Sprintf("investigate-merge: %s", input.FindingID)
-	ctx := fmt.Sprintf("skill=task:investigate-merge finding_id=%s deep_item_ids=%s parent_item_id=%s",
-		input.FindingID, strings.Join(input.DeepItemIDs, ","), parentItemID)
+	ctx := fmt.Sprintf("skill=task:investigate-merge finding_id=%s deep_item_ids=%s scenario_item_id=%s parent_item_id=%s",
+		input.FindingID, strings.Join(input.DeepItemIDs, ","), scenarioItemID, parentItemID)
 	mergeItemID, err := cfWorkCreate(workCampfireID, "task:investigate-merge", title, ctx, input.FindingID)
 	if err != nil {
 		return fmt.Errorf("create-investigate-merge: %w", err)
