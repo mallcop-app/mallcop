@@ -1449,10 +1449,27 @@ const skillBindingNote = "Tools listed here are statically registered in the ope
 // resolveRepoRoot returns the repo root directory.
 // Resolution order:
 //  1. MALLCOP_REPO_ROOT env var (set by the engine in operational mode)
-//  2. CWD (consistent with the path-resolution pattern in the existing tools)
+//  2. The binary's own location, walking up until agents/rules/operator-decisions.yaml
+//     is found (handles the bakeoff path where workers run with CWD elsewhere
+//     and MALLCOP_REPO_ROOT not exported to tool subprocesses)
+//  3. CWD (consistent with the path-resolution pattern in the existing tools)
 func resolveRepoRoot() (string, error) {
 	if v := os.Getenv("MALLCOP_REPO_ROOT"); v != "" {
 		return filepath.Abs(v)
+	}
+	if exe, err := os.Executable(); err == nil {
+		dir := filepath.Dir(exe)
+		for i := 0; i < 6; i++ {
+			candidate := filepath.Join(dir, "agents", "rules", "operator-decisions.yaml")
+			if _, err := os.Stat(candidate); err == nil {
+				return dir, nil
+			}
+			parent := filepath.Dir(dir)
+			if parent == dir {
+				break
+			}
+			dir = parent
+		}
 	}
 	return os.Getwd()
 }
