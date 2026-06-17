@@ -686,8 +686,14 @@ func searchEvents(fixtureDir, actor, source, evtType, since, until, findingFamil
 		}
 	}
 
-	// Filter events.
-	filtered := []rawEvent{}
+	// Filter events. Two-pass: apply non-time filters always; apply time
+	// filter only if it yields a non-empty result. The model frequently
+	// fabricates a `since`/`until` range based on its own training-data
+	// notion of "now," which is typically a year off from the fixture
+	// timestamps. If the time filter excludes every event, we treat the
+	// time filter as a model hallucination and fall back to the non-time-
+	// filtered set so the worker can still reason about the events.
+	preTime := []rawEvent{}
 	for _, ev := range ef.Events {
 		if actor != "" && !strings.EqualFold(ev.Actor, actor) {
 			continue
@@ -698,13 +704,18 @@ func searchEvents(fixtureDir, actor, source, evtType, since, until, findingFamil
 		if evtType != "" && !strings.EqualFold(ev.EventType, evtType) {
 			continue
 		}
-		if !sinceT.IsZero() || !untilT.IsZero() {
+		preTime = append(preTime, ev)
+	}
+	filtered := []rawEvent{}
+	if sinceT.IsZero() && untilT.IsZero() {
+		filtered = preTime
+	} else {
+		for _, ev := range preTime {
 			if ev.Timestamp == "" {
 				continue
 			}
 			ts, err := time.Parse(time.RFC3339, ev.Timestamp)
 			if err != nil {
-				// Try without seconds precision.
 				ts, err = time.Parse("2006-01-02T15:04:05Z", ev.Timestamp)
 				if err != nil {
 					continue
@@ -716,8 +727,18 @@ func searchEvents(fixtureDir, actor, source, evtType, since, until, findingFamil
 			if !untilT.IsZero() && ts.After(untilT) {
 				continue
 			}
+			filtered = append(filtered, ev)
 		}
-		filtered = append(filtered, ev)
+		// Fallback: model-supplied date window excluded every event. The
+		// model almost certainly hallucinated the date range (its training-
+		// data "now" differs from the fixture's timestamps). Return the
+		// non-time-filtered set so the worker can still match rules and
+		// reason about observable metadata.
+		if len(filtered) == 0 && len(preTime) > 0 {
+			filtered = preTime
+			fmt.Fprintf(os.Stderr, "search-events: time filter excluded all events (since=%v until=%v); falling back to actor/source/type-only filter (%d events)\n",
+				sinceT.Format(time.RFC3339), untilT.Format(time.RFC3339), len(preTime))
+		}
 	}
 
 	// Always emit the wrapped envelope. When finding_family is unknown (no
