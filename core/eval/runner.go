@@ -30,6 +30,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"sync"
 	"time"
 
@@ -157,6 +158,11 @@ type ScenarioRun struct {
 	ModelCalls     int
 	Transcript     []TranscriptEntry
 	WallMillis     int64
+	// SeedErr is non-empty when the per-scenario live ToolRunner could not be
+	// seeded (a genuine store failure). On ModeReal this is a DEGRADED run — the
+	// agent investigated without the scenario's live tools — and the harness can
+	// surface it rather than silently scoring an empty-toolbox verdict.
+	SeedErr string
 }
 
 // findingFromScenario builds a core finding.Finding from a scenario's finding:
@@ -219,15 +225,58 @@ func metaString(m exam.FindingMetadata, key string) string {
 }
 
 // RunScenario runs one scenario through the portable core IN-PROCESS against the
-// supplied Client + ToolRunner, capturing the full transcript. The Client is the
+// supplied Client, capturing the full transcript. The Client is the
 // {cannedbackend ⇄ real} pivot — RunScenario never decides which; the caller does.
 //
-// opts carries the per-tier model ids (defaulted by the cascade) and the
-// ToolRunner. A nil ToolRunner means "no live tools" — the cascade still runs and
-// the fail-safe still covers an empty/ambiguous read.
-func RunScenario(ctx context.Context, client agent.Client, ls LoadedScenario, opts agent.CascadeOptions) ScenarioRun {
+// LIVE TOOLS ARE WIRED PER SCENARIO when liveTools is true. opts carries the
+// per-tier model ids; its Tools field (the ToolRunner) is OVERRIDDEN here with a
+// per-scenario runner backed by the REAL core/tools over THIS scenario's events +
+// baseline + finding. This is the whole point of the parity run: on ModeReal the
+// live agent must investigate against the scenario's OWN telemetry — search-events
+// returns the scenario's events (folding §3.8 matched_rules), check-baseline
+// returns the scenario's frequencies, search-findings returns the scenario's
+// finding stream. Each scenario sees ONLY its own data (per-scenario isolation,
+// §4.1). A caller that pre-set opts.Tools is intentionally ignored: a shared/static
+// runner would leak telemetry across scenarios and make the number meaningless.
+//
+// liveTools is false for the MERGE-GATE (ModeCanned): golden responses prove the
+// grader pipeline, not the model's tool use, and the live ToolEmpty fail-safe
+// would inject model-independent escalations that have nothing to do with what a
+// golden response is testing. On ModeReal liveTools is true and a real per-scenario
+// runner is ALWAYS wired — the run NEVER silently investigates with an empty
+// toolbox (the very gap this closes). If liveTools is true but the runner cannot
+// be seeded (a genuine store failure), opts.Tools is left unchanged and the
+// failure is recorded in SeedErr so the harness surfaces a degraded run rather
+// than scoring an empty-toolbox verdict as if it were real.
+//
+// The per-scenario store lives in a temp dir cleaned up before RunScenario returns.
+func RunScenario(ctx context.Context, client agent.Client, ls LoadedScenario, opts agent.CascadeOptions, liveTools bool) ScenarioRun {
 	rc := &recordingClient{inner: client}
 	f := findingFromScenario(ls.Scenario)
+
+	// Build the per-scenario live ToolRunner over the scenario's own telemetry.
+	// The store lives in a temp dir torn down when the scenario completes.
+	var seedErr string
+	if liveTools {
+		tmpDir, err := os.MkdirTemp("", "mallcop-eval-scenario-*")
+		if err != nil {
+			seedErr = fmt.Sprintf("mkdir temp store: %v", err)
+		} else {
+			defer os.RemoveAll(tmpDir)
+			repoRoot, rrErr := RepoRoot()
+			if rrErr != nil {
+				// The §3.8 rule fold needs the corpus root; without it search-events
+				// still returns the scenario's events (matched_rules stays empty).
+				repoRoot = ""
+			}
+			runner, rErr := newScenarioToolRunner(tmpDir, repoRoot, ls.Scenario)
+			if rErr != nil {
+				seedErr = rErr.Error()
+			} else {
+				opts.Tools = runner
+			}
+		}
+	}
 
 	start := time.Now()
 	res := agent.ResolveFindingWith(ctx, rc, f, opts)
@@ -243,6 +292,7 @@ func RunScenario(ctx context.Context, client agent.Client, ls LoadedScenario, op
 		ModelCalls:     len(transcript),
 		Transcript:     transcript,
 		WallMillis:     wall.Milliseconds(),
+		SeedErr:        seedErr,
 	}
 }
 

@@ -135,7 +135,11 @@ func runOnce(ctx context.Context, cfg RunConfig, corpus Corpus, index int) (RunR
 			return RunResult{}, fmt.Errorf("unknown mode %q", cfg.Mode)
 		}
 
-		run := RunScenario(ctx, client, ls, cfg.Opts)
+		// ModeReal wires the per-scenario live ToolRunner (real core/tools over the
+		// scenario's events+baseline) so the agent actually investigates. ModeCanned
+		// (merge-gate) runs tool-free: golden responses prove the grader pipeline,
+		// not tool use, and the live ToolEmpty fail-safe would distort that.
+		run := RunScenario(ctx, client, ls, cfg.Opts, cfg.Mode == ModeReal)
 		stop()
 
 		res := Grade(run)
