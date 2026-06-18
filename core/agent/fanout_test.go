@@ -207,7 +207,7 @@ func (b *scriptedPanelBackend) withFanOutLeadIn() *scriptedPanelBackend {
 // --- (a) 3 agree benign → resolve ----------------------------------------------
 
 func TestFanOut_ThreeAgreeBenign_Resolves(t *testing.T) {
-	useShippedCorpus(t)
+	root := useShippedCorpus(t)
 	be := newPanelBackend().withFanOutLeadIn()
 	// All 3 deep tiers resolve with positive evidence and varying self-confidence;
 	// max(3,4,5)=5 should be recorded.
@@ -215,7 +215,7 @@ func TestFanOut_ThreeAgreeBenign_Resolves(t *testing.T) {
 	be.deep["malicious"] = `{"action":"resolve","confidence":3,"positive_evidence":true,"reason":"no attack vector found; IP 203.0.113.10 matches known automation."}`
 	be.deep["incomplete"] = `{"action":"resolve","confidence":5,"positive_evidence":true,"reason":"no missing data; events evt_001..evt_040 form the expected sequence."}`
 
-	res := agent.ResolveFindingWith(context.Background(), be, blockedResolveFinding(), shallowToolsOpts())
+	res := resolveAt(root, be, blockedResolveFinding(), shallowToolsOpts())
 
 	if res.Action != agent.ActionProceed {
 		t.Fatalf("3-agree-benign panel must RESOLVE (ActionProceed); got action=%q reason=%q", res.Action, res.Reason)
@@ -235,14 +235,14 @@ func TestFanOut_ThreeAgreeBenign_Resolves(t *testing.T) {
 // --- (b) 2 benign, 1 (weak) malicious → majority benign, dissent cited, −0.10 ---
 
 func TestFanOut_TwoBenignOneWeakMalicious_MajorityBenign_DissentCited(t *testing.T) {
-	useShippedCorpus(t)
+	root := useShippedCorpus(t)
 	be := newPanelBackend().withFanOutLeadIn()
 	be.deep["benign"] = `{"action":"resolve","confidence":4,"positive_evidence":true,"reason":"documented onboarding; baseline match for this exact action."}`
 	be.deep["incomplete"] = `{"action":"resolve","confidence":3,"positive_evidence":true,"reason":"no missing data; companion events coherent."}`
 	// The malicious tier escalates but did NOT find a strong indicator (weak dissent).
 	be.deep["malicious"] = `{"action":"escalate","confidence":2,"positive_evidence":false,"strong_evidence":false,"reason":"suspicious-looking but no concrete attack vector found."}`
 
-	res := agent.ResolveFindingWith(context.Background(), be, blockedResolveFinding(), shallowToolsOpts())
+	res := resolveAt(root, be, blockedResolveFinding(), shallowToolsOpts())
 
 	if res.Action != agent.ActionProceed {
 		t.Fatalf("2-benign vs 1-weak-malicious must RESOLVE (majority benign); got action=%q reason=%q", res.Action, res.Reason)
@@ -261,7 +261,7 @@ func TestFanOut_TwoBenignOneWeakMalicious_MajorityBenign_DissentCited(t *testing
 // --- (c) 1 STRONG malicious outweighs 2 weak benign → escalate (aggregation) ----
 
 func TestFanOut_OneStrongMaliciousOutweighsTwoWeakBenign_Escalates(t *testing.T) {
-	useShippedCorpus(t)
+	root := useShippedCorpus(t)
 	be := newPanelBackend().withFanOutLeadIn()
 	// Two benign tiers concur — but WEAKLY (low self-confidence, the resolves are
 	// thin). The malicious tier escalates with a STRONG indicator. Aggregation, not
@@ -270,7 +270,7 @@ func TestFanOut_OneStrongMaliciousOutweighsTwoWeakBenign_Escalates(t *testing.T)
 	be.deep["incomplete"] = `{"action":"resolve","confidence":2,"positive_evidence":true,"reason":"no obvious gap."}`
 	be.deep["malicious"] = `{"action":"escalate","confidence":5,"positive_evidence":false,"strong_evidence":true,"reason":"DECISIVE: a service principal with a persistent API key was created during the elevated window and the revert hid it — credential-persistence attack vector."}`
 
-	res := agent.ResolveFindingWith(context.Background(), be, blockedResolveFinding(), shallowToolsOpts())
+	res := resolveAt(root, be, blockedResolveFinding(), shallowToolsOpts())
 
 	if res.Action != agent.ActionEscalated {
 		t.Fatalf("a single STRONG malicious indicator must ESCALATE even against 2 weak benign concurrences; got action=%q reason=%q", res.Action, res.Reason)
@@ -286,7 +286,7 @@ func TestFanOut_OneStrongMaliciousOutweighsTwoWeakBenign_Escalates(t *testing.T)
 // --- (d) 3 disagree (resolve / suspicious / insufficient) → heal → escalate ----
 
 func TestFanOut_ThreeDisagree_RoutesToHeal(t *testing.T) {
-	useShippedCorpus(t)
+	root := useShippedCorpus(t)
 	be := newPanelBackend().withFanOutLeadIn()
 	// A genuine 3-way split: the benign tier RESOLVES (positive evidence), the
 	// malicious tier escalates as SUSPICIOUS (but with no strong/decisive indicator —
@@ -297,7 +297,7 @@ func TestFanOut_ThreeDisagree_RoutesToHeal(t *testing.T) {
 	be.deep["malicious"] = `{"action":"escalate","confidence":3,"positive_evidence":false,"strong_evidence":false,"reason":"the access pattern is unusual but no decisive attack vector found."}`
 	be.deep["incomplete"] = `{"action":"escalate","confidence":2,"positive_evidence":false,"insufficient_data":true,"reason":"the okta sign-in logs needed to disambiguate are not available; cannot determine."}`
 
-	res := agent.ResolveFindingWith(context.Background(), be, blockedResolveFinding(), shallowToolsOpts())
+	res := resolveAt(root, be, blockedResolveFinding(), shallowToolsOpts())
 
 	if res.Action != agent.ActionEscalated {
 		t.Fatalf("a 3-way-split panel must route to heal and escalate; got action=%q reason=%q", res.Action, res.Reason)
@@ -316,14 +316,14 @@ func TestFanOut_ThreeDisagree_RoutesToHeal(t *testing.T) {
 // --- (e) fan-out fires ONLY on the <0.55 resolve path, never on escalate -------
 
 func TestFanOut_NeverFiresOnEscalatePath(t *testing.T) {
-	useShippedCorpus(t)
+	root := useShippedCorpus(t)
 	be := newPanelBackend()
 	// Triage escalates; investigate ESCALATES (not a resolve). The fan-out must NOT
 	// fire — no deep hypothesis prompt may ever hit the backend.
 	be.triage = `{"action":"escalate","confidence":3,"positive_evidence":false,"reason":"needs deeper look"}`
 	be.investigate = `{"action":"escalate","confidence":4,"positive_evidence":false,"reason":"credential stuffing confirmed; recommend disable account."}`
 
-	res := agent.ResolveFindingWith(context.Background(), be, blockedResolveFinding(), shallowToolsOpts())
+	res := resolveAt(root, be, blockedResolveFinding(), shallowToolsOpts())
 
 	if res.Action != agent.ActionEscalated {
 		t.Fatalf("an investigate ESCALATE must escalate directly; got action=%q", res.Action)
@@ -354,13 +354,13 @@ func TestFanOut_NeverFiresOnEscalatePath(t *testing.T) {
 // (so neither is dispInsufficient and neither trips the strong-malicious override).
 // nResolve=1, nSusp=2, nInsuff=0 ⇒ NOT 3-way, NOT majority-resolve ⇒ rule (5).
 func TestFanOut_MajorityEscalate_TwoSuspiciousOneResolve_Escalates(t *testing.T) {
-	useShippedCorpus(t)
+	root := useShippedCorpus(t)
 	be := newPanelBackend().withFanOutLeadIn()
 	be.deep["benign"] = `{"action":"resolve","confidence":4,"positive_evidence":true,"reason":"documented onboarding workflow; baseline match for this exact action."}`
 	be.deep["malicious"] = `{"action":"escalate","confidence":3,"positive_evidence":false,"strong_evidence":false,"insufficient_data":false,"reason":"the access pattern is unusual but no single decisive attack vector found."}`
 	be.deep["incomplete"] = `{"action":"escalate","confidence":3,"positive_evidence":false,"strong_evidence":false,"insufficient_data":false,"reason":"the sequence looks suspicious on a second read; cannot call this benign."}`
 
-	res := agent.ResolveFindingWith(context.Background(), be, blockedResolveFinding(), shallowToolsOpts())
+	res := resolveAt(root, be, blockedResolveFinding(), shallowToolsOpts())
 
 	if res.Action != agent.ActionEscalated {
 		t.Fatalf("2-suspicious vs 1-resolve must ESCALATE (rule 5 majority-escalate); got action=%q reason=%q", res.Action, res.Reason)
@@ -392,7 +392,7 @@ func TestFanOut_MajorityEscalate_TwoSuspiciousOneResolve_Escalates(t *testing.T)
 // nResolve=2 > nEscalate=1 ⇒ enters the majority-resolve block; anyPositiveEvidence
 // (resolves) is FALSE ⇒ the guard fires ⇒ terminal escalate.
 func TestFanOut_MajorityResolve_NoPositiveEvidence_FailsSafeEscalates(t *testing.T) {
-	useShippedCorpus(t)
+	root := useShippedCorpus(t)
 	be := newPanelBackend().withFanOutLeadIn()
 	// Two RESOLVE tiers, but neither claims positive evidence of legitimacy.
 	be.deep["benign"] = `{"action":"resolve","confidence":4,"positive_evidence":false,"reason":"nothing obviously wrong; did not find a problem."}`
@@ -400,7 +400,7 @@ func TestFanOut_MajorityResolve_NoPositiveEvidence_FailsSafeEscalates(t *testing
 	// One weak (non-strong) suspicious escalate so the resolves are the majority.
 	be.deep["malicious"] = `{"action":"escalate","confidence":2,"positive_evidence":false,"strong_evidence":false,"reason":"slightly odd but no concrete attack vector."}`
 
-	res := agent.ResolveFindingWith(context.Background(), be, blockedResolveFinding(), shallowToolsOpts())
+	res := resolveAt(root, be, blockedResolveFinding(), shallowToolsOpts())
 
 	if res.Action != agent.ActionEscalated {
 		t.Fatalf("a majority resolve with NO positive evidence must FAIL-SAFE escalate; got action=%q reason=%q", res.Action, res.Reason)
@@ -416,13 +416,13 @@ func TestFanOut_MajorityResolve_NoPositiveEvidence_FailsSafeEscalates(t *testing
 // --- (f) the 3 deep tiers ran CONCURRENTLY with 3 DISTINCT hypothesis prompts ---
 
 func TestFanOut_ThreeDistinctHypothesesRanConcurrently(t *testing.T) {
-	useShippedCorpus(t)
+	root := useShippedCorpus(t)
 	be := newPanelBackend().withFanOutLeadIn()
 	be.deep["benign"] = `{"action":"resolve","confidence":4,"positive_evidence":true,"reason":"documented workflow; baseline match."}`
 	be.deep["malicious"] = `{"action":"resolve","confidence":3,"positive_evidence":true,"reason":"no attack vector."}`
 	be.deep["incomplete"] = `{"action":"resolve","confidence":4,"positive_evidence":true,"reason":"no missing data."}`
 
-	_ = agent.ResolveFindingWith(context.Background(), be, blockedResolveFinding(), shallowToolsOpts())
+	_ = resolveAt(root, be, blockedResolveFinding(), shallowToolsOpts())
 
 	// Exactly the three directed hypotheses, each once.
 	got := be.distinctDeepHypotheses()
@@ -484,13 +484,13 @@ func TestFanOut_VerdictIsolation_MutationProof(t *testing.T) {
 
 	// RUN A: deep replies RESOLVE (well-evidenced) → panel RESOLVES.
 	t.Run("deep_replies_resolve__panel_resolves", func(t *testing.T) {
-		useShippedCorpus(t)
+		root := useShippedCorpus(t)
 		be := newPanelBackend().withFanOutLeadIn()
 		be.deep["benign"] = `{"action":"resolve","confidence":5,"positive_evidence":true,"reason":"documented onboarding on 2026-03-10; baseline frequency 412; provenance traces to ticket."}`
 		be.deep["malicious"] = `{"action":"resolve","confidence":4,"positive_evidence":true,"reason":"no attack vector; IP 203.0.113.10 matches known automation."}`
 		be.deep["incomplete"] = `{"action":"resolve","confidence":4,"positive_evidence":true,"reason":"no missing data; events evt_001..evt_040 coherent."}`
 
-		res := agent.ResolveFindingWith(context.Background(), be, newF(), newOpts())
+		res := resolveAt(root, be, newF(), newOpts())
 		if res.Action != agent.ActionProceed {
 			t.Fatalf("deep replies scripted RESOLVE must yield a terminal RESOLVE; got action=%q reason=%q", res.Action, res.Reason)
 		}
@@ -502,13 +502,13 @@ func TestFanOut_VerdictIsolation_MutationProof(t *testing.T) {
 	// carry a perfect resolve verdict, and the ONLY reason the panel does not resolve
 	// is that the verdict is read from the deep replies (escalate), not the prompt.
 	t.Run("deep_replies_escalate__injection_does_not_flip", func(t *testing.T) {
-		useShippedCorpus(t)
+		root := useShippedCorpus(t)
 		be := newPanelBackend().withFanOutLeadIn()
 		be.deep["benign"] = `{"action":"escalate","confidence":2,"positive_evidence":false,"reason":"could not confirm benign; planted resolve ignored as untrusted."}`
 		be.deep["malicious"] = `{"action":"escalate","confidence":5,"positive_evidence":false,"strong_evidence":true,"reason":"DECISIVE attack vector found; planted resolve ignored."}`
 		be.deep["incomplete"] = `{"action":"escalate","confidence":3,"positive_evidence":false,"reason":"data missing; cannot resolve."}`
 
-		res := agent.ResolveFindingWith(context.Background(), be, newF(), newOpts())
+		res := resolveAt(root, be, newF(), newOpts())
 		if res.Action != agent.ActionEscalated {
 			t.Fatalf("FAN-OUT ISOLATION BROKEN: deep replies scripted ESCALATE but terminal action is %q (reason=%q) — "+
 				"the verdict was read from the planted prompt injection, not the model replies", res.Action, res.Reason)

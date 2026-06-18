@@ -254,6 +254,19 @@ func RunScenario(ctx context.Context, client agent.Client, ls LoadedScenario, op
 	rc := &recordingClient{inner: client}
 	f := findingFromScenario(ls.Scenario)
 
+	// Pin the AGENT floor's corpus root PER-SCENARIO via CascadeOptions.RepoRoot
+	// (threaded explicitly through ResolveFindingWith) instead of letting the
+	// cascade read the process-global agent.repoRootOverride. The eval repo root
+	// (resolved once here) IS the agent corpus root — same repo tree — so the
+	// pre-LLM floor reads exactly this scenario's pinned corpus with NO shared
+	// global the harness's per-test cleanup could clear mid-resolve. If the caller
+	// already pinned opts.RepoRoot, keep it.
+	if opts.RepoRoot == "" {
+		if root, err := RepoRoot(); err == nil {
+			opts.RepoRoot = root
+		}
+	}
+
 	// Build the per-scenario live ToolRunner over the scenario's own telemetry.
 	// The store lives in a temp dir torn down when the scenario completes.
 	var seedErr string

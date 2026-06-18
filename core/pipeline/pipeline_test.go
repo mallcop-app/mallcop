@@ -52,13 +52,15 @@ func knownActorsBaseline() *baseline.Baseline {
 	}
 }
 
-// useShippedCorpus pins the cascade's hard-constraint corpus root through the
-// EXPORTED deterministic test seam (agent.SetRepoRootForTest), so the
-// injection-probe force-escalate route fires regardless of where `go test` placed
-// the test binary. NOT the MALLCOP_REPO_ROOT env var (it is shadowed by the
-// os.Executable walk and is incompatible with t.Parallel). Mirrors the cascade
-// suite's helper.
-func useShippedCorpus(t *testing.T) {
+// useShippedCorpus RETURNS the root of the cascade's hard-constraint corpus so
+// the injection-probe force-escalate route fires regardless of where `go test`
+// placed the test binary. The root is threaded PER-INVOCATION into
+// Config.Cascade.RepoRoot (CascadeOptions.RepoRoot), checked FIRST by
+// ResolveFindingWith — NOT the MALLCOP_REPO_ROOT env var (shadowed by the
+// os.Executable walk) and NOT a shared process-global a concurrent test's
+// cleanup could clear mid-resolve (the §11 logical-race flake). Mirrors the
+// cascade suite's helper.
+func useShippedCorpus(t *testing.T) string {
 	t.Helper()
 	wd, err := os.Getwd()
 	if err != nil {
@@ -67,9 +69,7 @@ func useShippedCorpus(t *testing.T) {
 	dir := wd
 	for {
 		if _, err := os.Stat(filepath.Join(dir, "agents", "rules", "operator-decisions.yaml")); err == nil {
-			agent.SetRepoRootForTest(dir)
-			t.Cleanup(func() { agent.SetRepoRootForTest("") })
-			return
+			return dir
 		}
 		parent := filepath.Dir(dir)
 		if parent == dir {
@@ -190,7 +190,7 @@ func loadResolutions(t *testing.T, st *store.Store) []resolution.Resolution {
 // the floor with no model call. Terminal split: 1 resolved + 1 escalated over 2
 // findings; 2 model calls total.
 func TestPipeline_EndToEnd_ConnectDetectCascadeStore(t *testing.T) {
-	useShippedCorpus(t)
+	root := useShippedCorpus(t)
 
 	// Every model call returns the same thorough, well-cited resolve. Triage proposes
 	// it (forced to investigate by FIX 2 because the finding is high severity);
@@ -218,7 +218,7 @@ func TestPipeline_EndToEnd_ConnectDetectCascadeStore(t *testing.T) {
 		Client:    client,
 		Store:     st,
 		Baseline:  knownActorsBaseline(),
-		Cascade: agent.CascadeOptions{Tools: fixedTools{
+		Cascade: agent.CascadeOptions{RepoRoot: root, Tools: fixedTools{
 			text:      "events: evt-mfa-001 mfa_disabled ops-bot 14:22; baseline: ops-bot known, 312 prior changes, break-glass runbook RB-114 on file",
 			// Deep tool signals (6 calls / 4 distinct tools) so the investigate-tier
 			// resolve clears the structural gate (>=0.55) and need not fan out.
@@ -303,8 +303,8 @@ func TestPipeline_EndToEnd_ConnectDetectCascadeStore(t *testing.T) {
 // yields a clean summary (0 findings, 0 resolved, 0 escalated) and makes no model
 // calls — the pipeline must not invent work.
 func TestPipeline_NoFindings_CleanScan(t *testing.T) {
-	useShippedCorpus(t)
-
+	// No findings are produced, so the cascade (and its corpus root) is never
+	// reached; the shipped-corpus lookup is unnecessary here.
 	be := &cannedbackend.CannedBackend{
 		CannedResolutionFunc: func(callIndex int) string {
 			t.Errorf("clean scan must make NO model call; got call %d", callIndex)

@@ -33,7 +33,7 @@ import (
 // latency over a multi-finding fixture against the cannedbackend and asserts the
 // orchestration overhead is bounded.
 func TestPipeline_ScanLatency_P50OrchestrationOverheadIsSmall(t *testing.T) {
-	useShippedCorpus(t)
+	root := useShippedCorpus(t)
 
 	be := &cannedbackend.CannedBackend{
 		CannedResolutionFunc: func(callIndex int) string {
@@ -58,7 +58,7 @@ func TestPipeline_ScanLatency_P50OrchestrationOverheadIsSmall(t *testing.T) {
 			Client:    client,
 			Store:     st,
 			Baseline:  knownActorsBaseline(),
-			Cascade: agent.CascadeOptions{Tools: fixedTools{
+			Cascade: agent.CascadeOptions{RepoRoot: root, Tools: fixedTools{
 				text:      "events: evt-mfa-001 mfa_disabled ops-bot; baseline: ops-bot known, break-glass runbook RB-114 on file",
 				toolCalls: 2, distinctTools: 2,
 			}},

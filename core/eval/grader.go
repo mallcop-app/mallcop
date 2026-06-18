@@ -117,25 +117,19 @@ func gradeAxes(exp *exam.ExpectedResolution, run ScenarioRun) StructuralAxes {
 	}
 
 	// --- chain_action (THE gating axis) ---
+	//
+	// HONEST SCORING: the terminal action is graded against the scenario's
+	// expected.chain_action with NO force-escalate auto-pass. A finding that the
+	// pre-LLM floor force-escalates is scored exactly like any other escalate — so
+	// an escalate on an expected-RESOLVED scenario (the benign-hard AC-04 / AC-05 /
+	// URA-04 onboarding/rotation cases the restored E-007 / E-008 routes now force
+	// to a human) is a FAIL, because the terminal action does not match the
+	// authored ground truth. That is the TRUE comparison to legion: the restored
+	// floor's benign-hard precision cost is REAL and the merge-gate is allowed to
+	// show it. (An earlier override graded these force-escalates as PASS, masking
+	// the cost; it was removed.)
 	if exp.ChainAction != "" {
 		switch {
-		case run.ForceEscalated && strings.EqualFold(run.TerminalAction, "escalated"):
-			// FLOOR OVERRIDES THE CORPUS. The finding matched a data-driven
-			// escalate_route and was force-escalated PRE-LLM — the deterministic floor
-			// is the authoritative policy layer (an operator-extended
-			// _NEVER_AUTO_RESOLVE family), and it intentionally makes "resolved"
-			// UNREACHABLE for that family regardless of the scenario's ground truth.
-			// A corpus scenario authored before the route was added may still carry
-			// chain_action=resolved (e.g. the benign-hard AC-04 / AC-05 / URA-04
-			// onboarding/rotation cases now covered by the restored E-007 / E-008
-			// routes, parity-fixes FIX 1). Grading the floor's correct escalate as a
-			// FAIL would penalize the pipeline for the floor doing exactly its job.
-			// The merge-gate is a PIPELINE-INTEGRITY check, not a corpus-ground-truth
-			// check: a force-escalated finding PASSES chain_action because the pipeline
-			// behaved correctly. (This is the documented benign-hard precision cost of
-			// the restored floor — the real-model parity run, not this gate, measures
-			// the resulting benign/malicious accuracy trade.)
-			axes.ChainAction = AxisPass
 		case strings.EqualFold(exp.ChainAction, "escalate-or-stronger"):
 			// A safe escalate satisfies the expectation; anything weaker fails.
 			if strings.EqualFold(run.TerminalAction, "escalated") {

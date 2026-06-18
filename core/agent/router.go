@@ -61,16 +61,25 @@ type escalateRoutesFile struct {
 // Same file the core/tools lookup-rules loader reads — one corpus, two readers.
 var corpusRelPath = filepath.Join("agents", "rules", "operator-decisions.yaml")
 
-// routesCache memoizes the parsed-and-compiled routes per corpus path so the
-// floor does not re-read and re-parse the YAML on every finding. The cache keys
-// on the resolved path; a path change (test isolation: each test points at a
-// different temp corpus) invalidates it.
+// routesCache memoizes the parsed-and-compiled routes PER corpus path so the
+// floor does not re-read and re-parse the YAML on every finding. It is a map
+// keyed on the resolved corpus path — NOT a single mutable slot — so two
+// concurrent resolves over DIFFERENT corpus paths (e.g. parallel tests, each
+// with its own temp corpus) never evict each other's entry. This is part of the
+// race-proofing: there is no shared "current key" a concurrent load can stomp,
+// so a sibling's resolve can never flip this path's compiled routes mid-read.
 var (
-	routesCacheMu   sync.Mutex
-	routesCacheKey  string
-	routesCacheData *compiledRoutes
-	routesCacheErr  error
+	routesCacheMu sync.Mutex
+	routesCache   = map[string]routesCacheEntry{}
 )
+
+// routesCacheEntry is one path's memoized result: either compiled routes or the
+// load error (an unparseable corpus is cached as an error so the fail-safe is
+// stable across repeated reads of the same broken file).
+type routesCacheEntry struct {
+	data *compiledRoutes
+	err  error
+}
 
 // compiledRoutes is the matcher-ready form of the corpus: the raw routes plus,
 // per route, the set of normalized family spellings (canonical family +
@@ -98,29 +107,29 @@ func loadEscalateRoutes(repoRoot string) (*compiledRoutes, error) {
 	routesCacheMu.Lock()
 	defer routesCacheMu.Unlock()
 
-	if routesCacheKey == path && (routesCacheData != nil || routesCacheErr != nil) {
-		return routesCacheData, routesCacheErr
+	if e, ok := routesCache[path]; ok {
+		return e.data, e.err
 	}
-	routesCacheKey = path
-	routesCacheData = nil
-	routesCacheErr = nil
 
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			// No corpus → empty floor. The gate's fail-safe still covers the
 			// dangerous case (it escalates anything it cannot positively clear).
-			routesCacheData = &compiledRoutes{}
-			return routesCacheData, nil
+			empty := &compiledRoutes{}
+			routesCache[path] = routesCacheEntry{data: empty}
+			return empty, nil
 		}
-		routesCacheErr = fmt.Errorf("read escalate_routes corpus: %w", err)
-		return nil, routesCacheErr
+		loadErr := fmt.Errorf("read escalate_routes corpus: %w", err)
+		routesCache[path] = routesCacheEntry{err: loadErr}
+		return nil, loadErr
 	}
 
 	var file escalateRoutesFile
 	if err := yaml.Unmarshal(data, &file); err != nil {
-		routesCacheErr = fmt.Errorf("parse escalate_routes corpus: %w", err)
-		return nil, routesCacheErr
+		parseErr := fmt.Errorf("parse escalate_routes corpus: %w", err)
+		routesCache[path] = routesCacheEntry{err: parseErr}
+		return nil, parseErr
 	}
 
 	compiled := &compiledRoutes{routes: make([]compiledRoute, 0, len(file.EscalateRoutes))}
@@ -139,19 +148,30 @@ func loadEscalateRoutes(repoRoot string) (*compiledRoutes, error) {
 		compiled.routes = append(compiled.routes, cr)
 	}
 
-	routesCacheData = compiled
+	routesCache[path] = routesCacheEntry{data: compiled}
 	return compiled, nil
 }
 
-// invalidateRoutesCache drops the memoized routes. Tests that mutate the corpus
-// on disk between assertions call this so the next load re-reads the file —
-// proving a freshly-appended route takes effect without a process restart.
+// invalidateRoutesCache drops EVERY memoized path. Retained for the
+// SetRepoRootForTest seam (a root change there can re-point the floor at a new
+// corpus). Prefer invalidateRoutesCacheFor in tests that rewrite a known
+// corpus's bytes — it drops only that path, never a sibling's entry.
 func invalidateRoutesCache() {
 	routesCacheMu.Lock()
 	defer routesCacheMu.Unlock()
-	routesCacheKey = ""
-	routesCacheData = nil
-	routesCacheErr = nil
+	routesCache = map[string]routesCacheEntry{}
+}
+
+// invalidateRoutesCacheFor drops ONLY the memoized routes for the corpus under
+// repoRoot, so a test that rewrites its own temp corpus's bytes forces a re-read
+// of just that file (proving a freshly-appended route takes effect with no
+// process restart) WITHOUT evicting any concurrent sibling test's entry — part
+// of the race-proofing.
+func invalidateRoutesCacheFor(repoRoot string) {
+	path := filepath.Join(repoRoot, corpusRelPath)
+	routesCacheMu.Lock()
+	defer routesCacheMu.Unlock()
+	delete(routesCache, path)
 }
 
 // matchEscalateRoute returns the matching route (and true) when the finding

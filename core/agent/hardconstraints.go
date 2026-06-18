@@ -133,6 +133,12 @@ func stripSeparators(s string) string {
 // corpus and force-escalates any finding that matches one — no model, no I/O
 // beyond the one corpus read, no network.
 //
+// The corpus root is RESOLVED ONCE BY THE CALLER (ResolveFindingWith) and passed
+// in, immutable, as repoRoot/rootErr. This gate never reads process-global
+// repo-root state itself — that is what makes the floor race-proof: a concurrent
+// test clearing the global cannot flip THIS invocation's corpus mid-resolve.
+// rootErr carries any error from the caller's one-time resolveRepoRoot() walk.
+//
 // It returns (forceEscalate, resolution):
 //   - forceEscalate=true with an escalated Resolution when the finding matches a
 //     corpus escalate_route. The caller MUST NOT call the model in this case.
@@ -144,8 +150,7 @@ func stripSeparators(s string) string {
 // finding through to the model (never fail open). A MISSING corpus is treated as
 // an empty floor (no routes) — the resolve-gate fail-safe downstream still
 // covers unparseable/ambiguous findings.
-func checkHardConstraints(f finding.Finding) (bool, Resolution) {
-	repoRoot, rootErr := resolveRepoRoot()
+func checkHardConstraints(repoRoot string, rootErr error, f finding.Finding) (bool, Resolution) {
 	if rootErr != nil {
 		// Cannot even locate the corpus — fail safe: escalate, do not guess.
 		return true, Resolution{

@@ -100,6 +100,20 @@ type CascadeOptions struct {
 	// model decides from the pre-loaded (sanitized) finding context alone, and the
 	// fail-safe still covers an empty/ambiguous read.
 	Tools ToolRunner
+
+	// RepoRoot, when non-empty, is the PER-INVOCATION corpus root the pre-LLM
+	// floor reads its escalate_routes from — threaded explicitly through this one
+	// call instead of resolved from a process-global. It is resolved ONCE at the
+	// top of ResolveFindingWith and carried, immutable, through checkHardConstraints
+	// → loadEscalateRoutes, so a concurrent test's repo-root cleanup (or its
+	// fan-out goroutines) CANNOT clear the root mid-resolve and flip this finding's
+	// corpus — the §11 logical-race flake this field closes.
+	//
+	// Empty means "resolve the production way": ResolveFindingWith fills it from
+	// resolveRepoRoot() (the os.Executable walk / MALLCOP_REPO_ROOT fallback) on
+	// entry. Production never sets it; tests set it per-call to pin the corpus
+	// deterministically with NO shared-global mutation.
+	RepoRoot string
 }
 
 // defaulted returns a copy of o with empty model ids filled from the §1 defaults.
@@ -182,9 +196,27 @@ func ResolveFinding(ctx context.Context, client Client, f finding.Finding) Resol
 func ResolveFindingWith(ctx context.Context, client Client, f finding.Finding, opts CascadeOptions) Resolution {
 	opts = opts.defaulted()
 
+	// Resolve the corpus root EXACTLY ONCE, here at entry, into an immutable local
+	// that is threaded through the floor for the rest of this invocation. After
+	// this point the cascade NEVER re-reads any process-global repo-root state, so
+	// a concurrent test's SetRepoRootForTest("") cleanup (or this resolve's own
+	// fan-out goroutines) cannot clear the root mid-resolve and walk to the real
+	// shipped corpus — the §11 logical-race flake.
+	//
+	// opts.RepoRoot, when set (tests pin it per-call), wins with no global read.
+	// When empty (production), it is filled from resolveRepoRoot() — the unchanged
+	// os.Executable walk / MALLCOP_REPO_ROOT fallback. A resolve error is carried
+	// as an empty root + the error, so checkHardConstraints fails safe exactly as
+	// before (it escalates rather than guessing the corpus location).
+	repoRoot := opts.RepoRoot
+	var rootErr error
+	if repoRoot == "" {
+		repoRoot, rootErr = resolveRepoRoot()
+	}
+
 	// (1) The ONLY gate before any model call. A routed finding never reaches the
 	// model — security-critical, spy-proven.
-	if forceEscalate, res := checkHardConstraints(f); forceEscalate {
+	if forceEscalate, res := checkHardConstraints(repoRoot, rootErr, f); forceEscalate {
 		return res
 	}
 

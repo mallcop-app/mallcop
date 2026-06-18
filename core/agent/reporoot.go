@@ -19,14 +19,22 @@ import (
 	"sync"
 )
 
-// repoRootOverride lets tests point the floor at a temp corpus tree. When set,
-// it takes precedence over the walk. Production never sets it; the walk and the
-// MALLCOP_REPO_ROOT env fallback cover real deployments.
+// repoRootOverride is the LEGACY global test seam (SetRepoRootForTest), retained
+// for the eval harness. When set, it takes precedence over the walk. Production
+// never sets it; the walk and the MALLCOP_REPO_ROOT env fallback cover real
+// deployments.
 //
-// Guarded by repoRootMu so concurrent tests (and the -race detector) observe a
-// consistent value: the override is mutated by tests and read on every
-// resolveRepoRoot, which runs inside ResolveFinding on whatever goroutine the
-// caller uses.
+// IMPORTANT: the CASCADE no longer depends on this global being stable across a
+// resolve. ResolveFindingWith resolves the corpus root EXACTLY ONCE at entry
+// (preferring the per-invocation CascadeOptions.RepoRoot, else this override via
+// resolveRepoRoot) into an immutable local that is threaded through the floor.
+// So a concurrent test's SetRepoRootForTest("") cleanup can no longer clear the
+// root mid-resolve and flip the corpus — that was the §11 logical-race flake.
+// New tests pin CascadeOptions.RepoRoot per-call and never touch this global.
+//
+// Guarded by repoRootMu so any remaining reader (and the -race detector) observe
+// a consistent value: the override is mutated only by the legacy seam and read
+// once per resolve in resolveRepoRoot when no per-call RepoRoot is supplied.
 var (
 	repoRootMu       sync.RWMutex
 	repoRootOverride string

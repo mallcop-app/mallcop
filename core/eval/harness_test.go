@@ -150,7 +150,22 @@ func TestCorpus_SkipsLeadingUnderscorePaths(t *testing.T) {
 	}
 }
 
-// --- 3. END-TO-END MERGE-GATE: golden responses → GREEN, median over N=3. ------
+// floorForcedBenignHard is the EXACT set of corpus scenarios authored
+// chain_action=resolved that the restored pre-LLM floor (E-007 / E-008,
+// parity-fixes FIX 1) force-escalates to a human. Under HONEST scoring (the
+// grader no longer auto-passes a force-escalate) these are the ONLY merge-gate
+// misses: a deliberate benign-hard precision cost, not a pipeline defect. The
+// merge-gate is allowed to show it; the set is pinned so a NEW miss on any other
+// scenario (a real regression) still fails the gate loudly.
+var floorForcedBenignHard = map[string]bool{
+	"AC-04-approved-vendor-onboarding": true, // E-008 (new-external-access)
+	"AC-05-contractor-first-day":       true, // E-008
+	"URA-04-sibling-resource-rotation": true, // E-007 (unusual-resource-access)
+}
+
+// --- 3. END-TO-END MERGE-GATE: golden responses, median over N=3. The gate
+// scores HONESTLY — the 3 floor-forced benign-hard scenarios fail (expected
+// resolved, force-escalated by the floor), everything else passes. ------------
 
 func TestHarness_MergeGate_GreenWithMedianOfN(t *testing.T) {
 	pinShippedRoot(t)
@@ -166,20 +181,49 @@ func TestHarness_MergeGate_GreenWithMedianOfN(t *testing.T) {
 	if len(report.Runs) != 3 {
 		t.Fatalf("median-of-N must run N=3 passes; got %d", len(report.Runs))
 	}
-	// MERGE-GATE: golden responses make every scenario pass on chain_action.
-	if report.MedianPassRate != 1.0 {
-		t.Fatalf("merge-gate median pass rate must be 1.0 (golden responses); got %.4f", report.MedianPassRate)
+
+	// HONEST MERGE-GATE: with the force-escalate auto-pass removed, exactly the
+	// floor-forced benign-hard scenarios fail on chain_action. The expected median
+	// pass rate is therefore (corpus - benignHard) / corpus — NOT 1.0. Computing it
+	// from the pinned set (rather than hardcoding 0.9464) keeps the assertion exact
+	// AND self-updating if the corpus count changes, while still catching any EXTRA
+	// failure.
+	wantPass := report.CorpusCount - len(floorForcedBenignHard)
+	wantRate := float64(wantPass) / float64(report.CorpusCount)
+	if report.MedianPassRate != wantRate {
+		t.Fatalf("merge-gate median pass rate must be %.4f (%d/%d: corpus minus the %d floor-forced "+
+			"benign-hard scenarios); got %.4f", wantRate, wantPass, report.CorpusCount,
+			len(floorForcedBenignHard), report.MedianPassRate)
 	}
+
+	// Every run must fail on EXACTLY the pinned floor-forced benign-hard set — no
+	// more, no fewer. A miss on any OTHER scenario is a real regression and fails.
 	for _, rr := range report.Runs {
-		if rr.Passed != rr.Total {
-			// Surface the first failing scenario for diagnosis.
+		if rr.Passed != wantPass {
 			for _, res := range rr.Results {
-				if !res.Pass {
-					t.Errorf("merge-gate FAIL run %d: scenario %s expected=%s terminal=%s reason=%q calls=%d",
+				if !res.Pass && !floorForcedBenignHard[res.ScenarioID] {
+					t.Errorf("merge-gate UNEXPECTED FAIL run %d: scenario %s expected=%s terminal=%s reason=%q calls=%d",
 						rr.Index, res.ScenarioID, res.ExpectedAction, res.TerminalAction, res.TerminalReason, res.ModelCalls)
 				}
 			}
-			t.Fatalf("merge-gate run %d not green: %d/%d", rr.Index, rr.Passed, rr.Total)
+			t.Fatalf("merge-gate run %d: %d/%d passed, want %d (the pinned benign-hard set must be the ONLY misses)",
+				rr.Index, rr.Passed, rr.Total, wantPass)
+		}
+		for _, res := range rr.Results {
+			if floorForcedBenignHard[res.ScenarioID] {
+				// The honest cost: an expected-resolved scenario the floor force-escalated.
+				if res.Pass {
+					t.Errorf("run %d: floor-forced benign-hard scenario %s must FAIL honestly (no auto-pass); got pass",
+						rr.Index, res.ScenarioID)
+				}
+				if !res.ForceEscalated || res.ExpectedAction != "resolved" || res.TerminalAction != "escalated" {
+					t.Errorf("run %d: scenario %s expected the floor-forced shape (forceEsc, expected=resolved, terminal=escalated); got forceEsc=%v expected=%s terminal=%s",
+						rr.Index, res.ScenarioID, res.ForceEscalated, res.ExpectedAction, res.TerminalAction)
+				}
+			} else if !res.Pass {
+				t.Errorf("run %d: non-floor scenario %s must pass; got expected=%s terminal=%s reason=%q",
+					rr.Index, res.ScenarioID, res.ExpectedAction, res.TerminalAction, res.TerminalReason)
+			}
 		}
 	}
 	// Golden responses are deterministic → zero variance → within the 8pp band.
@@ -191,28 +235,39 @@ func TestHarness_MergeGate_GreenWithMedianOfN(t *testing.T) {
 		t.Fatalf("merge-gate report must say it is NOT the accuracy number; note=%q", report.Note)
 	}
 
-	// CLASSIFIER: under golden responses every scenario PASSES the GATING axis
-	// (chain_action). The classifier therefore bins each scenario as either PASS
-	// or R_rubric_axis_fail (the latter is a NON-GATING provenance bin: a scenario
-	// whose chain_action passed but whose force-escalate floor reason cannot carry
-	// the scenario-specific reasoning_must_mention substrings — a known, expected
-	// shape for the hard-constraint families). No scenario may land in an
-	// algorithm/infra failure bin under golden responses.
+	// CLASSIFIER: under golden responses every NON-floor scenario passes the GATING
+	// axis (chain_action) and bins as PASS or R_rubric_axis_fail (a NON-GATING
+	// provenance bin). The 3 floor-forced benign-hard scenarios bin as
+	// A1_invest_should_resolve_but_escalated — the HONEST over-escalation cost. No
+	// scenario may land in the DANGEROUS under-escalation bin or an infra-failure
+	// bin under golden responses.
 	pass := report.Classifier.Counts[BinPass]
 	rubric := report.Classifier.Counts[BinRubricAxisFail]
-	if pass+rubric != report.CorpusCount {
-		t.Fatalf("classifier: PASS(%d)+R_rubric_axis_fail(%d) must equal corpus %d under golden responses; counts=%v",
-			pass, rubric, report.CorpusCount, report.Classifier.Counts)
+	shouldResolve := report.Classifier.Counts[BinShouldResolve]
+	if shouldResolve != len(floorForcedBenignHard) {
+		t.Fatalf("classifier: exactly %d scenarios must bin as %s (the floor-forced benign-hard cost); got %d (counts=%v)",
+			len(floorForcedBenignHard), BinShouldResolve, shouldResolve, report.Classifier.Counts)
 	}
-	for _, bad := range []FailBin{BinNoInference, BinChainDrop, BinShouldResolve, BinShouldEscalate} {
+	if pass+rubric+shouldResolve != report.CorpusCount {
+		t.Fatalf("classifier: PASS(%d)+R_rubric_axis_fail(%d)+A1_should_resolve(%d) must equal corpus %d under golden responses; counts=%v",
+			pass, rubric, shouldResolve, report.CorpusCount, report.Classifier.Counts)
+	}
+	for _, bad := range []FailBin{BinNoInference, BinChainDrop, BinShouldEscalate} {
 		if n := report.Classifier.Counts[bad]; n != 0 {
-			t.Fatalf("classifier: golden responses must produce ZERO %s; got %d (counts=%v)", bad, n, report.Classifier.Counts)
+			t.Fatalf("classifier: golden responses must produce ZERO %s (no under-escalation, no infra failure); got %d (counts=%v)", bad, n, report.Classifier.Counts)
 		}
 	}
-	// Every R_rubric_axis_fail scenario must be one whose chain_action still passed
-	// (the bin is provenance, never a harness failure).
+	// The A1_invest_should_resolve_but_escalated scenarios must be EXACTLY the
+	// pinned floor-forced benign-hard set.
 	for id, bin := range report.Classifier.PerScenario {
-		if bin == BinRubricAxisFail {
+		switch bin {
+		case BinShouldResolve:
+			if !floorForcedBenignHard[id] {
+				t.Fatalf("classifier: scenario %s binned %s but is not in the pinned floor-forced benign-hard set", id, BinShouldResolve)
+			}
+		case BinRubricAxisFail:
+			// Every R_rubric_axis_fail scenario must be one whose chain_action still
+			// passed (the bin is provenance, never a harness failure).
 			if r := findResult(report.Runs, id); r == nil || r.Structural.ChainAction != AxisPass {
 				t.Fatalf("R_rubric_axis_fail scenario %s must have chain_action=pass (non-gating bin)", id)
 			}
