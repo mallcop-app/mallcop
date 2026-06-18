@@ -335,6 +335,82 @@ func TestFanOut_NeverFiresOnEscalatePath(t *testing.T) {
 	}
 }
 
+// --- (g) MAJORITY ESCALATE — 1 resolve vs 2 suspicious → terminal escalate ------
+//
+// (HIGH) This gates fanout.go:251-260, the rule (5) MAJORITY-ESCALATE terminal:
+// suspicious + insufficient OUTNUMBER resolves (and the strong-malicious override
+// did NOT fire, and it is not a clean 3-way split), so the panel escalates with
+// the dissent cited. Before this test the branch was UNCOVERED — the existing
+// panel tests only exercised resolve (3-agree, 2-1 majority), strong-malicious
+// override, and the 3-way heal split; none drove a plain 2-suspicious / 1-resolve
+// majority through (5). A mutation that flipped this terminal to ActionProceed
+// (resolve-as-benign) passed the WHOLE suite — exactly the false-negative hole
+// (a malicious finding the panel calls suspicious 2:1 would be silently resolved).
+//
+// Scenario: benign resolves with positive evidence; malicious AND incomplete both
+// ESCALATE as SUSPICIOUS with strong_evidence:false and insufficient_data:false
+// (so neither is dispInsufficient and neither trips the strong-malicious override).
+// nResolve=1, nSusp=2, nInsuff=0 ⇒ NOT 3-way, NOT majority-resolve ⇒ rule (5).
+func TestFanOut_MajorityEscalate_TwoSuspiciousOneResolve_Escalates(t *testing.T) {
+	useShippedCorpus(t)
+	be := newPanelBackend().withFanOutLeadIn()
+	be.deep["benign"] = `{"action":"resolve","confidence":4,"positive_evidence":true,"reason":"documented onboarding workflow; baseline match for this exact action."}`
+	be.deep["malicious"] = `{"action":"escalate","confidence":3,"positive_evidence":false,"strong_evidence":false,"insufficient_data":false,"reason":"the access pattern is unusual but no single decisive attack vector found."}`
+	be.deep["incomplete"] = `{"action":"escalate","confidence":3,"positive_evidence":false,"strong_evidence":false,"insufficient_data":false,"reason":"the sequence looks suspicious on a second read; cannot call this benign."}`
+
+	res := agent.ResolveFindingWith(context.Background(), be, blockedResolveFinding(), shallowToolsOpts())
+
+	if res.Action != agent.ActionEscalated {
+		t.Fatalf("2-suspicious vs 1-resolve must ESCALATE (rule 5 majority-escalate); got action=%q reason=%q", res.Action, res.Reason)
+	}
+	if !strings.Contains(res.Reason, "majority ESCALATE") {
+		t.Fatalf("a majority-escalate terminal must be attributed to the majority-ESCALATE rule; got %q", res.Reason)
+	}
+	// The lone resolving tier is the dissent and must be cited.
+	if !strings.Contains(res.Reason, "dissent (benign) cited") {
+		t.Fatalf("the resolving dissent (benign) must be cited in the majority-escalate reason; got %q", res.Reason)
+	}
+	if res.ForceEscalated {
+		t.Fatalf("a panel escalation is a chain escalation, not a floor force-escalate; ForceEscalated must be false; got %+v", res)
+	}
+}
+
+// --- (h) majority-resolve with NO positive evidence anywhere → fail-safe escalate
+//
+// (MEDIUM) This gates fanout.go:239-242, the positive-evidence guard inside the
+// MAJORITY-RESOLVE block: the resolving tiers outnumber the escalating ones, so
+// the panel WOULD resolve — but resolution requires positive evidence, and here
+// NO resolving tier claimed any. The guard converts the would-be resolve into a
+// fail-safe escalate. Disabling the guard would resolve a finding as benign on
+// the strength of two "nothing-found" reads with zero positive evidence — a
+// fail-OPEN regression. Before this test the guard branch was uncovered: the
+// existing majority-resolve tests all supplied positive evidence.
+//
+// Scenario: 2 resolves with positive_evidence:false + 1 weak suspicious escalate.
+// nResolve=2 > nEscalate=1 ⇒ enters the majority-resolve block; anyPositiveEvidence
+// (resolves) is FALSE ⇒ the guard fires ⇒ terminal escalate.
+func TestFanOut_MajorityResolve_NoPositiveEvidence_FailsSafeEscalates(t *testing.T) {
+	useShippedCorpus(t)
+	be := newPanelBackend().withFanOutLeadIn()
+	// Two RESOLVE tiers, but neither claims positive evidence of legitimacy.
+	be.deep["benign"] = `{"action":"resolve","confidence":4,"positive_evidence":false,"reason":"nothing obviously wrong; did not find a problem."}`
+	be.deep["incomplete"] = `{"action":"resolve","confidence":3,"positive_evidence":false,"reason":"no missing data jumped out; no affirmative proof of legitimacy either."}`
+	// One weak (non-strong) suspicious escalate so the resolves are the majority.
+	be.deep["malicious"] = `{"action":"escalate","confidence":2,"positive_evidence":false,"strong_evidence":false,"reason":"slightly odd but no concrete attack vector."}`
+
+	res := agent.ResolveFindingWith(context.Background(), be, blockedResolveFinding(), shallowToolsOpts())
+
+	if res.Action != agent.ActionEscalated {
+		t.Fatalf("a majority resolve with NO positive evidence must FAIL-SAFE escalate; got action=%q reason=%q", res.Action, res.Reason)
+	}
+	if !strings.Contains(res.Reason, "NO positive evidence") {
+		t.Fatalf("the fail-safe must be attributed to the no-positive-evidence guard; got %q", res.Reason)
+	}
+	if res.ForceEscalated {
+		t.Fatalf("a panel fail-safe escalation is a chain escalation, not a floor force-escalate; got %+v", res)
+	}
+}
+
 // --- (f) the 3 deep tiers ran CONCURRENTLY with 3 DISTINCT hypothesis prompts ---
 
 func TestFanOut_ThreeDistinctHypothesesRanConcurrently(t *testing.T) {
