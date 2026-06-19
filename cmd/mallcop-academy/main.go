@@ -1000,6 +1000,13 @@ func academy(sender Sender, args runArgs) error {
 			if hasTag(msg.Tags, "tool-usage") {
 				accumulateToolUsage(msg, tracked)
 			}
+			// inference-usage: legion's API substrate posts these after each
+			// Router.Infer with the actual InputTokens/OutputTokens from the
+			// model response. Attribution by item_id via workItemToScenario.
+			// Forge-calls is NOT incremented (terminal tools own that count).
+			if hasTag(msg.Tags, "inference-usage") {
+				accumulateInferenceUsage(msg, tracked, workItemToScenario)
+			}
 		}
 
 		for _, msg := range msgs {
@@ -1514,6 +1521,64 @@ func accumulateToolUsage(msg cfMessage, tracked map[string]*trackedScenario) {
 			return
 		}
 	}
+}
+
+// inferenceUsagePayload is the JSON payload shape of an inference-usage
+// message posted by legion's API substrate (worker.go) after each
+// Router.Infer call. Carries the actual InputTokens / OutputTokens from
+// the model response. Attribution is by item_id matching workItemToScenario
+// — NOT by finding-id tag, since legion does not know finding IDs.
+type inferenceUsagePayload struct {
+	TokensIn  int64  `json:"tokens_in"`
+	TokensOut int64  `json:"tokens_out"`
+	ItemID    string `json:"item_id"`
+	Source    string `json:"source"`
+}
+
+// accumulateInferenceUsage processes an inference-usage tagged campfire
+// message and adds its tokens_in / tokens_out to the matching scenario's
+// accumulators. Matches by item_id via workItemToScenario; if the item is
+// not in any scenario's chain, the message is silently dropped (it belongs
+// to non-academy work).
+//
+// forge_calls is NOT incremented — that count is owned by terminal tools
+// (resolve-finding / escalate-to-*) which emit tool-usage messages with
+// forge_calls=1.
+//
+// Dedup by msg.ID via ts.seenToolUsageMsgs (same set as tool-usage dedup —
+// IDs are globally unique so no collision risk).
+func accumulateInferenceUsage(msg cfMessage, tracked map[string]*trackedScenario, workItemToScenario map[string]string) {
+	if msg.Payload == "" {
+		return
+	}
+	var p inferenceUsagePayload
+	if err := json.Unmarshal([]byte(msg.Payload), &p); err != nil {
+		return
+	}
+	if p.ItemID == "" {
+		return
+	}
+	scenID, known := workItemToScenario[p.ItemID]
+	if !known {
+		return
+	}
+	ts, ok := tracked[scenID]
+	if !ok {
+		return
+	}
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	if msg.ID != "" {
+		if ts.seenToolUsageMsgs == nil {
+			ts.seenToolUsageMsgs = make(map[string]bool)
+		}
+		if ts.seenToolUsageMsgs[msg.ID] {
+			return
+		}
+		ts.seenToolUsageMsgs[msg.ID] = true
+	}
+	ts.toolUsageTokensIn += p.TokensIn
+	ts.toolUsageTokensOut += p.TokensOut
 }
 
 // matchesFindingTag reports whether tagFindingID refers to ts.
