@@ -58,9 +58,10 @@ type SearchEventsEnvelope struct {
 
 // EventView is the per-event projection returned in the envelope. It is a flat,
 // stable view over the typed event.Event — id / source / type / actor / target /
-// action / timestamp (RFC3339, empty when zero). The rest of the raw payload is
-// omitted to keep the envelope flat and the schema fixed; consumers that need the
-// full payload read the store directly.
+// action / timestamp (RFC3339, empty when zero) PLUS the discriminating per-event
+// metadata fields the model needs to weigh magnitude/origin. The rest of the raw
+// payload is omitted to keep the envelope flat and the schema fixed; consumers
+// that need the full payload read the store directly.
 //
 // EVAL FIDELITY (FIX 4): Target and Action are projected from the event payload so
 // the model sees WHAT an event did (action) and to WHAT (target) — the same
@@ -69,14 +70,49 @@ type SearchEventsEnvelope struct {
 // blind to the relationship structure the academy showed. Each string is sanitized
 // INDIVIDUALLY (control chars stripped, length-capped) on projection so a payload
 // field cannot smuggle control bytes / unbounded text into the transcript.
+//
+// FIX 1 (DISCRIMINATION, not blunter escalation): the discriminating metadata the
+// model needs to TELL an attack apart from benign load is also projected — the
+// VOLUME magnitude (operation_count / blobs_accessed / bytes_read), the ORIGIN
+// (ip / location), and the grant target (principal_id / role). These are the exact
+// fields VA-03 / CO-02 / UT-01 turn on (847 GetObject calls; a role_assignment to
+// an unknown principal_id at 03:14). Each is projected as a flat string in the
+// Metadata map and sanitized INDIVIDUALLY (sanitizeEventField) — never one
+// concatenated blob — so one field cannot bleed into another and a payload field
+// cannot smuggle control bytes / unbounded text into the boxed transcript.
 type EventView struct {
-	ID        string `json:"id"`
-	Source    string `json:"source"`
-	Type      string `json:"type"`
-	Actor     string `json:"actor"`
-	Target    string `json:"target"`
-	Action    string `json:"action"`
-	Timestamp string `json:"timestamp"`
+	ID     string `json:"id"`
+	Source string `json:"source"`
+	Type   string `json:"type"`
+	Actor  string `json:"actor"`
+	Target string `json:"target"`
+	Action string `json:"action"`
+	// Metadata carries the discriminating per-event fields (volume magnitude,
+	// origin ip/location, grant principal_id/role) the model weighs to tell an
+	// attack apart from benign load. Each VALUE is sanitized individually; the map
+	// is empty (never nil) when the payload carries none of the projected keys.
+	Metadata  map[string]string `json:"metadata"`
+	Timestamp string            `json:"timestamp"`
+}
+
+// discriminatingMetaKeys are the per-event payload metadata fields projected into
+// EventView.Metadata (FIX 1). They are the OBSERVABLE discriminators the model
+// needs to weigh: VOLUME magnitude (operation_count / blobs_accessed / bytes_read
+// / resource_count) tells a 847-call exfil read apart from a 2-call benign read;
+// ORIGIN (ip / location) tells a familiar-IP session apart from a foreign one;
+// GRANT shape (principal_id / role) tells WHO a role was granted to and at what
+// privilege. Only these keys are surfaced (the schema stays flat + fixed); every
+// other payload field is omitted, exactly as the rest of the projection is.
+var discriminatingMetaKeys = []string{
+	"operation_count",
+	"blobs_accessed",
+	"bytes_read",
+	"resource_count",
+	"ip",
+	"location",
+	"principal_id",
+	"role",
+	"user_agent",
 }
 
 // eventViewFieldCap bounds a single projected EventView string. It matches the

@@ -147,14 +147,40 @@ type ToolRunner interface {
 	RunTools(ctx context.Context, tier string, f finding.Finding) (ToolEvidence, error)
 }
 
-// ToolEvidence is what a ToolRunner observed for one tier. The Text is the
-// human/model-readable tool transcript (UNTRUSTED — sanitized before use). The
-// remaining fields are the structural signals the confidence gate scores; they
+// ToolEvidence is what a ToolRunner observed for one tier. The text fields are the
+// human/model-readable tool transcript (UNTRUSTED — each sanitized before use).
+// The remaining fields are the OBSERVABLE signals the gates score / force on; they
 // are measured by the runtime, never self-reported by the model.
+//
+// FIX 1 (DISCRIMINATION via visibility): the transcript is split into ONE FIELD
+// PER TOOL — BaselineText (check-baseline), EventsText (search-events + matched
+// rules), FindingsText (search-findings) — instead of a single concatenated blob.
+// The cascade boxes EACH field as its OWN WrapUntrusted field, EACH independently
+// sanitized + 1024-capped (sanitize.go). The old single-field boxing concatenated
+// all three and the 1024 cap truncated the high-signal check-baseline + relationship
+// evidence (VA-03's whole discriminator — ci-bot's ZERO relationship history with
+// the storage targets it read — lived past char 1024 and never reached the model).
+// Per-field boxing makes the salient baseline/relationship facts survive the cap.
+// SECURITY INVARIANT PRESERVED: each field is still WrapUntrusted + sanitized
+// (per-field 1024 cap), and the verdict is still parsed ONLY from the model reply.
 type ToolEvidence struct {
-	// Text is the concatenated tool-result transcript (events, matched rules,
-	// baseline). UNTRUSTED — the cascade wraps it in USER_DATA markers.
+	// Text is the legacy single-blob transcript. DEPRECATED in favor of the
+	// per-tool fields below, but retained: a runner that only sets Text still works
+	// (it is boxed as one tools.transcript field, the pre-FIX-1 behavior), and the
+	// scriptedTools test seam sets it. When any per-tool field is set, the per-tool
+	// fields are boxed individually and Text is ignored.
 	Text string
+	// BaselineText is the check-baseline transcript (known?, frequencies, and the
+	// actor↔target RELATIONSHIPS — the high-signal zero-history discriminator).
+	// Boxed as its OWN field so the relationship evidence survives the 1024 cap.
+	BaselineText string
+	// EventsText is the search-events transcript (matched event ids + per-event
+	// salient fields + §3.8 matched_rules). Boxed as its own field.
+	EventsText string
+	// FindingsText is the search-findings transcript (investigate tier's deeper
+	// sweep). Boxed as its own field. Empty on the triage tier.
+	FindingsText string
+
 	// ToolCalls is the number of tool calls made gathering this evidence.
 	ToolCalls int
 	// DistinctTools is the number of DIFFERENT tools used.
@@ -162,6 +188,46 @@ type ToolEvidence struct {
 	// ToolEmpty is true when a relied-on tool returned an empty result. Per the
 	// fail-safe this force-escalates a resolve (an empty read is not a dismissal).
 	ToolEmpty bool
+
+	// FIX 3 (OBSERVABLE FORCE-ESCALATE, event-keyed): the two structural predicates
+	// the triage gate forces a clean resolve to escalate on. Both are computed by
+	// the runtime from the REAL tool output (relationships / surfaced events) — NOT
+	// from the model and NOT from the untrusted transcript text — so they are
+	// trustworthy gate inputs. They are keyed on EVENT CONTENT, never on detector
+	// family, so VA-01-deploy-burst (all targets in baseline, no role grant) is NOT
+	// caught.
+	//
+	// ZeroHistoryAccess is true when the actor accesses a target with a
+	// relationship-history count of 0 in check-baseline (the actor has NEVER touched
+	// this target before). VA-03: ci-bot reads storage targets absent from its
+	// (deploy-only) relationships. CO-02: deploy-svc bulk-reads user-data outside
+	// its established relationship set.
+	ZeroHistoryAccess bool
+	// ZeroHistoryDetail names the actor + the zero-history target(s) for the audit
+	// trail (e.g. "ci-bot → atomstorage01/containers/backups"). Empty when
+	// ZeroHistoryAccess is false. Free-form runtime text (not boxed — it is the
+	// runtime's own audit string, not echoed model/attacker text).
+	ZeroHistoryDetail string
+	// RoleGrantByActor is true when the surfaced events show the FINDING ACTOR
+	// performing a role-grant / privilege event (event_type role_assignment, or
+	// action add_role_assignment) for which that actor has NO baseline history of
+	// granting roles. UT-01 / IT-02: admin-user grants a role with role_assignment
+	// frequency 0. ID-01 is NOT caught — there the role grant is authored by
+	// admin-user (a known role-granter), not by the finding actor deploy-svc-new.
+	RoleGrantByActor bool
+	// RoleGrantDetail names the role-grant event for the audit trail. Empty when
+	// RoleGrantByActor is false.
+	RoleGrantDetail string
+}
+
+// hasPerToolText reports whether any per-tool transcript field is populated. When
+// true, buildTierRequest boxes each per-tool field individually (FIX 1) and
+// ignores the legacy single Text blob; when false it falls back to boxing Text as
+// one field (pre-FIX-1 behavior, used by the scriptedTools test seam).
+func (e ToolEvidence) hasPerToolText() bool {
+	return strings.TrimSpace(e.BaselineText) != "" ||
+		strings.TrimSpace(e.EventsText) != "" ||
+		strings.TrimSpace(e.FindingsText) != ""
 }
 
 // ResolveFinding runs the full triage → investigate → escalate cascade for one
@@ -250,15 +316,66 @@ func ResolveFindingWith(ctx context.Context, client Client, f finding.Finding, o
 		// false below), and a non-empty tool read. A clean triage resolve closes the
 		// finding as benign — triage's only terminal outcome.
 		if triage.cleanResolve() {
-			// FIX 2: a clean triage resolve may TERMINATE only on an OBVIOUS-benign
-			// finding. A RISKY proposed-resolve (high/critical severity OR a
-			// malicious-shaped structural marker) does NOT terminate at triage — the
-			// cheap glm-4.7-flash model games the self-reported confidence+evidence on
-			// real attacks. It is converted to a triage ESCALATE that hands off to
-			// investigate, so the finding gets GuardResolve + the <0.55 structural gate
-			// + the deep×3 panel before any close. Obvious-benign (low/medium, no
-			// malicious marker) STILL closes cheaply here — precision + economy preserved.
-			if mustEscalate, why := triageResolveMustEscalate(f); !mustEscalate {
+			// FIX 3 (LOAD-BEARING SAFETY FLOOR — checked FIRST, keyed on EVENT content,
+			// doc §4.3 "the under-escalation cluster responds to pattern-match escalation
+			// overrides keyed on event content"). The OBSERVABLE tool evidence drives two
+			// DISTINCT forces, calibrated to the asymmetric error policy:
+			//
+			//  (1) ROLE-GRANT by the finding actor with no precedent → TERMINAL escalate
+			//      (NEVER_AUTO_RESOLVE). This is the doc's "Privilege changes → always
+			//      ESCALATE (non-negotiable)" override: a privilege/role grant is a
+			//      structural invariant the model cannot re-resolve past, exactly like
+			//      the pre-LLM hard-constraint floor. The corpus confirms ZERO
+			//      benign-expected scenario carries this predicate, so it never flips a
+			//      benign finding (discrimination preserved).
+			//
+			//  (2) ZERO-HISTORY ACCESS (the actor touched a target it has NO relationship
+			//      history with) → HANDOFF to investigate (NOT terminal). Zero-history is
+			//      genuinely a JUDGMENT signal, not a structural invariant: a known batch
+			//      actor reading a NEW container under an account it already uses, an
+			//      onboarding MFA enrollment, a deploy to a fresh app are all benign
+			//      first-time accesses (the corpus has 5+ such resolved-expected
+			//      scenarios). Terminally escalating them would tank benign-hard
+			//      precision. So zero-history forces the finding OFF the cheap-triage
+			//      terminal-resolve path INTO investigate, where the stronger model
+			//      weighs it in combination (it RESOLVES the benign batch with positive
+			//      evidence; it ESCALATES the out-of-scope exfil). The finding still gets
+			//      GuardResolve + the <0.55 structural gate + the deep×3 panel before any
+			//      close — it can never silently auto-resolve at the cheap tier.
+			//
+			// Both predicates are keyed on the EVENT the runner observed, never on the
+			// detector family — so VA-01 (all targets IN baseline relationships, no role
+			// grant) is NOT caught and keeps resolving. ID-01 is NOT caught (its role
+			// grant is authored by a known granter, not the finding actor; the finding
+			// actor performs no zero-history access). The signals are runtime-computed,
+			// never read from the model reply or the untrusted transcript — verdict
+			// isolation holds.
+			if triage.roleGrantByActor {
+				detail := triage.roleGrantDetail
+				if detail == "" {
+					detail = "the finding actor performed a role grant with no precedent"
+				}
+				return escalate(ctx, client, f, opts, triageStage,
+					"observable safety floor [never-auto-resolve: privilege/role-grant]: "+detail+"; the model proposed resolve but a privilege change always escalates: "+triage.reason)
+			}
+
+			// FIX 2 (risky proposed-resolve) AND FIX 3 zero-history both HAND OFF to
+			// investigate (the deeper tier weighs the signal; it does not auto-resolve
+			// at the cheap tier). FIX 3 zero-history is checked first so its richer audit
+			// reason is recorded; FIX 2 covers high/critical severity + malicious markers.
+			handoff, why := false, ""
+			if triage.zeroHistoryAccess {
+				handoff = true
+				detail := triage.zeroHistoryDetail
+				if detail == "" {
+					detail = "actor accessed a target with zero relationship history"
+				}
+				why = "zero-history access (" + detail + "): the actor accessed a never-before-touched target; a cheap-triage resolve is not trustworthy here — handing to investigate (GuardResolve + structural gate + deep panel)"
+			}
+			if !handoff {
+				handoff, why = triageResolveMustEscalate(f)
+			}
+			if !handoff {
 				return Resolution{
 					ForceEscalated: false,
 					Action:         ActionProceed, // proceed == resolved-as-benign (terminal)

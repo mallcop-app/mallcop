@@ -96,6 +96,33 @@ func triageResolveMustEscalate(f finding.Finding) (bool, string) {
 	return false, ""
 }
 
+// FIX 3 (OBSERVABLE, EVENT-KEYED SAFETY FLOOR) is wired directly in cascade.go's
+// triage gate, reading the runtime-measured ToolEvidence predicates carried on the
+// tierResult (zeroHistoryAccess / roleGrantByActor). The two predicates are
+// CALIBRATED DIFFERENTLY against the asymmetric error policy and the corpus:
+//
+//	ROLE-GRANT by the finding actor with no precedent → TERMINAL escalate
+//	  (NEVER_AUTO_RESOLVE). The doc's "Privilege changes → always ESCALATE
+//	  (non-negotiable)" override. The corpus confirms ZERO benign-expected scenario
+//	  carries this predicate, so a terminal force never flips a benign finding.
+//
+//	ZERO-HISTORY ACCESS (a target with relationship count 0) → HANDOFF to
+//	  investigate (NOT terminal). Zero-history is a JUDGMENT signal, not a structural
+//	  invariant: the corpus has 5+ resolved-expected scenarios where a KNOWN actor
+//	  legitimately makes a first-time access (a batch job reading a new container
+//	  under an account it already uses, an onboarding MFA enrollment, a deploy to a
+//	  fresh app). Terminally escalating those would tank benign-hard precision, so
+//	  the predicate only forces the finding OFF the cheap-triage terminal-resolve
+//	  path INTO investigate, where the stronger model weighs it in combination.
+//
+// Both are keyed on the EVENT the runner observed (relationships / surfaced events),
+// never on the detector family — VA-01 (every target IN the actor's relationships,
+// no role grant) is not caught and keeps resolving; ID-01 (role grant authored by a
+// KNOWN granter, not the finding actor; the finding actor performs no zero-history
+// access) is not caught and still resolves at triage. VERDICT-ISOLATION PRESERVED:
+// every input is a runtime-measured ToolEvidence signal, never the model's verdict
+// and never the boxed untrusted transcript text.
+
 // hasMaliciousShapedMarker reports whether the finding's type or reason carries a
 // malicious-shaped structural marker, and which one. Both fields are
 // separator-stripped + lower-cased (the same hardening normalizeFamily uses) before

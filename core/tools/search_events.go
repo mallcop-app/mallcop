@@ -10,6 +10,7 @@ package tools
 import (
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -208,6 +209,15 @@ func matchRulesForEvents(root, findingFamily string, findingMetadata map[string]
 	return matches, nil
 }
 
+// EventViewsFor projects typed events into the flat EventView the envelope
+// carries, with the discriminating per-event metadata populated and each string
+// sanitized individually (FIX 1). Exported so the eval harness can reason over the
+// SAME projection the model sees (target/action/metadata) when computing the
+// observable force-escalate predicates, instead of re-deriving the projection.
+func EventViewsFor(events []event.Event) []EventView {
+	return eventViews(events)
+}
+
 // eventViews projects typed events into the flat EventView the envelope carries.
 // Always returns a non-nil slice (empty when there are no events).
 //
@@ -220,16 +230,82 @@ func eventViews(events []event.Event) []EventView {
 	for _, ev := range events {
 		target, action := payloadTargetAction(ev.Payload)
 		out = append(out, EventView{
-			ID:        ev.ID,
-			Source:    ev.Source,
-			Type:      ev.Type,
-			Actor:     ev.Actor,
-			Target:    sanitizeEventField(target),
-			Action:    sanitizeEventField(action),
+			ID:     ev.ID,
+			Source: ev.Source,
+			Type:   ev.Type,
+			Actor:  ev.Actor,
+			Target: sanitizeEventField(target),
+			Action: sanitizeEventField(action),
+			// FIX 1: the discriminating per-event metadata (volume magnitude, origin,
+			// grant shape), each value sanitized INDIVIDUALLY on projection.
+			Metadata:  payloadDiscriminatingMeta(ev.Payload),
 			Timestamp: formatTime(ev.Timestamp),
 		})
 	}
 	return out
+}
+
+// payloadDiscriminatingMeta extracts the discriminatingMetaKeys from an event's
+// payload metadata, sanitizing EACH value individually (FIX 1). It returns an
+// empty map (never nil) when the payload carries none of the keys. Non-string
+// scalar values (a numeric operation_count, a boolean) are rendered to their
+// string form so a numeric magnitude still reaches the model as evidence; nested
+// objects/arrays are skipped (only flat scalars are surfaced, keeping the schema
+// flat). A malformed payload yields an empty map — never an error.
+func payloadDiscriminatingMeta(payload json.RawMessage) map[string]string {
+	out := map[string]string{}
+	if len(payload) == 0 {
+		return out
+	}
+	var m map[string]any
+	if err := json.Unmarshal(normalizeRecordKeys(payload), &m); err != nil {
+		return out
+	}
+	// The discriminating fields live under a nested "metadata" object in the
+	// stored event payload; fall back to the top level so either shape projects.
+	meta, _ := m["metadata"].(map[string]any)
+	for _, k := range discriminatingMetaKeys {
+		var v any
+		var ok bool
+		if meta != nil {
+			v, ok = meta[k]
+		}
+		if !ok {
+			v, ok = m[k]
+		}
+		if !ok {
+			continue
+		}
+		if s := scalarString(v); s != "" {
+			out[k] = sanitizeEventField(s)
+		}
+	}
+	return out
+}
+
+// scalarString renders a flat scalar payload value (string / number / bool) to the
+// string the model reads. Strings pass through; numbers render without scientific
+// notation and without a trailing ".0" for whole values (847.0 → "847"); bools
+// render true/false. A non-scalar (map / slice / nil) yields "" so it is skipped.
+func scalarString(v any) string {
+	switch t := v.(type) {
+	case string:
+		return t
+	case bool:
+		if t {
+			return "true"
+		}
+		return "false"
+	case float64:
+		if t == float64(int64(t)) {
+			return strconv.FormatInt(int64(t), 10)
+		}
+		return strconv.FormatFloat(t, 'f', -1, 64)
+	case json.Number:
+		return t.String()
+	default:
+		return ""
+	}
 }
 
 // payloadTargetAction extracts the "target" and "action" string fields from an

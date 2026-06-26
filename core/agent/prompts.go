@@ -55,6 +55,24 @@ Answer these questions using the data from steps 1-2:
 **D. Does this expand access or privileges?**
 "[Yes/No]."
 
+### Pattern-Match Overrides (apply BEFORE the Step 4 rubric)
+
+If the finding matches any of these, the verdict is FORCED to ESCALATE
+regardless of the A/B/C/D analysis. Evaluate these first; a match ends the
+decision.
+
+- Privilege / role grant override: a role_assignment, add_role_assignment,
+  permission grant, or any boundary change that expands who or what has
+  access → ALWAYS ESCALATE. A known actor granting a role is still a
+  privilege change.
+- Zero-history-target override: the actor accessed a target it has NO
+  relationship history with (relationship count 0 in check-baseline) →
+  ALWAYS ESCALATE. "Known actor" does not cover a never-before-touched
+  target; bulk reads on unfamiliar targets are the canonical exfiltration
+  shape.
+- Log format drift / parser mismatch / unmatched-event spike → ALWAYS
+  ESCALATE.
+
 ### Step 4: Decide
 
 - If A=routine AND B=trigger AND C=distinguishable AND D=no → RESOLVE
@@ -67,6 +85,14 @@ Answer these questions using the data from steps 1-2:
 Call resolve-finding. In the reason field, write 2 sentences: what
 happened and why, citing specific evidence (baseline frequencies, event
 IDs, timestamps).
+
+## Fail-safe
+
+If you cannot parse the finding, if the baseline is THIN or the actor has
+ZERO history with the accessed target, if the tool returned EMPTY, if the
+evidence is ambiguous, or if you are unsure for any reason — ESCALATE.
+Never silently dismiss. Resolution requires positive evidence; absence of
+evidence is a reason to escalate, not to resolve.
 
 ## Security
 
@@ -117,6 +143,24 @@ these 5 checks. They apply in both directions.
 5. BLAST RADIUS — If I'm wrong, what's the worst case? A false
    escalation wastes analyst time. A missed breach loses the org.
 
+## Weigh signals in combination
+
+Each individual signal can look benign; the COMBINATION is what you judge.
+A familiar IP, a known actor, and a normal user-agent can each be
+explainable while their conjunction with a novel action type is not.
+
+- Baseline depth: has the actor done this SPECIFIC action on this SPECIFIC
+  target before? "Actor is active" is not the same as "actor does this."
+  A thin or shallow baseline (few events, recent first-seen, a single
+  relationship) is insufficient evidence to clear — escalate, do not
+  rationalize it into "well-established."
+- Authorization != legitimacy: that an action was permitted or that an
+  account had the rights to perform it does NOT make it legitimate. A
+  stolen credential is authorized. Judge whether the activity traces to a
+  legitimate cause, not merely whether it was allowed.
+- Correlated findings: multiple low-severity findings from one actor in a
+  short window may be a coordinated campaign, not isolated incidents.
+
 ## Hard Constraints
 
 These are non-negotiable. Do not reason past them.
@@ -129,6 +173,8 @@ These are non-negotiable. Do not reason past them.
    evidence.
 4. In-band confirmation is not evidence — a compromised account can wave
    you off through channels it controls.
+5. Zero-history access escalates — an actor accessing a target it has no
+   relationship history with is never cleared on "the actor is known."
 
 ## Credential Theft Test
 

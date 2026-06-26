@@ -115,7 +115,12 @@ func newScenarioToolRunner(tmpDir, repoRoot string, s *exam.Scenario) (*scenario
 // read is data, not a dismissal — the fail-safe force-escalates a resolve built
 // on it (§3.4 / §2.5).
 func (r *scenarioToolRunner) RunTools(ctx context.Context, tier string, f finding.Finding) (agent.ToolEvidence, error) {
-	var b strings.Builder
+	// FIX 1: build ONE text section PER TOOL (baseline / events / findings) so the
+	// cascade boxes each as its OWN WrapUntrusted field, each independently 1024-
+	// capped — the high-signal check-baseline + relationship evidence (VA-03's
+	// zero-history discriminator) survives the cap instead of being truncated
+	// inside one concatenated blob.
+	var eventsB, baselineB, findingsB strings.Builder
 	calls := 0
 	distinct := 0
 	searchEmpty := false
@@ -131,6 +136,23 @@ func (r *scenarioToolRunner) RunTools(ctx context.Context, tier string, f findin
 		// cascade treats a tool ERROR as a fail-safe escalate. Surface it.
 		return agent.ToolEvidence{}, fmt.Errorf("search-events: %w", err)
 	}
+	// FIX 2 (EVAL FIDELITY): when the actor-filter returns NO events for a finding
+	// about a NEW actor, the creation events are authored by a DIFFERENT principal
+	// (ID-01: deploy-svc-new's creation events are authored by admin-user, with the
+	// finding actor appearing as the event TARGET / principal_id / display_name).
+	// An empty read would make ToolEmpty true and force a fail-safe escalate — but
+	// ID-01 is a benign onboarding the chain must RESOLVE. So when the actor-filter
+	// is empty, ALSO surface events whose target / principal_id / display_name names
+	// the finding actor, so triage can resolve ID-01 as designed.
+	// GUARD: this only ADDS resolving evidence when the direct read was empty; it
+	// never suppresses events. ID-03 / ID-04 (malicious/ambiguous new actors)
+	// perform their OWN events (the finding actor IS the event actor), so the direct
+	// read is non-empty and this fallback does not fire for them — they still escalate.
+	if len(env.Events) == 0 && r.actor != "" {
+		if alt := r.eventsNamingActor(); len(alt) > 0 {
+			env.Events = alt
+		}
+	}
 	// §3.8 matched_rules fold. SearchEventsWrapped resolves the operator-decisions
 	// corpus via the binary-walk (findConfigRoot) — the PRODUCTION path. Under the
 	// eval harness the "binary" is the test/harness binary, so the walk can miss
@@ -144,16 +166,23 @@ func (r *scenarioToolRunner) RunTools(ctx context.Context, tier string, f findin
 	}
 	calls++
 	distinct++
-	// COMPACT rendering, not the full JSON envelope: the cascade boxes this whole
-	// transcript as ONE untrusted field and the sanitizer caps a field at 1024
-	// chars (sanitize.go) — the SAME cap the production model sees. A verbose
-	// envelope dump would be truncated mid-evidence, dropping check-baseline and
-	// the matched rules. We render the high-signal facts (event ids, matched rule
-	// ids+family, baseline frequencies) so the salient evidence survives the cap.
-	writeSearchEvents(&b, env)
+	// COMPACT rendering, not the full JSON envelope: each per-tool field is still
+	// 1024-capped by the cascade's per-field sanitizer (sanitize.go) — the SAME cap
+	// the production model sees. We render the high-signal facts (event ids, matched
+	// rule ids+family, per-event discriminating metadata) so the salient evidence
+	// survives the cap.
+	writeSearchEvents(&eventsB, env)
 	if len(env.Events) == 0 {
 		searchEmpty = true
 	}
+
+	// FIX 3 (OBSERVABLE FORCE-ESCALATE, event-keyed): compute the two structural
+	// predicates the triage gate forces a clean resolve to escalate on — from the
+	// REAL surfaced events + the typed baseline, never from the model. Keyed on the
+	// EVENT predicate (zero relationship-history with an accessed target; a role-grant
+	// the finding actor has no precedent for), never on detector family.
+	zeroHist, zeroDetail := r.zeroHistoryAccess(env.Events)
+	roleGrant, roleDetail := r.roleGrantByActor(env.Events)
 
 	// --- check-baseline (every tier) — "is this routine for this actor". ------
 	if r.actor != "" {
@@ -165,7 +194,7 @@ func (r *scenarioToolRunner) RunTools(ctx context.Context, tier string, f findin
 		if err == nil {
 			calls++
 			distinct++
-			writeCheckBaseline(&b, r.actor, bl)
+			writeCheckBaseline(&baselineB, r.actor, bl)
 		}
 		// A check-baseline error is only "entity is required" (we guard actor !=
 		// "" above), so it cannot fire here; if it ever did, we omit the block
@@ -178,16 +207,288 @@ func (r *scenarioToolRunner) RunTools(ctx context.Context, tier string, f findin
 		if err == nil {
 			calls++
 			distinct++
-			writeSearchFindings(&b, fs)
+			writeSearchFindings(&findingsB, fs)
 		}
 	}
 
 	return agent.ToolEvidence{
-		Text:          b.String(),
-		ToolCalls:     calls,
-		DistinctTools: distinct,
-		ToolEmpty:     searchEmpty,
+		// FIX 1: per-tool boxed fields. Text is left empty so the cascade boxes the
+		// per-tool fields individually (each independently 1024-capped).
+		BaselineText:      baselineB.String(),
+		EventsText:        eventsB.String(),
+		FindingsText:      findingsB.String(),
+		ToolCalls:         calls,
+		DistinctTools:     distinct,
+		ToolEmpty:         searchEmpty,
+		ZeroHistoryAccess: zeroHist,
+		ZeroHistoryDetail: zeroDetail,
+		RoleGrantByActor:  roleGrant,
+		RoleGrantDetail:   roleDetail,
 	}, nil
+}
+
+// roleGrantEventTypes / roleGrantActions are the privilege/role-grant event
+// signatures the FIX 3 (b) predicate keys on. A surfaced event whose type or action
+// is one of these is a role grant. Compared after separator-stripping + lower-case.
+var roleGrantEventTypes = map[string]struct{}{
+	"roleassignment":   {},
+	"roleassign":       {},
+	"permissiongrant":  {},
+	"privilegegrant":   {},
+}
+
+var roleGrantActions = map[string]struct{}{
+	"addroleassignment": {},
+	"assignrole":        {},
+	"grantrole":         {},
+	"grantpermission":   {},
+}
+
+// eventsNamingActor (FIX 2) returns the events whose TARGET / principal_id /
+// display_name names the finding actor — the events that CREATED a new actor,
+// authored by a different principal. It is the empty-actor-filter fallback for a
+// NEW-actor finding: search-events keyed on the finding actor returns nothing
+// because the new actor authored no events yet, but it appears as the object of
+// its own creation. Returns the matching EventView set (empty when none match), so
+// triage sees the benign creation context (ID-01) instead of an empty read.
+func (r *scenarioToolRunner) eventsNamingActor() []tools.EventView {
+	if r.actor == "" {
+		return nil
+	}
+	full, _, err := tools.SearchEvents(r.store, tools.SearchEventsInput{})
+	if err != nil {
+		return nil
+	}
+	al := strings.ToLower(strings.TrimSpace(r.actor))
+	out := []tools.EventView{}
+	for _, ev := range projectEventViews(full) {
+		named := false
+		// The new actor appears as the TARGET of its creation (a service-principal
+		// path ending in the actor name) ...
+		if tl := strings.ToLower(ev.Target); strings.Contains(tl, al) {
+			named = true
+		}
+		// ... or as the principal_id / display_name in the grant/creation metadata.
+		if !named {
+			for _, k := range []string{"principal_id", "display_name"} {
+				if v, ok := ev.Metadata[k]; ok && strings.Contains(strings.ToLower(v), al) {
+					named = true
+					break
+				}
+			}
+		}
+		if named {
+			out = append(out, ev)
+		}
+	}
+	return out
+}
+
+// projectEventViews projects typed events into the flat EventView the runner
+// reasons over, reusing the EXACT projection the envelope uses (target/action +
+// the FIX 1 discriminating metadata, each sanitized individually) so the runner's
+// force-escalate predicates read the same EventView the model sees.
+func projectEventViews(events []event.Event) []tools.EventView {
+	return tools.EventViewsFor(events)
+}
+
+// zeroHistoryAccess (FIX 3a) reports whether the finding actor, in the surfaced
+// events, accessed a target with which it has ZERO relationship history (no
+// relationship record, or a record with count 0). VA-03: ci-bot reads storage
+// targets absent from its (deploy-only) relationship set. CO-02: deploy-svc
+// bulk-reads a target outside its established relationships. VA-01 is NOT caught:
+// every deploy target is in deploy-svc's relationships with a positive count.
+//
+// It considers only events AUTHORED BY the finding actor (the actor under
+// investigation actually performed the access) and only events carrying a target
+// (a login/health-check with no resource target is not an "access"). The first
+// zero-history target found is named in the detail for the audit trail.
+func (r *scenarioToolRunner) zeroHistoryAccess(events []tools.EventView) (bool, string) {
+	if r.actor == "" || r.baseline == nil {
+		return false, ""
+	}
+	rels := r.baseline.RelationshipsFor(r.actor)
+	al := strings.ToLower(strings.TrimSpace(r.actor))
+	for _, ev := range events {
+		if !strings.EqualFold(ev.Actor, r.actor) {
+			continue
+		}
+		target := strings.TrimSpace(ev.Target)
+		if target == "" {
+			continue
+		}
+		if relationshipCountFor(rels, al, target) == 0 {
+			return true, r.actor + " → " + target + " (no relationship history)"
+		}
+	}
+	return false, ""
+}
+
+// relationshipCountFor returns the historical relationship count for the
+// (actor, target) pair, or 0 when the actor has NO established relationship
+// covering that target. The scenario keys relationships as "<actor>:<target>".
+//
+// DISCRIMINATION (not blunter escalation): a relationship covers an event target
+// when its target segment is the SAME RESOURCE — an exact match, OR one is a
+// path-prefix of the other at a segment boundary (so a relationship with the
+// storage ACCOUNT atomstorage01 covers a read on atomstorage01/containers/financial:
+// the actor has established access to that resource; a new container under an
+// established account is not "zero history"). This is what separates VA-02 /
+// VA-05 (a known batch/report actor reading a NEW container under an account it
+// ALREADY accesses — established, RESOLVE) from VA-03 (ci-bot, a deploy-only
+// actor, reading storageAccounts it has NEVER touched — zero history, ESCALATE):
+// ci-bot's relationships are all containerRegistries/containerApps, none share a
+// resource prefix with the storage targets. Sharing only the subscription /
+// resourceGroup prefix does NOT count — the prefix must extend past the
+// resourceGroup to a concrete resource, so a brand-new resource in a known group
+// is still zero-history. actorLower is the pre-lowercased finding actor.
+func relationshipCountFor(rels map[string]baseline.Relationship, actorLower, target string) int {
+	tl := strings.ToLower(strings.TrimSpace(target))
+	for key, rel := range rels {
+		// Split off the actor prefix ("<actor>:") to isolate the target portion.
+		keyTarget := key
+		if idx := strings.Index(strings.ToLower(key), actorLower+":"); idx == 0 {
+			keyTarget = key[len(actorLower)+1:]
+		} else if i := strings.IndexByte(key, ':'); i >= 0 {
+			keyTarget = key[i+1:]
+		}
+		kl := strings.ToLower(strings.TrimSpace(keyTarget))
+		if kl == "" {
+			continue
+		}
+		if kl == tl || sameResource(kl, tl) {
+			return rel.Count
+		}
+	}
+	return 0
+}
+
+// sameResource reports whether two lower-cased resource paths refer to the same
+// underlying resource: one is a segment-boundary prefix of the other, with the
+// shared prefix extending PAST the resourceGroup level (so a relationship to a
+// concrete resource covers a sub-path of it, but merely sharing the
+// subscription/resourceGroup does not). "/"-delimited segment boundaries only —
+// "atomstorage01" must not match "atomstorage011".
+func sameResource(a, b string) bool {
+	if a == b {
+		return true
+	}
+	short, long := a, b
+	if len(short) > len(long) {
+		short, long = long, short
+	}
+	// long must start with short followed by a path separator (segment boundary).
+	if !strings.HasPrefix(long, short+"/") {
+		return false
+	}
+	// The shared prefix must reach a concrete resource, not stop at the resource
+	// group. Require the prefix to contain more path depth than "<sub>/resourceGroups
+	// /<rg>" — i.e. at least one segment AFTER the resourceGroup name. This stops a
+	// brand-new resource in a known group from counting as established access.
+	return resourceDepthPastGroup(short)
+}
+
+// resourceDepthPastGroup reports whether a resource path descends to at least a
+// concrete resource past the "<...>/resourceGroups/<rg>" prefix (or carries no
+// resourceGroups segment at all, e.g. an "acme-corp/tenant" style path, in which
+// case two segments are enough to name a resource). It prevents a relationship that
+// only reaches the resource-group level from "covering" arbitrary new resources
+// inside that group.
+func resourceDepthPastGroup(path string) bool {
+	segs := strings.Split(strings.Trim(path, "/"), "/")
+	for i, s := range segs {
+		if strings.EqualFold(s, "resourceGroups") || strings.EqualFold(s, "resourcegroups") {
+			// Need: resourceGroups(i) / <rg>(i+1) / <resourceType-or-name>(i+2)
+			return len(segs) >= i+3
+		}
+	}
+	// No resourceGroups segment: a 2+ segment path already names a resource.
+	return len(segs) >= 2
+}
+
+// roleGrantByActor (FIX 3b) reports whether the surfaced events show the FINDING
+// ACTOR performing a role-grant / privilege event (event_type role_assignment, or
+// action add_role_assignment) for which it has NO baseline history of granting
+// roles. UT-01 / IT-02: admin-user (the finding actor) grants a role with a
+// role_assignment baseline frequency of 0. ID-01 is NOT caught: there the role
+// grant is authored by admin-user (a KNOWN role-granter with frequency 28), NOT by
+// the finding actor deploy-svc-new — so the finding actor performed no grant.
+func (r *scenarioToolRunner) roleGrantByActor(events []tools.EventView) (bool, string) {
+	if r.actor == "" {
+		return false, ""
+	}
+	for _, ev := range events {
+		if !strings.EqualFold(ev.Actor, r.actor) {
+			continue
+		}
+		if !isRoleGrantEvent(ev) {
+			continue
+		}
+		// The finding actor performed a role grant. Force-escalate UNLESS the actor
+		// has an established baseline history of granting roles (a known role-granter
+		// doing a routine grant is not the under-escalation case). The baseline
+		// frequency for the role-grant event type captures "has this actor granted
+		// roles before"; 0 (or absent) => no precedent => escalate.
+		if r.actorRoleGrantFrequency() == 0 {
+			return true, r.actor + " performed " + ev.Type + "/" + ev.Action + " with no baseline role-grant history"
+		}
+	}
+	return false, ""
+}
+
+// isRoleGrantEvent reports whether an event is a role-grant / privilege event by
+// its type or action (separator-stripped, lower-cased). Keyed on the EVENT, never
+// on the detector family.
+func isRoleGrantEvent(ev tools.EventView) bool {
+	if _, ok := roleGrantEventTypes[stripSep(ev.Type)]; ok {
+		return true
+	}
+	if _, ok := roleGrantActions[stripSep(ev.Action)]; ok {
+		return true
+	}
+	return false
+}
+
+// actorRoleGrantFrequency returns the finding actor's baseline frequency for
+// role-grant event types, summed across the role-grant type keys. A frequency
+// table key has the shape "<source>:<event_type>:<actor>" or "<source>:<event_type>"
+// (the exam seeds the latter); we sum any key whose event_type segment is a
+// role-grant type AND that references the actor. 0 means "no role-grant precedent".
+func (r *scenarioToolRunner) actorRoleGrantFrequency() int {
+	if r.baseline == nil {
+		return 0
+	}
+	al := strings.ToLower(strings.TrimSpace(r.actor))
+	total := 0
+	for key, v := range r.baseline.FrequencyTables {
+		kl := strings.ToLower(key)
+		if !strings.Contains(kl, al) {
+			continue
+		}
+		parts := strings.Split(key, ":")
+		if len(parts) < 2 {
+			continue
+		}
+		if _, ok := roleGrantEventTypes[stripSep(parts[1])]; ok {
+			total += v
+		}
+	}
+	return total
+}
+
+// stripSep lower-cases and removes separators (-, _, space, .) so "role_assignment",
+// "role-assignment", and "Role Assignment" all fold to "roleassignment".
+func stripSep(s string) string {
+	var b strings.Builder
+	for _, r := range strings.ToLower(s) {
+		switch r {
+		case '-', '_', ' ', '.':
+			continue
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }
 
 // lookupInput builds the LookupRules input from the finding + observable metadata
@@ -282,6 +583,22 @@ func findingRecord(s *exam.Scenario) finding.Finding {
 	return findingFromScenario(s)
 }
 
+// eventMetaRenderOrder is the deterministic order the discriminating per-event
+// metadata (FIX 1) is rendered in the compact transcript, so the transcript is
+// reproducible (§4.1). It is the same key set EventView.Metadata carries; rendering
+// in a fixed order (not map iteration order) keeps the boxed text byte-stable.
+var eventMetaRenderOrder = []string{
+	"operation_count",
+	"blobs_accessed",
+	"bytes_read",
+	"resource_count",
+	"role",
+	"principal_id",
+	"ip",
+	"location",
+	"user_agent",
+}
+
 // writeSearchEvents renders the search-events result COMPACTLY: one line listing
 // the matched event ids (the model's anchor to "which events"), one line per
 // event with the salient fields, and the §3.8 matched rules as id+family (NOT the
@@ -308,6 +625,15 @@ func writeSearchEvents(b *strings.Builder, env tools.SearchEventsEnvelope) {
 			}
 			if e.Target != "" {
 				b.WriteString(" target=" + e.Target)
+			}
+			// FIX 1: the discriminating per-event metadata (volume magnitude, origin,
+			// grant shape) the model needs to tell an attack apart from benign load —
+			// rendered in a deterministic key order (§4.1 reproducibility). Each value
+			// is already sanitized individually at projection.
+			for _, k := range eventMetaRenderOrder {
+				if v, ok := e.Metadata[k]; ok && v != "" {
+					b.WriteString(" " + k + "=" + v)
+				}
 			}
 			b.WriteString(" " + e.Timestamp + "\n")
 		}

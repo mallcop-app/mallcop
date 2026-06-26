@@ -60,6 +60,18 @@ type tierResult struct {
 	distinctTools int
 	toolEmpty     bool
 
+	// FIX 3 OBSERVABLE FORCE-ESCALATE signals — computed by the ToolRunner from the
+	// REAL tool output (relationships / surfaced events), carried through so the
+	// triage gate can FORCE a clean resolve to escalate on event content (zero
+	// relationship-history access; a role-grant by the finding actor). Keyed on the
+	// EVENT predicate, never on detector family. Trustworthy gate inputs: they come
+	// from the runtime's read of the tool result, not from the model or the
+	// untrusted transcript text.
+	zeroHistoryAccess bool
+	zeroHistoryDetail string
+	roleGrantByActor  bool
+	roleGrantDetail   string
+
 	// failSafe is true when the tier could not produce a trustworthy verdict
 	// (model error, empty/unparseable reply): the cascade must escalate, never
 	// resolve. reason carries the cause.
@@ -129,12 +141,21 @@ func runTierWithContext(ctx context.Context, client Client, f finding.Finding, t
 	res.toolCalls = evidence.ToolCalls
 	res.distinctTools = evidence.DistinctTools
 	res.toolEmpty = evidence.ToolEmpty
+	// FIX 3: carry the OBSERVABLE force-escalate predicates the runner computed from
+	// the real tool output so the triage gate can act on event content (cascade.go).
+	res.zeroHistoryAccess = evidence.ZeroHistoryAccess
+	res.zeroHistoryDetail = evidence.ZeroHistoryDetail
+	res.roleGrantByActor = evidence.RoleGrantByActor
+	res.roleGrantDetail = evidence.RoleGrantDetail
 
 	// (2) Build the user message. Every attacker-controlled string — the finding's
 	// title/reason/actor/type AND the tool transcript AND any parent transcript —
 	// is WrapUntrusted + sanitized so an injection payload riding in any of them is
 	// boxed in USER_DATA markers and cannot pose as a system instruction (§2.7 / §3).
-	req := buildTierRequest(f, model, systemPrompt, evidence.Text, extraContext)
+	// FIX 1: each tool result is boxed as its OWN field (baseline/events/findings)
+	// so the high-signal baseline + relationship evidence survives the per-field
+	// 1024-char cap instead of being truncated inside one concatenated blob.
+	req := buildTierRequest(f, model, systemPrompt, evidence, extraContext)
 
 	// (3) Call the model once.
 	resp, err := client.Messages(ctx, req)
@@ -182,10 +203,19 @@ func runTierWithContext(ctx context.Context, client Client, f finding.Finding, t
 
 // buildTierRequest assembles a tier's single MessagesRequest. The system prompt
 // is the ported POST.md (carrying the ## Security block). The user content boxes
-// every untrusted scalar of the finding plus the tool transcript in USER_DATA
+// every untrusted scalar of the finding plus EACH tool result in USER_DATA
 // markers via WrapUntrusted — the model sees them as data to analyze, never as
 // instructions to follow.
-func buildTierRequest(f finding.Finding, model, systemPrompt, toolText, parentTranscript string) MessagesRequest {
+//
+// FIX 1: each tool result is boxed as its OWN WrapUntrusted field (tools.baseline,
+// tools.events, tools.findings) — EACH independently sanitized + 1024-capped — so
+// the high-signal check-baseline + relationship evidence survives the per-field cap
+// instead of being truncated inside one concatenated tools.transcript blob (VA-03's
+// zero-history discriminator lived past char 1024 of the old single field). A
+// runner that only set the legacy ev.Text is still boxed as one tools.transcript
+// field (pre-FIX-1 behavior). The SECURITY INVARIANT holds: every field is still
+// WrapUntrusted + sanitized, and the verdict is parsed only from the model reply.
+func buildTierRequest(f finding.Finding, model, systemPrompt string, ev ToolEvidence, parentTranscript string) MessagesRequest {
 	var b strings.Builder
 	b.WriteString("Analyze this security finding and decide.\n\n")
 	// Each finding field that an attacker can influence is individually boxed.
@@ -201,9 +231,25 @@ func buildTierRequest(f finding.Finding, model, systemPrompt, toolText, parentTr
 	b.WriteString("\n")
 	b.WriteString(WrapUntrusted("finding.reason", f.Reason))
 	b.WriteString("\n")
-	if strings.TrimSpace(toolText) != "" {
+	if ev.hasPerToolText() {
+		// FIX 1: box EACH tool result as its OWN field, each independently sanitized
+		// + 1024-capped, so the salient baseline/relationship facts survive the cap.
+		if strings.TrimSpace(ev.BaselineText) != "" {
+			b.WriteString(WrapUntrusted("tools.baseline", ev.BaselineText))
+			b.WriteString("\n")
+		}
+		if strings.TrimSpace(ev.EventsText) != "" {
+			b.WriteString(WrapUntrusted("tools.events", ev.EventsText))
+			b.WriteString("\n")
+		}
+		if strings.TrimSpace(ev.FindingsText) != "" {
+			b.WriteString(WrapUntrusted("tools.findings", ev.FindingsText))
+			b.WriteString("\n")
+		}
+	} else if strings.TrimSpace(ev.Text) != "" {
+		// Legacy single-blob fallback (scriptedTools test seam, pre-FIX-1 runners).
 		// The tool transcript is the highest-risk injection vector (§3.8): box it.
-		b.WriteString(WrapUntrusted("tools.transcript", toolText))
+		b.WriteString(WrapUntrusted("tools.transcript", ev.Text))
 		b.WriteString("\n")
 	}
 	if strings.TrimSpace(parentTranscript) != "" {
