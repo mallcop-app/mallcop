@@ -80,6 +80,19 @@ func Run(ctx context.Context, cfg RunConfig) (HarnessReport, error) {
 		n = 3 // median-of-N default; single-run gating forbidden (§4.6)
 	}
 
+	// COMMITTEE-CONSENSUS GATE (work/parity-consensus): the harness runs the FULL
+	// production cascade, which now includes the 4-voter any-escalate-wins consensus
+	// gate on every RESOLVE. Default it ON (DefaultConsensusRuns=3 additional
+	// re-runs) unless a caller explicitly pinned ConsensusRuns. The re-runs force a
+	// non-zero ConsensusTemperature (consensus.go) so a real model samples
+	// independently; under golden responses (ModeCanned) the content-aware script
+	// returns the same per-tier verdict to every re-run, so a resolved scenario
+	// stays resolved unanimously (the gate is wired + exercised end-to-end without
+	// changing the merge-gate outcome).
+	if cfg.Opts.ConsensusRuns == 0 {
+		cfg.Opts.ConsensusRuns = agent.DefaultConsensusRuns
+	}
+
 	report := HarnessReport{
 		Mode:        cfg.Mode,
 		CorpusCount: corpus.Count,

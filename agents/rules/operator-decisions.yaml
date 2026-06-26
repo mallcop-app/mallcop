@@ -154,31 +154,28 @@ escalate_routes:
       is force-escalated so a finding flood (e.g. attacker noise drowning a real
       boundary violation) halts autonomous processing and reaches a human.
 
-  - id: "E-007"
-    family: "unusual-resource-access"
-    aliases: ["lateral-movement", "new-resource-access", "resource-access-anomaly"]
-    reason: |
-      Unusual resource access / lateral movement / new-resource-access always
-      requires human review. This restores legion's resolution_rules.py
-      _NEVER_AUTO_RESOLVE family: an actor reaching a resource it has never
-      touched (or moving laterally to a sibling resource) is the canonical
-      credential-theft / lateral-movement signature. The cheap triage model
-      pattern-matches "actor is known, resource is in the same account" and
-      resolves a genuine breach as routine; the floor removes that path. Fires
-      on family match alone — no metadata predicate — so EVERY such finding
-      escalates pre-LLM. No model involved.
-
-  - id: "E-008"
-    family: "new-external-access"
-    aliases: ["external-access", "new-external-trust"]
-    reason: |
-      New external access / new external trust always requires human review.
-      This restores legion's resolution_rules.py _NEVER_AUTO_RESOLVE family: a
-      new external identity or a new external trust relationship is how an
-      attacker establishes persistence or exfiltration. A model that reads
-      "external collaborator added" as benign onboarding misses a planted
-      backdoor; the floor escalates every such finding pre-LLM. Fires on family
-      match alone — no metadata predicate. No model involved.
+  # E-007 (unusual-resource-access / lateral-movement) and E-008
+  # (new-external-access / new-external-trust) were CUT in the committee-consensus
+  # realignment (work/parity-consensus). Both were PURE detector-family routes
+  # that force-escalated on family match alone with NO metadata predicate, so they
+  # over-escalated confirmed-benign scenarios (AC-04 vendor-onboarding, AC-05
+  # contractor-first-day, URA-04 sibling-rotation). Those families are now decided
+  # by the model + the 4-voter consensus gate, backstopped by EVENT-KEYED (not
+  # family-keyed) mechanisms that still catch the genuine attacks the routes
+  # targeted:
+  #   - the ZeroHistoryAccess observable predicate (cascade.go) forces any actor
+  #     touching a zero-relationship-history target off the cheap-triage terminal
+  #     resolve into investigate + GuardResolve + deep panel; and
+  #   - triageResolveMustEscalate() (triagerisk.go) catches the lateral-movement
+  #     malicious-shaped marker.
+  # The benign new-external-access case resolves via R-006 (hr_provisioning); the
+  # no-HR-record external backdoor is caught by the cascade's defense-in-depth
+  # (ZeroHistoryAccess → investigate → GuardResolve + deep panel + the 4-voter
+  # consensus gate), NOT by a pre-LLM family floor. A dedicated escalate-on-
+  # absence-of-HR corpus rule (the spec's recommended "R-009", an hr_provisioning
+  # != true predicate) is DEFERRED: the resolve-rules schema is equality-only and
+  # resolve-disposition-only — it cannot express a `!=` escalate predicate without
+  # a new rule type + loader + matcher. Tracked as a follow-up rd item.
 
 rules:
   - id: "R-001"

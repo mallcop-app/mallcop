@@ -134,7 +134,7 @@ func runFanOut(ctx context.Context, client Client, f finding.Finding, opts Casca
 		wg.Add(1)
 		go func(i int, h hypothesis) {
 			defer wg.Done()
-			results[i] = runDeepTier(ctx, client, f, deepModel, h, partial, opts.Tools)
+			results[i] = runDeepTier(ctx, client, f, deepModel, h, partial, opts.Tools, opts.ConsensusTemperature)
 		}(i, h)
 	}
 	wg.Wait()
@@ -148,9 +148,9 @@ func runFanOut(ctx context.Context, client Client, f finding.Finding, opts Casca
 // runDeepTier runs one deep-investigate tier with its directed hypothesis prior
 // and the parent's (boxed) partial transcript. deep-investigate is NON-terminal:
 // it returns a verdict for the merge, it never closes the finding itself.
-func runDeepTier(ctx context.Context, client Client, f finding.Finding, model string, h hypothesis, partial string, tools ToolRunner) deepResult {
+func runDeepTier(ctx context.Context, client Client, f finding.Finding, model string, h hypothesis, partial string, tools ToolRunner, temperature float64) deepResult {
 	system := deepInvestigateSystemPrompt(h.prior)
-	tr := runTierWithContext(ctx, client, f, "deep-investigate:"+h.name, model, system, tools, partial)
+	tr := runTierWithContext(ctx, client, f, "deep-investigate:"+h.name, model, system, tools, partial, temperature)
 	return deepResult{
 		hypothesis:      h.name,
 		verdict:         tr.verdict,

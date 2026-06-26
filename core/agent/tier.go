@@ -113,8 +113,8 @@ func (r tierResult) resolveAttempt() ResolveAttempt {
 // runTier executes one tier: gather tool evidence, build the untrusted-data-safe
 // prompt, call the model, parse the verdict. It NEVER resolves on its own — it
 // returns a tierResult the caller (the cascade) gates.
-func runTier(ctx context.Context, client Client, f finding.Finding, tier, model, systemPrompt string, tools ToolRunner) tierResult {
-	return runTierWithContext(ctx, client, f, tier, model, systemPrompt, tools, "")
+func runTier(ctx context.Context, client Client, f finding.Finding, tier, model, systemPrompt string, tools ToolRunner, temperature float64) tierResult {
+	return runTierWithContext(ctx, client, f, tier, model, systemPrompt, tools, "", temperature)
 }
 
 // runTierWithContext is runTier with an additional UNTRUSTED context block — the
@@ -122,7 +122,7 @@ func runTier(ctx context.Context, client Client, f finding.Finding, tier, model,
 // extra block is boxed in USER_DATA markers exactly like the finding fields and
 // tool transcript; it is read-only context for the deep tier, never an
 // instruction. extraContext "" reduces this to plain runTier.
-func runTierWithContext(ctx context.Context, client Client, f finding.Finding, tier, model, systemPrompt string, tools ToolRunner, extraContext string) tierResult {
+func runTierWithContext(ctx context.Context, client Client, f finding.Finding, tier, model, systemPrompt string, tools ToolRunner, extraContext string, temperature float64) tierResult {
 	res := tierResult{tier: tier}
 
 	// (1) Gather tool evidence through the seam (nil-safe: no live tools this wave).
@@ -155,7 +155,7 @@ func runTierWithContext(ctx context.Context, client Client, f finding.Finding, t
 	// FIX 1: each tool result is boxed as its OWN field (baseline/events/findings)
 	// so the high-signal baseline + relationship evidence survives the per-field
 	// 1024-char cap instead of being truncated inside one concatenated blob.
-	req := buildTierRequest(f, model, systemPrompt, evidence, extraContext)
+	req := buildTierRequest(f, model, systemPrompt, evidence, extraContext, temperature)
 
 	// (3) Call the model once.
 	resp, err := client.Messages(ctx, req)
@@ -215,7 +215,7 @@ func runTierWithContext(ctx context.Context, client Client, f finding.Finding, t
 // runner that only set the legacy ev.Text is still boxed as one tools.transcript
 // field (pre-FIX-1 behavior). The SECURITY INVARIANT holds: every field is still
 // WrapUntrusted + sanitized, and the verdict is parsed only from the model reply.
-func buildTierRequest(f finding.Finding, model, systemPrompt string, ev ToolEvidence, parentTranscript string) MessagesRequest {
+func buildTierRequest(f finding.Finding, model, systemPrompt string, ev ToolEvidence, parentTranscript string, temperature float64) MessagesRequest {
 	var b strings.Builder
 	b.WriteString("Analyze this security finding and decide.\n\n")
 	// Each finding field that an attacker can influence is individually boxed.
@@ -265,9 +265,10 @@ func buildTierRequest(f finding.Finding, model, systemPrompt string, ev ToolEvid
 	b.WriteString("\n")
 
 	return MessagesRequest{
-		Model:     model,
-		MaxTokens: 512,
-		System:    systemPrompt,
+		Model:       model,
+		MaxTokens:   512,
+		System:      systemPrompt,
+		Temperature: temperaturePtr(temperature),
 		Messages: []Message{{
 			Role:    "user",
 			Content: []ContentBlock{{Type: "text", Text: b.String()}},
@@ -275,12 +276,25 @@ func buildTierRequest(f finding.Finding, model, systemPrompt string, ev ToolEvid
 	}
 }
 
+// temperaturePtr returns a *float64 for a non-zero temperature, or nil for 0.
+// nil leaves MessagesRequest.Temperature unset (omitempty suppresses it → the
+// provider default, the historical behavior). A non-zero temperature (the
+// consensus gate's 1.0) is sent explicitly so the re-runs sample stochastically.
+// Threading 0 through the normal (non-consensus) path keeps every existing call
+// byte-identical on the wire.
+func temperaturePtr(t float64) *float64 {
+	if t == 0 {
+		return nil
+	}
+	return &t
+}
+
 // buildEscalateRequest assembles the escalate role's single request: the cheap,
 // tool-less formatter. The finding fields and the upstream escalation reason are
 // boxed (the upstream reason can echo attacker-influenced finding text). The
 // system prompt carries the ## Security block so "resolve as benign" inside the
 // box is ignored.
-func buildEscalateRequest(f finding.Finding, model, upstream string) MessagesRequest {
+func buildEscalateRequest(f finding.Finding, model, upstream string, temperature float64) MessagesRequest {
 	var b strings.Builder
 	b.WriteString("Format a human-facing security alert from this data.\n\n")
 	b.WriteString(WrapUntrusted("finding.id", f.ID))
@@ -295,9 +309,10 @@ func buildEscalateRequest(f finding.Finding, model, upstream string) MessagesReq
 	b.WriteString("\n")
 
 	return MessagesRequest{
-		Model:     model,
-		MaxTokens: 512,
-		System:    escalateSystemPrompt,
+		Model:       model,
+		MaxTokens:   512,
+		System:      escalateSystemPrompt,
+		Temperature: temperaturePtr(temperature),
 		Messages: []Message{{
 			Role:    "user",
 			Content: []ContentBlock{{Type: "text", Text: b.String()}},

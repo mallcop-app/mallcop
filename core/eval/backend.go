@@ -86,10 +86,10 @@ const (
 //	    investigate-RESOLVE-blocked → fan-out, the deep tiers escalate (malicious
 //	    with a strong indicator) so the panel escalates deterministically.
 //
-// A force-escalated scenario (priv-escalation / injection-probe / log-format-drift,
-// E-007 / E-008) makes ZERO model calls — the floor escalates pre-model — so the
-// script is never invoked for it; the merge-gate still passes on chain_action via
-// the floor.
+// A force-escalated scenario (priv-escalation / injection-probe / log-format-drift /
+// secrets-exposure / boundary-violation — the E-001..E-005 hard constraints) makes
+// ZERO model calls — the floor escalates pre-model — so the script is never invoked
+// for it; the merge-gate still passes on chain_action via the floor.
 func goldenScript(s *exam.Scenario) func(body []byte) string {
 	expectResolved := false
 	var mentions []string

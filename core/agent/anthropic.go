@@ -48,6 +48,16 @@ type MessagesRequest struct {
 	System    string    `json:"system,omitempty"`
 	Messages  []Message `json:"messages"`
 	Tools     []Tool    `json:"tools,omitempty"`
+	// Temperature is the sampling temperature. A POINTER so omitempty suppresses
+	// the field when nil — a nil temperature means "use the server/provider
+	// default" (the historical behavior; the GLM endpoint's documented default is
+	// ~0.95, already stochastic). A non-nil value overrides it. The consensus gate
+	// (consensus.go) sets this to 1.0 on its re-runs so the N independent
+	// investigations sample DIFFERENTLY from one another — without an explicit
+	// non-zero temperature, re-runs against a deterministic endpoint would return
+	// identical verdicts and consensus would be vacuous. Existing (non-consensus)
+	// calls leave it nil and are unaffected on the wire.
+	Temperature *float64 `json:"temperature,omitempty"`
 }
 
 // Message is one turn in the conversation.

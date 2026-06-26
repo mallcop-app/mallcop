@@ -180,9 +180,9 @@ func deepHypFromSystem(sys string) string {
 
 // blockedResolveFinding + blockedResolveOpts produce a finding that reaches
 // investigate (not a floor route) with SHALLOW tools so an investigate RESOLVE is
-// blocked by the structural gate (<0.55) and fans out. Type is unusual-login (a
-// NON-floor-routed family) — external-access is now an E-008 floor route that
-// would force-escalate pre-LLM and never reach the fan-out path under test.
+// blocked by the structural gate (<0.55) and fans out. Type is unusual-login, a
+// plain non-floor family chosen so the test exercises the fan-out path directly
+// (its exact family is immaterial to what is under test here).
 func blockedResolveFinding() finding.Finding {
 	return finding.Finding{
 		ID: "FANOUT-01", Type: "unusual-login", Severity: "high", Actor: "vendor-x",

@@ -151,21 +151,25 @@ func TestCorpus_SkipsLeadingUnderscorePaths(t *testing.T) {
 }
 
 // floorForcedBenignHard is the EXACT set of corpus scenarios authored
-// chain_action=resolved that the restored pre-LLM floor (E-007 / E-008,
-// parity-fixes FIX 1) force-escalates to a human. Under HONEST scoring (the
-// grader no longer auto-passes a force-escalate) these are the ONLY merge-gate
-// misses: a deliberate benign-hard precision cost, not a pipeline defect. The
-// merge-gate is allowed to show it; the set is pinned so a NEW miss on any other
-// scenario (a real regression) still fails the gate loudly.
-var floorForcedBenignHard = map[string]bool{
-	"AC-04-approved-vendor-onboarding": true, // E-008 (new-external-access)
-	"AC-05-contractor-first-day":       true, // E-008
-	"URA-04-sibling-resource-rotation": true, // E-007 (unusual-resource-access)
-}
+// chain_action=resolved that a pre-LLM family floor force-escalates to a human.
+//
+// COMMITTEE-CONSENSUS REALIGNMENT (work/parity-consensus): this set is now EMPTY.
+// The three scenarios that used to live here — AC-04 (vendor-onboarding), AC-05
+// (contractor-first-day), URA-04 (sibling-rotation) — were force-escalated by the
+// E-007 / E-008 detector-family floor routes, which were CUT. Those families now
+// reach the model + the 4-voter consensus gate and resolve via their golden
+// responses, so under golden scoring the merge-gate is fully green (pass rate 1.0)
+// with NO floor-forced benign-hard misses. The map is kept (empty) so the gate's
+// arithmetic — wantPass = corpus - len(floorForcedBenignHard) — stays self-
+// updating, and so that re-introducing ANY family floor that over-escalates a
+// benign-hard scenario must be reflected here explicitly or the gate fails loudly.
+var floorForcedBenignHard = map[string]bool{}
 
 // --- 3. END-TO-END MERGE-GATE: golden responses, median over N=3. The gate
-// scores HONESTLY — the 3 floor-forced benign-hard scenarios fail (expected
-// resolved, force-escalated by the floor), everything else passes. ------------
+// scores HONESTLY. After the E-007 / E-008 family-floor cut (work/parity-consensus)
+// the floorForcedBenignHard set is empty, so every scenario passes under golden
+// responses and the median pass rate is 1.0. The full production cascade — now
+// including the 4-voter consensus gate on every resolve — runs here end-to-end. --
 
 func TestHarness_MergeGate_GreenWithMedianOfN(t *testing.T) {
 	pinShippedRoot(t)
@@ -287,10 +291,10 @@ func TestHarness_MergeGate_GreenWithMedianOfN(t *testing.T) {
 	mustExist(t, filepath.Join(out, "classifier.json"))
 	// Spot-check one scenario's result JSON + transcript carries real chain data.
 	// Pick a scenario that actually REACHED the model: a force-escalated finding
-	// (e.g. the E-007/E-008 floor routes added in parity-fixes FIX 1) is escalated
-	// pre-LLM and correctly has NO model exchange — an empty transcript is the right
-	// behavior there, not a capture regression. The §4.7 "every model exchange
-	// captured" invariant is meaningful only for a finding that made model calls.
+	// (e.g. an E-001..E-005 hard-constraint route) is escalated pre-LLM and correctly
+	// has NO model exchange — an empty transcript is the right behavior there, not a
+	// capture regression. The §4.7 "every model exchange captured" invariant is
+	// meaningful only for a finding that made model calls.
 	var sample string
 	for _, res := range report.Runs[0].Results {
 		if !res.ForceEscalated && res.ModelCalls > 0 {

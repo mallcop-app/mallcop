@@ -267,10 +267,12 @@ func TestShippedCorpus_SeedsProvenRoutes(t *testing.T) {
 	// per-call via resolveFindingAt — no shared-global mutation.
 	root := repoRootFromTestFile(t)
 
-	proven := []string{"priv-escalation", "injection-probe", "log-format-drift", "boundary-violation",
-		// E-007 / E-008 restore legion's resolution_rules.py _NEVER_AUTO_RESOLVE
-		// families dropped from the original seed (parity-fixes FIX 1).
-		"unusual-resource-access", "new-external-access"}
+	// E-007 (unusual-resource-access) and E-008 (new-external-access) were CUT in
+	// the committee-consensus realignment — those families are now decided by the
+	// model + the 4-voter consensus gate, not a pre-LLM family floor. The proven
+	// always-escalate routes that REMAIN are the structural hard constraints
+	// (E-001..E-005; E-006 is the synthetic circuit-breaker, tested elsewhere).
+	proven := []string{"priv-escalation", "injection-probe", "log-format-drift", "boundary-violation", "secrets-exposure"}
 	for _, fam := range proven {
 		t.Run(fam, func(t *testing.T) {
 			spy := &spyClient{t: t, failOnUse: true}
@@ -286,48 +288,45 @@ func TestShippedCorpus_SeedsProvenRoutes(t *testing.T) {
 	}
 }
 
-// --- FIX 1 (restore the floor): the two _NEVER_AUTO_RESOLVE families the seed
-// dropped — unusual-resource-access (E-007) and new-external-access (E-008) —
-// now force-escalate PRE-LLM on FAMILY MATCH ALONE (no metadata predicate).
-// URA-02 and AC-02 are the malicious-hard scenarios these routes own; before the
-// fix they reached the cheap triage model and were resolved at model_calls=1.
-// The spy proves the model is NEVER called once the route fires. ----------------
+// --- COMMITTEE-CONSENSUS REALIGNMENT (work/parity-consensus): the two
+// detector-family floor routes E-007 (unusual-resource-access / lateral-movement)
+// and E-008 (new-external-access / new-external-trust) were CUT. Both fired on
+// FAMILY MATCH ALONE and over-escalated confirmed-benign scenarios (AC-04, AC-05,
+// URA-04). Post-cut these families must NO LONGER force-escalate pre-LLM — they
+// REACH the model, which decides (backed by the 4-voter consensus gate and the
+// event-keyed ZeroHistoryAccess / lateral-movement-marker mechanisms). This test
+// proves the routes are gone: a low-severity finding of each cut family/alias is
+// NOT force-escalated and the model IS reached (callCount >= 1). It is the exact
+// inverse of the old TestFix1_RestoredFloorRoutes_ForceEscalatePreLLM. ----------
 
-func TestFix1_RestoredFloorRoutes_ForceEscalatePreLLM(t *testing.T) {
+func TestConsensusRealignment_CutFloorRoutes_ReachModelNotForceEscalated(t *testing.T) {
 	root := repoRootFromTestFile(t)
 
-	cases := []struct {
-		name       string
-		family     string
-		wantRoute  string
-	}{
-		// E-007: canonical family + each alias must all force-escalate.
-		{"URA-02/unusual-resource-access", "unusual-resource-access", "E-007"},
-		{"URA-02/lateral-movement-alias", "lateral-movement", "E-007"},
-		{"URA-02/new-resource-access-alias", "new-resource-access", "E-007"},
-		{"URA-02/resource-access-anomaly-alias", "resource-access-anomaly", "E-007"},
-		// E-008: canonical family + each alias must all force-escalate.
-		{"AC-02/new-external-access", "new-external-access", "E-008"},
-		{"AC-02/external-access-alias", "external-access", "E-008"},
-		{"AC-02/new-external-trust-alias", "new-external-trust", "E-008"},
+	// The canonical families + every alias the cut E-007 / E-008 routes carried.
+	cutFamilies := []string{
+		// E-007 family + aliases.
+		"unusual-resource-access", "lateral-movement", "new-resource-access", "resource-access-anomaly",
+		// E-008 family + aliases.
+		"new-external-access", "external-access", "new-external-trust",
 	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			spy := &spyClient{t: t, failOnUse: true}
-			// No metadata on the finding: the route MUST fire on family alone.
-			f := finding.Finding{ID: tc.name, Type: tc.family, Severity: "high"}
+	for _, fam := range cutFamilies {
+		t.Run(fam, func(t *testing.T) {
+			// A benign spy that ANSWERS (failOnUse:false) — the model must now be
+			// reachable for these families. Low severity so the triagerisk severity
+			// gate does not itself force a deeper look (the point is the floor route
+			// is gone, not that the model resolves).
+			spy := &spyClient{t: t, failOnUse: false}
+			f := finding.Finding{ID: "cut-" + fam, Type: fam, Severity: "low",
+				Reason: "first observed access; evaluating context"}
 			res := resolveFindingAt(root, spy, f)
-			if !res.ForceEscalated {
-				t.Fatalf("%s must force-escalate pre-LLM on family match alone; got %+v", tc.family, res)
+			if res.ForceEscalated {
+				t.Fatalf("%s must NOT force-escalate pre-LLM (E-007/E-008 were cut); got %+v", fam, res)
 			}
-			if res.RouteID != tc.wantRoute {
-				t.Fatalf("%s must cite route %s; got RouteID=%q", tc.family, tc.wantRoute, res.RouteID)
+			if res.RouteID != "" {
+				t.Fatalf("%s must cite NO corpus route (the family floor was cut); got RouteID=%q", fam, res.RouteID)
 			}
-			if res.Action != ActionEscalated {
-				t.Fatalf("%s must escalate; got action=%q", tc.family, res.Action)
-			}
-			if spy.callCount != 0 {
-				t.Fatalf("%s reached the model (%d calls); the floor must short-circuit pre-LLM", tc.family, spy.callCount)
+			if spy.callCount < 1 {
+				t.Fatalf("%s must REACH the model now that the floor route is cut; got %d model calls", fam, spy.callCount)
 			}
 		})
 	}

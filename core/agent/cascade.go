@@ -114,6 +114,28 @@ type CascadeOptions struct {
 	// entry. Production never sets it; tests set it per-call to pin the corpus
 	// deterministically with NO shared-global mutation.
 	RepoRoot string
+
+	// ConsensusRuns is the number of ADDITIONAL independent re-runs the consensus
+	// gate (consensus.go) performs when the cascade RESOLVES a finding (terminal
+	// ActionProceed). 0 disables the gate — the single-pass cascade behavior, which
+	// is the default for direct ResolveFindingWith callers and every inner-cascade
+	// unit test that pins exact model-call counts. Production / the eval harness set
+	// it to 3 (the Python DEFAULT_CONSENSUS_RUNS) to get the 4-voter
+	// any-escalate-wins gate. The gate fires ONLY on ActionProceed (a resolve);
+	// it NEVER fires on an escalate (already going to a human). The re-runs are
+	// dispatched with ConsensusRuns=0 so the gate does not recurse.
+	ConsensusRuns int
+
+	// ConsensusTemperature is the sampling temperature applied to the consensus
+	// gate's re-runs (MANDATORY non-zero for the gate to be non-vacuous: at
+	// temperature 0 the N re-runs would return the same verdict and consensus would
+	// always unanimously agree with the original, including the original's
+	// mistakes). It is threaded into buildTierRequest / buildEscalateRequest only
+	// for the re-run options the gate constructs — the ORIGINAL (first) chain run
+	// leaves it 0 (nil MessagesRequest.Temperature → provider default, the existing
+	// behavior). 0 means "fill the default" (1.0) when the gate is active; a
+	// non-zero value overrides it. See consensus.go.
+	ConsensusTemperature float64
 }
 
 // defaulted returns a copy of o with empty model ids filled from the §1 defaults.
@@ -259,9 +281,38 @@ func ResolveFinding(ctx context.Context, client Client, f finding.Finding) Resol
 
 // ResolveFindingWith is ResolveFinding with explicit tiers + tools. ResolveFinding
 // delegates here with zero options (documented defaults, no live tools).
+//
+// CONSENSUS WRAPPER (committee-consensus parity, ports src/mallcop/consensus.py):
+// the full triage → investigate → fan-out cascade runs in resolveFindingInner.
+// When that inner cascade RESOLVES a finding (terminal ActionProceed) AND consensus
+// is enabled (opts.ConsensusRuns > 0), the resolve is intercepted here — before it
+// is returned — by the 4-voter any-escalate-wins gate (runConsensusGate): N=3
+// additional INDEPENDENT re-runs of the WHOLE cascade. If ANY re-run escalates (or
+// errors / returns no resolution), the original resolve is overridden to escalate.
+// The gate fires ONLY on a resolve (ActionProceed); an escalate is already going to
+// a human and is returned unchanged. This single wrapper cleanly covers all three
+// internal ActionProceed return sites (triage clean resolve, investigate
+// gate-cleared resolve, deep-panel majority resolve) without touching their logic.
+// The re-runs go through ResolveFindingWith (not resolveFindingInner) so each also
+// re-applies checkHardConstraints — a finding that slipped past a corpus route on
+// the first run gets a second chance to be caught — but with ConsensusRuns=0 so the
+// gate does not recurse.
 func ResolveFindingWith(ctx context.Context, client Client, f finding.Finding, opts CascadeOptions) Resolution {
 	opts = opts.defaulted()
 
+	res := resolveFindingInner(ctx, client, f, opts)
+	if res.Action == ActionProceed && opts.ConsensusRuns > 0 {
+		res = runConsensusGate(ctx, client, f, opts, res, opts.ConsensusRuns)
+	}
+	return res
+}
+
+// resolveFindingInner is the single-pass triage → investigate → fan-out cascade —
+// the body that produced ResolveFindingWith's result before the consensus wrapper
+// was added. It is the unit under test for every call-count / verdict-isolation
+// cascade test (those run with ConsensusRuns=0, i.e. no gate). opts is already
+// defaulted() by the caller.
+func resolveFindingInner(ctx context.Context, client Client, f finding.Finding, opts CascadeOptions) Resolution {
 	// Resolve the corpus root EXACTLY ONCE, here at entry, into an immutable local
 	// that is threaded through the floor for the rest of this invocation. After
 	// this point the cascade NEVER re-reads any process-global repo-root state, so
@@ -307,7 +358,7 @@ func ResolveFindingWith(ctx context.Context, client Client, f finding.Finding, o
 	// (triage escalate → investigate) and the asymmetry honest (ambiguity goes
 	// deeper, never silently dismissed). The fail-safe cause is carried forward in
 	// the handoff reason for the audit trail.
-	triage := runTier(ctx, client, f, "triage", opts.TriageModel, triageSystemPrompt, opts.Tools)
+	triage := runTier(ctx, client, f, "triage", opts.TriageModel, triageSystemPrompt, opts.Tools, opts.ConsensusTemperature)
 
 	if !triage.failSafe && triage.verdict == VerdictResolve {
 		// Triage resolve is conditional on the rubric: positive evidence,
@@ -406,7 +457,7 @@ func ResolveFindingWith(ctx context.Context, client Client, f finding.Finding, o
 	if strings.TrimSpace(triageHandoff) == "" {
 		triageHandoff = "triage escalated"
 	}
-	investigate := runTier(ctx, client, f, "investigate", opts.InvestigateModel, investigateSystemPrompt, opts.Tools)
+	investigate := runTier(ctx, client, f, "investigate", opts.InvestigateModel, investigateSystemPrompt, opts.Tools, opts.ConsensusTemperature)
 
 	if investigate.failSafe {
 		return escalate(ctx, client, f, opts, investigateStage,
@@ -469,7 +520,7 @@ const (
 func escalate(ctx context.Context, client Client, f finding.Finding, opts CascadeOptions, from stage, reason string) Resolution {
 	upstream := fmt.Sprintf("escalated by %s: %s", from, reason)
 
-	req := buildEscalateRequest(f, opts.EscalateModel, upstream)
+	req := buildEscalateRequest(f, opts.EscalateModel, upstream, opts.ConsensusTemperature)
 	alert := upstream
 	if client != nil {
 		if resp, err := client.Messages(ctx, req); err == nil {

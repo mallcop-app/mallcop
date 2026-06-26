@@ -121,13 +121,16 @@ func gradeAxes(exp *exam.ExpectedResolution, run ScenarioRun) StructuralAxes {
 	// HONEST SCORING: the terminal action is graded against the scenario's
 	// expected.chain_action with NO force-escalate auto-pass. A finding that the
 	// pre-LLM floor force-escalates is scored exactly like any other escalate — so
-	// an escalate on an expected-RESOLVED scenario (the benign-hard AC-04 / AC-05 /
-	// URA-04 onboarding/rotation cases the restored E-007 / E-008 routes now force
-	// to a human) is a FAIL, because the terminal action does not match the
-	// authored ground truth. That is the TRUE comparison to legion: the restored
-	// floor's benign-hard precision cost is REAL and the merge-gate is allowed to
-	// show it. (An earlier override graded these force-escalates as PASS, masking
-	// the cost; it was removed.)
+	// an escalate on an expected-RESOLVED scenario is a FAIL, because the terminal
+	// action does not match the authored ground truth. (An earlier override graded
+	// force-escalates as PASS, masking the cost; it was removed.)
+	//
+	// COMMITTEE-CONSENSUS REALIGNMENT (work/parity-consensus): the benign-hard
+	// AC-04 / AC-05 / URA-04 onboarding/rotation cases used to FAIL here because the
+	// E-007 / E-008 detector-family floor routes force-escalated them. Those routes
+	// were CUT; those families now reach the model + the 4-voter consensus gate and
+	// resolve via their golden responses, so under golden scoring they PASS and the
+	// floorForcedBenignHard set is empty.
 	if exp.ChainAction != "" {
 		switch {
 		case strings.EqualFold(exp.ChainAction, "escalate-or-stronger"):

@@ -1023,9 +1023,10 @@ func TestCascade_OneWayRatchet_DownstreamCannotUnescalate(t *testing.T) {
 	be.deep["incomplete"] = `{"action":"resolve","confidence":2,"positive_evidence":true,"reason":"no obvious data gap."}`
 	be.deep["malicious"] = `{"action":"escalate","confidence":5,"positive_evidence":false,"strong_evidence":true,"reason":"DECISIVE: lateral movement to a sibling resource with a freshly-minted persistent token — credential-theft signature."}`
 
-	// Type is a NON-floor-routed family (unusual-login) so the finding reaches the
-	// model and exercises the cascade's fan-out path. (lateral-movement is now an
-	// E-007 floor route that force-escalates pre-LLM — see operator-decisions.yaml.)
+	// Type is a plain non-floor family (unusual-login) so the finding reaches the
+	// model and exercises the cascade's fan-out path. (E-007 — unusual-resource-
+	// access / lateral-movement — was CUT in work/parity-consensus, so that family
+	// now also reaches the model; unusual-login keeps this test independent of that.)
 	f := finding.Finding{ID: "URA-02", Type: "unusual-login", Severity: "high", Actor: "svc-x", Source: "aws", Reason: "sibling-resource rotation"}
 	opts := agent.CascadeOptions{Tools: scriptedTools{text: "events: one event", toolCalls: 1, distinctTools: 1}}
 
@@ -1104,9 +1105,10 @@ func TestCascade_InvestigateResolve_BlockedByStructuralGate_FansOut(t *testing.T
 	be.deep["malicious"] = `{"action":"resolve","confidence":4,"positive_evidence":true,"reason":"no attack vector; source IP matches known automation."}`
 	be.deep["incomplete"] = `{"action":"resolve","confidence":4,"positive_evidence":true,"reason":"no missing data; companion events coherent."}`
 
-	// Type is a NON-floor-routed family (unusual-login) so the finding reaches the
-	// model and exercises the structural-gate fan-out path. (external-access is now
-	// an E-008 floor route that force-escalates pre-LLM — see operator-decisions.yaml.)
+	// Type is a plain non-floor family (unusual-login) so the finding reaches the
+	// model and exercises the structural-gate fan-out path. (E-008 — new-external-
+	// access — was CUT in work/parity-consensus, so that family now also reaches the
+	// model; unusual-login keeps this test independent of that.)
 	f := finding.Finding{ID: "AC-01", Type: "unusual-login", Severity: "high", Actor: "vendor-x", Source: "okta", Reason: "external access from new trust domain"}
 	opts := agent.CascadeOptions{Tools: scriptedTools{text: "events: one", toolCalls: 1, distinctTools: 1}}
 
