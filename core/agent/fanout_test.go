@@ -263,23 +263,66 @@ func TestFanOut_TwoBenignOneWeakMalicious_MajorityBenign_DissentCited(t *testing
 func TestFanOut_OneStrongMaliciousOutweighsTwoWeakBenign_Escalates(t *testing.T) {
 	root := useShippedCorpus(t)
 	be := newPanelBackend().withFanOutLeadIn()
-	// Two benign tiers concur — but WEAKLY (low self-confidence, the resolves are
-	// thin). The malicious tier escalates with a STRONG indicator. Aggregation, not
-	// count: the single strong malicious item must win.
-	be.deep["benign"] = `{"action":"resolve","confidence":2,"positive_evidence":true,"reason":"actor is known."}`
-	be.deep["incomplete"] = `{"action":"resolve","confidence":2,"positive_evidence":true,"reason":"no obvious gap."}`
+	// Two benign tiers concur — but WEAKLY. "Weak" now means NO POSITIVE EVIDENCE:
+	// both resolves are vacuous ("actor is known." / "no obvious gap.") and set
+	// positive_evidence:false. The malicious tier escalates with a STRONG indicator.
+	// The strong-malicious backstop is GATED on !anyPositiveEvidence(resolves): when
+	// the benign concurrences carry no positive evidence, the single strong malicious
+	// item wins (aggregation, not count). (CORRECTED from the prior encoding, which
+	// set positive_evidence:true on both resolves — that encoded the OLD ungated
+	// override that would unilaterally beat a POSITIVELY-evidenced benign majority.
+	// The new rule must NOT do that; a positively-evidenced benign majority resolves,
+	// so to keep asserting the strong-malicious backstop these concurrences must be
+	// genuinely weak = no positive evidence. See the companion test below.)
+	be.deep["benign"] = `{"action":"resolve","confidence":2,"positive_evidence":false,"reason":"actor is known."}`
+	be.deep["incomplete"] = `{"action":"resolve","confidence":2,"positive_evidence":false,"reason":"no obvious gap."}`
 	be.deep["malicious"] = `{"action":"escalate","confidence":5,"positive_evidence":false,"strong_evidence":true,"reason":"DECISIVE: a service principal with a persistent API key was created during the elevated window and the revert hid it — credential-persistence attack vector."}`
 
 	res := resolveAt(root, be, blockedResolveFinding(), shallowToolsOpts())
 
 	if res.Action != agent.ActionEscalated {
-		t.Fatalf("a single STRONG malicious indicator must ESCALATE even against 2 weak benign concurrences; got action=%q reason=%q", res.Action, res.Reason)
+		t.Fatalf("a single STRONG malicious indicator must ESCALATE against 2 WEAK (no-positive-evidence) benign concurrences; got action=%q reason=%q", res.Action, res.Reason)
 	}
 	if !strings.Contains(res.Reason, "STRONG malicious") {
 		t.Fatalf("the escalation must be attributed to the strong-malicious aggregation rule; got %q", res.Reason)
 	}
 	if res.ForceEscalated {
 		t.Fatalf("a panel escalation is a chain escalation, not a floor force-escalate; ForceEscalated must be false; got %+v", res)
+	}
+}
+
+// --- (c2) 1 STRONG malicious does NOT override a POSITIVELY-EVIDENCED benign
+// majority → the panel RESOLVES (CHANGE 3: the softened, gated backstop). This is
+// the new behavior the gating buys: a strong malicious read no longer unilaterally
+// vetoes a benign majority that carried real positive evidence of legitimacy. The
+// strong-malicious override is gated on !anyPositiveEvidence(resolves); here the two
+// resolving tiers DO carry positive evidence (named trigger + baseline match), so the
+// override is suppressed and the positively-evidenced majority resolves. ----------
+func TestFanOut_StrongMaliciousDoesNotOverridePositiveBenignMajority_Resolves(t *testing.T) {
+	root := useShippedCorpus(t)
+	be := newPanelBackend().withFanOutLeadIn()
+	// Two benign tiers concur with REAL positive evidence (named trigger, baseline
+	// match, dated provenance). The malicious tier escalates with strong_evidence —
+	// but because the benign majority is positively evidenced, the gated override does
+	// NOT fire and the majority-resolve (with positive evidence) stands.
+	be.deep["benign"] = `{"action":"resolve","confidence":4,"positive_evidence":true,"reason":"documented onboarding workflow on 2026-03-10; baseline frequency 412 for this exact action on this exact target."}`
+	be.deep["incomplete"] = `{"action":"resolve","confidence":4,"positive_evidence":true,"reason":"no missing data; companion events evt_001..evt_040 form the expected coherent sequence."}`
+	be.deep["malicious"] = `{"action":"escalate","confidence":5,"positive_evidence":false,"strong_evidence":true,"reason":"asserts a credential-persistence vector, but the benign tiers name the legitimate upstream trigger."}`
+
+	res := resolveAt(root, be, blockedResolveFinding(), shallowToolsOpts())
+
+	if res.Action != agent.ActionProceed {
+		t.Fatalf("a strong malicious indicator must NOT override a POSITIVELY-evidenced benign majority; expected resolve (ActionProceed); got action=%q reason=%q", res.Action, res.Reason)
+	}
+	if strings.Contains(res.Reason, "STRONG malicious") {
+		t.Fatalf("the gated override must NOT have fired against a positively-evidenced benign majority; got %q", res.Reason)
+	}
+	if !strings.Contains(res.Reason, "deep panel resolved") {
+		t.Fatalf("the resolution must be attributed to the deep panel majority resolve; got %q", res.Reason)
+	}
+	// The dissenting malicious tier (and its strong indicator) must still be cited.
+	if !strings.Contains(res.Reason, "Dissent (malicious) cited") {
+		t.Fatalf("the dissenting malicious tier must be cited in the resolve reason; got %q", res.Reason)
 	}
 }
 

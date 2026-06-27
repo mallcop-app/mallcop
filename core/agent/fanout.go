@@ -25,7 +25,7 @@
 //	[investigate-merge]  EVIDENCE AGGREGATION, not majority vote:
 //	   ├─ all 3 agree         → that verdict, confidence = max(3)
 //	   ├─ 2 vs 1              → majority, dissent's evidence cited, confidence −0.10
-//	   ├─ strong malicious    → escalate even against 2 weak benign (aggregation)
+//	   ├─ strong malicious    → escalate against WEAK (no-positive-evidence) benign (aggregation)
 //	   └─ 3 disagree          → HEAL (genuinely uncertain; terminal escalate w/ all evidence)
 //
 // INVARIANTS preserved here (each tested in fanout_test.go):
@@ -168,10 +168,14 @@ func runDeepTier(ctx context.Context, client Client, f finding.Finding, model st
 // suspicious / insufficient) so a genuine 3-way split routes to heal. Rules, in
 // priority order:
 //
-//  1. STRONG MALICIOUS OVERRIDE — if any deep tier flagged a decisive malicious
-//     indicator (strong_evidence + escalate), escalate, even against two benign
-//     concurrences. Aggregation, not count: one strong malicious item outweighs
-//     two benign ones.
+//  1. STRONG MALICIOUS OVERRIDE (gated backstop) — if a deep tier flagged a
+//     decisive malicious indicator (strong_evidence + escalate) AND no resolving
+//     tier carried positive evidence, escalate. Aggregation, not count: one strong
+//     malicious item outweighs WEAK (no-positive-evidence) benign concurrences. It
+//     does NOT override a benign majority that DID carry positive evidence — that
+//     case falls through to (3)/(4), which resolves a positively-evidenced majority
+//     and escalates an unevidenced one (the kill-switch). One coherent rule: a
+//     benign majority resolves IFF a resolving tier carries positive evidence.
 //  2. 3 DISAGREE — exactly one resolve, one suspicious, one insufficient: the
 //     system is genuinely uncertain → HEAL with all evidence (§1).
 //  3. ALL 3 AGREE on resolve — resolve; confidence = max(3) self-conf.
@@ -207,10 +211,19 @@ func mergeDeepResults(ctx context.Context, client Client, f finding.Finding, opt
 		}
 	}
 
-	// (1) STRONG MALICIOUS OVERRIDE — aggregation beats count.
-	if strongMalicious {
+	// (1) STRONG MALICIOUS OVERRIDE — the false-negative BACKSTOP, now gated to one
+	// coherent merge rule with the anyPositiveEvidence kill-switch below. It fires
+	// ONLY when NO resolving tier carried positive evidence of legitimacy — i.e. the
+	// doc's "a single strong malicious piece outweighs two WEAK benign concurrences"
+	// (weak == no positive evidence). A strong malicious indicator must NOT
+	// unilaterally override a benign majority that DID carry positive evidence: with
+	// the kill-switch at (3)/(4), a benign majority resolves IFF a resolving tier
+	// carries positive evidence; otherwise the merge escalates — and when that benign
+	// majority is itself unevidenced, this backstop attributes the escalation to the
+	// strong malicious read (richer audit) instead of the generic kill-switch.
+	if strongMalicious && !anyPositiveEvidence(resolves) {
 		return escalate(ctx, client, f, opts, investigateStage,
-			"deep panel: a single STRONG malicious indicator outweighs the other concurrences (evidence aggregation, not vote); escalating. Evidence: "+evidence)
+			"deep panel: a single STRONG malicious indicator outweighs the WEAK (no-positive-evidence) benign concurrences (evidence aggregation, not vote); escalating. Evidence: "+evidence)
 	}
 
 	nResolve := len(resolves)

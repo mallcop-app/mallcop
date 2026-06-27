@@ -47,10 +47,15 @@ type Transcript struct {
 
 // ConfidenceFanOutThreshold is the structural-confidence floor for a resolve. A
 // resolve scoring strictly below this is blocked and fans out to a deep panel.
-// 0.55 matches the investigate-tier threshold documented in
-// portable-agent-architecture.md §2.4 / §1 (RESOLVE is conditional on
-// confidence ≥ 0.55).
-const ConfidenceFanOutThreshold = 0.55
+// Lowered 0.55 → 0.45 to match the Python intent that fan-out is reserved for the
+// one genuinely-thin/dangerous path, not every concise benign resolve: a correct
+// benign resolve now clears at ~3 evidence-pattern hits (3×0.04 evidence + a
+// modest tool-call/distinct-tool contribution) instead of needing ~5, so a
+// well-evidenced-but-terse benign close is no longer fanned out unnecessarily.
+// The asymmetry is preserved: shallow resolves (≤1 tool call, no citations) still
+// score ~0.12 and remain blocked, and the fail-safe positive-evidence gate
+// (resolveguard.go) still escalates any resolve lacking positive evidence.
+const ConfidenceFanOutThreshold = 0.45
 
 // Score weights — ported verbatim from confidence.py so the Go gate calibrates
 // identically to the validated Python scorer.

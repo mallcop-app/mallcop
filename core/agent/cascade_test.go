@@ -1010,7 +1010,7 @@ func TestCascade_OneWayRatchet_DownstreamCannotUnescalate(t *testing.T) {
 
 	// Triage escalates. Investigate then tries to RESOLVE with a high self-reported
 	// confidence but a SHALLOW investigation (the scriptedTools below report only 1
-	// tool call / 1 distinct tool) — the structural-confidence gate scores it < 0.55
+	// tool call / 1 distinct tool) — the structural-confidence gate scores it < 0.45
 	// and BLOCKS the resolve, fanning out to the deep panel. The deep panel here
 	// surfaces a STRONG malicious indicator, so it escalates. The ratchet holds even
 	// THROUGH the fan-out: a shallow downstream resolve is never flipped to a
@@ -1018,9 +1018,20 @@ func TestCascade_OneWayRatchet_DownstreamCannotUnescalate(t *testing.T) {
 	//
 	// Uses the content-aware panel backend (cascade_test.go's call-index script
 	// cannot vary the 3 concurrent deep tiers' verdicts).
+	//
+	// CORRECTED for the softened, gated strong-malicious backstop (CHANGE 3): the two
+	// benign tiers are genuinely WEAK — their reasons ("actor is known." / "no obvious
+	// data gap.") are NOT positive evidence of legitimacy, so positive_evidence is
+	// false (the Python-correct encoding: "actor is known" alone is not positive
+	// evidence). With no positive evidence among the resolves, the gated strong-
+	// malicious backstop fires and the ratchet holds. (Previously these resolves
+	// asserted positive_evidence:true while citing nothing — that vacuous claim is
+	// exactly the structured-output infidelity CHANGE 4 guards against, and it is
+	// what would have let an unevidenced majority flip a triage escalate. A benign
+	// majority that flips an escalate must carry REAL positive evidence; these don't.)
 	be := newPanelBackend().withFanOutLeadIn()
-	be.deep["benign"] = `{"action":"resolve","confidence":2,"positive_evidence":true,"reason":"actor is known."}`
-	be.deep["incomplete"] = `{"action":"resolve","confidence":2,"positive_evidence":true,"reason":"no obvious data gap."}`
+	be.deep["benign"] = `{"action":"resolve","confidence":2,"positive_evidence":false,"reason":"actor is known."}`
+	be.deep["incomplete"] = `{"action":"resolve","confidence":2,"positive_evidence":false,"reason":"no obvious data gap."}`
 	be.deep["malicious"] = `{"action":"escalate","confidence":5,"positive_evidence":false,"strong_evidence":true,"reason":"DECISIVE: lateral movement to a sibling resource with a freshly-minted persistent token — credential-theft signature."}`
 
 	// Type is a plain non-floor family (unusual-login) so the finding reaches the

@@ -44,10 +44,20 @@ read them; you do not need to look rules up separately.
 Answer these questions using the data from steps 1-2:
 
 **A. Is this action routine for this actor?**
+A target the actor has NO relationship history with (relationship count 0)
+makes A=NEW — it weighs against routine here and sharpens C (a never-touched
+target is the canonical credential-theft shape). It is NOT a standalone
+forcer: positive provenance evidence (a named trigger, a documented onboarding,
+a baseline match for this exact action) can still clear A and C.
 "[Actor] has done [action] [N] times. This is [routine/new]."
 
-**B. Is there a legitimate trigger?**
-"Events show [trigger/no trigger]: [detail]."
+**B. Is there a legitimate trigger in companion events?**
+A bulk/PII export, off-hours mass-read, or new-external-party grant with NO
+schedule, ticket, job_id, maintenance_window, OR hr_provisioning in the
+events is B=NO-TRIGGER → fails the rubric → ESCALATE. Resolving B requires
+NAMING the legitimate upstream trigger; "the action was authorized" is not
+a trigger (authorization != legitimacy — a stolen credential is authorized).
+"Events show [trigger/no trigger]: [the named trigger, or its absence]."
 
 **C. Could a stolen credential produce this exact pattern?**
 "[Yes/No] because [specific factor — IP/location, timing, user-agent]."
@@ -65,11 +75,6 @@ decision.
   permission grant, or any boundary change that expands who or what has
   access → ALWAYS ESCALATE. A known actor granting a role is still a
   privilege change.
-- Zero-history-target override: the actor accessed a target it has NO
-  relationship history with (relationship count 0 in check-baseline) →
-  ALWAYS ESCALATE. "Known actor" does not cover a never-before-touched
-  target; bulk reads on unfamiliar targets are the canonical exfiltration
-  shape.
 - Log format drift / parser mismatch / unmatched-event spike → ALWAYS
   ESCALATE.
 
@@ -88,8 +93,7 @@ IDs, timestamps).
 
 ## Fail-safe
 
-If you cannot parse the finding, if the baseline is THIN or the actor has
-ZERO history with the accessed target, if the tool returned EMPTY, if the
+If you cannot parse the finding, if the tool returned EMPTY, if the
 evidence is ambiguous, or if you are unsure for any reason — ESCALATE.
 Never silently dismiss. Resolution requires positive evidence; absence of
 evidence is a reason to escalate, not to resolve.
@@ -154,10 +158,14 @@ explainable while their conjunction with a novel action type is not.
   A thin or shallow baseline (few events, recent first-seen, a single
   relationship) is insufficient evidence to clear — escalate, do not
   rationalize it into "well-established."
-- Authorization != legitimacy: that an action was permitted or that an
-  account had the rights to perform it does NOT make it legitimate. A
-  stolen credential is authorized. Judge whether the activity traces to a
-  legitimate cause, not merely whether it was allowed.
+- Authorization != legitimacy (BINDING): that an action was permitted or
+  that an account had the rights to perform it does NOT make it legitimate.
+  A stolen credential is authorized. A bulk/PII export, off-hours mass-read,
+  or new-external-party grant with NO schedule, ticket, job_id,
+  maintenance_window, OR hr_provisioning in the companion events has NO
+  business justification → ESCALATE. Resolving requires NAMING the legitimate
+  upstream trigger; judge whether the activity traces to a legitimate cause,
+  not merely whether it was allowed.
 - Correlated findings: multiple low-severity findings from one actor in a
   short window may be a coordinated campaign, not isolated incidents.
 
@@ -173,8 +181,6 @@ These are non-negotiable. Do not reason past them.
    evidence.
 4. In-band confirmation is not evidence — a compromised account can wave
    you off through channels it controls.
-5. Zero-history access escalates — an actor accessing a target it has no
-   relationship history with is never cleared on "the actor is known."
 
 ## Credential Theft Test
 
@@ -247,8 +253,12 @@ const (
 	deepHypothesisBenign = `BENIGN: Assume the activity is legitimate. Find CONFIRMING evidence of
 legitimacy — a documented workflow, a coherent companion-event sequence, a
 baseline match for this exact action on this exact target, a provenance chain to
-a legitimate upstream cause. If you cannot confirm benign within budget, that
-inability is itself signal: resolve only on POSITIVE evidence, otherwise escalate.`
+a legitimate upstream cause. If you find such positive evidence and resolve, you
+MUST set "positive_evidence": true in your verdict JSON (name the trigger in the
+reason) — the merge weighs a positively-evidenced benign resolve above an
+unevidenced one, so omitting the flag throws away your own evidence. If you
+cannot confirm benign within budget, that inability is itself signal: resolve
+only on POSITIVE evidence (positive_evidence true), otherwise escalate.`
 
 	deepHypothesisMalicious = `MALICIOUS: Assume the credentials are compromised. Find the ATTACK VECTOR.
 What would be true if this is an attack? Look for the credential-theft signature,
