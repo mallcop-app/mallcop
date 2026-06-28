@@ -26,6 +26,7 @@ import (
 	"github.com/mallcop-app/mallcop/core/agent"
 	"github.com/mallcop-app/mallcop/core/inference"
 	"github.com/mallcop-app/mallcop/internal/exam"
+	"github.com/mallcop-app/mallcop/pkg/baseline"
 )
 
 // repoRootForTest walks up from the test's working directory (the package dir
@@ -659,5 +660,92 @@ func TestRunScenario_Fix1_PerEventMetadataReachesModel(t *testing.T) {
 		if !strings.Contains(prompt, label) {
 			t.Fatalf("FIX 1: per-tool boxed field %q missing from prompt\n--- prompt ---\n%s", label, prompt)
 		}
+	}
+}
+
+// TestRunScenario_GroupLevelRelationship_NotZeroHistory proves the resource-group
+// relationship credit (the sibling-resource-rotation fix). A known actor accessing
+// a SIBLING leaf resource inside a resource GROUP it has STRONG, established history
+// with must NOT be classified zero-history — the group-level relationship covers the
+// new leaf. URA-04 (infra-admin, atom-rg group count 892, first touch on a new
+// sibling DB) and UT-07 (ops-engineer, atom-rg group count 467, cleanup inside the
+// group) are the benign over-escalations this credit unblocks. The CRITICAL
+// DISCRIMINATOR: URA-02 (ci-bot lateral movement) and VA-03 (ci-bot bulk exfil)
+// access the SAME resource group but ci-bot holds ONLY leaf relationships there (no
+// group-level key), so they MUST still trip zero-history → escalate. This is the
+// behavior-level guard that the credit did not over-narrow.
+func TestRunScenario_GroupLevelRelationship_NotZeroHistory(t *testing.T) {
+	root := repoRootForTest(t)
+	defer SetRepoRootForTest("")
+	agent.SetRepoRootForTest(root)
+	defer agent.SetRepoRootForTest("")
+
+	cases := []struct {
+		rel          string
+		wantZeroHist bool // true => still zero-history (lateral movement); false => credited
+	}{
+		// Benign sibling-rotation: established GROUP-LEVEL history covers the new leaf.
+		{"behavioral/URA-04-sibling-resource-rotation.yaml", false},
+		{"behavioral/UT-07-deploy-window-ops.yaml", false},
+		// Lateral movement / bulk exfil: LEAF-ONLY history in the group → still zero-history.
+		{"behavioral/URA-02-lateral-movement.yaml", true},
+		{"behavioral/VA-03-data-exfil.yaml", true},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.rel, func(t *testing.T) {
+			ls := loadScenarioForTest(t, root, tc.rel)
+			r, err := newScenarioToolRunner(t.TempDir(), root, ls.Scenario)
+			if err != nil {
+				t.Fatalf("new runner: %v", err)
+			}
+			ev, err := r.RunTools(context.Background(), "triage", findingFromScenario(ls.Scenario))
+			if err != nil {
+				t.Fatalf("RunTools: %v", err)
+			}
+			if ev.ZeroHistoryAccess != tc.wantZeroHist {
+				t.Fatalf("%s: ZeroHistoryAccess=%t want %t (detail=%q)", tc.rel, ev.ZeroHistoryAccess, tc.wantZeroHist, ev.ZeroHistoryDetail)
+			}
+		})
+	}
+}
+
+// TestRelationshipCountFor_GroupCreditDiscriminator unit-tests the predicate core:
+// an EXPLICIT established group-level relationship covers a sibling leaf; a LEAF-only
+// relationship in the same group does NOT grant group-wide credit; a below-floor
+// group touch does NOT; and a sibling resource group the actor never touched is NOT
+// covered.
+func TestRelationshipCountFor_GroupCreditDiscriminator(t *testing.T) {
+	const grp = "sub-1/resourcegroups/atom-rg"
+	const newLeaf = "sub-1/resourcegroups/atom-rg/flexibleservers/atom-db-staging"
+	const foreignLeaf = "sub-1/resourcegroups/other-rg/flexibleservers/x"
+
+	mk := func(entries map[string]int) map[string]baseline.Relationship {
+		m := map[string]baseline.Relationship{}
+		for k, v := range entries {
+			m[k] = baseline.Relationship{Count: v}
+		}
+		return m
+	}
+
+	// Established group-level relationship → covers the new sibling leaf.
+	if got := relationshipCountFor(mk(map[string]int{"infra-admin:" + grp: 892}), "infra-admin", newLeaf); got != 892 {
+		t.Fatalf("established group relationship must cover a sibling leaf; got %d want 892", got)
+	}
+	// Leaf-only relationships in the same group → NO group-wide credit for a NEW leaf.
+	leafOnly := mk(map[string]int{
+		"ci-bot:sub-1/resourcegroups/atom-rg/containerapps/atom-api": 380,
+		"ci-bot:sub-1/resourcegroups/atom-rg/containerapps/atom-bot": 280,
+	})
+	if got := relationshipCountFor(leafOnly, "ci-bot", newLeaf); got != 0 {
+		t.Fatalf("leaf-only history must NOT grant group-wide credit (lateral movement); got %d want 0", got)
+	}
+	// Below-floor group touch → not established → no credit.
+	if got := relationshipCountFor(mk(map[string]int{"x:" + grp: 3}), "x", newLeaf); got != 0 {
+		t.Fatalf("a below-floor group touch must not manufacture group trust; got %d want 0", got)
+	}
+	// Established group relationship does not cover a DIFFERENT group's resource.
+	if got := relationshipCountFor(mk(map[string]int{"infra-admin:" + grp: 892}), "infra-admin", foreignLeaf); got != 0 {
+		t.Fatalf("group credit must not cross into a group the actor never touched; got %d want 0", got)
 	}
 }

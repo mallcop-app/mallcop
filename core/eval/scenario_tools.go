@@ -416,35 +416,57 @@ func (r *scenarioToolRunner) zeroHistoryAccess(events []tools.EventView) (bool, 
 	return false, ""
 }
 
+// establishedGroupRelationshipFloor is the minimum relationship count an actor
+// must hold AT THE RESOURCE-GROUP LEVEL for a sibling-leaf access inside that
+// group to count as established (not zero-history). The two benign-hard scenarios
+// that this credit unblocks carry group-level counts well above it (URA-04
+// infra-admin: 892; UT-07 ops-engineer: 467), and the lateral-movement attacks
+// carry NO group-level entry at all (ci-bot's atom-rg history in URA-02 / VA-03 is
+// only LEAF entries — containerApps/containerRegistries — never a "<...>/
+// resourceGroups/atom-rg" key), so the discriminator is really the EXISTENCE of an
+// established group-level relationship. The floor is a conservative guard so a
+// single incidental group-scoped touch cannot manufacture group-wide trust; it is
+// set far below the legitimate counts (467/892) yet above one-off noise.
+const establishedGroupRelationshipFloor = 25
+
 // relationshipCountFor returns the historical relationship count for the
 // (actor, target) pair, or 0 when the actor has NO established relationship
 // covering that target. The scenario keys relationships as "<actor>:<target>".
 //
-// DISCRIMINATION (not blunter escalation): a relationship covers an event target
-// when its target segment is the SAME RESOURCE — an exact match, OR one is a
-// path-prefix of the other at a segment boundary (so a relationship with the
-// storage ACCOUNT atomstorage01 covers a read on atomstorage01/containers/financial:
-// the actor has established access to that resource; a new container under an
-// established account is not "zero history"). This is what separates VA-02 /
-// VA-05 (a known batch/report actor reading a NEW container under an account it
-// ALREADY accesses — established, RESOLVE) from VA-03 (ci-bot, a deploy-only
-// actor, reading storageAccounts it has NEVER touched — zero history, ESCALATE):
-// ci-bot's relationships are all containerRegistries/containerApps, none share a
-// resource prefix with the storage targets. Sharing only the subscription /
-// resourceGroup prefix does NOT count — the prefix must extend past the
-// resourceGroup to a concrete resource, so a brand-new resource in a known group
-// is still zero-history. actorLower is the pre-lowercased finding actor.
+// DISCRIMINATION (not blunter escalation), in two tiers:
+//
+//  1. SAME-RESOURCE (leaf) credit: a relationship covers an event target when its
+//     target segment is the SAME RESOURCE — an exact match, OR one is a path-prefix
+//     of the other at a segment boundary (a relationship with the storage ACCOUNT
+//     atomstorage01 covers a read on atomstorage01/containers/financial: a new
+//     container under an established account is not "zero history"). This separates
+//     VA-02 / VA-05 (a known batch/report actor reading a NEW container under an
+//     account it ALREADY accesses — established, RESOLVE) from VA-03 (ci-bot reading
+//     storageAccounts it has NEVER touched — its leaf relationships are all
+//     containerRegistries/containerApps, none sharing a resource prefix with the
+//     storage targets — zero history, ESCALATE).
+//
+//  2. RESOURCE-GROUP credit (this fix): an established relationship recorded AT the
+//     resource-group path "<sub>/resourceGroups/<rg>" (count >= the established
+//     floor) covers ANY leaf resource inside that same group. This is what an
+//     owner/manager of the group has: the actor rotates through resources it owns,
+//     so first-touch on a newly provisioned SIBLING leaf is expected, not lateral
+//     movement. URA-04 (infra-admin manages atom-rg, group count 892, first access
+//     to atom-db-staging) and UT-07 (ops-engineer manages atom-rg, group count 467,
+//     cleanup deletes inside it) RESOLVE on this. The discriminator that keeps
+//     lateral movement escalating: the credit requires an EXPLICIT group-level
+//     relationship key. URA-02 / VA-03 ci-bot has only LEAF entries inside atom-rg
+//     (no "<...>/resourceGroups/atom-rg" key), so it gets NO group credit and stays
+//     zero-history → ESCALATE. Sharing only the subscription / resourceGroup PATH
+//     via prefix is still NOT enough on its own (sameResource rejects it); the actor
+//     must have an actual, established group-scoped relationship.
+//
+// actorLower is the pre-lowercased finding actor.
 func relationshipCountFor(rels map[string]baseline.Relationship, actorLower, target string) int {
 	tl := strings.ToLower(strings.TrimSpace(target))
+	// Tier 1: exact + same-resource (leaf) credit.
 	for key, rel := range rels {
-		// Split off the actor prefix ("<actor>:") to isolate the target portion.
-		keyTarget := key
-		if idx := strings.Index(strings.ToLower(key), actorLower+":"); idx == 0 {
-			keyTarget = key[len(actorLower)+1:]
-		} else if i := strings.IndexByte(key, ':'); i >= 0 {
-			keyTarget = key[i+1:]
-		}
-		kl := strings.ToLower(strings.TrimSpace(keyTarget))
+		kl := relationshipKeyTarget(key, actorLower)
 		if kl == "" {
 			continue
 		}
@@ -452,7 +474,76 @@ func relationshipCountFor(rels map[string]baseline.Relationship, actorLower, tar
 			return rel.Count
 		}
 	}
+	// Tier 2: resource-group credit. The actor holds an ESTABLISHED relationship at
+	// the resource-group level that contains this target → a sibling-leaf access in a
+	// group the actor manages is established, not zero-history.
+	for key, rel := range rels {
+		if rel.Count < establishedGroupRelationshipFloor {
+			continue
+		}
+		kl := relationshipKeyTarget(key, actorLower)
+		if kl == "" {
+			continue
+		}
+		if groupRelationshipCovers(kl, tl) {
+			return rel.Count
+		}
+	}
 	return 0
+}
+
+// relationshipKeyTarget isolates the target portion of an "<actor>:<target>"
+// relationship key (lower-cased, trimmed). It strips the actor prefix when present,
+// else splits on the first ':'. Returns "" when there is no target portion.
+func relationshipKeyTarget(key, actorLower string) string {
+	keyTarget := key
+	if idx := strings.Index(strings.ToLower(key), actorLower+":"); idx == 0 {
+		keyTarget = key[len(actorLower)+1:]
+	} else if i := strings.IndexByte(key, ':'); i >= 0 {
+		keyTarget = key[i+1:]
+	}
+	return strings.ToLower(strings.TrimSpace(keyTarget))
+}
+
+// groupRelationshipCovers reports whether relTarget is a RESOURCE-GROUP-level path
+// ("<sub>/resourceGroups/<rg>", i.e. it STOPS at the resource group with no deeper
+// resource segment) that CONTAINS the accessed target (target descends into that
+// same group at a segment boundary). Both args are lower-cased.
+//
+// This is the precise complement of sameResource's "must extend past the group"
+// rule: sameResource deliberately refuses to credit a group-level prefix as a
+// concrete-resource match (so a NEW resource in a known group is zero-history under
+// the leaf rule); groupRelationshipCovers is the SEPARATE, narrower credit that
+// fires ONLY for an explicit established group-level relationship — the manager case.
+// It does NOT fire for a leaf relationship (those have depth past the group, so
+// relationshipIsGroupLevel is false), keeping VA-03 / URA-02 (leaf-only history)
+// zero-history.
+func groupRelationshipCovers(relTarget, target string) bool {
+	if !relationshipIsGroupLevel(relTarget) {
+		return false
+	}
+	// The accessed target must be a STRICT descendant of the group path (a deeper
+	// resource inside the group), bounded at a segment boundary so "atom-rg" does not
+	// spuriously cover "atom-rg-2".
+	return strings.HasPrefix(target, relTarget+"/")
+}
+
+// relationshipIsGroupLevel reports whether a resource path is exactly a resource-
+// group path: it contains a "resourceGroups/<rg>" pair and STOPS there (no concrete
+// resource segment after the group name). That is the shape of a manager/owner's
+// group-scoped relationship. A leaf relationship (one segment past the group, e.g.
+// ".../resourceGroups/atom-rg/containerApps/atom-api") is NOT group-level — so a
+// deploy-only actor's leaf history never grants group-wide credit.
+func relationshipIsGroupLevel(path string) bool {
+	segs := strings.Split(strings.Trim(path, "/"), "/")
+	for i, s := range segs {
+		if strings.EqualFold(s, "resourceGroups") {
+			// Group-level iff the path ends at the <rg> name: segment i is
+			// "resourceGroups", i+1 is the group name, and there is nothing after it.
+			return len(segs) == i+2
+		}
+	}
+	return false
 }
 
 // sameResource reports whether two lower-cased resource paths refer to the same

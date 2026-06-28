@@ -48,7 +48,15 @@ A target the actor has NO relationship history with (relationship count 0)
 makes A=NEW — it weighs against routine here and sharpens C (a never-touched
 target is the canonical credential-theft shape). It is NOT a standalone
 forcer: positive provenance evidence (a named trigger, a documented onboarding,
-a baseline match for this exact action) can still clear A and C.
+a baseline match for this exact action) can still clear A and C. A first access
+to a SIBLING resource inside a resource GROUP the actor has ESTABLISHED history
+with (a high relationship count on the parent ".../resourceGroups/<rg>" path, or
+established relationships to the other resources in that group) is routine
+rotation, NOT a never-touched target — credit the group history and keep A=routine.
+But "the actor is known/routine" does NOT by itself clear a HIGH-VOLUME bulk/PII
+read or an off-hours mass operation: that specific anomalous action needs its own
+trigger (schedule / ticket / job_id / maintenance_window) in the companion events
+— without one, A does not clear it (see B).
 "[Actor] has done [action] [N] times. This is [routine/new]."
 
 **B. Is there a legitimate trigger in companion events?**
@@ -158,6 +166,22 @@ explainable while their conjunction with a novel action type is not.
   A thin or shallow baseline (few events, recent first-seen, a single
   relationship) is insufficient evidence to clear — escalate, do not
   rationalize it into "well-established."
+- Resource-group provenance is POSITIVE evidence (credit it): a FIRST access
+  to a target is NOT zero-history when the actor holds ESTABLISHED history with
+  the resource GROUP that contains it (a high relationship count on the parent
+  "<...>/resourceGroups/<rg>" path, or established relationships to the sibling
+  resources in that same group). An owner/manager rotating onto a newly
+  provisioned SIBLING resource inside a group it manages is expected behavior.
+  When (the actor has established resource-group history) AND (the companion
+  events form a coherent legitimate maintenance/workflow sequence — a named
+  job_id, schedule, ticket, or maintenance_window threading the events), that
+  combination IS positive evidence of legitimacy → RESOLVE (set
+  positive_evidence true, name the group + the trigger). Do NOT escalate solely
+  because the exact leaf target is first-seen. This credit is SCOPED: it applies
+  ONLY to a sibling inside a group the actor genuinely manages. It does NOT
+  apply to a resource group the actor has NO established history with — accessing
+  a group the actor never touched (a deploy-only actor enumerating storage /
+  secrets / VMs it has never used) is lateral movement and still ESCALATES.
 - Authorization != legitimacy (BINDING): that an action was permitted or
   that an account had the rights to perform it does NOT make it legitimate.
   A stolen credential is authorized. A bulk/PII export, off-hours mass-read,
@@ -166,6 +190,15 @@ explainable while their conjunction with a novel action type is not.
   business justification → ESCALATE. Resolving requires NAMING the legitimate
   upstream trigger; judge whether the activity traces to a legitimate cause,
   not merely whether it was allowed.
+- Known actor does NOT exempt an unexplained anomalous action (BINDING): "the
+  actor is routine / well-characterized" clears only the actions that ARE
+  routine for it. A HIGH-VOLUME bulk/PII read, an off-hours mass operation, or a
+  novel out-of-scope action by a KNOWN actor still needs ITS OWN justification —
+  a schedule, ticket, job_id, or maintenance_window in the companion events that
+  explains THIS specific action. A strong baseline of OTHER activity (logins,
+  deploys, prior resolutions) is not that justification. If the specific
+  anomalous action has no companion trigger of its own, "the actor is known" is
+  not a resolution → ESCALATE.
 - Correlated findings: multiple low-severity findings from one actor in a
   short window may be a coordinated campaign, not isolated incidents.
 
@@ -253,12 +286,20 @@ const (
 	deepHypothesisBenign = `BENIGN: Assume the activity is legitimate. Find CONFIRMING evidence of
 legitimacy — a documented workflow, a coherent companion-event sequence, a
 baseline match for this exact action on this exact target, a provenance chain to
-a legitimate upstream cause. If you find such positive evidence and resolve, you
-MUST set "positive_evidence": true in your verdict JSON (name the trigger in the
-reason) — the merge weighs a positively-evidenced benign resolve above an
-unevidenced one, so omitting the flag throws away your own evidence. If you
-cannot confirm benign within budget, that inability is itself signal: resolve
-only on POSITIVE evidence (positive_evidence true), otherwise escalate.`
+a legitimate upstream cause. Established resource-GROUP history counts as positive
+provenance: an actor with a high relationship count on the parent
+".../resourceGroups/<rg>" path (or established relationships to the sibling
+resources in that group) accessing a NEWLY provisioned sibling leaf inside that
+same group is expected rotation, not a first-seen anomaly — when that pairs with a
+coherent companion sequence (a job_id / schedule / maintenance_window threading
+the events), resolve with positive_evidence true. This credit is scoped to a group
+the actor genuinely manages; do NOT extend it to a group the actor has no history
+with. If you find such positive evidence and resolve, you MUST set
+"positive_evidence": true in your verdict JSON (name the trigger in the reason) —
+the merge weighs a positively-evidenced benign resolve above an unevidenced one,
+so omitting the flag throws away your own evidence. If you cannot confirm benign
+within budget, that inability is itself signal: resolve only on POSITIVE evidence
+(positive_evidence true), otherwise escalate.`
 
 	deepHypothesisMalicious = `MALICIOUS: Assume the credentials are compromised. Find the ATTACK VECTOR.
 What would be true if this is an attack? Look for the credential-theft signature,
