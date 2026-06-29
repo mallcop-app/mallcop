@@ -15,6 +15,7 @@ import (
 	"github.com/mallcop-app/mallcop/core/inference"
 	"github.com/mallcop-app/mallcop/core/pipeline"
 	"github.com/mallcop-app/mallcop/core/store"
+	"github.com/mallcop-app/mallcop/core/toolrun"
 	"github.com/mallcop-app/mallcop/pkg/baseline"
 	"github.com/mallcop-app/mallcop/pkg/finding"
 	"github.com/mallcop-app/mallcop/pkg/resolution"
@@ -136,7 +137,20 @@ func runScan(args []string) error {
 		// re-runs the cascade DefaultConsensusRuns more times and any-escalate-wins.
 		// Validated to cut missed attacks 9→2 on the eval corpus under the
 		// asymmetric error policy (false-negatives catastrophic).
-		Cascade: agent.CascadeOptions{ConsensusRuns: agent.DefaultConsensusRuns},
+		//
+		// Tools: the PRODUCTION ToolRunner (core/toolrun). It gives the live cascade
+		// the SAME tool surface the eval scenarioToolRunner gives the bakeoff —
+		// search-events (folding operator rules §3.8), check-baseline, search-findings
+		// over the live store + baseline — and computes the observable force-escalate
+		// predicates via the SHARED core/observe package, so the validated 83.9% /
+		// 2-missed-attacks transfers (proven byte-identical in core/eval/parity_test.go).
+		// RepoRoot="" lets SearchEventsWrapped resolve the operator-decisions corpus via
+		// the production os.Executable binary-walk. Nil-safe: omitting Tools runs
+		// tools-off (finding-context-only with fail-safe escalation).
+		Cascade: agent.CascadeOptions{
+			ConsensusRuns: agent.DefaultConsensusRuns,
+			Tools:         &toolrun.Runner{Store: st, Baseline: bl, RepoRoot: ""},
+		},
 	})
 	if err != nil {
 		return fmt.Errorf("scan: %w", err)
