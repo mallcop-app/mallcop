@@ -1,0 +1,32 @@
+[
+  {
+    "id": "EVT-MEMBER-RM-1",
+    "type": "MemberEvent",
+    "actor": { "login": "admin-user" },
+    "repo": { "name": "acme-corp/webapp" },
+    "org": { "login": "acme-corp" },
+    "created_at": "__TS3__",
+    "payload": {
+      "action": "removed",
+      "member": { "login": "former-dev" }
+    }
+  },
+  {
+    "id": "EVT-PUBLIC-1",
+    "type": "PublicEvent",
+    "actor": { "login": "admin-user" },
+    "repo": { "name": "acme-corp/secretproject" },
+    "org": { "login": "acme-corp" },
+    "created_at": "__TS4__",
+    "payload": {}
+  },
+  {
+    "id": "EVT-UNKNOWN-1",
+    "type": "WatchEvent",
+    "actor": { "login": "random-user" },
+    "repo": { "name": "acme-corp/webapp" },
+    "org": { "login": "acme-corp" },
+    "created_at": "__TS5__",
+    "payload": { "action": "started" }
+  }
+]

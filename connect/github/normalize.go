@@ -1,0 +1,288 @@
+package github
+
+import (
+	"encoding/json"
+	"strings"
+	"time"
+
+	"github.com/mallcop-app/mallcop/pkg/event"
+)
+
+// ghEvent is the subset of a GitHub Event object (the /orgs/{org}/events feed) we
+// normalize. payload is kept raw so action-bearing sub-objects can be inspected.
+type ghEvent struct {
+	ID        string `json:"id"`
+	Type      string `json:"type"`
+	CreatedAt string `json:"created_at"`
+	Actor     struct {
+		Login string `json:"login"`
+	} `json:"actor"`
+	Repo struct {
+		Name string `json:"name"`
+	} `json:"repo"`
+	Org struct {
+		Login string `json:"login"`
+	} `json:"org"`
+	Payload json.RawMessage `json:"payload"`
+}
+
+// auditEntry is the subset of a GitHub audit-log entry we normalize. Timestamps
+// are epoch-ms in @timestamp / created_at.
+type auditEntry struct {
+	Action     string          `json:"action"`
+	Actor      string          `json:"actor"`
+	Org        string          `json:"org"`
+	Repo       string          `json:"repo"`
+	User       string          `json:"user"`
+	DocumentID string          `json:"_document_id"`
+	Timestamp  json.Number     `json:"@timestamp"`
+	CreatedAt  json.Number     `json:"created_at"`
+	Raw        json.RawMessage `json:"-"`
+}
+
+// normalizedType is the routing gate every detector keys on first. These MUST be
+// the EXACT gate constants the detectors in core/detect compare against:
+//
+//   - "push"                      -> git_oops (also branch_delete/tag_delete)
+//   - "member_added"              -> priv_escalation + new_actor (elevation + new principal)
+//   - "collaborator_added"        -> priv_escalation
+//   - "permission_change"         -> priv_escalation
+//   - "collaborator_removed"      -> (benign; no detector gate — inert)
+//   - "repo_visibility_changed"   -> (informational)
+//   - "repo.add_collaborator"     -> new_external_access
+//   - "org.add_member"            -> new_external_access
+//   - "org.add_outside_collaborator" -> new_external_access
+//   - "secret_scanning_alert"     -> (informational)
+//   - "github_other"              -> benign catch-all (detectors gate on specific
+//     types, so unknowns are inert, never crash)
+//
+// Verified against core/detect: priv_escalation.elevationEventTypes,
+// new_actor.entityCreationEventTypes, new_external_access.externalAccessEventTypes,
+// git_oops gate ("push"/"branch_delete"/"tag_delete").
+
+// eventTypeMap maps GitHub Event object "type" values (the events feed) to the
+// normalized vocabulary. Action-qualified GitHub events (MemberEvent.added vs
+// removed) are disambiguated in classifyEventType using the payload "action".
+var eventTypeMap = map[string]string{
+	"PushEvent":                "push",
+	"PublicEvent":              "repo_visibility_changed",
+	"SecretScanningAlertEvent": "secret_scanning_alert",
+}
+
+// auditActionMap ports connector.py:_ACTION_MAP (audit-log action prefixes ->
+// normalized types). Longest-prefix / equality match, evaluated in order.
+var auditActionMap = []struct{ prefix, ty string }{
+	{"org.add_member", "org.add_member"},
+	{"org.add_outside_collaborator", "org.add_outside_collaborator"},
+	{"repo.add_member", "collaborator_added"},
+	{"repo.add_collaborator", "repo.add_collaborator"},
+	{"org.remove_member", "collaborator_removed"},
+	{"repo.access", "repo_visibility_changed"},
+	{"protected_branch.", "branch_protection_changed"},
+	{"deploy_key.create", "deploy_key_added"},
+	{"oauth_authorization.create", "oauth_app_authorized"},
+	{"secret_scanning_alert.create", "secret_scanning_alert"},
+	{"dependabot_alert.create", "dependabot_alert"},
+	{"git.push", "push"},
+	{"team.", "permission_change"},
+	{"org.update_member", "permission_change"},
+}
+
+// classifyAuditAction maps an audit-log action string to a normalized type.
+func classifyAuditAction(action string) string {
+	for _, m := range auditActionMap {
+		if action == m.prefix || strings.HasPrefix(action, m.prefix) {
+			return m.ty
+		}
+	}
+	return defaultEventTy
+}
+
+// memberPayload is the action-bearing sub-object of MemberEvent / OrgEvent.
+type memberPayload struct {
+	Action string `json:"action"`
+	Member struct {
+		Login string `json:"login"`
+	} `json:"member"`
+	Membership struct {
+		User struct {
+			Login string `json:"login"`
+		} `json:"user"`
+		Role string `json:"role"`
+	} `json:"membership"`
+}
+
+// classifyEventType maps a GitHub Event object to a normalized type, using the
+// payload action to disambiguate add/remove on MemberEvent/OrgEvent.
+func classifyEventType(ghType string, payload json.RawMessage) (normType string, mp memberPayload) {
+	_ = json.Unmarshal(payload, &mp)
+	switch ghType {
+	case "MemberEvent":
+		// repo collaborator add/remove. add -> new external access; remove benign.
+		switch mp.Action {
+		case "removed":
+			return "collaborator_removed", mp
+		default: // "added", "edited"
+			return "repo.add_collaborator", mp
+		}
+	case "OrgEvent":
+		switch mp.Action {
+		case "member_removed", "member_invited":
+			return "collaborator_removed", mp
+		default: // member_added
+			return "org.add_member", mp
+		}
+	case "TeamAddEvent":
+		return "permission_change", mp
+	}
+	if t, ok := eventTypeMap[ghType]; ok {
+		return t, mp
+	}
+	return defaultEventTy, mp
+}
+
+// synthPayload is the FLAT per-detector payload the connector emits. It is shaped
+// for the detector typed structs: payloadMeta returns this top-level map (no
+// "metadata" key), and the detectors read role/permission/target_user/action/ip
+// from it (priv_escalation.readPrivPayload, new_external_access metadata reads,
+// new_actor payloadMeta). The verbatim GitHub object is preserved under "raw".
+type synthPayload struct {
+	Action          string          `json:"action,omitempty"`
+	Role            string          `json:"role,omitempty"`
+	RoleName        string          `json:"role_name,omitempty"`
+	Permission      string          `json:"permission,omitempty"`
+	PermissionLevel string          `json:"permission_level,omitempty"`
+	TargetUser      string          `json:"target_user,omitempty"`
+	Collaborator    string          `json:"collaborator,omitempty"`
+	DisplayName     string          `json:"display_name,omitempty"`
+	PrincipalID     string          `json:"principal_id,omitempty"`
+	Repo            string          `json:"repo,omitempty"`
+	Org             string          `json:"org,omitempty"`
+	Raw             json.RawMessage `json:"raw,omitempty"`
+}
+
+// normalizeEvent normalizes one GitHub Event object (events feed) to event.Event.
+// Returns ok=false when the entry has no usable timestamp (skipped, not
+// zero-valued — port connector.py:223-226).
+func normalizeEvent(raw json.RawMessage, org string) (event.Event, bool) {
+	var ge ghEvent
+	if err := json.Unmarshal(raw, &ge); err != nil {
+		return event.Event{}, false
+	}
+	if ge.CreatedAt == "" {
+		return event.Event{}, false
+	}
+	ts, err := time.Parse(time.RFC3339, ge.CreatedAt)
+	if err != nil {
+		return event.Event{}, false
+	}
+
+	normType, mp := classifyEventType(ge.Type, ge.Payload)
+
+	actor := ge.Actor.Login
+	if actor == "" {
+		actor = "unknown"
+	}
+
+	// Synthesize the per-detector payload. The "target" of a member/collaborator
+	// grant is the added principal; surface it where new-external-access and
+	// priv-escalation read it.
+	target := mp.Member.Login
+	if target == "" {
+		target = mp.Membership.User.Login
+	}
+	sp := synthPayload{
+		Action:       mp.Action,
+		Role:         mp.Membership.Role,
+		RoleName:     mp.Membership.Role,
+		TargetUser:   target,
+		Collaborator: target,
+		Repo:         ge.Repo.Name,
+		Org:          orgOr(ge.Org.Login, org),
+		Raw:          raw,
+	}
+	payload, _ := json.Marshal(sp)
+
+	return event.Event{
+		ID:        makeEventID(ge.ID),
+		Source:    sourceGitHub,
+		Type:      normType,
+		Actor:     actor,
+		Timestamp: ts,
+		Org:       orgOr(ge.Org.Login, org),
+		Payload:   payload,
+	}, true
+}
+
+// normalizeAuditEntry normalizes one audit-log entry to event.Event. Timestamp is
+// epoch-ms (@timestamp, then created_at). Returns ok=false when no timestamp is
+// present (skip, do not zero-value).
+func normalizeAuditEntry(raw json.RawMessage, org string) (event.Event, bool) {
+	var ae auditEntry
+	if err := json.Unmarshal(raw, &ae); err != nil {
+		return event.Event{}, false
+	}
+	ms, ok := epochMS(ae.Timestamp, ae.CreatedAt)
+	if !ok {
+		return event.Event{}, false
+	}
+	ts := time.UnixMilli(ms).UTC()
+
+	normType := classifyAuditAction(ae.Action)
+
+	actor := ae.Actor
+	if actor == "" {
+		actor = "unknown"
+	}
+	target := ae.Repo
+	if target == "" {
+		target = ae.Org
+	}
+	sp := synthPayload{
+		Action:       ae.Action,
+		TargetUser:   ae.User,
+		Collaborator: ae.User,
+		Repo:         ae.Repo,
+		Org:          orgOr(ae.Org, org),
+		Raw:          raw,
+	}
+	payload, _ := json.Marshal(sp)
+
+	// Deterministic ID: prefer the audit document id, else a stable composite.
+	idSrc := ae.DocumentID
+	if idSrc == "" {
+		idSrc = ae.Action + "|" + actor + "|" + target
+	}
+
+	return event.Event{
+		ID:        makeEventID(idSrc),
+		Source:    sourceGitHub,
+		Type:      normType,
+		Actor:     actor,
+		Timestamp: ts,
+		Org:       orgOr(ae.Org, org),
+		Payload:   payload,
+	}, true
+}
+
+// epochMS resolves an epoch-millisecond timestamp from the first present numeric
+// field.
+func epochMS(vals ...json.Number) (int64, bool) {
+	for _, v := range vals {
+		if v == "" {
+			continue
+		}
+		n, err := v.Int64()
+		if err == nil && n > 0 {
+			return n, true
+		}
+	}
+	return 0, false
+}
+
+func orgOr(a, b string) string {
+	if a != "" {
+		return a
+	}
+	return b
+}

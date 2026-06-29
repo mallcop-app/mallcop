@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/mallcop-app/mallcop/connect/github"
 	"github.com/mallcop-app/mallcop/core/agent"
 	"github.com/mallcop-app/mallcop/core/connect"
 	"github.com/mallcop-app/mallcop/core/inference"
@@ -77,6 +78,8 @@ func runScan(args []string) error {
 	baseURL := fs.String("base-url", "", "Inference endpoint base URL (overrides $"+envInferenceURL+")")
 	workers := fs.Int("workers", 0, "Bounded resolve-pool size (0 = pipeline default)")
 	asJSON := fs.Bool("json", false, "Output the summary as JSON")
+	connector := fs.String("connector", "file", `Connector: "file" (default, reads --events) or "github"`)
+	githubOrg := fs.String("github-org", "", "GitHub org to scan (required when --connector github)")
 	// --chart is retained for backward-compatible invocation but is no longer
 	// required or consulted by the in-process pipeline.
 	_ = fs.String("chart", "", "(deprecated; ignored by the in-process pipeline)")
@@ -125,10 +128,29 @@ func runScan(args []string) error {
 		}
 	}
 
+	// (3.5) Build the connector. "file" (default) is byte-identical to the prior
+	// behavior; "github" builds the portable GitHub connector from env creds.
+	var conn connect.Connector
+	switch *connector {
+	case "file":
+		conn = connect.FromPath(*eventsPath)
+	case "github":
+		if *githubOrg == "" {
+			return fmt.Errorf("scan: --github-org is required with --connector github")
+		}
+		gc, gerr := github.NewFromEnv(*githubOrg)
+		if gerr != nil {
+			return fmt.Errorf("scan: github connector: %w", gerr)
+		}
+		conn = gc
+	default:
+		return fmt.Errorf("scan: unknown --connector %q", *connector)
+	}
+
 	// (4) Run the pipeline.
 	ctx := context.Background()
 	sum, err := pipeline.Run(ctx, pipeline.Config{
-		Connector: connect.FromPath(*eventsPath),
+		Connector: conn,
 		Client:    client,
 		Store:     st,
 		Baseline:  bl,

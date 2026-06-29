@@ -1,0 +1,21 @@
+[
+  {
+    "@timestamp": 1709740800000,
+    "action": "repo.add_member",
+    "actor": "admin-user",
+    "org": "acme-corp",
+    "repo": "acme-corp/infrastructure",
+    "user": "external-contractor",
+    "created_at": 1709740800000,
+    "_document_id": "collab001"
+  },
+  {
+    "@timestamp": 1709744400000,
+    "action": "git.push",
+    "actor": "admin-user",
+    "org": "acme-corp",
+    "repo": "acme-corp/infrastructure",
+    "created_at": 1709744400000,
+    "_document_id": "collab002"
+  }
+]

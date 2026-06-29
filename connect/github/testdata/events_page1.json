@@ -1,0 +1,35 @@
+[
+  {
+    "id": "EVT-PUSH-1",
+    "type": "PushEvent",
+    "actor": { "login": "dev-alice" },
+    "repo": { "name": "acme-corp/webapp" },
+    "org": { "login": "acme-corp" },
+    "created_at": "__TS0__",
+    "payload": { "ref": "refs/heads/main", "size": 2 }
+  },
+  {
+    "id": "EVT-MEMBER-ADD-1",
+    "type": "MemberEvent",
+    "actor": { "login": "admin-user" },
+    "repo": { "name": "acme-corp/secretproject" },
+    "org": { "login": "acme-corp" },
+    "created_at": "__TS1__",
+    "payload": {
+      "action": "added",
+      "member": { "login": "outside-contractor" }
+    }
+  },
+  {
+    "id": "EVT-ORG-ADD-1",
+    "type": "OrgEvent",
+    "actor": { "login": "admin-user" },
+    "repo": { "name": "" },
+    "org": { "login": "acme-corp" },
+    "created_at": "__TS2__",
+    "payload": {
+      "action": "member_added",
+      "membership": { "user": { "login": "newhire" }, "role": "member" }
+    }
+  }
+]

@@ -1,0 +1,107 @@
+[
+  {
+    "@timestamp": 1709654400000,
+    "action": "org.add_member",
+    "actor": "admin-user",
+    "org": "acme-corp",
+    "user": "newdev",
+    "created_at": 1709654400000,
+    "_document_id": "type01"
+  },
+  {
+    "@timestamp": 1709654401000,
+    "action": "org.remove_member",
+    "actor": "admin-user",
+    "org": "acme-corp",
+    "user": "olddev",
+    "created_at": 1709654401000,
+    "_document_id": "type02"
+  },
+  {
+    "@timestamp": 1709654402000,
+    "action": "repo.access",
+    "actor": "admin-user",
+    "org": "acme-corp",
+    "repo": "acme-corp/secret",
+    "created_at": 1709654402000,
+    "_document_id": "type03"
+  },
+  {
+    "@timestamp": 1709654403000,
+    "action": "protected_branch.create",
+    "actor": "devops",
+    "org": "acme-corp",
+    "repo": "acme-corp/main-app",
+    "created_at": 1709654403000,
+    "_document_id": "type04"
+  },
+  {
+    "@timestamp": 1709654404000,
+    "action": "deploy_key.create",
+    "actor": "cibot",
+    "org": "acme-corp",
+    "repo": "acme-corp/webapp",
+    "created_at": 1709654404000,
+    "_document_id": "type05"
+  },
+  {
+    "@timestamp": 1709654405000,
+    "action": "oauth_authorization.create",
+    "actor": "admin-user",
+    "org": "acme-corp",
+    "created_at": 1709654405000,
+    "_document_id": "type06"
+  },
+  {
+    "@timestamp": 1709654406000,
+    "action": "secret_scanning_alert.create",
+    "actor": "github",
+    "org": "acme-corp",
+    "repo": "acme-corp/leaked",
+    "created_at": 1709654406000,
+    "_document_id": "type07"
+  },
+  {
+    "@timestamp": 1709654407000,
+    "action": "dependabot_alert.create",
+    "actor": "github",
+    "org": "acme-corp",
+    "repo": "acme-corp/vulnerable",
+    "created_at": 1709654407000,
+    "_document_id": "type08"
+  },
+  {
+    "@timestamp": 1709654408000,
+    "action": "git.push",
+    "actor": "admin-user",
+    "org": "acme-corp",
+    "repo": "acme-corp/myrepo",
+    "created_at": 1709654408000,
+    "_document_id": "type09"
+  },
+  {
+    "@timestamp": 1709654409000,
+    "action": "team.add_member",
+    "actor": "admin-user",
+    "org": "acme-corp",
+    "created_at": 1709654409000,
+    "_document_id": "type10"
+  },
+  {
+    "@timestamp": 1709654410000,
+    "action": "repo.add_member",
+    "actor": "admin-user",
+    "org": "acme-corp",
+    "repo": "acme-corp/collab-repo",
+    "created_at": 1709654410000,
+    "_document_id": "type11"
+  },
+  {
+    "@timestamp": 1709654411000,
+    "action": "org.update_member",
+    "actor": "admin",
+    "org": "acme-corp",
+    "created_at": 1709654411000,
+    "_document_id": "type12"
+  }
+]
