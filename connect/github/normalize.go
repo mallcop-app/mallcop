@@ -74,7 +74,7 @@ var eventTypeMap = map[string]string{
 var auditActionMap = []struct{ prefix, ty string }{
 	{"org.add_member", "org.add_member"},
 	{"org.add_outside_collaborator", "org.add_outside_collaborator"},
-	{"repo.add_member", "collaborator_added"},
+	{"repo.add_member", "repo.add_collaborator"},
 	{"repo.add_collaborator", "repo.add_collaborator"},
 	{"org.remove_member", "collaborator_removed"},
 	{"repo.access", "repo_visibility_changed"},
