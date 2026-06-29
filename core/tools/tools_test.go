@@ -175,14 +175,24 @@ func TestLookupRules(t *testing.T) {
 
 // TestLookupRulesMissingCorpus confirms a repo root with no corpus loads zero
 // rules (missing file == "no pre-seeded rules", not an error).
+// TestLookupRulesMissingCorpus proves the on-disk-only path: with the embed
+// fallback DISABLED (MALLCOP_RULES_EMBED_DISABLE=1), an explicit root that has no
+// corpus on disk yields 0 rules and no error — the legacy "no pre-seeded rules"
+// behavior. This is the escape-hatch test that pins the filesystem branch so the
+// embed can never silently shadow a genuinely absent disk corpus when an operator
+// opts out.
 func TestLookupRulesMissingCorpus(t *testing.T) {
+	t.Setenv("MALLCOP_RULES_EMBED_DISABLE", "1")
+	invalidateRulesCacheForTest()
+	t.Cleanup(invalidateRulesCacheForTest)
+
 	empty := t.TempDir()
 	out, err := LookupRules(empty, LookupRulesInput{FindingID: "f", FindingFamily: "unusual-timing", MaintenanceWindow: "true"})
 	if err != nil {
 		t.Fatalf("missing corpus should not error: %v", err)
 	}
 	if len(out.Rules) != 0 {
-		t.Errorf("missing corpus should yield 0 rules, got %d", len(out.Rules))
+		t.Errorf("embed disabled + missing corpus should yield 0 rules, got %d", len(out.Rules))
 	}
 }
 

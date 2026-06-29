@@ -21,6 +21,7 @@
 package agent
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -29,6 +30,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	mallcoplegion "github.com/mallcop-app/mallcop"
 	"github.com/mallcop-app/mallcop/pkg/finding"
 )
 
@@ -94,41 +96,93 @@ type compiledRoute struct {
 	triggers  map[string]struct{} // normalized family + all normalized aliases
 }
 
-// loadEscalateRoutes reads and compiles the escalate_routes from the corpus at
-// repoRoot. A missing corpus file yields an EMPTY route set (not an error): no
-// corpus means no data-driven floor, which the caller treats as fail-safe (see
-// checkHardConstraints — an empty floor still escalates on a nil/unparseable
-// finding through the gate, never silently resolves). A present-but-unparseable
-// corpus IS an error, surfaced to the caller so a tampered/broken floor fails
-// loud rather than silently disabling escalation.
-func loadEscalateRoutes(repoRoot string) (*compiledRoutes, error) {
-	path := filepath.Join(repoRoot, corpusRelPath)
+// embedRoutesCacheKey is the sentinel cache key used when routes are compiled
+// from the EMBEDDED corpus (no on-disk path). A sentinel rather than a real path
+// keeps embed loads memoized without colliding with a real repo-root path or
+// with each other across roots.
+const embedRoutesCacheKey = ":embed:"
+
+// escalateCorpusBytes resolves the escalate-route corpus bytes with the
+// filesystem-first / embed-last precedence (mirrors core/tools.corpusBytes):
+//
+//  1. When an on-disk root is available (rootErr == nil), read the corpus under
+//     repoRoot:
+//     - read OK            → DISK bytes (preserves dev edit-and-reload).
+//     - os.ErrNotExist     → fall through to the embed (absent, not broken).
+//     - any other error    → propagate (never mask a corrupt corpus with the embed).
+//  2. Otherwise (the root resolver itself failed — the /tmp standalone-binary
+//     case), use the embedded corpus, UNLESS MALLCOP_RULES_EMBED_DISABLE is set
+//     (the escape hatch forcing the on-disk-only path).
+//
+// The returned cacheKey is the on-disk path for disk bytes, or
+// embedRoutesCacheKey for the embed.
+func escalateCorpusBytes(repoRoot string, rootErr error) (data []byte, cacheKey string, err error) {
+	if rootErr == nil {
+		path := filepath.Join(repoRoot, corpusRelPath)
+		b, rerr := os.ReadFile(path)
+		if rerr == nil {
+			return b, path, nil
+		}
+		if !errors.Is(rerr, os.ErrNotExist) {
+			return nil, path, fmt.Errorf("read escalate_routes corpus: %w", rerr)
+		}
+		// Absent on-disk corpus → fall through to the embed.
+	}
+	if isTruthyEnv(os.Getenv("MALLCOP_RULES_EMBED_DISABLE")) {
+		// Escape hatch: on-disk-only. No readable file and embed disabled means
+		// an empty floor (the gate's downstream fail-safe still covers the
+		// dangerous case).
+		return nil, embedRoutesCacheKey + ":disabled", nil
+	}
+	return mallcoplegion.OperatorDecisionsYAML, embedRoutesCacheKey, nil
+}
+
+// isTruthyEnv returns true for common truthy env values, case-insensitive.
+func isTruthyEnv(v string) bool {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
+}
+
+// loadEscalateRoutes reads and compiles the escalate_routes for the resolved
+// root, falling back to the EMBEDDED corpus when no on-disk corpus can be
+// located. rootErr carries any failure from the caller's resolveRepoRoot() walk;
+// a resolution failure is NO LONGER fatal here — it routes to the embed, which
+// always parses, so the standalone /tmp binary loads the baked-in routes instead
+// of fail-safe-escalating everything.
+//
+// A missing corpus (absent path, or embed disabled with no file) yields an EMPTY
+// route set (not an error): no data-driven floor, which the caller treats as
+// fail-safe (the gate still escalates anything it cannot positively clear). A
+// present-but-unparseable corpus (disk OR embed) IS an error, surfaced to the
+// caller so a tampered/broken floor fails loud rather than silently disabling
+// escalation.
+func loadEscalateRoutes(repoRoot string, rootErr error) (*compiledRoutes, error) {
+	data, cacheKey, err := escalateCorpusBytes(repoRoot, rootErr)
+	if err != nil {
+		return nil, err
+	}
 
 	routesCacheMu.Lock()
 	defer routesCacheMu.Unlock()
 
-	if e, ok := routesCache[path]; ok {
+	if e, ok := routesCache[cacheKey]; ok {
 		return e.data, e.err
 	}
 
-	data, err := os.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			// No corpus → empty floor. The gate's fail-safe still covers the
-			// dangerous case (it escalates anything it cannot positively clear).
-			empty := &compiledRoutes{}
-			routesCache[path] = routesCacheEntry{data: empty}
-			return empty, nil
-		}
-		loadErr := fmt.Errorf("read escalate_routes corpus: %w", err)
-		routesCache[path] = routesCacheEntry{err: loadErr}
-		return nil, loadErr
+	if data == nil {
+		// No corpus → empty floor.
+		empty := &compiledRoutes{}
+		routesCache[cacheKey] = routesCacheEntry{data: empty}
+		return empty, nil
 	}
 
 	var file escalateRoutesFile
 	if err := yaml.Unmarshal(data, &file); err != nil {
 		parseErr := fmt.Errorf("parse escalate_routes corpus: %w", err)
-		routesCache[path] = routesCacheEntry{err: parseErr}
+		routesCache[cacheKey] = routesCacheEntry{err: parseErr}
 		return nil, parseErr
 	}
 
@@ -148,7 +202,7 @@ func loadEscalateRoutes(repoRoot string) (*compiledRoutes, error) {
 		compiled.routes = append(compiled.routes, cr)
 	}
 
-	routesCache[path] = routesCacheEntry{data: compiled}
+	routesCache[cacheKey] = routesCacheEntry{data: compiled}
 	return compiled, nil
 }
 

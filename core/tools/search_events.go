@@ -165,18 +165,17 @@ func SearchEventsWrapped(s *store.Store, in SearchEventsInput, findingFamily str
 
 	// §3.8: fold the operator-decisions rule lookup into this response.
 	if findingFamily != "" {
+		// A config-root resolution failure is NO LONGER fatal to the fold: the
+		// rootErr is threaded into the loader, which falls back to the EMBEDDED
+		// corpus when no on-disk root is available (the standalone /tmp binary
+		// case). On a real on-disk root the disk corpus is used unchanged. Only a
+		// genuinely broken corpus (parse/SHA/IO error) drops the fold into Notes.
 		root, rootErr := findConfigRoot()
-		if rootErr != nil {
-			// §3.4: config-root resolution failure is surfaced in Notes, not as
-			// an error — the events are still useful and the model can proceed.
-			notes = append(notes, "rule corpus not consulted: "+rootErr.Error())
+		matched, lookupErr := matchRulesForEvents(root, rootErr, findingFamily, findingMetadata)
+		if lookupErr != nil {
+			notes = append(notes, "rule matching skipped: "+lookupErr.Error())
 		} else {
-			matched, lookupErr := matchRulesForEvents(root, findingFamily, findingMetadata)
-			if lookupErr != nil {
-				notes = append(notes, "rule matching skipped: "+lookupErr.Error())
-			} else {
-				env.MatchedRules = matched
-			}
+			env.MatchedRules = matched
 		}
 	}
 
@@ -192,8 +191,13 @@ func SearchEventsWrapped(s *store.Store, in SearchEventsInput, findingFamily str
 // the rules whose applies_to predicate matches the given finding family +
 // metadata. Returns an empty slice (never nil) on no match. This is the same
 // matcher LookupRules uses, exposed so search-events can fold the rule data in.
-func matchRulesForEvents(root, findingFamily string, findingMetadata map[string]string) ([]OperatorRule, error) {
-	rules, err := LoadOperatorRules(root)
+//
+// rootErr carries any failure from the caller's findConfigRoot() walk. It is
+// threaded into LoadOperatorRulesResolved so a resolution failure (the /tmp
+// standalone-binary case) falls back to the embedded corpus instead of dropping
+// the fold — the embedded rules still fold for the production scan path.
+func matchRulesForEvents(root string, rootErr error, findingFamily string, findingMetadata map[string]string) ([]OperatorRule, error) {
+	rules, err := LoadOperatorRulesResolved(root, rootErr)
 	if err != nil {
 		return nil, err
 	}

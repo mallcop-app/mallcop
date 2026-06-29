@@ -42,6 +42,8 @@ import (
 	"sync"
 
 	"gopkg.in/yaml.v3"
+
+	mallcoplegion "github.com/mallcop-app/mallcop"
 )
 
 // expectedOperatorRulesSHA256 pins the sha256 of agents/rules/operator-decisions.yaml.
@@ -64,7 +66,16 @@ import (
 // When MALLCOP_RULES_SHA256 is set it overrides this constant (lets the build/
 // release process pin a corpus that wasn't yet hardcoded). Mismatch in either
 // path returns an error from LoadOperatorRules.
-const expectedOperatorRulesSHA256 = "76d2076332601a0335f5795b38ddc99dff19d8c4b03bef88150d10fd96dd046e"
+//
+// This MUST equal the sha256 of the embedded corpus
+// (mallcoplegion.OperatorDecisionsYAML), which //go:embed guarantees is the
+// on-disk agents/rules/operator-decisions.yaml byte-for-byte. The pin==embed
+// test (TestExpectedSHAMatchesEmbed) ties this constant to those bytes so the
+// SHA-enforce path can never reference a hash that disagrees with the corpus the
+// binary actually carries. It is also kept equal to the identically-named
+// constant in cmd/mallcop-investigate-tools (the legacy standalone loader) so the
+// two readers cannot diverge — both pin f1de914… for the shipped corpus.
+const expectedOperatorRulesSHA256 = "f1de914f4de7796b695b3978418bab221d5e09db5af946680ce5922dc42bbd89"
 
 // OperatorRule is a single rule loaded from operator-decisions.yaml.
 type OperatorRule struct {
@@ -175,63 +186,134 @@ func rulesCachePath(repoRoot string) string {
 	return filepath.Join(repoRoot, "agents", "rules", "operator-decisions.yaml")
 }
 
-// rulesCache memoizes the parsed rules file per source path. Within one process
-// (e.g. repeated LookupRules calls against the same corpus) we avoid re-parsing.
+// embedCacheKey is the sentinel cache key used when the rules are loaded from the
+// embedded corpus (no on-disk path). Using a sentinel rather than a real path
+// keeps embed loads memoized without colliding with any real repo-root path.
+const embedCacheKey = ":embed:"
+
+// rulesCache memoizes the parsed rules file per source key (an on-disk path or
+// the embedCacheKey sentinel). Within one process (e.g. repeated LookupRules
+// calls against the same corpus) we avoid re-parsing.
 var (
-	rulesCacheMu   sync.Mutex
-	rulesCacheOnce sync.Once
-	rulesCacheData []OperatorRule
-	rulesCacheErr  error
-	rulesCacheKey  string // path used for last load, to invalidate on path change
+	rulesCacheMu sync.Mutex
+	rulesCache   = map[string]rulesCacheEntry{}
 )
+
+type rulesCacheEntry struct {
+	data []OperatorRule
+	err  error
+}
+
+// corpusBytes resolves the operator-decisions corpus bytes following the
+// filesystem-first / embed-last precedence:
+//
+//  1. When an on-disk root is available (rootErr == nil), read
+//     rulesCachePath(repoRoot):
+//     - read OK            → DISK bytes (preserves dev edit-and-reload).
+//     - os.ErrNotExist     → fall through to the embed (absent path, not broken).
+//     - any other error    → propagate (do NOT mask a corrupt/permission-denied
+//     corpus with the embed).
+//  2. Otherwise (root resolver failed, e.g. /tmp binary with MALLCOP_REPO_ROOT
+//     unset), use the embedded corpus — UNLESS MALLCOP_RULES_EMBED_DISABLE is set,
+//     the escape hatch that forces the on-disk-only path so a test can prove the
+//     filesystem branch still works.
+//
+// The returned cacheKey is the path for disk bytes or embedCacheKey for the
+// embed, so the caller memoizes correctly. fromDisk reports the source.
+func corpusBytes(repoRoot string, rootErr error) (data []byte, cacheKey string, fromDisk bool, err error) {
+	if rootErr == nil {
+		path := rulesCachePath(repoRoot)
+		b, rerr := os.ReadFile(path)
+		if rerr == nil {
+			return b, path, true, nil
+		}
+		if !errors.Is(rerr, os.ErrNotExist) {
+			return nil, path, false, fmt.Errorf("read operator-decisions.yaml: %w", rerr)
+		}
+		// os.ErrNotExist → absent on-disk corpus → fall through to the embed.
+	}
+	if embedDisabled() {
+		// Escape hatch: behave as the legacy on-disk-only loader. A resolver
+		// failure with no readable file means "no pre-seeded rules".
+		return nil, "", false, errNoOnDiskCorpus
+	}
+	return mallcoplegion.OperatorDecisionsYAML, embedCacheKey, false, nil
+}
+
+// errNoOnDiskCorpus is the sentinel returned by corpusBytes when the embed is
+// disabled and no on-disk corpus is available. Callers translate it into the
+// legacy "no pre-seeded rules" empty result.
+var errNoOnDiskCorpus = errors.New("operator-decisions corpus not found on disk and embed disabled")
+
+// embedDisabled reports whether the MALLCOP_RULES_EMBED_DISABLE escape hatch is
+// engaged, forcing the on-disk-only path.
+func embedDisabled() bool {
+	return isTruthyEnv(os.Getenv("MALLCOP_RULES_EMBED_DISABLE"))
+}
 
 // LoadOperatorRules reads operator-decisions.yaml from repoRoot and returns the
 // parsed rules. Returns an empty slice (not an error) when the file does not
 // exist — a missing file means "no pre-seeded rules" rather than an error.
+//
+// This is the explicit-root entry point (eval + the toolrun explicit-root
+// fallback). It treats the supplied repoRoot as resolved (rootErr == nil), so a
+// missing file under that root degrades to the embed (or, with the embed
+// disabled, to an empty result). For the production scan path — where the root
+// resolver itself may fail — use LoadOperatorRulesResolved with the resolver's
+// error so a resolution failure also routes to the embed.
 func LoadOperatorRules(repoRoot string) ([]OperatorRule, error) {
-	path := rulesCachePath(repoRoot)
+	return LoadOperatorRulesResolved(repoRoot, nil)
+}
+
+// LoadOperatorRulesResolved loads the operator-decisions rules using the
+// filesystem-first / embed-last precedence in corpusBytes. rootErr carries any
+// error from the caller's repo-root resolver (findConfigRoot / resolveRepoRoot):
+// when non-nil, no on-disk read is attempted and the loader falls straight to the
+// embedded corpus. This is what lets the standalone /tmp binary self-resolve the
+// corpus instead of dropping the §3.8 rule fold.
+func LoadOperatorRulesResolved(repoRoot string, rootErr error) ([]OperatorRule, error) {
+	data, cacheKey, _, err := corpusBytes(repoRoot, rootErr)
+	if err != nil {
+		if errors.Is(err, errNoOnDiskCorpus) {
+			// Embed disabled + no on-disk corpus → legacy "no pre-seeded rules".
+			return []OperatorRule{}, nil
+		}
+		return nil, err
+	}
 
 	rulesCacheMu.Lock()
 	defer rulesCacheMu.Unlock()
 
-	// Invalidate cache when the path changes (test isolation: each test points
-	// at a different temp repo root).
-	if rulesCacheKey != path {
-		rulesCacheData = nil
-		rulesCacheErr = nil
-		rulesCacheOnce = sync.Once{}
-		rulesCacheKey = path
+	if e, ok := rulesCache[cacheKey]; ok {
+		return e.data, e.err
 	}
 
-	rulesCacheOnce.Do(func() {
-		data, err := os.ReadFile(path)
-		if err != nil {
-			if errors.Is(err, os.ErrNotExist) {
-				rulesCacheData = []OperatorRule{}
-				rulesCacheErr = nil
-				return
-			}
-			rulesCacheErr = fmt.Errorf("read operator-decisions.yaml: %w", err)
-			return
-		}
-		// Belt+suspenders sha256 check. Enforced only when
-		// MALLCOP_RULES_SHA256_ENFORCE is truthy or MALLCOP_RULES_SHA256 is set.
-		// Mismatch surfaces as a load error so a tampered corpus cannot silently
-		// grant rule_id citations downstream.
-		if err := verifyOperatorRulesChecksum(data); err != nil {
-			rulesCacheErr = err
-			return
-		}
-		var file operatorRulesFile
-		if err := yaml.Unmarshal(data, &file); err != nil {
-			rulesCacheErr = fmt.Errorf("parse operator-decisions.yaml: %w", err)
-			return
-		}
-		rulesCacheData = file.Rules
-		rulesCacheErr = nil
-	})
+	parsed, perr := parseOperatorRules(data)
+	rulesCache[cacheKey] = rulesCacheEntry{data: parsed, err: perr}
+	return parsed, perr
+}
 
-	return rulesCacheData, rulesCacheErr
+// parseOperatorRules verifies the optional sha256 pin and unmarshals the corpus
+// bytes (disk or embed — identical handling). The sha256 check is enforced only
+// when MALLCOP_RULES_SHA256_ENFORCE is truthy or MALLCOP_RULES_SHA256 is set, so
+// a tampered corpus cannot silently grant rule_id citations downstream.
+func parseOperatorRules(data []byte) ([]OperatorRule, error) {
+	if err := verifyOperatorRulesChecksum(data); err != nil {
+		return nil, err
+	}
+	var file operatorRulesFile
+	if err := yaml.Unmarshal(data, &file); err != nil {
+		return nil, fmt.Errorf("parse operator-decisions.yaml: %w", err)
+	}
+	return file.Rules, nil
+}
+
+// invalidateRulesCacheForTest drops every memoized entry. Test-only seam so a
+// test that rewrites a temp corpus (or toggles the embed) forces a re-read.
+func invalidateRulesCacheForTest() {
+	rulesCacheMu.Lock()
+	defer rulesCacheMu.Unlock()
+	rulesCache = map[string]rulesCacheEntry{}
 }
 
 // verifyOperatorRulesChecksum enforces the sha256 pin on the operator-decisions

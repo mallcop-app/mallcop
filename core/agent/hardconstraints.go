@@ -145,25 +145,22 @@ func stripSeparators(s string) string {
 //   - forceEscalate=false with a proceed Resolution otherwise; the caller may
 //     route the finding to the model.
 //
-// Fail-safe on corpus load error: if the corpus is present but unparseable, the
-// floor cannot trust its policy, so it force-escalates rather than waving the
-// finding through to the model (never fail open). A MISSING corpus is treated as
-// an empty floor (no routes) — the resolve-gate fail-safe downstream still
+// Corpus resolution is filesystem-first, embed-last: rootErr (a failure of the
+// caller's repo-root walk) is NO LONGER fatal by itself. loadEscalateRoutes
+// threads rootErr into the loader, which falls back to the EMBEDDED corpus when
+// no on-disk corpus can be located — so a standalone /tmp binary with
+// MALLCOP_REPO_ROOT unset loads the baked-in routes instead of force-escalating
+// everything. The embedded corpus always parses, so a pure resolution failure
+// degrades to "use embedded policy", not "escalate everything".
+//
+// Fail-safe on corpus load error STAYS for the case that matters: if the corpus
+// (disk OR embed) is present but UNPARSEABLE, the floor cannot trust its policy,
+// so it force-escalates rather than waving the finding through to the model
+// (never fail open). A genuinely MISSING corpus (absent path with the embed
+// disabled) is an empty floor — the resolve-gate fail-safe downstream still
 // covers unparseable/ambiguous findings.
 func checkHardConstraints(repoRoot string, rootErr error, f finding.Finding) (bool, Resolution) {
-	if rootErr != nil {
-		// Cannot even locate the corpus — fail safe: escalate, do not guess.
-		return true, Resolution{
-			ForceEscalated: true,
-			Action:         ActionEscalated,
-			Family:         normalizeFamily(f.Type),
-			Reason: fmt.Sprintf(
-				"Hard constraint (fail-safe): cannot locate escalate-route corpus (%v); "+
-					"escalating for human review rather than routing to the model", rootErr),
-		}
-	}
-
-	routes, err := loadEscalateRoutes(repoRoot)
+	routes, err := loadEscalateRoutes(repoRoot, rootErr)
 	if err != nil {
 		// Corpus present but broken — fail safe: escalate, do not route to model.
 		return true, Resolution{
