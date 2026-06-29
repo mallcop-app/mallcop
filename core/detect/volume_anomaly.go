@@ -34,6 +34,7 @@ const (
 type volumeGroupKey struct {
 	source    string
 	eventType string
+	actor     string
 }
 
 // volumeAnomalyEvaluateAll counts events per (source, event_type) group and
@@ -51,7 +52,7 @@ func volumeAnomalyEvaluateAll(events []event.Event, bl *baseline.Baseline) []fin
 	meta := make(map[volumeGroupKey]groupMeta)
 
 	for _, ev := range events {
-		k := volumeGroupKey{ev.Source, ev.Type}
+		k := volumeGroupKey{ev.Source, ev.Type, ev.Actor}
 		counts[k]++
 		if _, seen := meta[k]; !seen {
 			meta[k] = groupMeta{firstEventID: ev.ID, firstEvent: ev}
@@ -67,13 +68,20 @@ func volumeAnomalyEvaluateAll(events []event.Event, bl *baseline.Baseline) []fin
 		if keys[i].source != keys[j].source {
 			return keys[i].source < keys[j].source
 		}
-		return keys[i].eventType < keys[j].eventType
+		if keys[i].eventType != keys[j].eventType {
+			return keys[i].eventType < keys[j].eventType
+		}
+		return keys[i].actor < keys[j].actor
 	})
 
 	var findings []finding.Finding
 	for _, k := range keys {
 		currentCount := counts[k]
-		baselineCount := bl.FreqCount(k.source, k.eventType)
+		// Key on the 3-segment "source:event_type:actor" baseline (the corpus
+		// frequency_tables shape). FreqCountActor reads the per-actor count so the
+		// spike ratio is measured against THIS actor's history, not a cross-actor
+		// aggregate.
+		baselineCount := bl.FreqCountActor(k.source, k.eventType, k.actor)
 
 		if baselineCount < volumeMinBaselineCount {
 			continue

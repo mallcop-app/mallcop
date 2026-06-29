@@ -13,9 +13,9 @@ import (
 
 // Sentinel errors returned by Load for distinct validation failures.
 var (
-	ErrMissingID       = errors.New("scenario missing required field: id")
-	ErrMissingFinding  = errors.New("scenario missing required field: finding")
-	ErrMalformedEvents = errors.New("scenario has malformed events: each event must have an id")
+	ErrMissingID         = errors.New("scenario missing required field: id")
+	ErrMissingFinding    = errors.New("scenario missing required field: finding")
+	ErrMalformedEvents   = errors.New("scenario has malformed events: each event must have an id")
 	ErrMalformedBaseline = errors.New("scenario has malformed baseline: known_entities must be present")
 )
 
@@ -52,9 +52,18 @@ type Event struct {
 }
 
 // KnownEntities holds the known actors and sources from the baseline.
+//
+// ActorRoles / ActorHours mirror the corpus's per-actor role and active-hour
+// baseline blocks. They are parsed here so the YAML is no longer silently dropped
+// during unmarshal; the eval projection decides which (if any) it feeds into the
+// typed baseline (priv-escalation deliberately does NOT consume ActorRoles, so a
+// known-Contributor actor still escalates — the Known-Actor-Trust trap). Additive
+// fields with yaml tags are safe: scenarios without these blocks unmarshal to nil.
 type KnownEntities struct {
-	Actors  []string `yaml:"actors"`
-	Sources []string `yaml:"sources"`
+	Actors     []string            `yaml:"actors"`
+	Sources    []string            `yaml:"sources"`
+	ActorRoles map[string][]string `yaml:"actor_roles"`
+	ActorHours map[string][]int    `yaml:"actor_hours"`
 }
 
 // RelationshipEntry describes a historical relationship between actor and target.
@@ -95,13 +104,13 @@ type ConnectorTool struct {
 // (exam-seed) is responsible for stripping them before posting scenarios to
 // worker campfires.
 type ExpectedResolution struct {
-	ChainAction               string   `yaml:"chain_action"`
-	TriageAction              string   `yaml:"triage_action"`
-	ReasoningMustMention      []string `yaml:"reasoning_must_mention"`
-	ReasoningMustNotMention   []string `yaml:"reasoning_must_not_mention"`
-	InvestigateMustUseTools   bool     `yaml:"investigate_must_use_tools"`
-	MinInvestigateIterations  int      `yaml:"min_investigate_iterations"`
-	MinInvestigationQuality   int      `yaml:"min_investigation_quality"`
+	ChainAction              string   `yaml:"chain_action"`
+	TriageAction             string   `yaml:"triage_action"`
+	ReasoningMustMention     []string `yaml:"reasoning_must_mention"`
+	ReasoningMustNotMention  []string `yaml:"reasoning_must_not_mention"`
+	InvestigateMustUseTools  bool     `yaml:"investigate_must_use_tools"`
+	MinInvestigateIterations int      `yaml:"min_investigate_iterations"`
+	MinInvestigationQuality  int      `yaml:"min_investigation_quality"`
 }
 
 // Scenario is the Go representation of a mallcop exam scenario YAML file.

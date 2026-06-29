@@ -243,7 +243,9 @@ func fixtures(t *testing.T) []positiveFixture {
 			wantType: "volume-anomaly",
 			baseline: &baseline.Baseline{
 				FrequencyTables: map[string]int{
-					"github:push": 5, // baseline 5; we emit 30 → 6× spike.
+					// 3-segment actor-aware key (the corpus shape FreqCountActor reads):
+					// baseline 5 for ci's github push; we emit 30 → 6× spike.
+					"github:push:ci": 5,
 				},
 			},
 			events: func(t *testing.T) []event.Event {
@@ -256,6 +258,77 @@ func fixtures(t *testing.T) []positiveFixture {
 					})
 				}
 				return evs
+			},
+		},
+		{
+			detector: "new-external-access",
+			wantType: "new-external-access",
+			baseline: &baseline.Baseline{},
+			events: func(t *testing.T) []event.Event {
+				// admin grants an external collaborator write — corpus nested shape.
+				return []event.Event{{
+					ID: "nea-1", Source: "github", Type: "repo.add_collaborator",
+					Actor: "admin-user", Timestamp: ts(16, 13),
+					Payload: raw(t, map[string]any{
+						"action": "add_collaborator",
+						"metadata": map[string]any{
+							"collaborator": "evil-actor-x",
+							"permission":   "write",
+						},
+					}),
+				}}
+			},
+		},
+		{
+			detector: "auth-failure-burst",
+			wantType: "auth-failure-burst",
+			baseline: &baseline.Baseline{},
+			events: func(t *testing.T) []event.Event {
+				// 5 same-actor login_failures, no terminal success → burst.
+				var evs []event.Event
+				for i := 0; i < 5; i++ {
+					evs = append(evs, event.Event{
+						ID: "afb-" + itoa(i), Source: "azure", Type: "login_failure",
+						Actor: "ext-user-7f3a", Timestamp: ts(16, 14),
+						Payload: raw(t, map[string]any{
+							"metadata": map[string]any{"ip": "198.51.100.99", "reason": "InvalidPassword"},
+						}),
+					})
+				}
+				return evs
+			},
+		},
+		{
+			detector: "unusual-resource-access",
+			wantType: "unusual-resource-access",
+			baseline: &baseline.Baseline{
+				Relationships: map[string]baseline.Relationship{
+					// actor only knows the resource GROUP, not the db resource class.
+					"new-dev-user:sub-x/resourceGroups/atom-rg": {Count: 3},
+				},
+			},
+			events: func(t *testing.T) []event.Event {
+				return []event.Event{{
+					ID: "ura-1", Source: "azure", Type: "database_access",
+					Actor: "new-dev-user", Timestamp: ts(16, 15),
+					Payload: raw(t, map[string]any{
+						"target": "sub-x/resourceGroups/atom-rg/flexibleServers/atom-db-prod",
+					}),
+				}}
+			},
+		},
+		{
+			detector: "log-format-drift",
+			wantType: "log-format-drift",
+			baseline: &baseline.Baseline{},
+			events: func(t *testing.T) []event.Event {
+				return []event.Event{{
+					ID: "lfd-1", Source: "opensign", Type: "log_format_drift",
+					Actor: "opensign-server", Timestamp: ts(16, 16),
+					Payload: raw(t, map[string]any{
+						"metadata": map[string]any{"unmatched_percent": 40},
+					}),
+				}}
 			},
 		},
 	}
@@ -339,15 +412,30 @@ func TestDetectNilBaseline(t *testing.T) {
 	}
 }
 
-// TestRegistryHasAllThirteen is a guard against accidentally dropping a
-// detector from the registry.
-func TestRegistryHasAllThirteen(t *testing.T) {
-	want := 13
-	if got := len(Detectors()); got != want {
-		var names []string
-		for _, d := range Detectors() {
-			names = append(names, d.Name())
+// TestRegistryHasAllSeventeen is a guard against accidentally dropping a
+// detector from the registry, AND a guard that the four attack-family detectors
+// added for e2e detect-fidelity (new-external-access, auth-failure-burst,
+// unusual-resource-access, log-format-drift) stay registered.
+func TestRegistryHasAllSeventeen(t *testing.T) {
+	want := 17
+	got := len(Detectors())
+	names := map[string]bool{}
+	for _, d := range Detectors() {
+		names[d.Name()] = true
+	}
+	if got != want {
+		var list []string
+		for n := range names {
+			list = append(list, n)
 		}
-		t.Fatalf("expected %d registered detectors, got %d: %v", want, got, names)
+		t.Fatalf("expected %d registered detectors, got %d: %v", want, got, list)
+	}
+	for _, fam := range []string{
+		"new-external-access", "auth-failure-burst",
+		"unusual-resource-access", "log-format-drift",
+	} {
+		if !names[fam] {
+			t.Errorf("expected attack-family detector %q registered, missing", fam)
+		}
 	}
 }

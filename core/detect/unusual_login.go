@@ -25,10 +25,23 @@ func (unusualLoginDetector) Detect(events []event.Event, bl *baseline.Baseline) 
 	return out
 }
 
-// loginPayload is the expected structure inside Event.Payload for login events.
+// loginPayload is the resolved login discriminator set, read from BOTH the corpus
+// shape (ip under payload.metadata) and a flat connector shape via the
+// metadata-first payloadMeta fallback. The corpus login events carry metadata.ip
+// and NO geo.
 type loginPayload struct {
-	IP  string `json:"ip"`
-	Geo string `json:"geo"`
+	IP  string
+	Geo string
+}
+
+// readLoginPayload resolves ip/geo from an event payload, tolerating both the
+// nested (payload.metadata.ip) and flat (payload.ip) layouts.
+func readLoginPayload(payload []byte) loginPayload {
+	meta := payloadMeta(payload)
+	return loginPayload{
+		IP:  metaStr(meta, "ip", "source_ip", "client_ip"),
+		Geo: metaStr(meta, "geo", "location", "region"),
+	}
 }
 
 // unusualLoginEvaluate returns a Finding if the event is unusual, or nil if it
@@ -39,10 +52,7 @@ func unusualLoginEvaluate(ev event.Event, bl *baseline.Baseline) *finding.Findin
 		return nil
 	}
 
-	var lp loginPayload
-	if len(ev.Payload) > 0 {
-		_ = json.Unmarshal(ev.Payload, &lp)
-	}
+	lp := readLoginPayload(ev.Payload)
 
 	evidence, _ := json.Marshal(map[string]string{
 		"ip":       lp.IP,
@@ -61,6 +71,19 @@ func unusualLoginEvaluate(ev event.Event, bl *baseline.Baseline) *finding.Findin
 			Reason:    "login from unrecognized user account",
 			Evidence:  evidence,
 		}
+	}
+
+	// OVER-FIRE GATE (eval fidelity): a known user whose baseline profile carries
+	// NO known IPs and NO known geos gives us no basis to call this login's IP/geo
+	// "unknown" — every login would spuriously fire 'high'. The corpus seeds known
+	// actors with an EMPTY UserProfile (no per-actor IP history), so without this
+	// gate unusual-login over-fires on every known-actor login across UT/BG/IT/TD/
+	// CO/PI/AF scenarios, masking the expected detector and over-escalating benign
+	// resolves. When there is no profile data to compare against, defer: an unknown
+	// actor is still surfaced (the HasUser branch above), but a known actor with no
+	// IP/geo baseline yields no unusual-login finding.
+	if !bl.HasLoginProfile(ev.Actor) {
+		return nil
 	}
 
 	if bl.KnownIP(ev.Actor, lp.IP) {

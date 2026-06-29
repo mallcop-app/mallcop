@@ -37,6 +37,20 @@ var elevationEventTypes = map[string]bool{
 	"permission_change":  true,
 	"admin_action":       true,
 	"member_added":       true,
+	// iam_change carries boundary / policy mutations whose elevation lives in the
+	// ACTION keyword (DeleteRolePermissionsBoundary), not a role field (PE-06).
+	"iam_change": true,
+}
+
+// elevatedActionKeywords are action substrings that indicate a privilege
+// elevation even when no elevated role/permission field is present — e.g. removing
+// an IAM permissions boundary widens effective privilege (PE-06's
+// DeleteRolePermissionsBoundary). Matched case-insensitively as substrings.
+var elevatedActionKeywords = []string{
+	"deleterolepermissionsboundary",
+	"deletepermissionsboundary",
+	"removepermissionsboundary",
+	"putrolepermissionsboundary",
 }
 
 // elevatedKeywords are role/permission values that indicate elevated access.
@@ -48,18 +62,61 @@ var elevatedKeywords = map[string]bool{
 	"maintainer":  true,
 }
 
-// privPayload is the expected payload structure for privilege escalation events.
+// privPayload is the resolved privilege-escalation discriminator set, read from
+// BOTH the corpus shape (role under payload.metadata) and the production GitHub
+// connector shape (role/role_name flat) via the metadata-first payloadMeta
+// fallback. Action is read from the top-level payload (the eval seeder writes
+// action at the payload root, not under metadata) for boundary-removal detection.
 type privPayload struct {
-	RoleName        string `json:"role_name"`
-	PermissionLevel string `json:"permission_level"`
-	TargetUser      string `json:"target_user"`
+	RoleName        string
+	PermissionLevel string
+	TargetUser      string
+	Action          string
+}
+
+// readPrivPayload resolves the privilege discriminators from an event payload,
+// tolerating both on-disk layouts. role: metadata.role (corpus) | role |
+// role_name (production). permission: metadata.permission | permission |
+// permission_level. target_user: metadata.target_user | target_user |
+// principal_id. action: the top-level payload action (boundary-removal keyword).
+func readPrivPayload(payload []byte) privPayload {
+	var pp privPayload
+	if len(payload) == 0 {
+		return pp
+	}
+	// Top-level read for the action (and the production-flat fallthrough below).
+	var top map[string]any
+	_ = json.Unmarshal(payload, &top)
+	if s, ok := top["action"].(string); ok {
+		pp.Action = s
+	}
+	meta := payloadMeta(payload)
+	pp.RoleName = metaStr(meta, "role", "role_name")
+	pp.PermissionLevel = metaStr(meta, "permission", "permission_level")
+	pp.TargetUser = metaStr(meta, "target_user", "principal_id")
+	return pp
 }
 
 // isElevated returns true when the event indicates privilege elevation.
-// admin_action is always elevated; other types check payload fields.
+// admin_action is always elevated; an action carrying a boundary-removal keyword
+// is elevated regardless of role fields (PE-06); other types check payload fields.
 func isElevated(ev event.Event, pp privPayload) bool {
 	if ev.Type == "admin_action" {
 		return true
+	}
+	action := strings.ToLower(pp.Action)
+	// A role/permission REMOVAL narrows privilege, it does not elevate it — do not
+	// flag it (UT-07's remove_role_assignment of a Contributor role is a benign
+	// ops cleanup, not an escalation). The boundary-DELETE keyword below is the
+	// deliberate exception: deleting a permissions boundary WIDENS effective
+	// privilege, so it is matched before this guard via the keyword loop.
+	for _, kw := range elevatedActionKeywords {
+		if action != "" && strings.Contains(action, kw) {
+			return true
+		}
+	}
+	if strings.HasPrefix(action, "remove") || strings.HasPrefix(action, "revoke") || strings.HasPrefix(action, "delete_role") {
+		return false
 	}
 	for _, val := range []string{pp.RoleName, pp.PermissionLevel} {
 		if elevatedKeywords[strings.ToLower(val)] {
@@ -89,10 +146,7 @@ func privEscalationEvaluate(ev event.Event, bl *baseline.Baseline, emitted map[s
 		return nil
 	}
 
-	var pp privPayload
-	if len(ev.Payload) > 0 {
-		_ = json.Unmarshal(ev.Payload, &pp)
-	}
+	pp := readPrivPayload(ev.Payload)
 
 	if !isElevated(ev, pp) {
 		return nil

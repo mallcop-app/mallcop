@@ -637,10 +637,20 @@ func baselineFromScenario(s *exam.Scenario) *baseline.Baseline {
 		KnownActors:     append([]string{}, s.Baseline.KnownEntities.Actors...),
 		FrequencyTables: map[string]int{},
 		Relationships:   map[string]baseline.Relationship{},
+		ActorHours:      map[string][]int{},
 	}
 	for k, v := range s.Baseline.FrequencyTables {
 		b.FrequencyTables[k] = v
 	}
+	// CLASS D (timing baseline): the corpus encodes an actor's KNOWN active hours
+	// NOT as actor_hours but as 5-segment frequency keys
+	// "source:event_type:actor:N:partofday" (UT-03 / UT-05 carry these). Derive
+	// ActorHours from those keys so unusual-timing has a profile to compare an
+	// event's UTC hour against. Only the part-of-day token's hour set is known —
+	// the index segment (N) is a window ordinal, not an hour. ActorRoles is
+	// deliberately NOT populated (priv-escalation must still escalate a known-role
+	// grant — the PE-05 Known-Actor-Trust trap).
+	deriveActorHours(b, s.Baseline.FrequencyTables)
 	// EVAL FIDELITY (FIX 4): reconstruct the scenario's relationships table into the
 	// typed baseline so check-baseline can surface the actor↔target history legion's
 	// academy fed its agent. The scenario keys an "actor:target" pair → {count,
@@ -660,6 +670,62 @@ func baselineFromScenario(s *exam.Scenario) *baseline.Baseline {
 		b.KnownUsers[a] = baseline.UserProfile{}
 	}
 	return b
+}
+
+// partOfDayHours maps a corpus part-of-day token to the set of UTC hours it
+// covers. The corpus encodes an actor's active windows as these tokens in its
+// 5-segment frequency keys; unusual-timing compares an event's UTC hour against
+// the union of hours for the tokens the actor carries. Boundaries follow the
+// conventional quartering of the day (night 0-5, morning 6-11, afternoon 12-17,
+// evening 18-23).
+func partOfDayHours(token string) []int {
+	switch strings.ToLower(strings.TrimSpace(token)) {
+	case "night":
+		return []int{0, 1, 2, 3, 4, 5}
+	case "morning":
+		return []int{6, 7, 8, 9, 10, 11}
+	case "afternoon":
+		return []int{12, 13, 14, 15, 16, 17}
+	case "evening":
+		return []int{18, 19, 20, 21, 22, 23}
+	default:
+		return nil
+	}
+}
+
+// deriveActorHours scans the frequency_tables for 5-segment timing keys
+// "source:event_type:actor:N:partofday" and populates b.ActorHours[actor] with the
+// union of UTC hours implied by the part-of-day tokens present. Actors with no
+// 5-segment keys get no entry (HasActorHours stays false for them → unusual-timing
+// has nothing to compare and correctly stays silent — the corpus-data limit the
+// design documents for UT-01/02/04/06/07).
+func deriveActorHours(b *baseline.Baseline, freq map[string]int) {
+	seen := map[string]map[int]bool{}
+	for key := range freq {
+		segs := strings.Split(key, ":")
+		if len(segs) != 5 {
+			continue
+		}
+		actor := segs[2]
+		hours := partOfDayHours(segs[4])
+		if len(hours) == 0 {
+			continue
+		}
+		if seen[actor] == nil {
+			seen[actor] = map[int]bool{}
+		}
+		for _, h := range hours {
+			seen[actor][h] = true
+		}
+	}
+	for actor, hs := range seen {
+		out := make([]int, 0, len(hs))
+		for h := range hs {
+			out = append(out, h)
+		}
+		sort.Ints(out)
+		b.ActorHours[actor] = out
+	}
 }
 
 // --- scenario field extractors (shared by the runner + the rule fold) ---------

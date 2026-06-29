@@ -115,12 +115,36 @@ func (b *Baseline) IsKnownActor(actor string) bool {
 	return false
 }
 
+// HasLoginProfile returns true when the actor has a baseline UserProfile carrying
+// at least one known IP or known geo — i.e. there is login-location history to
+// compare a new login against. A known actor with an empty profile (no IPs, no
+// geos) returns false: unusual-login has no basis to flag the login as unusual
+// and must not over-fire (eval-fidelity gate).
+func (b *Baseline) HasLoginProfile(actor string) bool {
+	p, ok := b.KnownUsers[actor]
+	if !ok {
+		return false
+	}
+	return len(p.KnownIPs) > 0 || len(p.KnownGeos) > 0
+}
+
 // FreqCount returns the baseline event count for "source:event_type".
 func (b *Baseline) FreqCount(source, eventType string) int {
 	if b.FrequencyTables == nil {
 		return 0
 	}
 	return b.FrequencyTables[source+":"+eventType]
+}
+
+// FreqCountActor returns the baseline event count for the 3-segment key
+// "source:event_type:actor" — the actor-aware shape the corpus frequency_tables
+// use. volume-anomaly keys on this so the per-actor baseline (not a 2-segment
+// aggregate) drives the spike ratio, matching the corpus key shape exactly.
+func (b *Baseline) FreqCountActor(source, eventType, actor string) int {
+	if b.FrequencyTables == nil {
+		return 0
+	}
+	return b.FrequencyTables[source+":"+eventType+":"+actor]
 }
 
 // KnownHour returns true when the given UTC hour is in the actor's known hours.

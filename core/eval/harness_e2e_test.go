@@ -11,8 +11,10 @@
 //   - the per-scenario store's KindResolutions stream is non-empty (durably
 //     written) — proven by a non-empty terminal action + ModelCalls > 0;
 //   - the DetectFidelity block classifies each scenario correctly — a known
-//     REPRODUCED scenario lands REPRODUCED, and the AC-01-style ZERO-finding
-//     scenario lands DETECT-MISS, proving the fidelity accounting is honest;
+//     REPRODUCED scenario lands REPRODUCED, and a known ZERO-finding scenario
+//     (VA-04: the volume magnitude lives only in finding metadata, so the
+//     representative event sample cannot fire volume-anomaly) lands DETECT-MISS,
+//     proving the fidelity accounting is honest;
 //   - Grade returns a deterministic pass/fail matching the canned verdict (the
 //     action-string-mismatch trap: ≥1 Pass proves resolve/escalate → resolved/
 //     escalated mapping is wired; without it EVERY scenario fails at 0%).
@@ -89,11 +91,14 @@ func TestE2E_CannedVerification(t *testing.T) {
 	// TestE2E_DetectReproductionProbe / the detect map):
 	//   ID-03 — detect emits new-actor/ext-user-7f3a, the scenario's expected
 	//           (new-actor, ext-user-7f3a) → REPRODUCED (expected escalated).
-	//   AC-01 — detect emits ZERO (no new-external-access detector;
-	//           repo.add_collaborator is in no event-type set) → DETECT-MISS
-	//           (expected escalated → an end-to-end FAIL).
+	//   VA-04 — the volume spike's magnitude lives only in the finding metadata
+	//           (volume_ratio); the corpus emits a representative handful of
+	//           api_call events whose RAW count never clears the 3× baseline, so
+	//           volume-anomaly cannot fire from events alone → DETECT-MISS
+	//           (expected escalated → an end-to-end FAIL). A durable corpus-data
+	//           limit, not a detector defect — the canonical DETECT-MISS anchor.
 	const wantReproduced = "ID-03-new-actor-suspicious-unknown"
-	const wantDetectMiss = "AC-01-external-access-stolen-cred"
+	const wantDetectMiss = "VA-04-api-enumeration"
 	subset := []LoadedScenario{
 		pickScenario(t, corpus, wantReproduced),
 		pickScenario(t, corpus, wantDetectMiss),
@@ -197,8 +202,14 @@ func TestE2E_DetectReproductionProbe(t *testing.T) {
 		if strings.HasPrefix(s.ID, "ID-03-") && row.Outcome != OutcomeReproduced {
 			t.Errorf("ID-03 expected REPRODUCED, got %s (emitted=%v)", row.Outcome, row.EmittedDetectors)
 		}
-		if strings.HasPrefix(s.ID, "AC-01-") && row.Outcome != OutcomeDetectMiss {
-			t.Errorf("AC-01 expected DETECT-MISS, got %s (emitted=%v)", row.Outcome, row.EmittedDetectors)
+		// AC-01 now REPRODUCES (new-external-access detector). VA-04 is the durable
+		// DETECT-MISS anchor: the volume magnitude lives only in finding metadata,
+		// so volume-anomaly cannot fire from the representative event sample.
+		if strings.HasPrefix(s.ID, "AC-01-") && row.Outcome != OutcomeReproduced {
+			t.Errorf("AC-01 expected REPRODUCED, got %s (emitted=%v)", row.Outcome, row.EmittedDetectors)
+		}
+		if strings.HasPrefix(s.ID, "VA-04-") && row.Outcome != OutcomeDetectMiss {
+			t.Errorf("VA-04 expected DETECT-MISS, got %s (emitted=%v)", row.Outcome, row.EmittedDetectors)
 		}
 	}
 	if reproduced == 0 {
