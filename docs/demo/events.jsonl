@@ -1,0 +1,2 @@
+{"id":"evt-001","source":"github","type":"role_assignment","actor":"ext-contractor-9f","timestamp":"2026-06-18T03:14:07Z","org":"acme-corp","payload":{"role_name":"admin","permission_level":"admin","target_user":"acme-corp/payments-api","action":"add_role_assignment","ip":"203.0.113.77"}}
+{"id":"evt-002","source":"github","type":"push","actor":"ci-bot","timestamp":"2026-06-18T09:02:11Z","org":"acme-corp","payload":{"action":"push","target":"acme-corp/website","branch":"main"}}

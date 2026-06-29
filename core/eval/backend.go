@@ -49,8 +49,18 @@ const (
 	// ModeCanned is the creds-free merge-gate: cannedbackend golden responses.
 	ModeCanned Mode = "canned"
 	// ModeReal is the parity run against a live model via DirectClient. WIRED but
-	// not run here (no creds).
+	// not run here (no creds). ModeReal injects a SYNTHETIC finding built from the
+	// scenario's YAML finding: block and calls agent.ResolveFindingWith directly —
+	// the detector is bypassed.
 	ModeReal Mode = "real"
+	// ModeE2E is the END-TO-END scan run: it drives the REAL pipeline.Run (the same
+	// function `mallcop scan` calls) so the scenario's raw events flow through
+	// connect → detect.Detect (the PROD detector fleet) → store → resolve → store.
+	// The finding the cascade resolves is whatever the REAL detectors emit, NOT the
+	// YAML block. It uses the same {base_url,key} pivot client as ModeReal (or a
+	// cannedbackend for the $0 canned-verification test). Its headline output is the
+	// detect-fidelity block: how many scenario findings detect even reproduces.
+	ModeE2E Mode = "e2e"
 )
 
 // goldenScript returns the cannedbackend CannedContentFunc that makes ONE scenario

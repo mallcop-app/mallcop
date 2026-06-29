@@ -1,0 +1,12 @@
+{
+  "known_users": {},
+  "known_actors": ["ci-bot", "deploy-svc"],
+  "frequency_tables": {
+    "github:push:ci-bot": 4821,
+    "github:role_assignment:admin-user": 12
+  },
+  "actor_roles": {
+    "ci-bot": ["read"],
+    "deploy-svc": ["write"]
+  }
+}

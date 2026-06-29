@@ -40,6 +40,14 @@ type RunResult struct {
 	// Transcripts maps scenario id → the full captured transcript for this pass
 	// (§4.7). Carried on the run so artifacts derive from a single source.
 	Transcripts map[string][]TranscriptEntry `json:"-"`
+	// Fidelity is the per-scenario detect-fidelity rows for this pass (ModeE2E
+	// only; nil otherwise). detect is deterministic, so these are stable across
+	// passes — the report aggregates run 0's rows.
+	Fidelity []DetectFidelityRow `json:"-"`
+	// ReproducedPassRate is the chain_action pass-rate over REPRODUCED scenarios
+	// only for THIS pass (ModeE2E only) — the agent-reasoning number. Zero when no
+	// scenario reproduced.
+	ReproducedPassRate float64 `json:"reproduced_pass_rate,omitempty"`
 }
 
 // HarnessReport is the harness's full output: the corpus integrity facts, every
@@ -53,8 +61,19 @@ type HarnessReport struct {
 	NoiseBandPP    float64           `json:"noise_band_pp"`
 	WithinBand     bool              `json:"runs_within_band"`
 	Classifier     ClassifierSummary `json:"classifier"`
+	// DetectFidelity is the e2e-only block measuring how many scenario findings the
+	// REAL detector fleet reproduced (vs mismatched/missed). Nil/zero for ModeCanned
+	// and ModeReal (which inject the finding and so never exercise detect). It is the
+	// headline result e2e exposes and must never be silently dropped.
+	DetectFidelity *DetectFidelity `json:"detect_fidelity,omitempty"`
+	// ReproducedPassRate is the e2e-only chain_action pass-rate over REPRODUCED
+	// scenarios ONLY — the agent-reasoning number, directly comparable to ModeReal.
+	// Computed as the median across runs of (passes among reproduced / reproduced
+	// count). Zero for non-e2e modes.
+	ReproducedPassRate float64 `json:"reproduced_pass_rate,omitempty"`
 	// Note states, in the report itself, what the number means — so a reader can
-	// never mistake the merge-gate's 100% for the accuracy number (§4.4).
+	// never mistake the merge-gate's 100% for the accuracy number (§4.4), nor the
+	// e2e all-scenario rate for the agent-reasoning rate.
 	Note string `json:"note"`
 }
 
@@ -104,9 +123,12 @@ func Run(ctx context.Context, cfg RunConfig) (HarnessReport, error) {
 		report.Note = "MERGE-GATE (golden responses): proves the harness+grader pipeline, NOT the model's accuracy. The real accuracy number comes only from ModeReal."
 	case ModeReal:
 		report.Note = "REAL-MODEL parity run: this IS the accuracy number (the model decided each verdict)."
+	case ModeE2E:
+		report.Note = "END-TO-END scan run: raw events → core/detect → cascade → store. The headline is detect_fidelity.reproduction_rate — how many scenario findings the detector fleet even reproduces. reproduced_pass_rate is the agent-reasoning number over REPRODUCED scenarios (comparable to ModeReal); detect_fidelity.end_to_end_pass_rate is the TRUE live-scan number over ALL scenarios (DETECT-MISS/MISMATCH on expected-escalate count as fails). If end_to_end_pass_rate is far below the ModeReal number, the detector fleet — not agent reasoning — is the gap."
 	}
 
 	var passRates []float64
+	var reproducedRates []float64
 	for i := 0; i < n; i++ {
 		rr, err := runOnce(ctx, cfg, corpus, i)
 		if err != nil {
@@ -114,16 +136,30 @@ func Run(ctx context.Context, cfg RunConfig) (HarnessReport, error) {
 		}
 		report.Runs = append(report.Runs, rr)
 		passRates = append(passRates, rr.PassRate)
+		reproducedRates = append(reproducedRates, rr.ReproducedPassRate)
 	}
 
 	report.MedianPassRate = median(passRates)
 	report.WithinBand = spread(passRates) <= noiseBandPP/100.0
 	report.Classifier = Classify(report.Runs)
+
+	// ModeE2E: surface the detect-fidelity block + the two pass-rate views so the
+	// detector-reproduction gap is loud, never folded into the chain_action rate.
+	if cfg.Mode == ModeE2E && len(report.Runs) > 0 {
+		// detect is deterministic → run 0's fidelity rows represent every pass.
+		df := aggregateDetectFidelity(report.Runs[0].Fidelity)
+		report.DetectFidelity = &df
+		report.ReproducedPassRate = median(reproducedRates)
+	}
 	return report, nil
 }
 
 // runOnce runs the full corpus once and grades it.
 func runOnce(ctx context.Context, cfg RunConfig, corpus Corpus, index int) (RunResult, error) {
+	if cfg.Mode == ModeE2E {
+		return runOnceE2E(ctx, cfg, corpus, index)
+	}
+
 	results := make([]ScenarioResult, 0, corpus.Count)
 	transcripts := make(map[string][]TranscriptEntry, corpus.Count)
 	passed := 0
@@ -170,6 +206,60 @@ func runOnce(ctx context.Context, cfg RunConfig, corpus Corpus, index int) (RunR
 		Total:       len(results),
 		PassRate:    rate(passed, len(results)),
 		Transcripts: transcripts,
+	}
+	return rr, nil
+}
+
+// runOnceE2E runs the full corpus once through the REAL pipeline (RunScenarioE2E)
+// and grades it. It threads cfg.RealClient as the single inference client (the
+// {base_url,key} pivot — a cannedbackend for the $0 verification, a DirectClient
+// for the metered run) and records per-scenario detect-fidelity. The chain_action
+// PassRate is over ALL scenarios (consistent with the other modes' RunResult shape,
+// so the median/classifier spine works unchanged); ReproducedPassRate is the
+// agent-reasoning rate over REPRODUCED scenarios only.
+func runOnceE2E(ctx context.Context, cfg RunConfig, corpus Corpus, index int) (RunResult, error) {
+	if cfg.RealClient == nil {
+		return RunResult{}, fmt.Errorf("ModeE2E requires a non-nil RealClient (RealClientFromEnv or a canned-backed DirectClient); refusing to run")
+	}
+	// The §3.8 operator-decisions corpus root for the prod toolrun.Runner. Resolve
+	// once here (the eval repo root IS the corpus root) and thread it per scenario.
+	repoRoot, _ := RepoRoot()
+
+	results := make([]ScenarioResult, 0, corpus.Count)
+	transcripts := make(map[string][]TranscriptEntry, corpus.Count)
+	fidelity := make([]DetectFidelityRow, 0, corpus.Count)
+	passed := 0
+	reproducedTotal := 0
+	reproducedPassed := 0
+
+	for _, ls := range corpus.Scenarios {
+		out, err := RunScenarioE2E(ctx, cfg.RealClient, ls, cfg.Opts, repoRoot)
+		if err != nil {
+			return RunResult{}, err
+		}
+		if out.Result.Pass {
+			passed++
+		}
+		if out.Fidelity.Outcome == OutcomeReproduced {
+			reproducedTotal++
+			if out.Result.Pass {
+				reproducedPassed++
+			}
+		}
+		results = append(results, out.Result)
+		transcripts[out.Result.ScenarioID] = out.Transcript
+		fidelity = append(fidelity, out.Fidelity)
+	}
+
+	rr := RunResult{
+		Index:              index,
+		Results:            results,
+		Passed:             passed,
+		Total:              len(results),
+		PassRate:           rate(passed, len(results)),
+		Transcripts:        transcripts,
+		Fidelity:           fidelity,
+		ReproducedPassRate: rate(reproducedPassed, reproducedTotal),
 	}
 	return rr, nil
 }

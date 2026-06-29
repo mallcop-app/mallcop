@@ -3,10 +3,16 @@
 //
 //	mallcop-eval -mode canned          # creds-free merge-gate (golden responses)
 //	mallcop-eval -mode real -n 3       # parity run vs a live model (needs creds)
+//	mallcop-eval -mode e2e  -n 3       # END-TO-END: raw events → core/detect → cascade
 //
-// ModeReal reads MALLCOP_INFERENCE_URL + MALLCOP_API_KEY (see core/eval
+// ModeReal AND ModeE2E read MALLCOP_INFERENCE_URL + MALLCOP_API_KEY (see core/eval
 // RealClientFromEnv). The per-tier lane defaults (triage glm-4.7-flash,
 // investigate/deep glm-5) come from the cascade; no model flag is needed.
+//
+// -mode e2e drives the SAME pipeline.Run `mallcop scan` calls, so the scenario's
+// raw events flow through the PROD detector fleet. Its headline output is the
+// detect_fidelity block (reproduction_rate + end_to_end_pass_rate) — the honest
+// "does live scan get the right answer from raw events" number.
 package main
 
 import (
@@ -22,7 +28,7 @@ import (
 )
 
 func main() {
-	mode := flag.String("mode", "canned", "canned | real")
+	mode := flag.String("mode", "canned", "canned | real | e2e")
 	n := flag.Int("n", 3, "number of full-corpus passes for the median")
 	// consensus selects the number of ADDITIONAL committee re-runs the consensus
 	// gate makes on every RESOLVE (default 3). 0 turns the gate OFF: the harness
@@ -53,8 +59,16 @@ func main() {
 			os.Exit(2)
 		}
 		cfg.RealClient = client
+	case "e2e":
+		cfg.Mode = eval.ModeE2E
+		client, err := eval.RealClientFromEnv()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "mallcop-eval: %v\n", err)
+			os.Exit(2)
+		}
+		cfg.RealClient = client
 	default:
-		fmt.Fprintf(os.Stderr, "mallcop-eval: unknown -mode %q (want canned|real)\n", *mode)
+		fmt.Fprintf(os.Stderr, "mallcop-eval: unknown -mode %q (want canned|real|e2e)\n", *mode)
 		os.Exit(2)
 	}
 
