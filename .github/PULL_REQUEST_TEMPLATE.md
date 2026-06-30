@@ -10,4 +10,4 @@ Fixes #
 
 - [ ] New tests added
 - [ ] All existing tests pass (`go test ./...`)
-- [ ] Connector verification passes (`mallcop scan --chart <chart>`) if applicable
+- [ ] Connector verification passes (`mallcop scan --connector github --github-org <org>` or `--events <file>`) if applicable
