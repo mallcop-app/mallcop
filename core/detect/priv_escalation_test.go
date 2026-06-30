@@ -16,12 +16,14 @@ func TestContainsElevatedKeyword(t *testing.T) {
 		role string
 		want bool
 	}{
-		{"owner", true},             // Azure / GitHub bare form (exact, still works)
-		{"admin", true},             //
-		{"roles/owner", true},       // GCP — missed by the old exact match
-		{"Super Admin", true},       // Okta — missed by old exact match (case-insensitive)
-		{"Org Administrator", true}, // contains "admin"
-		{"write", true},             // a write grant is elevated
+		{"owner", true},                 // Azure / GitHub bare form (exact, still works)
+		{"admin", true},                 //
+		{"roles/owner", true},           // GCP — missed by the old exact match
+		{"roles/editor", true},          // GCP primitive: broad write (GAP-1)
+		{"Super Admin", true},           // Okta — missed by old exact match (case-insensitive)
+		{"Org Administrator", true},     // contains "admin"
+		{"Sites.FullControl.All", true}, // M365 Graph app role (GAP-2)
+		{"write", true},                 // a write grant is elevated
 		{"viewer", false},
 		{"readonly", false},
 		{"roles/viewer", false},
@@ -40,10 +42,12 @@ func TestContainsElevatedKeyword(t *testing.T) {
 // even though the connector emitted the correct role_assignment Type + payload.
 func TestPrivEscalationFiresOnCloudRoles(t *testing.T) {
 	cases := []struct {
-		name, source, actor, role string
+		name, source, actor, role, wantSev string
 	}{
-		{"gcp-roles-owner", "gcp", "deployer", "roles/owner"},
-		{"okta-super-admin", "okta", "rogue", "Super Admin"},
+		{"gcp-roles-owner", "gcp", "deployer", "roles/owner", "critical"},
+		{"okta-super-admin", "okta", "rogue", "Super Admin", "critical"},
+		{"gcp-roles-editor", "gcp", "deployer2", "roles/editor", "high"},       // GAP-1: broad write, not owner/admin → high
+		{"m365-fullcontrol", "m365", "appsp", "Sites.FullControl.All", "high"}, // GAP-2
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -69,8 +73,8 @@ func TestPrivEscalationFiresOnCloudRoles(t *testing.T) {
 			if !found {
 				t.Fatalf("priv-escalation did NOT fire on %s role %q", c.source, c.role)
 			}
-			if sev != "critical" {
-				t.Errorf("priv-escalation severity = %q, want critical (role %q carries owner/admin)", sev, c.role)
+			if sev != c.wantSev {
+				t.Errorf("priv-escalation severity = %q, want %q (role %q)", sev, c.wantSev, c.role)
 			}
 		})
 	}

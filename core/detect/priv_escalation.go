@@ -54,12 +54,16 @@ var elevatedActionKeywords = []string{
 }
 
 // elevatedKeywords are role/permission values that indicate elevated access.
+// Matched as case-insensitive SUBSTRINGS (see containsElevatedKeyword) so
+// cloud-specific role formats are recognized, not just GitHub/Azure bare names.
 var elevatedKeywords = map[string]bool{
 	"admin":       true,
 	"owner":       true,
 	"write":       true,
 	"contributor": true,
 	"maintainer":  true,
+	"editor":      true, // GCP primitive role roles/editor: broad project-wide write
+	"fullcontrol": true, // M365 Graph app role, e.g. Sites.FullControl.All
 }
 
 // privPayload is the resolved privilege-escalation discriminator set, read from
