@@ -12,7 +12,17 @@ mallcop is a single standalone executable.
 
 ## Install
 
-**Go install (latest):**
+**One line (Linux & macOS):**
+
+```bash
+curl -fsSL https://mallcop.app/install.sh | sh
+```
+
+Downloads the prebuilt binary for your platform, verifies its checksum, and
+installs it to `/usr/local/bin` or `~/.local/bin` (no sudo). It's a single
+static binary with the detection rules baked in — no runtime, no config file.
+
+**Go toolchain:**
 
 ```bash
 go install github.com/mallcop-app/mallcop/cmd/mallcop@latest
@@ -20,9 +30,9 @@ go install github.com/mallcop-app/mallcop/cmd/mallcop@latest
 
 **Release binaries:**
 
-Pre-built binaries for Linux, macOS, and Windows are attached to each
-[GitHub release](https://github.com/mallcop-app/mallcop/releases). Download
-the archive for your platform, extract, and place `mallcop` on your `PATH`.
+Pre-built binaries for Linux (amd64/arm64) and macOS (Apple Silicon) are
+attached to each [GitHub release](https://github.com/mallcop-app/mallcop/releases).
+Download the archive for your platform, extract, and place `mallcop` on your `PATH`.
 
 ## Quickstart
 
