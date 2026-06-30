@@ -119,7 +119,25 @@ func isElevated(ev event.Event, pp privPayload) bool {
 		return false
 	}
 	for _, val := range []string{pp.RoleName, pp.PermissionLevel} {
-		if elevatedKeywords[strings.ToLower(val)] {
+		if containsElevatedKeyword(val) {
+			return true
+		}
+	}
+	return false
+}
+
+// containsElevatedKeyword reports whether a role/permission value carries an
+// elevated-access keyword as a SUBSTRING (case-insensitive). Substring, not exact,
+// so cloud-specific role formats are recognized: GCP "roles/owner" and Okta
+// "Super Admin" both carry a privileged keyword but never exact-matched the bare
+// "owner"/"admin" GitHub/Azure form, so priv-escalation silently missed them.
+func containsElevatedKeyword(val string) bool {
+	lowered := strings.ToLower(val)
+	if lowered == "" {
+		return false
+	}
+	for kw := range elevatedKeywords {
+		if strings.Contains(lowered, kw) {
 			return true
 		}
 	}
@@ -165,7 +183,7 @@ func privEscalationEvaluate(ev event.Event, bl *baseline.Baseline, emitted map[s
 	emitted[dedupKey] = true
 
 	severity := "high"
-	if ev.Type == "admin_action" || rk == "admin" || rk == "owner" {
+	if ev.Type == "admin_action" || strings.Contains(rk, "admin") || strings.Contains(rk, "owner") {
 		severity = "critical"
 	}
 
