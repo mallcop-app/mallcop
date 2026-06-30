@@ -205,37 +205,6 @@ func TestIsFindingsError(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// loadCheckpoint
-// ---------------------------------------------------------------------------
-
-func TestLoadCheckpoint_Valid(t *testing.T) {
-	tmp := t.TempDir()
-	path := tmp + "/checkpoint.json"
-	ts := time.Now().UTC().Truncate(time.Second)
-	content := fmt.Sprintf(`{"purpose":"test","last_cursor":"abc","last_run":%q,"findings_processed":7}`,
-		ts.Format(time.RFC3339))
-	os.WriteFile(path, []byte(content), 0o644)
-
-	cp, err := loadCheckpoint(path)
-	if err != nil {
-		t.Fatalf("loadCheckpoint: %v", err)
-	}
-	if cp.LastCursor != "abc" {
-		t.Errorf("expected cursor abc, got %q", cp.LastCursor)
-	}
-	if cp.FindingsProcessed != 7 {
-		t.Errorf("expected 7 findings, got %d", cp.FindingsProcessed)
-	}
-}
-
-func TestLoadCheckpoint_Missing(t *testing.T) {
-	_, err := loadCheckpoint("/nonexistent/checkpoint.json")
-	if err == nil {
-		t.Error("expected error for missing file")
-	}
-}
-
-// ---------------------------------------------------------------------------
 // readFindingsDir / readResolutionsDir
 // ---------------------------------------------------------------------------
 

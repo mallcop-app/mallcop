@@ -2,11 +2,11 @@
 //
 // Usage:
 //
-//	mallcop scan   [--chart <path>] [--timeout <duration>] [--json]
+//	mallcop scan   --store <dir> [--events <file> | --connector github --github-org <org>] [--json]
 //	mallcop detect [--baseline <path>]   < events.jsonl   > findings.jsonl
 //	mallcop init   [--dir <path>]
-//	mallcop status [--chart <path>]
-//	mallcop config [--chart <path>]
+//	mallcop status --store <dir>
+//	mallcop config
 package main
 
 import (
@@ -60,28 +60,29 @@ func usage() {
 
 Commands:
   scan    Run a one-shot agentic security scan (connect -> detect -> cascade -> store)
-    --events    Events JSONL source (file path, or "-" for stdin; default: "-")
-    --store     Path to the git-repo store for findings/resolutions (required)
-    --baseline  Optional path to a baseline JSON file
-    --base-url  Inference endpoint base URL (overrides $MALLCOP_INFERENCE_URL)
-    --workers   Bounded resolve-pool size (0 = pipeline default)
-    --json      Output the summary as JSON
-                Inference auth: $MALLCOP_INFERENCE_URL + $MALLCOP_API_KEY
-                (BYOK: vendor URL+key; Forge: forge URL + mallcop-sk-* key).
-                With no URL, every finding force-escalates (fail-safe).
+    --store      Path to the git-repo store for findings/resolutions (required)
+    --events     Events JSONL source (file path, or "-" for stdin; default: "-")
+    --connector  "file" (default, reads --events) or "github"
+    --github-org GitHub org to scan (required when --connector github)
+    --baseline   Optional path to a baseline JSON file
+    --base-url   Inference endpoint base URL (overrides $MALLCOP_INFERENCE_URL)
+    --workers    Bounded resolve-pool size (0 = pipeline default)
+    --json       Output the summary as JSON
+                 Inference auth: $MALLCOP_INFERENCE_URL + $MALLCOP_API_KEY
+                 (BYOK: vendor URL+key; Forge: forge URL + mallcop-sk-* key).
+                 With no URL, every finding force-escalates (fail-safe).
 
   detect  Run offline detection over events JSONL on stdin (no inference key)
     --baseline  Optional path to a baseline JSON file
                Reads events JSONL from stdin, writes findings JSONL to stdout.
 
-  init    Initialize a mallcop config directory
+  init    Scaffold a findings store + sample events and print runnable next steps
     --dir      Directory to initialize (default: current directory)
 
-  status  Show current scan state
-    --chart    Path to the legion chart TOML (default: charts/vertical-slice.toml)
+  status  Report findings/resolutions recorded in a store
+    --store    Path to the git-repo store written by 'mallcop scan' (required)
 
-  config  Print and validate the current config
-    --chart    Path to the legion chart TOML (default: charts/vertical-slice.toml)
+  config  Print the effective scan config resolved from the environment
 
 Exit codes (scan):
   0  No findings

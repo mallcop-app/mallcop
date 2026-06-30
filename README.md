@@ -2,16 +2,13 @@
 
 > Open-source security monitoring for small cloud operators. AI-native. Go.
 
-mallcop is a Go-native security monitoring CLI. It plugs into your cloud audit
-logs (AWS, Azure, GCP, GitHub, M365, Okta), runs detectors that look for
-real-world attack patterns, and uses LLM-driven investigation tools to
-triage findings before paging a human.
-
-## Status
-
-**v0.6.0** is the first release on this Go codebase. It supersedes the Python
-implementation at [mallcop-app/mallcop-py](https://github.com/mallcop-app/mallcop-py).
-Python users: see [Migrating from Python mallcop](#migrating-from-python-mallcop-05x) below.
+mallcop is a Go-native security monitoring CLI. It ingests your cloud and SaaS
+audit events, runs 17 deterministic detectors that look for real-world attack
+patterns, then drives each finding through an LLM-backed investigation cascade
+(triage → investigate → deep panel → committee consensus) before paging a human.
+Findings and resolutions are written to a git-native store, so every decision is
+durable, replayable, and auditable. The rules corpus is embedded in the binary —
+mallcop is a single standalone executable.
 
 ## Install
 
@@ -29,98 +26,131 @@ the archive for your platform, extract, and place `mallcop` on your `PATH`.
 
 ## Quickstart
 
-**1. Install mallcop:**
+**1. Install mallcop** (see above).
+
+**2. Scaffold a store and sample events:**
 
 ```bash
-go install github.com/mallcop-app/mallcop/cmd/mallcop@latest
+mallcop init
 ```
 
-**2. Set up a connector.**
+`init` creates a `store/` directory (the git-backed findings store) and a sample
+`events.jsonl`, then prints the exact next-step commands below.
 
-Connectors live in the sibling repo
-[mallcop-app/mallcop-connectors](https://github.com/mallcop-app/mallcop-connectors).
-Follow that repo's README to install and configure the connector for your
-platform (e.g. AWS CloudTrail, GitHub Audit Log).
-
-**3. Run a scan:**
+**3. Run a scan over the sample events:**
 
 ```bash
-mallcop scan
+mallcop scan --events events.jsonl --store store
 ```
 
-mallcop reads `charts/vertical-slice.toml` by default. Pass `--chart` to point
-at a different chart file.
+That's it — no config file. `scan` reads the events, runs the detectors, drives
+findings through the cascade, and commits findings + resolutions into `store/`.
+With no inference endpoint configured, every finding force-escalates (the
+documented fail-safe), so the command works end to end with zero credentials.
+
+**4. (Optional) Enable LLM-driven resolution.** Point mallcop at an inference
+endpoint via the `MALLCOP_INFERENCE_URL` / `MALLCOP_API_KEY` pivot — a vendor URL
++ key for BYOK, or the Forge URL + a `mallcop-sk-*` tenant key for the metered
+managed path:
 
 ```bash
-mallcop scan --chart charts/my-stack.toml --timeout 15m --json
+export MALLCOP_INFERENCE_URL=https://api.mallcop.app
+export MALLCOP_API_KEY=mallcop-sk-...
+mallcop scan --events events.jsonl --store store
 ```
 
-Use `mallcop init` to scaffold a config directory in the current folder.
+**5. Inspect what was recorded:**
+
+```bash
+mallcop status --store store
+```
+
+## Commands
+
+| Command | Purpose |
+|---------|---------|
+| `mallcop scan` | Full agentic scan: connect → detect → cascade → store. Requires `--store`. |
+| `mallcop detect` | Offline detection only. Reads events JSONL on stdin, writes findings JSONL on stdout. No inference key. |
+| `mallcop init` | Scaffold a findings store + sample events and print runnable next steps. |
+| `mallcop status` | Report findings/resolutions recorded in a store. Requires `--store`. |
+| `mallcop config` | Print the effective scan config resolved from the environment. |
+
+### `mallcop scan`
+
+```bash
+# File connector (default): scan a local events JSONL file
+mallcop scan --events events.jsonl --store store
+
+# GitHub connector (built into the core binary): scan a GitHub org's audit log
+export GITHUB_APP_ID=...
+export GITHUB_APP_PRIVATE_KEY=...      # PEM, or a path to it
+export GITHUB_INSTALLATION_ID=...
+mallcop scan --connector github --github-org my-org --store store
+```
+
+Flags: `--store` (required), `--events` (file path or `-` for stdin),
+`--connector` (`file` | `github`), `--github-org`, `--baseline`, `--workers`,
+`--json`, `--base-url`.
+
+Exit codes: `0` no findings, `1` findings present, `2` scan failure.
 
 ## Architecture
 
 ```
-mallcop CLI (cmd/mallcop)
-  → connectors       — fetch cloud audit events
-  → detectors        — pattern-match for attack indicators
-  → investigate-tools — LLM-driven triage
-  → notifiers        — page humans on confirmed findings
+mallcop scan
+  → connector        — fetch/ingest audit events (file or github)
+  → detectors        — 17 deterministic attack-pattern detectors
+  → cascade          — triage → investigate → deep panel → committee consensus
+  → git store        — durable, replayable findings + resolutions
 ```
 
-### Binaries
-
-| Binary | Purpose |
-|--------|---------|
-| `cmd/mallcop` | Primary user-facing CLI (`scan`, `init`, `status`, `config`) |
-| `cmd/mallcop-academy` | Scenario-based evaluation harness for detectors |
-| `cmd/mallcop-investigate-tools` | Investigation actor surface (LLM tool calls) |
-| `cmd/detector-*` | 13 detector binaries (config-drift, dependency-tamper, exfil-pattern, git-oops, injection-probe, malicious-skill, new-actor, priv-escalation, rate-anomaly, secrets-exposure, unusual-login, unusual-timing, volume-anomaly) |
-| `cmd/notify-{email,slack,teams,telegram}` | Outbound notification channels |
-| `cmd/baseline` | Baseline snapshot management |
-| `cmd/mallcop-checklist-verify` | Post-scan checklist verification |
-| `cmd/mallcop-coverage-tripwire` | Coverage enforcement |
-| `cmd/mallcop-exam-report` | Academy exam report generation |
-| `cmd/mallcop-finding-context` | Finding enrichment context |
-
-### Key packages
-
-| Package | Role |
-|---------|------|
-| `pkg/event` | Shared event types across connectors and detectors |
-| `pkg/finding` | Finding schema and severity levels |
-| `pkg/baseline` | Baseline snapshot storage and diffing |
-| `pkg/resolution` | Finding resolution tracking |
-| `internal/exam` | Academy exam runner shared types |
+The cascade resolves each finding through escalating tiers and ends in a
+committee **consensus** vote: on every RESOLVE, the gate re-runs the cascade and
+**any-escalate-wins** — a safety-first, asymmetric policy because a missed attack
+(false negative) is catastrophic while an over-escalation merely pages a human.
+The operator rules corpus is embedded in the binary, so the scan is fully
+standalone — no external rules files to ship or keep in sync.
 
 ## Connectors
 
-Connector binaries live in a sibling repo:
+The core binary ships two **built-in** connectors:
+
+- **file** (default) — reads normalized event JSONL from `--events`.
+- **github** — pulls a GitHub org's audit log directly, using
+  `GITHUB_APP_ID` / `GITHUB_APP_PRIVATE_KEY` / `GITHUB_INSTALLATION_ID`.
+
+Additional connectors ship as **standalone binaries** in the sibling repo
 [mallcop-app/mallcop-connectors](https://github.com/mallcop-app/mallcop-connectors).
+Each emits event JSONL that you pipe into `mallcop scan --events -`:
 
-Currently shipped: AWS CloudTrail, Azure Activity Log, GCP Cloud Logging,
-GitHub Audit Log, M365 Management Activity, Okta System Log.
+```bash
+mallcop-connector-aws-cloudtrail --region us-east-1 \
+  | mallcop scan --events - --store store
+```
 
-## Migrating from Python mallcop (0.5.x)
+Currently shipped standalone connectors: AWS CloudTrail, Azure Activity Log,
+GCP Cloud Logging, GitHub Audit Log, M365 Management Activity, Okta System Log.
 
-The Go rewrite is a clean break. There is no automated migration path.
+**Not yet ported:** `container_logs`, `supabase`, `vercel`.
 
-**Connectors not yet ported to Go:** `container_logs`, `supabase`, `vercel`,
-`openclaw_config_drift`. If you depend on these, stay on Python 0.5.x until
-Go equivalents ship.
+## Detectors
 
-**CLI surface changes:**
-- `mallcop scan` replaces `mallcop run`
-- `mallcop init` scaffolds a TOML chart + `output/` directory (replaces `mallcop.yaml` + `.mallcop/`)
-- Patrol scheduler, chat REPL, daemon mode, and baseline ack/feedback/scaffold/verify/research/contribute are not yet ported
+17 deterministic detectors run on every scan (and via `mallcop detect`):
 
-**Config format changed:** YAML `mallcop.yaml` → TOML chart files under `charts/`.
-No automated conversion. Reconfigure from scratch using `mallcop init`.
+```
+auth-failure-burst       config-drift            dependency-tamper
+exfil-pattern            git-oops                injection-probe
+log-format-drift         malicious-skill         new-actor
+new-external-access      priv-escalation         rate-anomaly
+secrets-exposure         unusual-login           unusual-resource-access
+unusual-timing           volume-anomaly
+```
 
-**License changed:** Apache-2.0 → MIT.
-
-## Contributing
-
-See [CONTRIBUTING.md](CONTRIBUTING.md).
+Content-only detectors (e.g. `injection-probe`, `secrets-exposure`, `git-oops`,
+`config-drift`, `dependency-tamper`, `malicious-skill`) fire without any history.
+The baseline-dependent detectors (`new-actor`, `priv-escalation`, `unusual-login`,
+`unusual-timing`, `volume-anomaly`, `rate-anomaly`, `exfil-pattern`) use an
+optional `--baseline` JSON file for historical context.
 
 ## License
 

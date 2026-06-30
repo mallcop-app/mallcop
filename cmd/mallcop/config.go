@@ -4,31 +4,36 @@ import (
 	"flag"
 	"fmt"
 	"os"
-
-	"github.com/BurntSushi/toml"
 )
 
+// runConfig implements `mallcop config`: print the effective scan configuration
+// resolved from the environment. There is no chart or TOML config file — a scan
+// is configured entirely by flags plus the MALLCOP_INFERENCE_URL / MALLCOP_API_KEY
+// env pivot (point the URL at a vendor for BYOK, or at Forge for the metered
+// managed path). This command shows what a scan would pick up right now.
 func runConfig(args []string) error {
 	fs := flag.NewFlagSet("config", flag.ContinueOnError)
-	chartPath := fs.String("chart", defaultChart, "Path to the legion chart TOML")
-
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 
-	data, err := os.ReadFile(*chartPath)
-	if err != nil {
-		return fmt.Errorf("reading chart %s: %w", *chartPath, err)
+	url := os.Getenv(envInferenceURL)
+	model := os.Getenv(envInferenceModel)
+	if model == "" {
+		model = "mallcop-default"
 	}
 
-	// Validate: parse as generic TOML to catch syntax errors.
-	var v interface{}
-	if err := toml.Unmarshal(data, &v); err != nil {
-		return fmt.Errorf("invalid TOML in %s: %w", *chartPath, err)
+	fmt.Printf("mallcop effective config\n\n")
+	if url == "" {
+		fmt.Printf("  Inference URL (%s):   (unset — scans force-escalate every finding, the fail-safe)\n", envInferenceURL)
+	} else {
+		fmt.Printf("  Inference URL (%s):   %s\n", envInferenceURL, url)
 	}
-
-	fmt.Printf("Chart: %s\n", *chartPath)
-	fmt.Printf("Config OK\n\n")
-	fmt.Printf("%s", data)
+	if os.Getenv(envInferenceKey) == "" {
+		fmt.Printf("  Inference key (%s):       (unset)\n", envInferenceKey)
+	} else {
+		fmt.Printf("  Inference key (%s):       (set)\n", envInferenceKey)
+	}
+	fmt.Printf("  Model (%s):                 %s\n", envInferenceModel, model)
 	return nil
 }

@@ -23,8 +23,6 @@ import (
 )
 
 const (
-	defaultChart = "charts/vertical-slice.toml"
-
 	// envInferenceURL / envInferenceKey are the {BaseURL, Key} pivot: point the URL
 	// at the vendor for BYOK or at Forge for the metered managed path; the key is
 	// the vendor key (BYOK) or a mallcop-sk-* tenant key (Forge). Empty URL means
@@ -80,10 +78,6 @@ func runScan(args []string) error {
 	asJSON := fs.Bool("json", false, "Output the summary as JSON")
 	connector := fs.String("connector", "file", `Connector: "file" (default, reads --events) or "github"`)
 	githubOrg := fs.String("github-org", "", "GitHub org to scan (required when --connector github)")
-	// --chart is retained for backward-compatible invocation but is no longer
-	// required or consulted by the in-process pipeline.
-	_ = fs.String("chart", "", "(deprecated; ignored by the in-process pipeline)")
-	_ = fs.String("timeout", "10m", "(deprecated; the pipeline runs to completion)")
 
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -239,15 +233,6 @@ func (e *findingsError) Error() string { return "findings detected" }
 func isFindingsError(err error) bool {
 	_, ok := err.(*findingsError)
 	return ok
-}
-
-// scanOutputDir returns the directory where the scan pipeline writes
-// findings/resolutions, derived from chart location. Returns "" if not
-// determinable.
-func scanOutputDir(chartPath string) string {
-	chartDir := filepath.Dir(chartPath)
-	candidate := filepath.Join(chartDir, "..", "output")
-	return filepath.Clean(candidate)
 }
 
 // parseScanLine attempts to decode a JSONL line as Finding or Resolution.

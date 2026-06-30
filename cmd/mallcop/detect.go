@@ -14,7 +14,7 @@ import (
 )
 
 // runDetect implements `mallcop detect`: read events JSONL on stdin, run the
-// offline core/detect pipeline (all 13 detectors), and write findings JSONL to
+// offline core/detect pipeline (all 17 detectors), and write findings JSONL to
 // stdout. No inference key, network access, or Forge account is required —
 // detection is fully local and deterministic.
 //
