@@ -180,7 +180,9 @@ func (c *Client) exchange(ctx context.Context) (*InstallationToken, error) {
 		var errBody struct {
 			Message string `json:"message"`
 		}
-		_ = json.NewDecoder(resp.Body).Decode(&errBody)
+		if derr := json.NewDecoder(resp.Body).Decode(&errBody); derr != nil {
+			errBody.Message = fmt.Sprintf("<unparseable error body: %v>", derr)
+		}
 		return nil, fmt.Errorf("ghauth: GitHub returned %d creating installation token: %s",
 			resp.StatusCode, errBody.Message)
 	}

@@ -43,7 +43,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	mallcoplegion "github.com/mallcop-app/mallcop"
+	"github.com/mallcop-app/mallcop"
 )
 
 // expectedOperatorRulesSHA256 pins the sha256 of agents/rules/operator-decisions.yaml.
@@ -68,7 +68,7 @@ import (
 // path returns an error from LoadOperatorRules.
 //
 // This MUST equal the sha256 of the embedded corpus
-// (mallcoplegion.OperatorDecisionsYAML), which //go:embed guarantees is the
+// (mallcop.OperatorDecisionsYAML), which //go:embed guarantees is the
 // on-disk agents/rules/operator-decisions.yaml byte-for-byte. The pin==embed
 // test (TestExpectedSHAMatchesEmbed) ties this constant to those bytes so the
 // SHA-enforce path can never reference a hash that disagrees with the corpus the
@@ -237,7 +237,7 @@ func corpusBytes(repoRoot string, rootErr error) (data []byte, cacheKey string, 
 		// failure with no readable file means "no pre-seeded rules".
 		return nil, "", false, errNoOnDiskCorpus
 	}
-	return mallcoplegion.OperatorDecisionsYAML, embedCacheKey, false, nil
+	return mallcop.OperatorDecisionsYAML, embedCacheKey, false, nil
 }
 
 // errNoOnDiskCorpus is the sentinel returned by corpusBytes when the embed is

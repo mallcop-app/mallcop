@@ -77,6 +77,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"math"
 	"os"
 	"os/exec"
@@ -145,21 +146,21 @@ func lookupRulesInvoked(msgs []cfMessage) bool {
 
 // confidenceGateConfig holds the parsed configuration for the gate.
 type confidenceGateConfig struct {
-	Enabled           bool
-	ScoreFloor        float64
+	Enabled    bool
+	ScoreFloor float64
 	// TriageScoreFloor is the floor used when MALLCOP_SKILL=task:triage.
 	// Triage's 2-tool flow produces lower typical scores than investigate's
 	// 4+ tool flow, so it needs its own calibration. See file header for the
 	// rationale behind the 0.18 default.
-	TriageScoreFloor  float64
-	ToolCallWeight    float64
-	ToolCallCap       int
-	DistinctWeight    float64
-	DistinctCap       int
-	CitationWeight    float64
-	CitationCap       int
-	IterPenalty       float64
-	IterThreshold     int
+	TriageScoreFloor float64
+	ToolCallWeight   float64
+	ToolCallCap      int
+	DistinctWeight   float64
+	DistinctCap      int
+	CitationWeight   float64
+	CitationCap      int
+	IterPenalty      float64
+	IterThreshold    int
 }
 
 // Fan-out mode identifiers. These are the values runConfidenceGateFanOut
@@ -318,9 +319,9 @@ func loadGateConfig() confidenceGateConfig {
 
 // transcriptStats holds the parsed statistics from the engagement campfire.
 type transcriptStats struct {
-	ToolCallCount    int
+	ToolCallCount     int
 	DistinctToolCount int
-	Iterations       int
+	Iterations        int
 }
 
 // cfMessage is the JSON shape of a message from cf read --json --all.
@@ -416,9 +417,9 @@ var allowedRetrievalTags = map[string]struct{}{
 // contribute retrieved-evidence IDs, even when a retrieval-tag also appears.
 // This is the denylist half of the mallcoppro-a5d defense.
 var modelControlledTags = map[string]struct{}{
-	"finding:annotation":   {}, // annotate-finding payload (note field is model-controlled)
-	"transcript:partial":   {}, // write-partial-transcript payload
-	"transcript:annotate":  {}, // legacy annotate transcript tag
+	"finding:annotation":  {}, // annotate-finding payload (note field is model-controlled)
+	"transcript:partial":  {}, // write-partial-transcript payload
+	"transcript:annotate": {}, // legacy annotate transcript tag
 }
 
 // isAllowedRetrievalMessage reports whether a campfire message's tags qualify
@@ -875,9 +876,9 @@ func checkConfidenceGate(campfireID, action, reason, ruleID string) (gateResult,
 //
 //   - fanoutModeDeepX3Merge (task:investigate): emits the 4-message
 //     investigate fan-out:
-//      1. write-partial-transcript — saves the partial reasoning chain.
-//      2. escalate-to-deep × 3 — creates deep-investigate items per hypothesis.
-//      3. create-investigate-merge — creates the merge item wired to the 3 deep ids.
+//     1. write-partial-transcript — saves the partial reasoning chain.
+//     2. escalate-to-deep × 3 — creates deep-investigate items per hypothesis.
+//     3. create-investigate-merge — creates the merge item wired to the 3 deep ids.
 //
 // Unknown FanoutMode values fall through to the deep×3 + merge default to
 // preserve the historical behavior for any caller that constructs a gateResult
@@ -911,9 +912,12 @@ func runConfidenceGateFanOut(findingID, reason string, gr gateResult) error {
 		"content":    partialContent,
 	})
 	var transcriptPath string
-	transcriptOut := captureStdoutSilent(func() error {
+	transcriptOut, transcriptErr := captureStdoutSilent(func() error {
 		return runWritePartialTranscript(string(transcriptInputJSON))
 	})
+	if transcriptErr != nil {
+		fmt.Fprintf(os.Stderr, "gate: write-partial-transcript failed: %v\n", transcriptErr)
+	}
 	if transcriptOut != "" {
 		var tResult map[string]interface{}
 		if json.Unmarshal([]byte(transcriptOut), &tResult) == nil {
@@ -934,16 +938,19 @@ func runConfidenceGateFanOut(findingID, reason string, gr gateResult) error {
 	deepItemIDs := make([]string, 0, 3)
 	for _, hyp := range hypotheses {
 		deepInputJSON, _ := json.Marshal(map[string]interface{}{
-			"finding_id":             findingID,
-			"hypothesis":             hyp,
+			"finding_id":              findingID,
+			"hypothesis":              hyp,
 			"partial_transcript_path": transcriptPath,
 		})
-		deepOut := captureStdoutSilent(func() error {
+		deepOut, deepErr := captureStdoutSilent(func() error {
 			// Temporarily override MALLCOP_WORK_CAMPFIRE_ID to ensure the work
 			// campfire is set (it should already be set from requireEnv above).
 			_ = workCampfireID
 			return runEscalateToDeep(string(deepInputJSON))
 		})
+		if deepErr != nil {
+			fmt.Fprintf(os.Stderr, "gate: escalate-to-deep[%s] failed: %v\n", hyp, deepErr)
+		}
 		var itemID string
 		if deepOut != "" {
 			var dResult map[string]interface{}
@@ -964,12 +971,15 @@ func runConfidenceGateFanOut(findingID, reason string, gr gateResult) error {
 
 	// Step 3: create-investigate-merge wired to the 3 deep ids.
 	mergeInputJSON, _ := json.Marshal(map[string]interface{}{
-		"finding_id":   findingID,
+		"finding_id":    findingID,
 		"deep_item_ids": deepItemIDs,
 	})
-	mergeOut := captureStdoutSilent(func() error {
+	mergeOut, mergeErr := captureStdoutSilent(func() error {
 		return runCreateInvestigateMerge(string(mergeInputJSON))
 	})
+	if mergeErr != nil {
+		fmt.Fprintf(os.Stderr, "gate: create-investigate-merge failed: %v\n", mergeErr)
+	}
 	var mergeItemID string
 	if mergeOut != "" {
 		var mResult map[string]interface{}
@@ -985,19 +995,19 @@ func runConfidenceGateFanOut(findingID, reason string, gr gateResult) error {
 	// ScoreFloor here — kept in the result so the report matches the decision
 	// even if config is reloaded between check and report).
 	return emitJSON(map[string]interface{}{
-		"gate_fired":          true,
-		"finding_id":          findingID,
-		"score":               gr.Score,
-		"score_floor":         gr.EffectiveFloor,
-		"tool_calls":          gr.Stats.ToolCallCount,
-		"distinct_tools":      gr.Stats.DistinctToolCount,
-		"citations":           gr.CitationCount,
-		"iterations":          gr.Stats.Iterations,
-		"partial_transcript":  transcriptPath,
-		"deep_item_ids":       deepItemIDs,
-		"merge_item_id":       mergeItemID,
-		"fanout_action":       "deep-investigate-panel",
-		"reason":              "confidence gate fired — score below floor; fan-out to deep-investigate",
+		"gate_fired":         true,
+		"finding_id":         findingID,
+		"score":              gr.Score,
+		"score_floor":        gr.EffectiveFloor,
+		"tool_calls":         gr.Stats.ToolCallCount,
+		"distinct_tools":     gr.Stats.DistinctToolCount,
+		"citations":          gr.CitationCount,
+		"iterations":         gr.Stats.Iterations,
+		"partial_transcript": transcriptPath,
+		"deep_item_ids":      deepItemIDs,
+		"merge_item_id":      mergeItemID,
+		"fanout_action":      "deep-investigate-panel",
+		"reason":             "confidence gate fired — score below floor; fan-out to deep-investigate",
 	})
 }
 
@@ -1064,25 +1074,36 @@ func forceEscalateToInvestigator(findingID, reason string, gr gateResult) error 
 	})
 }
 
-// captureStdoutSilent runs fn while capturing stdout output.
-// Returns the captured output string. Used internally by the fan-out to collect
-// sub-tool outputs without emitting them to the parent process's stdout.
-func captureStdoutSilent(fn func() error) string {
+// captureStdoutSilent runs fn while capturing stdout output. Returns the
+// captured output and fn's error (or a capture error). Used by the fan-out to
+// collect sub-tool outputs without emitting them to the parent process's stdout.
+func captureStdoutSilent(fn func() error) (string, error) {
 	origStdout := os.Stdout
 	r, w, err := os.Pipe()
 	if err != nil {
-		_ = fn()
-		return ""
+		// Can't capture stdout, but still run fn so its side effects happen.
+		// Surface both failures rather than swallowing them.
+		if ferr := fn(); ferr != nil {
+			return "", fmt.Errorf("capture stdout: pipe failed (%v); fn failed: %w", err, ferr)
+		}
+		return "", fmt.Errorf("capture stdout: pipe: %w", err)
 	}
 	os.Stdout = w
 
-	_ = fn()
+	fnErr := fn()
 
 	w.Close()
 	os.Stdout = origStdout
 
-	buf := make([]byte, 64*1024)
-	n, _ := r.Read(buf)
+	// io.ReadAll, not a fixed 64 KiB buffer: a larger tool output was previously
+	// truncated silently.
+	out, readErr := io.ReadAll(r)
 	r.Close()
-	return string(buf[:n])
+	if fnErr != nil {
+		return string(out), fnErr
+	}
+	if readErr != nil {
+		return string(out), fmt.Errorf("capture stdout: read captured output: %w", readErr)
+	}
+	return string(out), nil
 }

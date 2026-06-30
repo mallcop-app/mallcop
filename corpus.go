@@ -4,7 +4,7 @@
 // file at a directory level whose subtree contains the corpus. The corpus is at
 // <root>/agents/rules/operator-decisions.yaml, so ONLY the repo root qualifies.
 // This is the sole production package at the root (hello_test.go is the external
-// `mallcoplegion_test` package, which Go permits to coexist with `mallcoplegion`
+// `mallcop_test` package, which Go permits to coexist with `mallcop`
 // in the same directory).
 //
 // The bytes are exposed so the production runtime loaders (core/agent's
@@ -18,7 +18,7 @@
 // This package imports ONLY "embed" — it carries no dependency that could let
 // the floor path reach inference, so importing it from core/agent and core/tools
 // does not violate either import-lint.
-package mallcoplegion
+package mallcop
 
 import _ "embed"
 

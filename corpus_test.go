@@ -1,4 +1,4 @@
-package mallcoplegion_test
+package mallcop_test
 
 import (
 	"bytes"
@@ -6,11 +6,11 @@ import (
 	"path/filepath"
 	"testing"
 
-	mallcoplegion "github.com/mallcop-app/mallcop"
+	"github.com/mallcop-app/mallcop"
 )
 
 // corpusRelPath is the repo-relative location of the operator-decisions corpus,
-// the same file //go:embed bakes into mallcoplegion.OperatorDecisionsYAML.
+// the same file //go:embed bakes into mallcop.OperatorDecisionsYAML.
 var corpusRelPath = filepath.Join("agents", "rules", "operator-decisions.yaml")
 
 // TestEmbedEqualsOnDisk asserts the embedded corpus is byte-for-byte identical
@@ -25,12 +25,12 @@ func TestEmbedEqualsOnDisk(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read on-disk corpus %s: %v", corpusRelPath, err)
 	}
-	if len(mallcoplegion.OperatorDecisionsYAML) == 0 {
+	if len(mallcop.OperatorDecisionsYAML) == 0 {
 		t.Fatal("embedded OperatorDecisionsYAML is empty; //go:embed directive not wired")
 	}
-	if !bytes.Equal(disk, mallcoplegion.OperatorDecisionsYAML) {
+	if !bytes.Equal(disk, mallcop.OperatorDecisionsYAML) {
 		t.Fatalf("embedded corpus differs from on-disk %s: disk=%d bytes embed=%d bytes — "+
 			"the binary would carry a corpus that disagrees with the file the SHA pin describes",
-			corpusRelPath, len(disk), len(mallcoplegion.OperatorDecisionsYAML))
+			corpusRelPath, len(disk), len(mallcop.OperatorDecisionsYAML))
 	}
 }

@@ -113,32 +113,34 @@ type memberPayload struct {
 }
 
 // classifyEventType maps a GitHub Event object to a normalized type, using the
-// payload action to disambiguate add/remove on MemberEvent/OrgEvent.
-func classifyEventType(ghType string, payload json.RawMessage) (normType string, mp memberPayload) {
-	_ = json.Unmarshal(payload, &mp)
+// already-parsed member payload to disambiguate add/remove on
+// MemberEvent/OrgEvent. A zero-valued mp (absent or unparseable payload) falls
+// through to the security-relevant default (e.g. "added"), so a corrupt payload
+// over-escalates rather than being missed — the fail-safe direction.
+func classifyEventType(ghType string, mp memberPayload) string {
 	switch ghType {
 	case "MemberEvent":
 		// repo collaborator add/remove. add -> new external access; remove benign.
 		switch mp.Action {
 		case "removed":
-			return "collaborator_removed", mp
+			return "collaborator_removed"
 		default: // "added", "edited"
-			return "repo.add_collaborator", mp
+			return "repo.add_collaborator"
 		}
 	case "OrgEvent":
 		switch mp.Action {
 		case "member_removed", "member_invited":
-			return "collaborator_removed", mp
+			return "collaborator_removed"
 		default: // member_added
-			return "org.add_member", mp
+			return "org.add_member"
 		}
 	case "TeamAddEvent":
-		return "permission_change", mp
+		return "permission_change"
 	}
 	if t, ok := eventTypeMap[ghType]; ok {
-		return t, mp
+		return t
 	}
-	return defaultEventTy, mp
+	return defaultEventTy
 }
 
 // synthPayload is the FLAT per-detector payload the connector emits. It is shaped
@@ -159,6 +161,10 @@ type synthPayload struct {
 	Repo            string          `json:"repo,omitempty"`
 	Org             string          `json:"org,omitempty"`
 	Raw             json.RawMessage `json:"raw,omitempty"`
+	// ParseError is set when the GitHub payload was present but could not be
+	// unmarshaled; it makes a corrupt payload visible in the finding record
+	// instead of silently misclassifying the event.
+	ParseError string `json:"parse_error,omitempty"`
 }
 
 // normalizeEvent normalizes one GitHub Event object (events feed) to event.Event.
@@ -177,7 +183,15 @@ func normalizeEvent(raw json.RawMessage, org string) (event.Event, bool) {
 		return event.Event{}, false
 	}
 
-	normType, mp := classifyEventType(ge.Type, ge.Payload)
+	// Parse the member payload (drives add/remove disambiguation). An empty
+	// payload is legitimate for many event types; a non-empty payload that fails
+	// to parse is surfaced on the event below rather than silently dropped.
+	var mp memberPayload
+	var parseErr error
+	if len(ge.Payload) > 0 {
+		parseErr = json.Unmarshal(ge.Payload, &mp)
+	}
+	normType := classifyEventType(ge.Type, mp)
 
 	actor := ge.Actor.Login
 	if actor == "" {
@@ -200,6 +214,9 @@ func normalizeEvent(raw json.RawMessage, org string) (event.Event, bool) {
 		Repo:         ge.Repo.Name,
 		Org:          orgOr(ge.Org.Login, org),
 		Raw:          raw,
+	}
+	if parseErr != nil {
+		sp.ParseError = parseErr.Error()
 	}
 	payload, _ := json.Marshal(sp)
 

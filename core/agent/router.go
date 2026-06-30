@@ -30,7 +30,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	mallcoplegion "github.com/mallcop-app/mallcop"
+	"github.com/mallcop-app/mallcop"
 	"github.com/mallcop-app/mallcop/pkg/finding"
 )
 
@@ -134,7 +134,7 @@ func escalateCorpusBytes(repoRoot string, rootErr error) (data []byte, cacheKey 
 		// dangerous case).
 		return nil, embedRoutesCacheKey + ":disabled", nil
 	}
-	return mallcoplegion.OperatorDecisionsYAML, embedRoutesCacheKey, nil
+	return mallcop.OperatorDecisionsYAML, embedRoutesCacheKey, nil
 }
 
 // isTruthyEnv returns true for common truthy env values, case-insensitive.

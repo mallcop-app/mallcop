@@ -357,7 +357,9 @@ func (s *Store) buildTree(baseCommit, file, blobSHA string) (string, error) {
 		return "", fmt.Errorf("store: temp index: %w", err)
 	}
 	idxPath := tmpIndex.Name()
-	tmpIndex.Close()
+	if err := tmpIndex.Close(); err != nil {
+		return "", fmt.Errorf("store: close temp index: %w", err)
+	}
 	// Remove the empty placeholder: git rejects a 0-byte file as a corrupt
 	// index ("smaller than expected"). It must create the index fresh at this
 	// path. We only needed CreateTemp to reserve a collision-free name.

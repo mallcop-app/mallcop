@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	mallcoplegion "github.com/mallcop-app/mallcop"
+	"github.com/mallcop-app/mallcop"
 )
 
 // TestExpectedSHAMatchesEmbed ties expectedOperatorRulesSHA256 to the embedded
@@ -21,7 +21,7 @@ import (
 //
 // Regenerate the constant with: sha256sum agents/rules/operator-decisions.yaml
 func TestExpectedSHAMatchesEmbed(t *testing.T) {
-	sum := sha256.Sum256(mallcoplegion.OperatorDecisionsYAML)
+	sum := sha256.Sum256(mallcop.OperatorDecisionsYAML)
 	got := hex.EncodeToString(sum[:])
 	if got != expectedOperatorRulesSHA256 {
 		t.Fatalf("expectedOperatorRulesSHA256 (%s) does not match sha256 of embedded corpus (%s); "+
