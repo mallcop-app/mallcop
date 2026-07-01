@@ -69,9 +69,6 @@ func dispatchActionTool(tool, inputJSON string) error {
 		return runReadRecentChat(inputJSON)
 	case "search-chat-history":
 		return runSearchChatHistory(inputJSON)
-	// F1G-h: Heal tools
-	case "spawn-claude-code-fix":
-		return runSpawnClaudeCodeFix(inputJSON)
 	// F2B: Engagement-campfire watcher — detects direct cf-send bypass of F2A gate
 	case "watch-engagement-campfire":
 		return runWatchEngagementCampfire(inputJSON)

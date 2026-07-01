@@ -306,8 +306,6 @@ var actionTools = map[string]bool{
 	// F1G-e: Operator chat tools
 	"read-recent-chat":    true,
 	"search-chat-history": true,
-	// F1G-h: Heal tools
-	"spawn-claude-code-fix": true,
 	// F2B: Engagement-campfire watcher — detects direct cf-send bypass of F2A gate
 	"watch-engagement-campfire": true,
 	// mallcoppro-00c: Pre-seeded operator-decision rules lookup (read-only,

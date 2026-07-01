@@ -1,5 +1,5 @@
 // tools_heal_budget.go — Per-attempt and per-day budget gate for the
-// heal-broaden spawn-claude-code-fix tool (mallcoppro-f8f).
+// embedded self-extension engine (donut spend cap).
 //
 // Design source: docs/design/heal-broaden.md §10 constraint C5, §4.5.
 //
@@ -16,7 +16,7 @@
 // Tests override the cache dir via MALLCOP_HEAL_BUDGET_DIR env var.
 //
 // This file does NOT register a dispatchActionTool case. It is a library
-// consumed by the future spawn-claude-code-fix tool (mallcoppro-724).
+// consumed by the embedded self-extension engine (its metered inference spend cap).
 package main
 
 import (
@@ -30,12 +30,12 @@ import (
 
 // Budget gate limits (C5).
 const (
-	healBudgetDailyCapPerClass     = 20
-	healBudgetTokenCapPerAttempt   = 150_000
-	healBudgetWallCapPerAttempt    = 20 * time.Minute
-	healBudgetFreezeHours          = 1         // consecutive failure freeze duration
-	healBudgetConsecFailFreeze     = 3         // consecutive failures → 1h freeze
-	healBudgetConsecFailDailyFreeze = 5        // consecutive failures → daily freeze
+	healBudgetDailyCapPerClass      = 20
+	healBudgetTokenCapPerAttempt    = 150_000
+	healBudgetWallCapPerAttempt     = 20 * time.Minute
+	healBudgetFreezeHours           = 1 // consecutive failure freeze duration
+	healBudgetConsecFailFreeze      = 3 // consecutive failures → 1h freeze
+	healBudgetConsecFailDailyFreeze = 5 // consecutive failures → daily freeze
 )
 
 // BudgetClassEntry tracks per-class counters for a single UTC day.

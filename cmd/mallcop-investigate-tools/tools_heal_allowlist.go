@@ -1,5 +1,5 @@
 // tools_heal_allowlist.go — Repo allowlist + subtree pathspec enforcement for
-// the heal-broaden spawn-claude-code-fix tool (mallcoppro-8b1).
+// the embedded self-extension engine (write allowlist for agent-authored data).
 //
 // Design source: docs/design/heal-broaden.md §10 constraints C1-C2, §4.4.
 //
@@ -10,7 +10,7 @@
 //
 // This file implements the allowlist + subtree validation library.
 // It does NOT register a dispatchActionTool case — this is consumed by the
-// future spawn-claude-code-fix tool (mallcoppro-724), not callable as
+// embedded self-extension engine, not callable as
 // a standalone --tool mode.
 package main
 
