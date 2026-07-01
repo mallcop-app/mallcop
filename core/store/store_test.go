@@ -42,6 +42,50 @@ func initRepo(t *testing.T) string {
 	return dir
 }
 
+// TestWriteSnapshotOverwritesAndDedupes proves WriteSnapshot commits a full-content
+// JSON document (not an append), overwrites on the next call, and skips a byte-identical
+// write — the property the browser depends on (deduped current state, not the append log).
+func TestWriteSnapshotOverwrites(t *testing.T) {
+	repo := initRepo(t)
+	s, err := Open(repo)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+
+	// First snapshot: two records.
+	if _, err := s.WriteSnapshot("findings.json", []map[string]any{{"id": "a"}, {"id": "b"}}); err != nil {
+		t.Fatalf("WriteSnapshot 1: %v", err)
+	}
+	var got []map[string]any
+	if err := json.Unmarshal(committedBytes(t, repo, "findings.json"), &got); err != nil {
+		t.Fatalf("snapshot 1 not valid JSON array: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("snapshot 1 = %d records, want 2", len(got))
+	}
+
+	// Second snapshot with ONE record must OVERWRITE (not append) — the file is a
+	// single document, so the count goes down, unlike the append-only stream.
+	if _, err := s.WriteSnapshot("findings.json", []map[string]any{{"id": "c"}}); err != nil {
+		t.Fatalf("WriteSnapshot 2: %v", err)
+	}
+	if err := json.Unmarshal(committedBytes(t, repo, "findings.json"), &got); err != nil {
+		t.Fatalf("snapshot 2 not valid JSON array: %v", err)
+	}
+	if len(got) != 1 || got[0]["id"] != "c" {
+		t.Fatalf("snapshot 2 = %v, want single record id=c (overwrite, not append)", got)
+	}
+
+	// A byte-identical re-write must NOT create a new commit.
+	before := len(gitLog(t, repo))
+	if _, err := s.WriteSnapshot("findings.json", []map[string]any{{"id": "c"}}); err != nil {
+		t.Fatalf("WriteSnapshot 3 (identical): %v", err)
+	}
+	if after := len(gitLog(t, repo)); after != before {
+		t.Fatalf("identical snapshot created a commit: log %d -> %d", before, after)
+	}
+}
+
 func gitLog(t *testing.T, repo string) []string {
 	t.Helper()
 	cmd := exec.Command("git", "log", "--format=%H %s")

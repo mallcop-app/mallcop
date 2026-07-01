@@ -196,6 +196,15 @@ func Run(ctx context.Context, cfg Config) (Summary, error) {
 		}
 	}
 
+	// Publish the browser-readable snapshot: the current, deduped, non-suppressed
+	// findings as a single JSON document. The web chat reads this instead of the
+	// append-only findings.jsonl, which accumulates history + suppressed records
+	// across scans. Written on every scan (including the empty set, so a cleared
+	// scan overwrites a stale snapshot).
+	if _, err := cfg.Store.WriteSnapshot("findings.json", findings); err != nil {
+		return Summary{}, fmt.Errorf("pipeline: write findings snapshot: %w", err)
+	}
+
 	if len(findings) == 0 {
 		summary.Duration = time.Since(start)
 		return summary, nil
