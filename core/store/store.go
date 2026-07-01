@@ -323,6 +323,70 @@ func (s *Store) commitAppend(kind Kind, line []byte) (string, error) {
 	return "", fmt.Errorf("store: commit %s gave up after %d rebase retries: %w", kind, maxRetries, lastErr)
 }
 
+// WriteSnapshot commits a full-content JSON document named `name` at the repo
+// root, using the same work-tree-free plumbing + CAS-retry as commitAppend.
+// Unlike Append (which appends one line to a JSONL stream), a snapshot REPLACES
+// the whole file with the caller's complete record set — the current, deduped,
+// non-suppressed view. It is the browser-readable projection of the scan: a
+// consumer (e.g. the web chat) reads this single document instead of replaying
+// the append-only findings.jsonl, which accumulates historical + suppressed
+// records across scans. A snapshot byte-identical to HEAD's is a no-op (no empty
+// commit). Returns the new (or unchanged) commit SHA.
+func (s *Store) WriteSnapshot(name string, records any) (string, error) {
+	content, err := json.MarshalIndent(records, "", "  ")
+	if err != nil {
+		return "", fmt.Errorf("store: marshal snapshot %s: %w", name, err)
+	}
+	content = append(content, '\n')
+
+	release, err := s.serializer.Lock(s.repoPath)
+	if err != nil {
+		return "", fmt.Errorf("store: acquire write lock: %w", err)
+	}
+	defer release()
+
+	const maxRetries = 128
+	var lastErr error
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		if attempt > 0 {
+			backoff(attempt)
+		}
+		oldHead, _ := s.head()
+		if oldHead != "" {
+			if prev, err := s.blobAt(oldHead, name); err == nil && bytes.Equal(prev, content) {
+				return oldHead, nil // unchanged — skip the empty commit
+			}
+		}
+		blobSHA, err := s.hashObject(content)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		treeSHA, err := s.buildTree(oldHead, name, blobSHA)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		commitSHA, err := s.commitTree(treeSHA, oldHead, "store: snapshot "+name)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		var casArgs []string
+		if oldHead == "" {
+			casArgs = []string{"update-ref", "HEAD", commitSHA, strings.Repeat("0", 40)}
+		} else {
+			casArgs = []string{"update-ref", "HEAD", commitSHA, oldHead}
+		}
+		if _, err := s.git(casArgs...); err != nil {
+			lastErr = err
+			continue
+		}
+		return commitSHA, nil
+	}
+	return "", fmt.Errorf("store: snapshot %s gave up after %d retries: %w", name, maxRetries, lastErr)
+}
+
 // blobAt returns the bytes of the file blob at the given commit, or empty bytes
 // if the file does not exist in that commit's tree.
 func (s *Store) blobAt(commit, file string) ([]byte, error) {
