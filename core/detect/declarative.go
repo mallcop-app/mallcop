@@ -514,12 +514,20 @@ func boxUntrusted(s string) string {
 
 // sanitizeReasonValue replaces every control character (incl. newlines/tabs) and
 // whitespace run with a single space and trims the edges, so a payload-derived
-// value cannot inject line structure into the committee prompt.
+// value cannot inject line structure into the committee prompt. It also DROPS the
+// untrusted-box delimiter runes (« U+00AB / » U+00BB): otherwise an attacker-controlled
+// value could close the «untrusted:…» span early and smuggle an instruction OUTSIDE
+// the box, where the committee reads it as un-boxed (trusted) text — a forged box
+// defeats the entire quoting guarantee (invariant 9).
 func sanitizeReasonValue(s string) string {
 	var b strings.Builder
 	b.Grow(len(s))
 	pendingSpace := false
 	for _, r := range s {
+		if r == '«' || r == '»' {
+			// Delimiter rune in attacker text — drop it so the box is unforgeable.
+			continue
+		}
 		if unicode.IsControl(r) || unicode.IsSpace(r) {
 			pendingSpace = true
 			continue
