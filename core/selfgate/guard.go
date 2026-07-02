@@ -16,23 +16,39 @@
 //     lint, tools, eval (the grader is out of the agent's reach), inference,
 //     the stable pkg contracts, cmd, CI config, the module files, and this
 //     package itself (the guard protects the guard) is rejected outright.
-//   - FROZEN-BUT-EXTENSIBLE trees — existing detector Go files and existing
-//     exam scenarios are frozen (M/D rejected) while purely additive new files
-//     pass THIS layer (the additive code lane is gated by other layers).
+//   - GO SOURCE DEFAULT-DENY (the catch-all safety floor) — ANY .go path not
+//     terminally handled above is rejected: Modify/Delete of any existing .go
+//     file, and Add of a .go file anywhere EXCEPT the single sanctioned
+//     additive detector lane (a NEW file directly under core/detect/). This
+//     floor does NOT depend on the enumerated protected prefixes, so a
+//     decision-path package the list never named (core/observe's
+//     force-escalate predicates, core/toolrun's cascade wiring, core/store,
+//     core/connect, internal/**, non-contract pkg/**) is frozen ANYWAY — the
+//     loop authors DATA, never code, so a Go change always needs a human.
+//   - FROZEN-BUT-EXTENSIBLE trees — existing exam scenarios are frozen (M/D
+//     rejected) while purely additive new scenario files pass THIS layer, and
+//     a NEW detector file DIRECTLY under core/detect/ passes this layer (the
+//     additive code lane, gated by other layers). A .go file in a SUBDIRECTORY
+//     under core/detect is NOT the lane — it is code-frozen by the floor above.
 //   - SEMANTIC WIDEN RULES — detectors/*.yaml tuning data and
 //     agents/rules/operator-decisions.yaml may be MODIFIED, but the contents
 //     are parsed (base and head) and only pure widens pass. Anything
-//     unrecognized fails closed.
+//     unrecognized — including an unknown top-level section or field — fails
+//     closed.
 //
-// DESIGN DECISION (no mechanical-pair exception): core/tools/lookup_rules.go
-// pins the sha256 of agents/rules/operator-decisions.yaml in the Go constant
-// expectedOperatorRulesSHA256, and core/tools/** is a protected path. A
-// proposal that widens operator-decisions.yaml therefore CANNOT also update
-// the pin — the YAML widen passes this guard, but at runtime the unchanged pin
-// makes the corpus SHA check fire, so the widened corpus only takes effect
-// after a HUMAN reviews the widen and re-pins. Widens route to the human tier
-// BY CONSTRUCTION; there is deliberately no "the pair moved together
-// mechanically, wave it through" exception.
+// DESIGN DECISION (no mechanical-pair exception): a proposal that widens
+// agents/rules/operator-decisions.yaml is ADDITIVE at this layer (new routes /
+// alias additions only; the widen-only rules above are the always-on floor).
+// As DEFENCE-IN-DEPTH, core/tools/lookup_rules.go pins the sha256 of that
+// corpus in the Go constant expectedOperatorRulesSHA256, and core/tools/** is a
+// protected path the proposal cannot touch. WHEN sha256 enforcement is enabled
+// in the deployment env — MALLCOP_RULES_SHA256_ENFORCE set truthy, or an
+// explicit MALLCOP_RULES_SHA256 digest (the check is OPT-IN and OFF by default,
+// see core/tools/lookup_rules.go verifyOperatorRulesChecksum) — the unchanged
+// pin makes the runtime corpus SHA check fire, so the widened corpus only takes
+// effect after a HUMAN reviews the widen and re-pins. There is deliberately no
+// "the pair moved together mechanically, wave it through" exception. This pin
+// coupling is a deployment-conditional defence, not an unconditional guarantee.
 package selfgate
 
 import (
@@ -60,6 +76,14 @@ const (
 	RuleProtectedPath = "protected-path"
 	// RuleDetectCodeFrozen — M/D on an existing core/detect/*.go file.
 	RuleDetectCodeFrozen = "detect-code-frozen"
+	// RuleCodeFrozen — the Go source DEFAULT-DENY catch-all: Modify/Delete of
+	// ANY existing .go file, or Add of a .go file OUTSIDE the sanctioned
+	// additive detector lane (a new file directly under core/detect/). The
+	// self-extension loop authors DATA, not code; any other Go change requires
+	// human review. This is the safety floor that does NOT depend on the
+	// enumerated protectedPrefixes, so a decision-path package the list forgot
+	// (core/observe, core/toolrun, core/store, core/connect, …) is frozen anyway.
+	RuleCodeFrozen = "code-frozen"
 	// RuleScenarioFrozen — M/D on an existing exam scenario file.
 	RuleScenarioFrozen = "scenario-frozen"
 	// RuleCorpusPinPairing — corpus.pin changed without the required
@@ -246,9 +270,29 @@ func Guard(repoRoot, baseRef, headRef string) ([]GuardFinding, error) {
 					Detail: fmt.Sprintf("%s of existing detector code: core/detect/*.go is frozen; new additive detector files are the gated code lane", statusWord(c.status)),
 				})
 			}
+
+		case strings.HasSuffix(c.path, ".go"):
+			// GO SOURCE DEFAULT-DENY (the catch-all safety floor). Any .go path
+			// that reaches here was NOT terminally handled above: it is neither
+			// a protected package nor the sanctioned additive detector lane
+			// (a new file directly under core/detect/, handled by the case
+			// above). Modify/Delete of an existing .go file and Add of a .go
+			// file anywhere else is a FINDING — the loop authors DATA, not
+			// code. Critically this does NOT rely on protectedPrefixes, so a
+			// decision-path package the prefix list never enumerated
+			// (core/observe's force-escalate predicates, core/toolrun's cascade
+			// wiring, core/store, core/connect, internal/**, non-contract
+			// pkg/**) is frozen ANYWAY, and a NEW .go file in a SUBDIRECTORY
+			// under core/detect (core/detect/evil/…) is code — not the lane.
+			findings = append(findings, GuardFinding{
+				Path:   c.path,
+				Rule:   RuleCodeFrozen,
+				Detail: fmt.Sprintf("%s of Go source outside the additive core/detect/ detector lane: the self-extension loop authors DATA, not code; modification/addition of Go source requires human review", statusWord(c.status)),
+			})
 		}
 		// Anything else passes THIS layer: the guard enforces the enumerated
-		// invariants; unlisted paths (docs, README, ...) are gated elsewhere.
+		// invariants; unlisted non-.go paths (docs, README, ...) are gated
+		// elsewhere.
 	}
 
 	return findings, nil

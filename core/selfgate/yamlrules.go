@@ -45,11 +45,16 @@ import (
 //     frozen (consensus-not-rules, invariant 1);
 //   - any unrecognized top-level section or unparseable document (fail closed).
 //
-// NOTE (design decision, no mechanical-pair exception): even a PASSING widen
-// here routes to the human tier by construction — the sha256 pin on this file
-// (core/tools/lookup_rules.go expectedOperatorRulesSHA256) lives on a
-// protected path the proposal cannot touch, so the runtime corpus SHA check
-// fires until a human re-pins.
+// NOTE (design decision, no mechanical-pair exception): a PASSING widen here is
+// ADDITIVE (new routes / alias additions only). As DEFENCE-IN-DEPTH, the sha256
+// pin on this file (core/tools/lookup_rules.go expectedOperatorRulesSHA256)
+// lives on a protected path the proposal cannot touch, so — WHEN sha256
+// enforcement is enabled in the deployment env (MALLCOP_RULES_SHA256_ENFORCE
+// set truthy, or an explicit MALLCOP_RULES_SHA256 digest; the check is OPT-IN
+// and OFF by default, see verifyOperatorRulesChecksum) — the runtime corpus SHA
+// check fires until a human re-pins. The pin coupling is a deployment-
+// conditional defence, not an unconditional guarantee; the widen-only rules
+// enforced here are the always-on floor.
 func checkOperatorDecisions(p string, baseData, headData []byte) []GuardFinding {
 	reject := func(format string, args ...any) []GuardFinding {
 		return []GuardFinding{{Path: p, Rule: RuleOperatorDecisionsWidenOnly, Detail: fmt.Sprintf(format, args...)}}
@@ -202,6 +207,23 @@ func routesByID(p string, v any, which string) (map[string]map[string]any, []Gua
 
 // ---- widen-only list data (detectors/tuning.yaml + future overlays) ---------
 
+// tuningKnownSchema mirrors core/detect/tuning.go's Tuning struct: the ONLY
+// top-level sections, and the ONLY fields within each, that the human-written
+// loader recognizes for detectors/tuning.yaml. checkWidenOnlyYAML fails closed
+// on anything else, so an unknown top-level section or an unknown field is
+// rejected at the GUARD layer — not left to be caught downstream by the loader's
+// strict KnownFields decode or by exam-detect (a head-only unknown section would
+// otherwise sail past the widen subset check, since head-only IS the widen).
+// If the loader gains a new additive field, extend this in the SAME change: the
+// guard schema and the loader schema move together.
+var tuningKnownSchema = map[string]map[string]bool{
+	"priv_escalation": {
+		"extra_elevated_keywords":        true,
+		"extra_elevated_action_keywords": true,
+		"extra_elevation_event_types":    true,
+	},
+}
+
 // checkWidenOnlyYAML enforces the widen-direction rule on section→field→list
 // YAML data (detectors/tuning.yaml today; future connect learned_mappings
 // overlays use the same checker). For every list under every section, the base
@@ -225,6 +247,32 @@ func checkWidenOnlyYAML(p string, baseData, headData []byte) []GuardFinding {
 	}
 
 	var findings []GuardFinding
+
+	// SECTION / FIELD ALLOWLIST (fail closed, mirroring checkOperatorDecisions).
+	// Only sections and fields the loader (tuningKnownSchema) recognizes may
+	// appear, in EITHER version. A head-only unknown top-level section or field
+	// is the widen direction and would pass the subset check below — so reject
+	// it HERE instead of relying on exam-detect / the loader to catch it later.
+	for _, doc := range []map[string]map[string][]string{base, head} {
+		for _, section := range sortedKeys(doc) {
+			allowedFields, ok := tuningKnownSchema[section]
+			if !ok {
+				findings = append(findings, GuardFinding{Path: p, Rule: RuleDetectorDataWidenOnly,
+					Detail: fmt.Sprintf("unrecognized top-level section %q — the tuning loader (core/detect) declares no such section; fail closed", section)})
+				continue
+			}
+			for _, field := range sortedKeys(doc[section]) {
+				if !allowedFields[field] {
+					findings = append(findings, GuardFinding{Path: p, Rule: RuleDetectorDataWidenOnly,
+						Detail: fmt.Sprintf("section %q: unrecognized field %q — the tuning loader declares no such field; fail closed", section, field)})
+				}
+			}
+		}
+	}
+	if len(findings) > 0 {
+		return findings
+	}
+
 	for _, section := range sortedKeys(base) {
 		headSection, ok := head[section]
 		if !ok {

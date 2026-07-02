@@ -419,6 +419,136 @@ func TestGuard_AcceptsAdditiveEscalateRouteWithoutPinEdit(t *testing.T) {
 	})
 }
 
+// The consensus-bypass proof: core/observe computes the PRODUCTION
+// force-escalate floor (ZeroHistoryAccess / RoleGrantByActor /
+// BulkExportNoJustification), core/toolrun wires it into the cascade, and
+// core/store backs it — NONE of these were in protectedPrefixes, so the old
+// guard let an attacker neuter a predicate (e.g. ZeroHistoryAccess -> false,
+// disabling lateral-movement escalation) and pass the whole free tier. The Go
+// default-deny floor rejects Modify of ANY existing .go file on the decision
+// path, regardless of what the diff content is.
+func TestGuard_RejectsModifyingDecisionPathGoCode(t *testing.T) {
+	cases := []struct {
+		path   string
+		mutate func(t *testing.T, real string) string
+	}{
+		{
+			// The exact red-team attack: neuter the lateral-movement predicate
+			// so it never force-escalates (return true -> return false).
+			path: "core/observe/observe.go",
+			mutate: func(t *testing.T, real string) string {
+				return replaceOnce(t, real,
+					`return true, actor + " → " + target + " (no relationship history)"`,
+					`return false, actor + " → " + target + " (no relationship history)"`)
+			},
+		},
+		{
+			path:   "core/toolrun/toolrun.go",
+			mutate: func(t *testing.T, real string) string { return real + "\n// tampered by the loop\n" },
+		},
+		{
+			path:   "core/store/store.go",
+			mutate: func(t *testing.T, real string) string { return real + "\n// tampered by the loop\n" },
+		},
+		{
+			path:   "core/store/records.go",
+			mutate: func(t *testing.T, real string) string { return real + "\n// tampered by the loop\n" },
+		},
+		{
+			path:   "core/connect/connect.go",
+			mutate: func(t *testing.T, real string) string { return real + "\n// tampered by the loop\n" },
+		},
+		{ // non-contract pkg/** (pkg/event, pkg/finding, pkg/baseline are the
+			// protected contracts; everything else under pkg/ is code-frozen).
+			path:   "pkg/ghauth/ghauth.go",
+			mutate: func(t *testing.T, real string) string { return real + "\n// tampered by the loop\n" },
+		},
+		{
+			path:   "pkg/resolution/resolution.go",
+			mutate: func(t *testing.T, real string) string { return real + "\n// tampered by the loop\n" },
+		},
+		{ // internal/** is never enumerated in protectedPrefixes — the floor covers it.
+			path:   "internal/exam/scenario.go",
+			mutate: func(t *testing.T, real string) string { return real + "\n// tampered by the loop\n" },
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.path, func(t *testing.T) {
+			f := newFixture(t)
+			real := f.copyReal(tc.path)
+			base := f.commit("base")
+			f.write(tc.path, tc.mutate(t, real))
+			head := f.commit("proposal: tamper with a decision-path Go file")
+			requireRejected(t, f.guard(base, head), RuleCodeFrozen, tc.path)
+		})
+	}
+}
+
+// The sanctioned additive code lane is directly-under-core/detect ONLY. A NEW
+// .go file anywhere else is code the loop may not author: under a protected
+// package it trips RuleProtectedPath; under a NEW SUBDIRECTORY of core/detect
+// it trips the Go default-deny floor (RuleCodeFrozen) — a subdir is NOT the
+// lane, so the L1-isolation escape hatch stays behind K7's dedicated gate, not
+// this guard. Both are rejected.
+func TestGuard_RejectsNewGoFileOutsideDetectorLane(t *testing.T) {
+	cases := []struct{ path, rule string }{
+		{"core/agent/smuggled.go", RuleProtectedPath},
+		{"core/detect/evil/evil.go", RuleCodeFrozen},
+	}
+	for _, tc := range cases {
+		t.Run(tc.path, func(t *testing.T) {
+			f := newFixture(t)
+			f.copyReal("core/detect/injection_probe.go") // real committed base
+			base := f.commit("base")
+			f.write(tc.path, "package p\n\n// a new .go file the loop tried to add outside the lane\n")
+			head := f.commit("proposal: add a new Go file outside the detector lane")
+			requireRejected(t, f.guard(base, head), tc.rule, tc.path)
+		})
+	}
+}
+
+// The Go default-deny floor must NOT swallow the sanctioned lane: a NEW .go
+// file DIRECTLY under core/detect/ passes THIS layer (K7 gates the lane
+// downstream). Mirrors TestGuard_AcceptsAdditiveNewDetectorFile from the
+// floor's perspective.
+func TestGuard_StillAcceptsNewDetectorFileDirectlyUnderDetect(t *testing.T) {
+	f := newFixture(t)
+	f.copyReal("core/detect/injection_probe.go")
+	base := f.commit("base")
+
+	f.write("core/detect/newdet.go", "package detect\n\n// additive detector lane — gated by K7, not this guard\n")
+	head := f.commit("proposal: additive detector file directly under core/detect")
+
+	requireClean(t, f.guard(base, head))
+}
+
+// A WELL-SHAPED (mapping→field→list) but loader-unknown section or field in
+// detectors/tuning.yaml would sail past the widen subset check (head-only IS
+// the widen). The section/field allowlist mirrors core/detect/tuning.go's
+// Tuning struct and fails closed at the GUARD layer — it does not defer to
+// exam-detect or the loader's strict decode.
+func TestGuard_RejectsUnknownTuningSection(t *testing.T) {
+	t.Run("unknown top-level section", func(t *testing.T) {
+		f := newFixture(t)
+		real := f.copyReal("detectors/tuning.yaml")
+		base := f.commit("base")
+		// A brand-new, structurally valid, but loader-unknown top-level section.
+		f.write("detectors/tuning.yaml", real+"\nlateral_movement:\n  extra_elevated_keywords:\n    - clusteradmin\n")
+		head := f.commit("proposal: smuggle an unknown top-level tuning section")
+		requireRejected(t, f.guard(base, head), RuleDetectorDataWidenOnly, "detectors/tuning.yaml")
+	})
+
+	t.Run("unknown field under a known section", func(t *testing.T) {
+		f := newFixture(t)
+		real := f.copyReal("detectors/tuning.yaml")
+		base := f.commit("base")
+		// A sibling key under priv_escalation the loader's struct does not declare.
+		f.write("detectors/tuning.yaml", real+"  override_elevated_keywords:\n    - poweruser\n")
+		head := f.commit("proposal: smuggle an unknown field under a known section")
+		requireRejected(t, f.guard(base, head), RuleDetectorDataWidenOnly, "detectors/tuning.yaml")
+	})
+}
+
 // Paths the guard has no opinion on (docs) pass this layer — the guard
 // enforces the enumerated invariants, other layers gate the rest.
 func TestGuard_PassesUnprotectedDocChange(t *testing.T) {
