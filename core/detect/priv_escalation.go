@@ -4,13 +4,19 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync/atomic"
 
 	"github.com/mallcop-app/mallcop/pkg/baseline"
 	"github.com/mallcop-app/mallcop/pkg/event"
 	"github.com/mallcop-app/mallcop/pkg/finding"
 )
 
-func init() { Register(privEscalationDetector{}) }
+func init() {
+	Register(privEscalationDetector{})
+	// Publish the built-in tuning snapshot before any scan. ApplyTuning replaces
+	// this pointer with a fresh IMMUTABLE snapshot; Detect only ever reads it.
+	activePrivEscalationTuning.Store(defaultPrivEscalationTuning())
+}
 
 type privEscalationDetector struct{}
 
@@ -19,19 +25,60 @@ func (privEscalationDetector) Name() string { return "priv-escalation" }
 // Detect emits one finding per (actor, role) escalation not in the baseline.
 // The emitted dedup map is local to this call, mirroring the standalone
 // binary's per-process dedup.
+//
+// K7 TUNING ISOLATION: the priv-escalation knob sets are read from an IMMUTABLE
+// snapshot loaded ONCE here (loadPrivEscalationTuning) and threaded down to the
+// pure evaluators, exactly like events/baseline are passed in read-only. Detect
+// never touches the live-mutable package state that ApplyTuning writes, so a
+// leaked or concurrent ApplyTuning goroutine can never race a priv-escalation
+// read (there is no shared map that is both read here and written there — the
+// snapshot's maps are frozen at construction, and ApplyTuning publishes a NEW
+// snapshot via an atomic pointer swap).
 func (privEscalationDetector) Detect(events []event.Event, bl *baseline.Baseline) []finding.Finding {
+	tuning := loadPrivEscalationTuning()
 	emitted := make(map[string]bool)
 	var out []finding.Finding
 	for _, ev := range events {
-		if f := privEscalationEvaluate(ev, bl, emitted); f != nil {
+		if f := privEscalationEvaluate(ev, bl, emitted, tuning); f != nil {
 			out = append(out, *f)
 		}
 	}
 	return out
 }
 
-// elevationEventTypes are event types that may carry privilege escalation.
-var elevationEventTypes = map[string]bool{
+// privEscalationTuning is an IMMUTABLE snapshot of the priv-escalation knob
+// sets. Once constructed it is never mutated: ApplyTuning builds a fresh
+// snapshot (widened copy) and publishes it via an atomic pointer swap, and
+// Detect loads it once per scan. This is the K7 tuning-isolation half — it
+// extends the per-detector input isolation (events/baseline are cloned per
+// detector) to cover the tuning state that isolation previously omitted, so no
+// shared map is ever read by a detector and written by ApplyTuning at the same
+// time.
+type privEscalationTuning struct {
+	elevationEventTypes    map[string]bool
+	elevatedActionKeywords []string
+	elevatedKeywords       map[string]bool
+}
+
+// activePrivEscalationTuning holds the currently-published immutable snapshot.
+// It is seeded in init() with the built-in defaults and only ever replaced
+// wholesale (never mutated in place) by ApplyTuning.
+var activePrivEscalationTuning atomic.Pointer[privEscalationTuning]
+
+// loadPrivEscalationTuning returns the currently-published snapshot, falling
+// back to a fresh built-in snapshot if nothing has been published yet (defensive
+// — init() always publishes before any Detect runs). The returned value is
+// treated as READ-ONLY.
+func loadPrivEscalationTuning() *privEscalationTuning {
+	if pt := activePrivEscalationTuning.Load(); pt != nil {
+		return pt
+	}
+	return defaultPrivEscalationTuning()
+}
+
+// builtinElevationEventTypes are the built-in event types that may carry
+// privilege escalation. They seed the default snapshot and are never mutated.
+var builtinElevationEventTypes = map[string]bool{
 	"role_assignment":    true,
 	"collaborator_added": true,
 	"permission_change":  true,
@@ -42,21 +89,22 @@ var elevationEventTypes = map[string]bool{
 	"iam_change": true,
 }
 
-// elevatedActionKeywords are action substrings that indicate a privilege
-// elevation even when no elevated role/permission field is present — e.g. removing
-// an IAM permissions boundary widens effective privilege (PE-06's
+// builtinElevatedActionKeywords are the built-in action substrings that indicate
+// a privilege elevation even when no elevated role/permission field is present —
+// e.g. removing an IAM permissions boundary widens effective privilege (PE-06's
 // DeleteRolePermissionsBoundary). Matched case-insensitively as substrings.
-var elevatedActionKeywords = []string{
+var builtinElevatedActionKeywords = []string{
 	"deleterolepermissionsboundary",
 	"deletepermissionsboundary",
 	"removepermissionsboundary",
 	"putrolepermissionsboundary",
 }
 
-// elevatedKeywords are role/permission values that indicate elevated access.
-// Matched as case-insensitive SUBSTRINGS (see containsElevatedKeyword) so
-// cloud-specific role formats are recognized, not just GitHub/Azure bare names.
-var elevatedKeywords = map[string]bool{
+// builtinElevatedKeywords are the built-in role/permission values that indicate
+// elevated access. Matched as case-insensitive SUBSTRINGS (see
+// containsElevatedKeyword) so cloud-specific role formats are recognized, not
+// just GitHub/Azure bare names.
+var builtinElevatedKeywords = map[string]bool{
 	"admin":       true,
 	"owner":       true,
 	"write":       true,
@@ -64,6 +112,43 @@ var elevatedKeywords = map[string]bool{
 	"maintainer":  true,
 	"editor":      true, // GCP primitive role roles/editor: broad project-wide write
 	"fullcontrol": true, // M365 Graph app role, e.g. Sites.FullControl.All
+}
+
+// defaultPrivEscalationTuning returns a fresh snapshot seeded from the built-in
+// knob sets. Each call allocates its own maps/slice so the returned snapshot
+// shares no backing storage with the builtins (or any other snapshot), keeping
+// every published snapshot independently immutable.
+func defaultPrivEscalationTuning() *privEscalationTuning {
+	pt := &privEscalationTuning{
+		elevationEventTypes:    make(map[string]bool, len(builtinElevationEventTypes)),
+		elevatedActionKeywords: append([]string(nil), builtinElevatedActionKeywords...),
+		elevatedKeywords:       make(map[string]bool, len(builtinElevatedKeywords)),
+	}
+	for k := range builtinElevationEventTypes {
+		pt.elevationEventTypes[k] = true
+	}
+	for k := range builtinElevatedKeywords {
+		pt.elevatedKeywords[k] = true
+	}
+	return pt
+}
+
+// clone returns a deep copy of the snapshot: fresh maps and slice so the copy
+// shares no backing storage with the receiver. ApplyTuning widens a clone (never
+// the live snapshot) and the test snapshot/restore seam round-trips through it.
+func (pt *privEscalationTuning) clone() *privEscalationTuning {
+	next := &privEscalationTuning{
+		elevationEventTypes:    make(map[string]bool, len(pt.elevationEventTypes)),
+		elevatedActionKeywords: append([]string(nil), pt.elevatedActionKeywords...),
+		elevatedKeywords:       make(map[string]bool, len(pt.elevatedKeywords)),
+	}
+	for k := range pt.elevationEventTypes {
+		next.elevationEventTypes[k] = true
+	}
+	for k := range pt.elevatedKeywords {
+		next.elevatedKeywords[k] = true
+	}
+	return next
 }
 
 // privPayload is the resolved privilege-escalation discriminator set, read from
@@ -104,7 +189,9 @@ func readPrivPayload(payload []byte) privPayload {
 // isElevated returns true when the event indicates privilege elevation.
 // admin_action is always elevated; an action carrying a boundary-removal keyword
 // is elevated regardless of role fields (PE-06); other types check payload fields.
-func isElevated(ev event.Event, pp privPayload) bool {
+// The knob sets are read from the immutable tuning snapshot passed in, never from
+// live-mutable package state.
+func isElevated(ev event.Event, pp privPayload, tuning *privEscalationTuning) bool {
 	if ev.Type == "admin_action" {
 		return true
 	}
@@ -114,7 +201,7 @@ func isElevated(ev event.Event, pp privPayload) bool {
 	// ops cleanup, not an escalation). The boundary-DELETE keyword below is the
 	// deliberate exception: deleting a permissions boundary WIDENS effective
 	// privilege, so it is matched before this guard via the keyword loop.
-	for _, kw := range elevatedActionKeywords {
+	for _, kw := range tuning.elevatedActionKeywords {
 		if action != "" && strings.Contains(action, kw) {
 			return true
 		}
@@ -123,7 +210,7 @@ func isElevated(ev event.Event, pp privPayload) bool {
 		return false
 	}
 	for _, val := range []string{pp.RoleName, pp.PermissionLevel} {
-		if containsElevatedKeyword(val) {
+		if containsElevatedKeyword(val, tuning) {
 			return true
 		}
 	}
@@ -135,12 +222,13 @@ func isElevated(ev event.Event, pp privPayload) bool {
 // so cloud-specific role formats are recognized: GCP "roles/owner" and Okta
 // "Super Admin" both carry a privileged keyword but never exact-matched the bare
 // "owner"/"admin" GitHub/Azure form, so priv-escalation silently missed them.
-func containsElevatedKeyword(val string) bool {
+// The keyword set comes from the immutable tuning snapshot passed in.
+func containsElevatedKeyword(val string, tuning *privEscalationTuning) bool {
 	lowered := strings.ToLower(val)
 	if lowered == "" {
 		return false
 	}
-	for kw := range elevatedKeywords {
+	for kw := range tuning.elevatedKeywords {
 		if strings.Contains(lowered, kw) {
 			return true
 		}
@@ -163,14 +251,14 @@ func roleKey(ev event.Event, pp privPayload) string {
 // privilege escalation not already in the baseline. emitted tracks
 // (actor:role) pairs already reported.
 // This is a pure function with respect to state mutation (emitted is caller-owned).
-func privEscalationEvaluate(ev event.Event, bl *baseline.Baseline, emitted map[string]bool) *finding.Finding {
-	if !elevationEventTypes[ev.Type] {
+func privEscalationEvaluate(ev event.Event, bl *baseline.Baseline, emitted map[string]bool, tuning *privEscalationTuning) *finding.Finding {
+	if !tuning.elevationEventTypes[ev.Type] {
 		return nil
 	}
 
 	pp := readPrivPayload(ev.Payload)
 
-	if !isElevated(ev, pp) {
+	if !isElevated(ev, pp, tuning) {
 		return nil
 	}
 

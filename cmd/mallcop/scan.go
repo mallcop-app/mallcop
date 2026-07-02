@@ -84,6 +84,7 @@ func runScan(args []string) error {
 	connector := fs.String("connector", "file", `Connector: "file" (default, reads --events) or "github"`)
 	githubOrg := fs.String("github-org", "", "GitHub org to scan (required when --connector github)")
 	tuningPath := fs.String("tuning", "", "Optional path to a detector tuning YAML (widen-only extra_* knobs)")
+	maxFindings := fs.Int("max-findings", 0, "Volume circuit-breaker ceiling: a scan producing MORE findings than this force-escalates a critical meta-finding to a human (0 = default 25)")
 
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -161,6 +162,9 @@ func runScan(args []string) error {
 		Store:     st,
 		Baseline:  bl,
 		Workers:   *workers,
+		// Volume circuit-breaker ceiling. 0 lets the pipeline apply its default
+		// (25, from src/mallcop/budget.py); a positive flag overrides it.
+		Budget: agent.BudgetConfig{MaxFindingsForActors: *maxFindings},
 		// Consensus ON by default (safety-first): on every RESOLVE, the gate
 		// re-runs the cascade DefaultConsensusRuns more times and any-escalate-wins.
 		// Validated to cut missed attacks 9→2 on the eval corpus under the

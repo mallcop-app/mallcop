@@ -29,8 +29,9 @@ func TestContainsElevatedKeyword(t *testing.T) {
 		{"roles/viewer", false},
 		{"", false},
 	}
+	tuning := defaultPrivEscalationTuning()
 	for _, c := range cases {
-		if got := containsElevatedKeyword(c.role); got != c.want {
+		if got := containsElevatedKeyword(c.role, tuning); got != c.want {
 			t.Errorf("containsElevatedKeyword(%q) = %v, want %v", c.role, got, c.want)
 		}
 	}

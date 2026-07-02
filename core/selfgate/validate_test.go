@@ -14,8 +14,10 @@
 package selfgate
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"go/parser"
 	"go/token"
@@ -25,6 +27,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 )
 
 // ---- fixture: temp clones of the REAL repo ----------------------------------
@@ -459,4 +462,36 @@ func TestDiffExamReports_AllowNoCoverageGainWaivesOnlyCoverage(t *testing.T) {
 			t.Fatalf("newFirings = %v, want [\"S-1: fam-b\"]", newFirings)
 		}
 	})
+}
+
+// TestRunToolCtx_WallClockTimeoutKillsHang is the K7 re-red-team regression for
+// the stage-3 defense-in-depth timeout (Fix #3). An authored detector that slips
+// an unbounded loop / blocking call past the L3 shape gate would otherwise let
+// the exam-detect subprocess run forever and "pass" stage-3 by never crashing.
+// runTreeExam now runs that exec through runToolCtx bounded by examExecWallClock,
+// so a hang is KILLED at the wall clock and surfaced as a NON-nil error wrapping
+// context.DeadlineExceeded (code -1). For the head tree that error becomes a
+// RuleExamExecution fail-closed rejection upstream. This proves the mechanism:
+// a subprocess that runs past the deadline is terminated promptly, not awaited.
+func TestRunToolCtx_WallClockTimeoutKillsHang(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	// `sleep 60` stands in for a detector that hangs the exam exec.
+	_, _, code, err := runToolCtx(ctx, t.TempDir(), nil, "sleep", "60")
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("expected a wall-clock timeout error, got nil — the hang was NOT killed")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected an error wrapping context.DeadlineExceeded, got %v", err)
+	}
+	if code != -1 {
+		t.Fatalf("expected code -1 on a timeout, got %d", code)
+	}
+	if elapsed > 20*time.Second {
+		t.Fatalf("the subprocess was not killed promptly at the deadline: took %s", elapsed)
+	}
 }

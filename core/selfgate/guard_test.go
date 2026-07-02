@@ -364,17 +364,20 @@ func TestGuard_AcceptsK2bShapedTuningWiden(t *testing.T) {
 	requireClean(t, f.guard(base, head))
 }
 
-// (i) A purely additive new core/detect file (A, not M) passes THE GUARD
-// layer — the additive code lane is gated by other layers (K7), not here.
-func TestGuard_AcceptsAdditiveNewDetectorFile(t *testing.T) {
+// (i) A NEW .go file directly under core/detect/ is REJECTED (RuleDetectCodeFrozen).
+// This is the closed §5 L1 break: a new file directly under core/detect/ is
+// `package detect` — the SHARED framework package — and its init() could mutate
+// a sibling detector's unexported state. The sanctioned additive lane is the
+// OWN-PACKAGE tree core/detect/authored/<name>/, not this package.
+func TestGuard_RejectsNewFileDirectlyUnderDetect(t *testing.T) {
 	f := newFixture(t)
 	f.copyReal("core/detect/injection_probe.go")
 	base := f.commit("base")
 
-	f.write("core/detect/new_signal_probe.go", "package detect\n\n// additive detector lane — gated elsewhere\n")
-	head := f.commit("proposal: additive detector file")
+	f.write("core/detect/new_signal_probe.go", "package detect\n\n// a new file in the SHARED framework package — the L1 break, now frozen\n")
+	head := f.commit("proposal: new file directly in the shared detect package")
 
-	requireClean(t, f.guard(base, head))
+	requireRejected(t, f.guard(base, head), RuleDetectCodeFrozen, "core/detect/new_signal_probe.go")
 }
 
 // (j) An additive escalate_routes entry in the REAL corpus, WITHOUT the Go pin
@@ -484,12 +487,12 @@ func TestGuard_RejectsModifyingDecisionPathGoCode(t *testing.T) {
 	}
 }
 
-// The sanctioned additive code lane is directly-under-core/detect ONLY. A NEW
-// .go file anywhere else is code the loop may not author: under a protected
-// package it trips RuleProtectedPath; under a NEW SUBDIRECTORY of core/detect
-// it trips the Go default-deny floor (RuleCodeFrozen) — a subdir is NOT the
-// lane, so the L1-isolation escape hatch stays behind K7's dedicated gate, not
-// this guard. Both are rejected.
+// The sanctioned additive code lane is the OWN-PACKAGE tree
+// core/detect/authored/<name>/ ONLY. A NEW .go file anywhere else is code the
+// loop may not author: under a protected package it trips RuleProtectedPath;
+// under a NON-authored subdirectory of core/detect (core/detect/evil/) it trips
+// the Go default-deny floor (RuleCodeFrozen) — that subdir is NOT the lane.
+// Both are rejected.
 func TestGuard_RejectsNewGoFileOutsideDetectorLane(t *testing.T) {
 	cases := []struct{ path, rule string }{
 		{"core/agent/smuggled.go", RuleProtectedPath},
@@ -507,19 +510,152 @@ func TestGuard_RejectsNewGoFileOutsideDetectorLane(t *testing.T) {
 	}
 }
 
-// The Go default-deny floor must NOT swallow the sanctioned lane: a NEW .go
-// file DIRECTLY under core/detect/ passes THIS layer (K7 gates the lane
-// downstream). Mirrors TestGuard_AcceptsAdditiveNewDetectorFile from the
-// floor's perspective.
-func TestGuard_StillAcceptsNewDetectorFileDirectlyUnderDetect(t *testing.T) {
+// The sanctioned additive lane is the OWN-PACKAGE core/detect/authored/<name>/
+// tree, NOT the shared core/detect package. A NEW .go file directly under
+// core/detect/ is `package detect` (the L1 break) and is now frozen.
+func TestGuard_FreezesNewFileInSharedDetectPackage(t *testing.T) {
 	f := newFixture(t)
 	f.copyReal("core/detect/injection_probe.go")
 	base := f.commit("base")
 
-	f.write("core/detect/newdet.go", "package detect\n\n// additive detector lane — gated by K7, not this guard\n")
-	head := f.commit("proposal: additive detector file directly under core/detect")
+	f.write("core/detect/newdet.go", "package detect\n\n// shared framework package — frozen, not the additive lane\n")
+	head := f.commit("proposal: new file directly under core/detect")
 
-	requireClean(t, f.guard(base, head))
+	requireRejected(t, f.guard(base, head), RuleDetectCodeFrozen, "core/detect/newdet.go")
+}
+
+// The OWN-PACKAGE authored-detector lane (K7 L1): a NEW file under
+// core/detect/authored/<name>/ is the sanctioned additive code lane (gated
+// downstream by K2a + K7 L3), while a .go file sitting directly in the
+// aggregator package (core/detect/authored/loose.go) is NOT — only registry.go
+// belongs there — so it trips the Go default-deny floor. An existing authored
+// detector, once merged, is frozen.
+func TestGuard_AuthoredDetectorLane(t *testing.T) {
+	t.Run("A of a new own-package authored detector PASSES", func(t *testing.T) {
+		f := newFixture(t)
+		f.copyReal("core/detect/injection_probe.go")
+		base := f.commit("base")
+		f.write("core/detect/authored/newsig/newsig.go",
+			"package newsig\n\n// a new own-package authored detector — the additive lane\n")
+		head := f.commit("proposal: new authored detector own package")
+		requireClean(t, f.guard(base, head))
+	})
+
+	t.Run("A of a loose .go in the aggregator package is REJECTED", func(t *testing.T) {
+		f := newFixture(t)
+		f.copyReal("core/detect/injection_probe.go")
+		base := f.commit("base")
+		f.write("core/detect/authored/loose.go", "package authored\n\n// not registry.go — not allowed directly in the aggregator package\n")
+		head := f.commit("proposal: loose file in the aggregator package")
+		requireRejected(t, f.guard(base, head), RuleCodeFrozen, "core/detect/authored/loose.go")
+	})
+
+	t.Run("M of an existing authored detector is FROZEN", func(t *testing.T) {
+		f := newFixture(t)
+		real := f.copyReal("core/detect/authored/synthmarker/synthmarker.go")
+		base := f.commit("base")
+		f.write("core/detect/authored/synthmarker/synthmarker.go", real+"\n// tampered by the loop\n")
+		head := f.commit("proposal: modify a merged authored detector")
+		requireRejected(t, f.guard(base, head), RuleDetectCodeFrozen, "core/detect/authored/synthmarker/synthmarker.go")
+	})
+
+	// K7 re-red-team: a NESTED authored .go file (deeper than one path segment,
+	// e.g. core/detect/authored/<name>/<sub>/file.go) compiles into cmd/mallcop
+	// through the aggregator's transitive import graph, yet lies outside the
+	// one-level own-package lane the shape gate and import allow-list are built
+	// around. The guard's allowed surface must never exceed the shape-checked
+	// surface, so a deeper authored .go file is FROZEN (RuleCodeFrozen) even when
+	// added — it is not a sanctioned additive lane.
+	t.Run("A of a deeper NESTED authored .go file is REJECTED", func(t *testing.T) {
+		f := newFixture(t)
+		f.copyReal("core/detect/injection_probe.go")
+		base := f.commit("base")
+		f.write("core/detect/authored/newsig/inner/inner.go",
+			"package inner\n\n// nested below <name>/ — outside the one-level own-package lane\n")
+		head := f.commit("proposal: nested authored package")
+		requireRejected(t, f.guard(base, head), RuleCodeFrozen, "core/detect/authored/newsig/inner/inner.go")
+	})
+}
+
+// The authored-detector registration aggregator (core/detect/authored/registry.go)
+// is human-bootstrapped once and thereafter accepts ONLY append-only blank
+// imports of packages under core/detect/authored/. Every other shape fails
+// closed with RuleAuthoredRegistry.
+func TestGuard_AuthoredRegistryAppendOnly(t *testing.T) {
+	const synthImport = `_ "github.com/mallcop-app/mallcop/core/detect/authored/synthmarker"`
+
+	t.Run("appending a blank authored import PASSES", func(t *testing.T) {
+		f := newFixture(t)
+		real := f.copyReal("core/detect/authored/registry.go")
+		base := f.commit("base")
+		appended := replaceOnce(t, real, synthImport,
+			synthImport+"\n\t_ \"github.com/mallcop-app/mallcop/core/detect/authored/example\"")
+		f.write("core/detect/authored/registry.go", appended)
+		head := f.commit("proposal: append a blank authored import")
+		requireClean(t, f.guard(base, head))
+	})
+
+	t.Run("adding a func is REJECTED", func(t *testing.T) {
+		f := newFixture(t)
+		real := f.copyReal("core/detect/authored/registry.go")
+		base := f.commit("base")
+		f.write("core/detect/authored/registry.go", real+"\nfunc sneaky() {}\n")
+		head := f.commit("proposal: smuggle a func into the registry")
+		requireRejected(t, f.guard(base, head), RuleAuthoredRegistry, "registry.go")
+	})
+
+	t.Run("removing an existing import is REJECTED", func(t *testing.T) {
+		f := newFixture(t)
+		real := f.copyReal("core/detect/authored/registry.go")
+		base := f.commit("base")
+		f.write("core/detect/authored/registry.go", replaceOnce(t, real, "\n\t"+synthImport, ""))
+		head := f.commit("proposal: remove an authored import")
+		requireRejected(t, f.guard(base, head), RuleAuthoredRegistry, "registry.go")
+	})
+
+	t.Run("adding a non-blank import is REJECTED", func(t *testing.T) {
+		f := newFixture(t)
+		real := f.copyReal("core/detect/authored/registry.go")
+		base := f.commit("base")
+		appended := replaceOnce(t, real, synthImport,
+			synthImport+"\n\tother \"github.com/mallcop-app/mallcop/core/detect/authored/example\"")
+		f.write("core/detect/authored/registry.go", appended)
+		head := f.commit("proposal: add a NAMED (non-blank) import")
+		requireRejected(t, f.guard(base, head), RuleAuthoredRegistry, "registry.go")
+	})
+
+	t.Run("adding a blank import OUTSIDE core/detect/authored is REJECTED", func(t *testing.T) {
+		f := newFixture(t)
+		real := f.copyReal("core/detect/authored/registry.go")
+		base := f.commit("base")
+		appended := replaceOnce(t, real, synthImport,
+			synthImport+"\n\t_ \"github.com/mallcop-app/mallcop/core/agent\"")
+		f.write("core/detect/authored/registry.go", appended)
+		head := f.commit("proposal: blank-import a non-authored package")
+		requireRejected(t, f.guard(base, head), RuleAuthoredRegistry, "registry.go")
+	})
+
+	t.Run("adding the registry file (A) is REJECTED", func(t *testing.T) {
+		f := newFixture(t)
+		realRegistry, err := os.ReadFile(filepath.Join(f.root, "core/detect/authored/registry.go"))
+		if err != nil {
+			t.Fatalf("read real registry.go: %v", err)
+		}
+		f.copyReal("core/detect/injection_probe.go") // base anchor
+		base := f.commit("base")
+		f.write("core/detect/authored/registry.go", string(realRegistry))
+		head := f.commit("proposal: add the registry from scratch")
+		requireRejected(t, f.guard(base, head), RuleAuthoredRegistry, "registry.go")
+	})
+
+	t.Run("deleting the registry file (D) is REJECTED", func(t *testing.T) {
+		f := newFixture(t)
+		f.copyReal("core/detect/authored/registry.go")
+		base := f.commit("base")
+		f.remove("core/detect/authored/registry.go")
+		head := f.commit("proposal: delete the registry")
+		requireRejected(t, f.guard(base, head), RuleAuthoredRegistry, "registry.go")
+	})
 }
 
 // A WELL-SHAPED (mapping→field→list) but loader-unknown section or field in

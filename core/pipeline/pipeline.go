@@ -56,6 +56,14 @@ import (
 // pressure low while still overlapping the per-finding model round-trips.
 const defaultWorkers = 4
 
+// defaultMaxFindingsForActors is the volume circuit-breaker ceiling applied when
+// Config.Budget.MaxFindingsForActors <= 0. A run whose detector floor produces
+// strictly MORE findings than this trips the breaker (agent.CheckCircuitBreaker),
+// which appends a synthetic critical meta-finding that force-escalates to a human.
+// It mirrors src/mallcop/budget.py BudgetConfig.max_findings_for_actors (= 25) —
+// the legacy default, kept in exactly one place so the flag/env only OVERRIDE it.
+const defaultMaxFindingsForActors = 25
+
 // Config is the immutable input to one Run. The {Client, ...} the pipeline needs
 // are injected — the pipeline constructs none of them, so the import-lint floor
 // holds (no inference, no transport built here).
@@ -87,6 +95,15 @@ type Config struct {
 	// Workers bounds the concurrent resolve pool. <= 0 uses defaultWorkers. The
 	// pool never exceeds the number of findings.
 	Workers int
+
+	// Budget carries the volume circuit-breaker ceiling (MaxFindingsForActors).
+	// A run whose (post-suppression) detector floor produces strictly MORE
+	// findings than the ceiling trips the breaker: a synthetic critical
+	// meta-finding (family "mallcop-budget") is appended to the finding set and
+	// force-escalated to a human via the seeded E-006 route (see Run). The zero
+	// value applies defaultMaxFindingsForActors — the caller only sets this to
+	// OVERRIDE the default (scan.go threads a --max-findings flag through here).
+	Budget agent.BudgetConfig
 }
 
 // Summary is the result of one completed scan cycle. The four counts answer the
@@ -181,6 +198,28 @@ func Run(ctx context.Context, cfg Config) (Summary, error) {
 		return Summary{}, fmt.Errorf("pipeline: load directives: %w", err)
 	}
 	findings = applyDirectives(findings, directives)
+
+	// VOLUME CIRCUIT BREAKER (L4 resource floor, ports src/mallcop/budget.py
+	// check_circuit_breaker). A flood of findings — e.g. an attacker generating
+	// noise to drown a single real boundary violation — must NOT be quietly
+	// auto-handled. When the (post-suppression) finding count exceeds the budget
+	// ceiling, CheckCircuitBreaker returns a synthetic CRITICAL meta-finding
+	// (family "mallcop-budget"). We APPEND it to the finding set HERE, before the
+	// count and the store-append below, so that:
+	//   - it is counted in FindingsDetected (the Resolved+Escalated invariant holds),
+	//   - it is durably stored like any other finding, and
+	//   - it flows through the SAME resolve loop, where checkHardConstraints matches
+	//     the seeded E-006 escalate_route and force-escalates it to a HUMAN with no
+	//     model call. We do NOT merely log the trip: it becomes a first-class,
+	//     escalated finding an operator sees. At or under the ceiling, nothing is
+	//     appended (CheckCircuitBreaker returns nil).
+	budget := cfg.Budget
+	if budget.MaxFindingsForActors <= 0 {
+		budget.MaxFindingsForActors = defaultMaxFindingsForActors
+	}
+	if mf := agent.CheckCircuitBreaker(findings, budget); mf != nil {
+		findings = append(findings, *mf)
+	}
 
 	summary := Summary{
 		EventsScanned:    len(events),

@@ -1,8 +1,9 @@
 package lint
 
 // allowlist.go is the L2 purity gate for the AUTHORED detector tree — the
-// detectors the in-product self-extension loop writes as code under
-// detectors/ (canonical authoredRel = "detectors"). It is PRODUCTION code:
+// detectors the in-product self-extension loop writes as code under their own
+// packages in core/detect/authored/<name>/ (canonical authoredRel =
+// "core/detect/authored"). It is PRODUCTION code:
 // the K4 validate_proposal step calls CheckAuthoredDetectorTree to reject a
 // proposed detector whose import graph reaches outside the sandbox, and
 // allowlist_test.go runs the same checker as a repo CI gate.
@@ -119,7 +120,7 @@ func ModulePath(repoRoot string) (string, error) {
 // repoRoot/authoredRel and returns a Violation for each import that is not on
 // the allow list. modulePath is the module identity from go.mod (see
 // ModulePath); authoredRel is the repo-relative authored tree root (canonical:
-// "detectors").
+// "core/detect/authored").
 //
 // Classification, per import path p:
 //   - exact allowedStdlib match          -> OK

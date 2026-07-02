@@ -39,6 +39,7 @@
 package selfgate
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -47,6 +48,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/mallcop-app/mallcop/core/lint"
 )
@@ -58,6 +60,13 @@ const GateSchemaVersion = 1
 
 // TierFree identifies the $0 gate tier this package implements.
 const TierFree = "free"
+
+// authoredDetectorRel is the repo-relative root of the AUTHORED detector tree,
+// the own-package location the self-extension loop writes new detectors into
+// (K7 L1: core/detect/authored/<name>/). Both the K2a import allow-list and the
+// K7 L3 shape AST gate police exactly this tree, and the invariant guard opens
+// its additive lane here — so they must all name the same root.
+const authoredDetectorRel = "core/detect/authored"
 
 // Stage names, in run order.
 const (
@@ -86,6 +95,19 @@ const (
 	// RuleExamNewFiring — a detector family fired at head on a scenario where
 	// it did not fire at base and is not a declared target of the proposal.
 	RuleExamNewFiring = "exam-detect-new-firing"
+	// RuleExamMissingMustFire — a proposal ADDED an authored detector but no
+	// PASSING must_fire scenario in the head corpus labels its family: the
+	// detector ships no proof it detects what it claims to. Fires only when the
+	// proposal adds an authored package.
+	RuleExamMissingMustFire = "exam-detect-missing-must-fire"
+	// RuleExamMissingBenignTwin — a proposal ADDED an authored detector but no
+	// PASSING must_not_fire BENIGN TWIN in the head corpus labels its family: the
+	// detector ships no proof it correctly stays silent on a benign look-alike.
+	// This is the consensus-not-rules false-positive floor for authored
+	// detectors — a new detector must demonstrate BOTH a true-positive (must_fire)
+	// and a true-negative (must_not_fire benign twin) before it merges. Fires only
+	// when the proposal adds an authored package.
+	RuleExamMissingBenignTwin = "exam-detect-missing-benign-twin"
 )
 
 // Options tunes a ValidateProposal run.
@@ -232,10 +254,26 @@ func ValidateProposal(repoRoot, baseRef, headRef string, opts Options) (GateResu
 	if len(newFirings) > 0 {
 		res.NewFirings = newFirings
 	}
+
+	// MANDATORY BENIGN TWIN (L4c). If this proposal ADDED an authored detector,
+	// the head corpus must prove BOTH a passing must_fire scenario AND a passing
+	// must_not_fire benign twin for it. baseTree / headTree are the same worktrees
+	// the exam ran over, so the added authored families are exactly
+	// (head authored names \ base authored names). Pure data/tuning widens add no
+	// authored family, so this is a no-op for them.
+	addedFamilies, aerr := addedAuthoredFamilies(baseTree, headTree)
+	if aerr != nil {
+		return GateResult{}, fmt.Errorf("selfgate: collecting added authored detectors: %w", aerr)
+	}
+	diffFindings = append(diffFindings, checkAuthoredBenignTwins(addedFamilies, headReport)...)
+
 	evidence := fmt.Sprintf("base: %d labeled (%d passed); head: %d labeled (%d passed); coverage +%d; %d undeclared new firing(s)",
 		baseReport.Totals.Labeled, baseReport.Totals.Passed,
 		headReport.Totals.Labeled, headReport.Totals.Passed,
 		coveragePlus, len(newFirings))
+	if len(addedFamilies) > 0 {
+		evidence += fmt.Sprintf("; %d added authored detector(s) benign-twin checked: %v", len(addedFamilies), addedFamilies)
+	}
 	if opts.AllowNoCoverageGain {
 		evidence += "; coverage-gain requirement waived by options"
 	}
@@ -274,7 +312,7 @@ func structuralStage(headTree string) ([]GuardFinding, string, error) {
 		return nil, "", fmt.Errorf("selfgate: head tree module path: %w", err)
 	}
 	allowlistNote := "authored-detector import allow-list clean"
-	violations, err := lint.CheckAuthoredDetectorTree(headTree, modulePath, "detectors")
+	violations, err := lint.CheckAuthoredDetectorTree(headTree, modulePath, authoredDetectorRel)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
 		// No authored tree at head — trivially green.
@@ -283,7 +321,7 @@ func structuralStage(headTree string) ([]GuardFinding, string, error) {
 		// An authored tree that cannot be verified (e.g. an unparseable
 		// authored file) is a proposal defect — fail closed.
 		findings = append(findings, GuardFinding{
-			Path:   "detectors",
+			Path:   authoredDetectorRel,
 			Rule:   RuleStructuralAllowlist,
 			Detail: fmt.Sprintf("authored detector tree cannot be verified (%v) — fail closed", err),
 		})
@@ -301,11 +339,53 @@ func structuralStage(headTree string) ([]GuardFinding, string, error) {
 		}
 	}
 
+	// K7 L3 additive-shape AST gate over the same authored tree the allow-list
+	// polices. Where the allow-list constrains what authored code may LINK,
+	// this constrains its SHAPE (pure, self-registering leaf; no build tags,
+	// cgo, compiler directives, non-local writes, non-literal Names, or
+	// duplicate Names). An unverifiable tree fails closed.
+	shapeNote := "authored-detector shape gate clean"
+	authoredRoot := filepath.Join(headTree, filepath.FromSlash(authoredDetectorRel))
+	shapeViolations, serr := CheckAuthoredDetectorTreeShape(authoredRoot)
+	switch {
+	case errors.Is(serr, fs.ErrNotExist):
+		shapeNote = "no authored detector tree (shape gate trivially clean)"
+	case serr != nil:
+		findings = append(findings, GuardFinding{
+			Path:   authoredDetectorRel,
+			Rule:   RuleAuthoredShape,
+			Detail: fmt.Sprintf("authored detector tree cannot be shape-verified (%v) — fail closed", serr),
+		})
+		shapeNote = "authored-detector shape gate unverifiable"
+	default:
+		for _, v := range shapeViolations {
+			findings = append(findings, GuardFinding{
+				Path:   repoRelativeHead(headTree, v.File),
+				Rule:   RuleAuthoredShape,
+				Detail: v.Rule + ": " + v.Detail,
+			})
+		}
+		if len(shapeViolations) > 0 {
+			shapeNote = fmt.Sprintf("%d authored-detector shape violation(s)", len(shapeViolations))
+		}
+	}
+
 	buildNote := "`go build ./...` OK in head tree"
 	if !buildOK {
 		buildNote = "`go build ./...` FAILED in head tree"
 	}
-	return findings, buildNote + "; " + allowlistNote, nil
+	return findings, buildNote + "; " + allowlistNote + "; " + shapeNote, nil
+}
+
+// repoRelativeHead makes a shape-violation file path (which is absolute, rooted
+// in the head worktree) repo-relative and slash-separated, so GateResult
+// findings carry stable paths the mallcop-pro consumer can render.
+func repoRelativeHead(headTree, file string) string {
+	rel, err := filepath.Rel(headTree, file)
+	if err != nil {
+		return filepath.ToSlash(file)
+	}
+	return filepath.ToSlash(rel)
 }
 
 // ---- stage 3: exam-detect ------------------------------------------------------
@@ -332,6 +412,13 @@ type examReport struct {
 	} `json:"totals"`
 }
 
+// examExecWallClock bounds a single tree's exam-detect exec (stage 3). It is
+// generous — the exam is an offline pass over a small corpus and finishes in
+// seconds — but finite: it exists so a hang in an authored detector cannot stall
+// the gate indefinitely. It is a var (not const) ONLY so tests can shorten it;
+// production never mutates it.
+var examExecWallClock = 3 * time.Minute
+
 // runTreeExam builds tree's OWN mallcop binary and execs its exam-detect over
 // tree's OWN corpus (MALLCOP_REPO_ROOT pins the root; --tuning is passed iff
 // the tree carries detectors/tuning.yaml). Exit 0 (all green) and exit 1
@@ -352,9 +439,16 @@ func runTreeExam(tree string) (examReport, string, error) {
 	if _, err := os.Stat(tuning); err == nil {
 		args = append(args, "--tuning", tuning)
 	}
-	stdout, stderr, code, err = runTool(tree, []string{"MALLCOP_REPO_ROOT=" + tree}, bin, args...)
+	// Defense-in-depth behind the L3 shape gate: an authored detector that slips
+	// an unbounded loop or blocking call past the AST check would otherwise let
+	// stage-3 "pass" by running forever/long instead of crashing. Wall-clock-box
+	// the exam-detect exec — a timeout kills it and (for the head tree) surfaces
+	// as a RuleExamExecution fail-closed rejection upstream.
+	ctx, cancel := context.WithTimeout(context.Background(), examExecWallClock)
+	defer cancel()
+	stdout, stderr, code, err = runToolCtx(ctx, tree, []string{"MALLCOP_REPO_ROOT=" + tree}, bin, args...)
 	if err != nil {
-		return examReport{}, "", fmt.Errorf("exec %s: %w", bin, err)
+		return examReport{}, truncate(stderr, 1500), fmt.Errorf("exec %s: %w", bin, err)
 	}
 	if code != 0 && code != 1 {
 		// exit 1 = labeled gaps present (a report was still produced);
@@ -470,6 +564,103 @@ func diffExamReports(base, head examReport, allowNoCoverageGain bool) (findings 
 	return findings, coveragePlus, newFirings
 }
 
+// addedAuthoredFamilies returns the normalized families of the authored
+// detectors a proposal ADDS: the registered Names present under
+// core/detect/authored/ in the HEAD tree but not in the BASE tree, normalized to
+// their emitted family token (an authored detector emits finding.Type == its
+// Name). A missing authored tree at either ref (fs.ErrNotExist) is treated as the
+// empty set — a base with no authored tree means every head authored detector is
+// new. The result is sorted for deterministic finding order. An error is returned
+// only for a non-NotExist I/O failure reading a tree.
+func addedAuthoredFamilies(baseTree, headTree string) ([]string, error) {
+	authoredRel := filepath.FromSlash(authoredDetectorRel)
+
+	collect := func(tree string) (map[string]bool, error) {
+		names, err := collectAuthoredDetectorNames(filepath.Join(tree, authoredRel))
+		if err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				return map[string]bool{}, nil
+			}
+			return nil, err
+		}
+		return names, nil
+	}
+
+	base, err := collect(baseTree)
+	if err != nil {
+		return nil, err
+	}
+	head, err := collect(headTree)
+	if err != nil {
+		return nil, err
+	}
+
+	added := map[string]bool{}
+	for name := range head {
+		if !base[name] {
+			added[normalizeFamily(name)] = true
+		}
+	}
+	return sortedKeys(added), nil
+}
+
+// checkAuthoredBenignTwins enforces, for every authored detector a proposal ADDS
+// (addedFamilies — the normalized families of authored detectors present at head
+// but not at base), that the head exam corpus proves BOTH halves of the
+// consensus-not-rules contract for it:
+//
+//   - a MUST-FIRE scenario labeled for the family that PASSES (a true positive:
+//     the detector actually fires where it should — the detection gain), and
+//   - a MUST-NOT-FIRE BENIGN TWIN labeled for the family that PASSES (a true
+//     negative: the detector correctly stays silent on a benign look-alike).
+//
+// Requiring the benign twin ties "X detects its target" to "X does NOT fire on
+// its benign neighbor", both present and passing, before an authored detector
+// merges — so the loop cannot grow a trigger-happy detector proven only on its
+// happy path. It runs ONLY when the proposal adds an authored package
+// (addedFamilies non-empty); pure data/tuning widens pass through untouched.
+// Pure function over the head report — no I/O; findings are emitted in sorted
+// family order (addedFamilies is pre-sorted) for determinism.
+func checkAuthoredBenignTwins(addedFamilies []string, head examReport) []GuardFinding {
+	if len(addedFamilies) == 0 {
+		return nil
+	}
+	// Families that appear in a PASSING must_fire row and in a PASSING
+	// must_not_fire row of the head corpus.
+	firesPassing := map[string]bool{}
+	twinPassing := map[string]bool{}
+	for _, r := range head.Rows {
+		if !r.Pass {
+			continue
+		}
+		for _, fam := range r.MustFire {
+			firesPassing[normalizeFamily(fam)] = true
+		}
+		for _, fam := range r.MustNotFire {
+			twinPassing[normalizeFamily(fam)] = true
+		}
+	}
+
+	var findings []GuardFinding
+	for _, fam := range addedFamilies {
+		if !firesPassing[fam] {
+			findings = append(findings, GuardFinding{
+				Path:   StageExamDetect,
+				Rule:   RuleExamMissingMustFire,
+				Detail: fmt.Sprintf("authored detector family %q was added but no passing must_fire scenario labels it — an authored detector must ship a labeled scenario proving it fires on its target", fam),
+			})
+		}
+		if !twinPassing[fam] {
+			findings = append(findings, GuardFinding{
+				Path:   StageExamDetect,
+				Rule:   RuleExamMissingBenignTwin,
+				Detail: fmt.Sprintf("authored detector family %q was added without a passing must_not_fire benign twin — every authored detector must ship a benign look-alike scenario it correctly does NOT fire on (consensus-not-rules false-positive floor)", fam),
+			})
+		}
+	}
+	return findings
+}
+
 // normalizeFamily canonicalizes a family token the same way the exam grader
 // does (lowercase, trimmed).
 func normalizeFamily(tok string) string {
@@ -509,15 +700,31 @@ func removeWorktree(repoRoot, dir string) {
 // extraEnv (later entries win), capturing stdout/stderr separately. The error
 // return is for SPAWN failures only; a started process that exits non-zero
 // reports through code. GOWORK=off keeps a stray workspace file above the
-// scratch dir from leaking into tree builds.
+// scratch dir from leaking into tree builds. It runs with no wall-clock bound —
+// use runToolCtx for a subprocess that must be time-boxed.
 func runTool(dir string, extraEnv []string, name string, args ...string) (stdout, stderr string, code int, err error) {
-	cmd := exec.Command(name, args...)
+	return runToolCtx(context.Background(), dir, extraEnv, name, args...)
+}
+
+// runToolCtx is runTool bounded by ctx: if ctx's deadline fires, the process
+// (and its children) are killed and the call returns a NON-nil error wrapping
+// context.DeadlineExceeded with code -1 — a hang is surfaced as a hard failure,
+// never mistaken for a clean exit. Spawn failures likewise return err with code
+// -1; a started process that exits non-zero reports through code with a nil err.
+func runToolCtx(ctx context.Context, dir string, extraEnv []string, name string, args ...string) (stdout, stderr string, code int, err error) {
+	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Dir = dir
 	cmd.Env = append(append(os.Environ(), "GOWORK=off"), extraEnv...)
 	var outBuf, errBuf strings.Builder
 	cmd.Stdout, cmd.Stderr = &outBuf, &errBuf
 	runErr := cmd.Run()
 	if runErr != nil {
+		// A wall-clock timeout is a HANG, not a spawn error nor a clean exit.
+		// Surface it explicitly so the stage-3 caller fails the proposal closed.
+		if ctxErr := ctx.Err(); errors.Is(ctxErr, context.DeadlineExceeded) {
+			return outBuf.String(), errBuf.String(), -1,
+				fmt.Errorf("subprocess %q exceeded its wall-clock timeout: %w", name, ctxErr)
+		}
 		var exitErr *exec.ExitError
 		if errors.As(runErr, &exitErr) {
 			return outBuf.String(), errBuf.String(), exitErr.ExitCode(), nil

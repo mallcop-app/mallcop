@@ -10,8 +10,9 @@ import (
 )
 
 // authoredRel is the canonical repo-relative root of the authored detector
-// tree the allow-list gate governs.
-const authoredRel = "detectors"
+// tree the allow-list gate governs: the own-package location the self-extension
+// loop writes new detectors into (K7 L1).
+const authoredRel = "core/detect/authored"
 
 // moduleRoot locates the repo root (the go.mod directory) by walking up from
 // the test's working directory — the same self-locating discipline coreRoot
@@ -142,7 +143,7 @@ func TestAllowListNegativeControl(t *testing.T) {
 			// legitimate framework imports.
 			plantedRoot := writeTree(t, map[string]string{
 				"go.mod": testGoMod,
-				"detectors/planted/planted.go": "package planted\n\nimport (\n" +
+				"core/detect/authored/planted/planted.go": "package planted\n\nimport (\n" +
 					"\t_ \"" + banned + "\"\n" +
 					"\t_ \"" + testModule + "/pkg/event\"\n" +
 					")\n",
@@ -174,7 +175,7 @@ func TestAllowListNegativeControl(t *testing.T) {
 			// also proves framework matches are TERMINAL (no resolution).
 			cleanRoot := writeTree(t, map[string]string{
 				"go.mod": testGoMod,
-				"detectors/planted/planted.go": "package planted\n\nimport (\n" +
+				"core/detect/authored/planted/planted.go": "package planted\n\nimport (\n" +
 					"\t_ \"strings\"\n" +
 					"\t_ \"" + testModule + "/pkg/event\"\n" +
 					"\t_ \"" + testModule + "/core/detect\"\n" +
@@ -192,17 +193,17 @@ func TestAllowListNegativeControl(t *testing.T) {
 }
 
 // TestAllowListTransitiveSmuggle proves a banned import cannot be laundered
-// through an authored helper package: detectors/evil imports
-// MODULE/detectors/helper, and helper imports os/exec. The gate must flag it
-// with a Via chain naming the smuggling path through helper.
+// through an authored helper package: core/detect/authored/evil imports
+// MODULE/core/detect/authored/helper, and helper imports os/exec. The gate must
+// flag it with a Via chain naming the smuggling path through helper.
 func TestAllowListTransitiveSmuggle(t *testing.T) {
 	root := writeTree(t, map[string]string{
 		"go.mod": testGoMod,
-		"detectors/evil/evil.go": "package evil\n\nimport (\n" +
-			"\t_ \"" + testModule + "/detectors/helper\"\n" +
+		"core/detect/authored/evil/evil.go": "package evil\n\nimport (\n" +
+			"\t_ \"" + testModule + "/core/detect/authored/helper\"\n" +
 			"\t_ \"" + testModule + "/pkg/finding\"\n" +
 			")\n",
-		"detectors/helper/helper.go": "package helper\n\nimport _ \"os/exec\"\n",
+		"core/detect/authored/helper/helper.go": "package helper\n\nimport _ \"os/exec\"\n",
 	})
 	modulePath, err := ModulePath(root)
 	if err != nil {
@@ -225,15 +226,15 @@ func TestAllowListTransitiveSmuggle(t *testing.T) {
 		t.Fatalf("no transitive violation for os/exec with a Via chain; got: %v", violations)
 	}
 	via := strings.Join(transitive.Via, " -> ")
-	if !strings.Contains(via, "detectors/helper") {
+	if !strings.Contains(via, "core/detect/authored/helper") {
 		t.Fatalf("Via chain does not name the smuggling helper: %q", via)
 	}
-	if !strings.Contains(via, "detectors/evil/evil.go") {
+	if !strings.Contains(via, "core/detect/authored/evil/evil.go") {
 		t.Fatalf("Via chain does not name the root file that imported the helper: %q", via)
 	}
-	if transitive.File != "detectors/helper/helper.go" {
+	if transitive.File != "core/detect/authored/helper/helper.go" {
 		t.Fatalf("violation File = %q, want the file containing the contraband import "+
-			"(detectors/helper/helper.go)", transitive.File)
+			"(core/detect/authored/helper/helper.go)", transitive.File)
 	}
 }
 
@@ -245,7 +246,7 @@ func TestAllowListRejectsNonFrameworkInModule(t *testing.T) {
 	target := testModule + "/core/agent"
 	root := writeTree(t, map[string]string{
 		"go.mod": testGoMod,
-		"detectors/planted/planted.go": "package planted\n\nimport (\n" +
+		"core/detect/authored/planted/planted.go": "package planted\n\nimport (\n" +
 			"\t_ \"" + target + "\"\n" +
 			"\t_ \"" + testModule + "/pkg/event\"\n" +
 			")\n",

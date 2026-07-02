@@ -19,17 +19,25 @@
 //   - GO SOURCE DEFAULT-DENY (the catch-all safety floor) — ANY .go path not
 //     terminally handled above is rejected: Modify/Delete of any existing .go
 //     file, and Add of a .go file anywhere EXCEPT the single sanctioned
-//     additive detector lane (a NEW file directly under core/detect/). This
-//     floor does NOT depend on the enumerated protected prefixes, so a
-//     decision-path package the list never named (core/observe's
-//     force-escalate predicates, core/toolrun's cascade wiring, core/store,
-//     core/connect, internal/**, non-contract pkg/**) is frozen ANYWAY — the
-//     loop authors DATA, never code, so a Go change always needs a human.
+//     additive detector lane (a NEW own-package file under
+//     core/detect/authored/<name>/). This floor does NOT depend on the
+//     enumerated protected prefixes, so a decision-path package the list never
+//     named (core/observe's force-escalate predicates, core/toolrun's cascade
+//     wiring, core/store, core/connect, internal/**, non-contract pkg/**) is
+//     frozen ANYWAY — the loop authors DATA, never code, so a Go change always
+//     needs a human.
 //   - FROZEN-BUT-EXTENSIBLE trees — existing exam scenarios are frozen (M/D
-//     rejected) while purely additive new scenario files pass THIS layer, and
-//     a NEW detector file DIRECTLY under core/detect/ passes this layer (the
-//     additive code lane, gated by other layers). A .go file in a SUBDIRECTORY
-//     under core/detect is NOT the lane — it is code-frozen by the floor above.
+//     rejected) while purely additive new scenario files pass THIS layer. The
+//     AUTHORED-DETECTOR CODE LANE (K7 L1) is the OWN-PACKAGE tree
+//     core/detect/authored/<name>/: a NEW file there passes this layer (gated
+//     downstream by the K2a import allow-list and the K7 L3 shape AST gate),
+//     while an existing authored detector is frozen. A NEW file DIRECTLY under
+//     core/detect/ is `package detect`, the SHARED framework package — its
+//     init() could mutate a sibling detector's unexported state (the §5 L1
+//     hazard), so it is FROZEN (human-only), NOT the lane. The registration
+//     aggregator core/detect/authored/registry.go accepts only append-only
+//     blank imports of packages under core/detect/authored/; every other change
+//     to it fails closed.
 //   - SEMANTIC WIDEN RULES — detectors/*.yaml tuning data and
 //     agents/rules/operator-decisions.yaml may be MODIFIED, but the contents
 //     are parsed (base and head) and only pure widens pass. Anything
@@ -54,6 +62,9 @@ package selfgate
 import (
 	"bytes"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"os/exec"
 	"path"
@@ -100,6 +111,12 @@ const (
 	// RuleDiffUnrecognized — a diff entry the guard does not understand
 	// (typechange, unmerged, ...). Fail closed: unknown means rejected.
 	RuleDiffUnrecognized = "diff-unrecognized"
+	// RuleAuthoredRegistry — a change to the authored-detector registration
+	// aggregator (core/detect/authored/registry.go) that is not an append-only
+	// blank import of a package under core/detect/authored/. The registry is
+	// human-bootstrapped once (A/D rejected); thereafter only append-only
+	// blank-import growth is allowed.
+	RuleAuthoredRegistry = "authored-registry-append-only"
 )
 
 // Paths with special (non-prefix) handling.
@@ -109,6 +126,16 @@ const (
 	scenariosPrefix       = "exams/scenarios/"
 	detectorsPrefix       = "detectors/"
 	detectGoDir           = "core/detect"
+	// authoredPrefix is the OWN-PACKAGE authored-detector code lane: a NEW .go
+	// file under core/detect/authored/<name>/ is the sanctioned additive lane
+	// (gated downstream by K2a import allow-list + K7 shape AST). Its own
+	// package makes the §5 L1 same-package-mutation hazard structurally
+	// impossible.
+	authoredPrefix = "core/detect/authored/"
+	// authoredRegistryPath is the human-bootstrapped registration aggregator;
+	// the ONLY file allowed to sit directly in the authored/ package, and only
+	// append-only blank-import modifications to it pass.
+	authoredRegistryPath = "core/detect/authored/registry.go"
 )
 
 // protectedPrefixes deny ANY Add/Modify/Delete beneath them. This is the
@@ -262,14 +289,87 @@ func Guard(repoRoot, baseRef, headRef string) ([]GuardFinding, error) {
 			// 'A' passes: a brand-new data file widens by definition at this
 			// layer (its loader strictly rejects non-additive fields).
 
-		case path.Dir(c.path) == detectGoDir && strings.HasSuffix(c.path, ".go"):
+		case c.path == authoredRegistryPath:
+			// The authored-detector registration aggregator. Bootstrapped once
+			// by a human (A/D rejected); thereafter ONLY append-only blank
+			// imports of packages under core/detect/authored/ pass. Anything
+			// else — a func, a non-blank import, a removed/rewritten import, a
+			// changed package clause — fails closed.
+			if c.status != 'M' {
+				findings = append(findings, GuardFinding{
+					Path:   c.path,
+					Rule:   RuleAuthoredRegistry,
+					Detail: fmt.Sprintf("%s of the authored-detector registry: it is human-bootstrapped once and thereafter only append-only blank imports are allowed", statusWord(c.status)),
+				})
+				continue
+			}
+			base, head, err := readBlobs(repoRoot, baseRef, headRef, c.path)
+			if err != nil {
+				return nil, err
+			}
+			findings = append(findings, checkAuthoredRegistryAppendOnly(c.path, base, head)...)
+
+		case strings.HasPrefix(c.path, authoredPrefix) && strings.HasSuffix(c.path, ".go"):
+			// The OWN-PACKAGE authored-detector code lane. rel is the path
+			// beneath core/detect/authored/.
+			rel := strings.TrimPrefix(c.path, authoredPrefix)
+			// The sanctioned own-package lane is EXACTLY one path segment before
+			// the filename: rel of the form "<name>/<file>.go" (one slash). This
+			// mirrors the registry's isAuthoredDetectorImportPath one-segment rule
+			// AND the shape gate's documented one-level design — the guard-allowed
+			// change surface and the shape-checked surface must not diverge.
+			switch strings.Count(rel, "/") {
+			case 0:
+				// A .go file sitting DIRECTLY in the aggregator package (only
+				// registry.go is allowed there, handled above) — not a detector
+				// package. Freeze it.
+				findings = append(findings, GuardFinding{
+					Path:   c.path,
+					Rule:   RuleCodeFrozen,
+					Detail: fmt.Sprintf("%s of a .go file directly in the authored aggregator package: only registry.go and per-detector own-package subdirectories are allowed under core/detect/authored/", statusWord(c.status)),
+				})
+				continue
+			case 1:
+				// rel is <name>/<file>.go — an own-package authored detector,
+				// handled below.
+			default:
+				// rel is <name>/<sub>/.../<file>.go — a NESTED authored package.
+				// It compiles into cmd/mallcop through the aggregator's transitive
+				// import graph yet lies OUTSIDE the one-level own-package lane the
+				// shape gate and import allow-list are designed around. Freeze it:
+				// the guard's allowed surface must never exceed what the downstream
+				// gates shape-check.
+				findings = append(findings, GuardFinding{
+					Path:   c.path,
+					Rule:   RuleCodeFrozen,
+					Detail: fmt.Sprintf("%s of a .go file nested below core/detect/authored/<name>/: authored detectors are single-level own packages (core/detect/authored/<name>/<file>.go); deeper packages are not a sanctioned lane", statusWord(c.status)),
+				})
+				continue
+			}
+			// rel is <name>/<file>.go — an own-package authored detector. A NEW
+			// file is the sanctioned additive lane (gated downstream by the
+			// K2a import allow-list and the K7 shape AST gate). An existing
+			// authored detector is FROZEN once merged.
 			if c.status != 'A' {
 				findings = append(findings, GuardFinding{
 					Path:   c.path,
 					Rule:   RuleDetectCodeFrozen,
-					Detail: fmt.Sprintf("%s of existing detector code: core/detect/*.go is frozen; new additive detector files are the gated code lane", statusWord(c.status)),
+					Detail: fmt.Sprintf("%s of an existing authored detector: once merged, core/detect/authored/<name>/ code is frozen; only NEW own-package detector files are the additive lane", statusWord(c.status)),
 				})
 			}
+
+		case path.Dir(c.path) == detectGoDir && strings.HasSuffix(c.path, ".go"):
+			// A .go file DIRECTLY under core/detect/ is `package detect` — the
+			// SHARED framework package. THE §5 L1 BREAK: a new file here runs
+			// its init() alongside every sibling detector and could mutate their
+			// unexported state. It is human-only now. Add/Modify/Delete are ALL
+			// frozen — the sanctioned additive lane is the own-package
+			// core/detect/authored/<name>/ tree handled above, not this package.
+			findings = append(findings, GuardFinding{
+				Path:   c.path,
+				Rule:   RuleDetectCodeFrozen,
+				Detail: fmt.Sprintf("%s of core/detect/*.go: the shared framework `detect` package is frozen (a new file here is package detect and its init() could mutate sibling detectors' state — the §5 L1 hazard); the additive lane is core/detect/authored/<name>/", statusWord(c.status)),
+			})
 
 		case strings.HasSuffix(c.path, ".go"):
 			// GO SOURCE DEFAULT-DENY (the catch-all safety floor). Any .go path
@@ -363,6 +463,120 @@ func readBlobs(repoRoot, baseRef, headRef, p string) (base, head []byte, err err
 		return nil, nil, fmt.Errorf("selfgate: git show %s:%s: %v: %s", headRef, p, err, headOut)
 	}
 	return []byte(baseOut), []byte(headOut), nil
+}
+
+// checkAuthoredRegistryAppendOnly is the narrow structured allow for a
+// modification of core/detect/authored/registry.go. It parses BOTH the base and
+// head blobs and passes ONLY when: both are `package authored`; the head file
+// contains nothing but import declarations (no funcs/vars/types/consts); every
+// base import survives verbatim into head (no removals or rewrites); and every
+// import ADDED at head is a BLANK import (`_`) of a package under
+// core/detect/authored/. Anything else — including an unparseable file — fails
+// closed with RuleAuthoredRegistry.
+func checkAuthoredRegistryAppendOnly(p string, base, head []byte) []GuardFinding {
+	fail := func(detail string) []GuardFinding {
+		return []GuardFinding{{Path: p, Rule: RuleAuthoredRegistry, Detail: detail}}
+	}
+
+	fset := token.NewFileSet()
+	bf, berr := parser.ParseFile(fset, "base/registry.go", base, parser.ParseComments)
+	hf, herr := parser.ParseFile(fset, "head/registry.go", head, parser.ParseComments)
+	if berr != nil || herr != nil {
+		return fail(fmt.Sprintf("authored registry unparseable (base: %v; head: %v) — fail closed", berr, herr))
+	}
+	if bf.Name.Name != "authored" || hf.Name.Name != "authored" {
+		return fail(fmt.Sprintf("authored registry package clause changed or unexpected (base %q, head %q) — must remain package authored", bf.Name.Name, hf.Name.Name))
+	}
+	if bad := nonImportDecl(hf); bad != "" {
+		return fail("authored registry may contain only import declarations, found " + bad)
+	}
+
+	baseSet := importSpecKeys(bf)
+	for _, spec := range importSpecs(hf) {
+		if baseSet[spec.key] {
+			delete(baseSet, spec.key) // matched a surviving base import
+			continue
+		}
+		// An import present at head but not base: it must be an append-only
+		// blank import of an authored detector package.
+		if !spec.blank {
+			return fail(fmt.Sprintf("added registry import %q is not a blank import — appends must be `_ \".../core/detect/authored/<name>\"`", spec.path))
+		}
+		if !isAuthoredDetectorImportPath(spec.path) {
+			return fail(fmt.Sprintf("added blank import %q is not a package under core/detect/authored/", spec.path))
+		}
+	}
+	if len(baseSet) > 0 {
+		return fail("an existing registry import was removed or rewritten — the aggregator is append-only")
+	}
+	return nil
+}
+
+// importSpec is one parsed import: its normalized identity key (alias+path),
+// its path, and whether it is a blank (`_`) import.
+type importSpec struct {
+	key   string
+	path  string
+	blank bool
+}
+
+// importSpecs returns every import in f as an importSpec.
+func importSpecs(f *ast.File) []importSpec {
+	var specs []importSpec
+	for _, imp := range f.Imports {
+		path := strings.Trim(imp.Path.Value, `"`)
+		name := ""
+		if imp.Name != nil {
+			name = imp.Name.Name
+		}
+		specs = append(specs, importSpec{
+			key:   name + "|" + path,
+			path:  path,
+			blank: name == "_",
+		})
+	}
+	return specs
+}
+
+// importSpecKeys returns the set of import identity keys in f.
+func importSpecKeys(f *ast.File) map[string]bool {
+	set := map[string]bool{}
+	for _, s := range importSpecs(f) {
+		set[s.key] = true
+	}
+	return set
+}
+
+// nonImportDecl returns a human description of the first top-level declaration
+// in f that is NOT an import, or "" if every declaration is an import.
+func nonImportDecl(f *ast.File) string {
+	for _, decl := range f.Decls {
+		switch d := decl.(type) {
+		case *ast.GenDecl:
+			if d.Tok != token.IMPORT {
+				return "a " + d.Tok.String() + " declaration"
+			}
+		case *ast.FuncDecl:
+			return "a func declaration"
+		default:
+			return "a non-import declaration"
+		}
+	}
+	return ""
+}
+
+// isAuthoredDetectorImportPath reports whether p addresses a package directly
+// under core/detect/authored/ (exactly one path segment after the marker, i.e.
+// .../core/detect/authored/<name>). Module-prefix agnostic — the K2a import
+// allow-list independently constrains the concrete import graph.
+func isAuthoredDetectorImportPath(p string) bool {
+	const marker = "/core/detect/authored/"
+	i := strings.Index(p, marker)
+	if i < 0 {
+		return false
+	}
+	rest := p[i+len(marker):]
+	return rest != "" && !strings.Contains(rest, "/")
 }
 
 // runGit is the hermetic git exec chokepoint — the SAME discipline as

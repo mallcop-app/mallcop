@@ -15,6 +15,15 @@ import (
 	"flag"
 	"fmt"
 	"os"
+
+	// Link the agent-authored detector aggregator so its own-package detectors
+	// register with core/detect and become reachable by detect.Detect across
+	// every subcommand (scan / detect / exam-detect). This single blank import
+	// is the human-wired registration seam (K7 L1); core/detect cannot import
+	// the aggregator itself without a cycle. cmd/ is a guard-protected path, so
+	// this line is frozen after the human wires it once — thereafter only the
+	// aggregator's append-only blank-import list grows.
+	_ "github.com/mallcop-app/mallcop/core/detect/authored"
 )
 
 func main() {
