@@ -93,20 +93,28 @@ const (
 	// Options.AllowNoCoverageGain was not set.
 	RuleExamNoCoverageGain = "exam-detect-no-coverage-gain"
 	// RuleExamNewFiring — a detector family fired at head on a scenario where
-	// it did not fire at base and is not a declared target of the proposal.
+	// it did not fire at base and is not a declared target of the proposal FOR
+	// THAT SCENARIO.
 	RuleExamNewFiring = "exam-detect-new-firing"
-	// RuleExamMissingMustFire — a proposal ADDED an authored detector but no
-	// PASSING must_fire scenario in the head corpus labels its family: the
-	// detector ships no proof it detects what it claims to. Fires only when the
-	// proposal adds an authored package.
+	// RuleExamNewScenarioFails — a labeled scenario this proposal ADDS (present
+	// at head, absent at base) does not pass at head. The base-row regression
+	// check cannot see it, so without this a newly-added benign twin the rule
+	// wrongly fires on (or a must_fire the new detector misses) would fail
+	// silently. An added label the head does not satisfy is a hard rejection.
+	RuleExamNewScenarioFails = "exam-detect-new-scenario-fails"
+	// RuleExamMissingMustFire — a proposal ADDED a detector (authored package OR
+	// declarative rule) but no PASSING must_fire scenario in the head corpus
+	// labels its family: the detector ships no proof it detects what it claims to.
+	// Fires only when the proposal adds a detector on either lane.
 	RuleExamMissingMustFire = "exam-detect-missing-must-fire"
-	// RuleExamMissingBenignTwin — a proposal ADDED an authored detector but no
-	// PASSING must_not_fire BENIGN TWIN in the head corpus labels its family: the
-	// detector ships no proof it correctly stays silent on a benign look-alike.
-	// This is the consensus-not-rules false-positive floor for authored
-	// detectors — a new detector must demonstrate BOTH a true-positive (must_fire)
-	// and a true-negative (must_not_fire benign twin) before it merges. Fires only
-	// when the proposal adds an authored package.
+	// RuleExamMissingBenignTwin — a proposal ADDED a detector (authored package OR
+	// declarative rule) but no PASSING must_not_fire BENIGN TWIN in the head
+	// corpus labels its family: the detector ships no proof it correctly stays
+	// silent on a benign look-alike. This is the consensus-not-rules false-positive
+	// floor, and it applies to BOTH detection lanes equally — a new detector must
+	// demonstrate BOTH a true-positive (must_fire) and a true-negative
+	// (must_not_fire benign twin) before it merges. Fires only when the proposal
+	// adds a detector on either lane.
 	RuleExamMissingBenignTwin = "exam-detect-missing-benign-twin"
 )
 
@@ -255,16 +263,28 @@ func ValidateProposal(repoRoot, baseRef, headRef string, opts Options) (GateResu
 		res.NewFirings = newFirings
 	}
 
-	// MANDATORY BENIGN TWIN (L4c). If this proposal ADDED an authored detector,
-	// the head corpus must prove BOTH a passing must_fire scenario AND a passing
-	// must_not_fire benign twin for it. baseTree / headTree are the same worktrees
-	// the exam ran over, so the added authored families are exactly
-	// (head authored names \ base authored names). Pure data/tuning widens add no
-	// authored family, so this is a no-op for them.
-	addedFamilies, aerr := addedAuthoredFamilies(baseTree, headTree)
+	// MANDATORY BENIGN TWIN (L4c). If this proposal ADDED a detector on EITHER
+	// lane, the head corpus must prove BOTH a passing must_fire scenario AND a
+	// passing must_not_fire benign twin for its family:
+	//   - the AUTHORED lane (core/detect/authored/): added families are
+	//     (head authored names \ base authored names);
+	//   - the DECLARATIVE lane (detectors/rules.yaml): added families are the new
+	//     "decl:<name>" rules (head rule names \ base rule names).
+	// Covering the decl lane closes the K6 asymmetry — without it the "detect
+	// anything" data lane would have STRICTLY WEAKER false-positive protection
+	// than the authored lane (a loop-authored rule could merge proven only on its
+	// happy path). Pure data/tuning widens add no family on either lane, so this
+	// stays a no-op for them. baseTree / headTree are the same worktrees the exam
+	// ran over.
+	addedAuthored, aerr := addedAuthoredFamilies(baseTree, headTree)
 	if aerr != nil {
 		return GateResult{}, fmt.Errorf("selfgate: collecting added authored detectors: %w", aerr)
 	}
+	addedDecl, derr := addedDeclFamilies(baseTree, headTree)
+	if derr != nil {
+		return GateResult{}, fmt.Errorf("selfgate: collecting added declarative rules: %w", derr)
+	}
+	addedFamilies := mergeSortedFamilies(addedAuthored, addedDecl)
 	diffFindings = append(diffFindings, checkAuthoredBenignTwins(addedFamilies, headReport)...)
 
 	evidence := fmt.Sprintf("base: %d labeled (%d passed); head: %d labeled (%d passed); coverage +%d; %d undeclared new firing(s)",
@@ -475,12 +495,16 @@ func diffExamReports(base, head examReport, allowNoCoverageGain bool) (findings 
 		headByID[r.ScenarioID] = r
 	}
 
-	// declaredTargets: the must_fire families of rows newly labeled (absent at
-	// base) or newly passing (failing at base) — the detection the proposal
-	// EXPLICITLY set out to add. Only rows that actually PASS at head declare
-	// targets: an unproven label excuses nothing (fail closed). This is also
-	// the COVERAGE-+1 count.
-	declared := map[string]bool{}
+	// declaredOn maps a family to the SET OF SCENARIOS that declare it as a
+	// passing must_fire target — the must_fire families of rows newly labeled
+	// (absent at base) or newly passing (failing at base), the detection the
+	// proposal EXPLICITLY set out to add, tracked PER SCENARIO. Scoping the
+	// no-new-firings excusal to the declaring scenario (not a blanket family
+	// excusal) is what stops an over-broad NEW rule from firing on UNRELATED
+	// existing benign scenarios under cover of "its family is declared somewhere".
+	// Only rows that actually PASS at head declare a target: an unproven label
+	// excuses nothing (fail closed). This is also the COVERAGE-+1 count.
+	declaredOn := map[string]map[string]bool{}
 	for _, h := range head.Rows {
 		if !h.Pass || len(h.MustFire) == 0 {
 			continue
@@ -489,7 +513,11 @@ func diffExamReports(base, head examReport, allowNoCoverageGain bool) (findings 
 		if !inBase || !b.Pass {
 			coveragePlus++
 			for _, fam := range h.MustFire {
-				declared[normalizeFamily(fam)] = true
+				f := normalizeFamily(fam)
+				if declaredOn[f] == nil {
+					declaredOn[f] = map[string]bool{}
+				}
+				declaredOn[f][h.ScenarioID] = true
 			}
 		}
 	}
@@ -546,7 +574,10 @@ func diffExamReports(base, head examReport, allowNoCoverageGain bool) (findings 
 		seen := map[string]bool{}
 		for _, e := range h.Emitted {
 			fam := normalizeFamily(e)
-			if seen[fam] || baseFams[fam] || declared[fam] {
+			// A declared family is excused ONLY on the scenario that declared it
+			// (declaredOn[fam][h.ScenarioID]); firing on any OTHER scenario is a new
+			// firing even for a declared family.
+			if seen[fam] || baseFams[fam] || declaredOn[fam][h.ScenarioID] {
 				seen[fam] = true
 				continue
 			}
@@ -554,10 +585,31 @@ func diffExamReports(base, head examReport, allowNoCoverageGain bool) (findings 
 			findings = append(findings, GuardFinding{
 				Path: h.ScenarioID,
 				Rule: RuleExamNewFiring,
-				Detail: fmt.Sprintf("family %q fires at head but not at base and is not a declared target of this proposal (declared: %v) — widens must be monotonic and intentional",
-					fam, sortedKeys(declared)),
+				Detail: fmt.Sprintf("family %q fires at head but not at base and is not a declared target of this proposal FOR THIS scenario (families declared: %v) — widens must be monotonic and intentional",
+					fam, sortedKeys(declaredOn)),
 			})
 			newFirings = append(newFirings, h.ScenarioID+": "+fam)
+		}
+	}
+
+	// (d) NEW LABELED SCENARIO MUST PASS. The regression check (a) only covers
+	// rows present at BASE, and (a)'s "missing from head" arm cannot see a row
+	// that never existed at base, so a scenario this proposal ADDS (present at
+	// head, absent at base) that carries a label but does NOT pass at head would
+	// otherwise be invisible — the exact hole a benign-twin must_not_fire the new
+	// rule wrongly fires on falls through. An added label the head does not
+	// satisfy is unproven detection: fail closed.
+	for _, h := range head.Rows {
+		if _, inBase := baseByID[h.ScenarioID]; inBase {
+			continue
+		}
+		if (len(h.MustFire) > 0 || len(h.MustNotFire) > 0) && !h.Pass {
+			findings = append(findings, GuardFinding{
+				Path: h.ScenarioID,
+				Rule: RuleExamNewScenarioFails,
+				Detail: fmt.Sprintf("labeled scenario added by this proposal does not pass at head (must_fire=%v must_not_fire=%v emitted=%v) — an added label the head does not satisfy is unproven detection, fail closed",
+					h.MustFire, h.MustNotFire, h.Emitted),
+			})
 		}
 	}
 
@@ -604,10 +656,85 @@ func addedAuthoredFamilies(baseTree, headTree string) ([]string, error) {
 	return sortedKeys(added), nil
 }
 
-// checkAuthoredBenignTwins enforces, for every authored detector a proposal ADDS
-// (addedFamilies — the normalized families of authored detectors present at head
-// but not at base), that the head exam corpus proves BOTH halves of the
-// consensus-not-rules contract for it:
+// declRulesRel is the repo-relative path of the K6 declarative-rule corpus.
+const declRulesRel = "detectors/rules.yaml"
+
+// declFamilyPrefix namespaces every declarative-rule finding family. It MIRRORS
+// core/detect.DeclNamePrefix; selfgate intentionally does not import core/detect
+// (the exam binary is the seam, JSON is the wire), so the prefix is duplicated
+// here with this note — keep the two in lockstep.
+const declFamilyPrefix = "decl:"
+
+// addedDeclFamilies returns the normalized finding families ("decl:<name>") of
+// the declarative rules a proposal ADDS: the rule Names present in the HEAD
+// detectors/rules.yaml but not the BASE one, namespaced. A missing corpus at
+// either ref is the empty set — a base with no rules means every head rule is new.
+// By the time this runs, the head tree's exam-detect subprocess has already
+// loaded rules.yaml successfully (LoadRules ran at binary startup), so a parse
+// failure here is a genuine on-disk anomaly, returned as an error (fail closed),
+// exactly like addedAuthoredFamilies. The result is sorted for deterministic
+// finding order.
+func addedDeclFamilies(baseTree, headTree string) ([]string, error) {
+	base, err := declRuleFamilies(baseTree)
+	if err != nil {
+		return nil, err
+	}
+	head, err := declRuleFamilies(headTree)
+	if err != nil {
+		return nil, err
+	}
+	added := map[string]bool{}
+	for fam := range head {
+		if !base[fam] {
+			added[fam] = true
+		}
+	}
+	return sortedKeys(added), nil
+}
+
+// declRuleFamilies reads <tree>/detectors/rules.yaml and returns the set of
+// normalized decl finding families it declares ("decl:"+name). An absent file is
+// the empty set (the documented "no rules" state). It reuses rulesByName — the
+// SAME shape-validating parser the guard's append-only check uses — so a
+// malformed corpus (unrecognized top-level section, non-sequence rules, an entry
+// with no name, a duplicate name) is a fail-closed error, not a silent miss.
+func declRuleFamilies(tree string) (map[string]bool, error) {
+	path := filepath.Join(tree, filepath.FromSlash(declRulesRel))
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return map[string]bool{}, nil
+		}
+		return nil, err
+	}
+	rules, findings := rulesByName(declRulesRel, data, filepath.Base(tree))
+	if len(findings) > 0 {
+		return nil, fmt.Errorf("%s in %q is not a well-formed rule corpus: %s", declRulesRel, tree, findings[0].Detail)
+	}
+	fams := map[string]bool{}
+	for name := range rules {
+		fams[normalizeFamily(declFamilyPrefix+name)] = true
+	}
+	return fams, nil
+}
+
+// mergeSortedFamilies unions two family lists and returns them sorted and deduped
+// — the combined added-family set the mandatory benign-twin check runs over.
+func mergeSortedFamilies(a, b []string) []string {
+	set := make(map[string]bool, len(a)+len(b))
+	for _, f := range a {
+		set[f] = true
+	}
+	for _, f := range b {
+		set[f] = true
+	}
+	return sortedKeys(set)
+}
+
+// checkAuthoredBenignTwins enforces, for every detector a proposal ADDS on
+// EITHER lane (addedFamilies — the normalized families present at head but not at
+// base: authored-detector Names AND new "decl:<name>" rules), that the head exam
+// corpus proves BOTH halves of the consensus-not-rules contract for it:
 //
 //   - a MUST-FIRE scenario labeled for the family that PASSES (a true positive:
 //     the detector actually fires where it should — the detection gain), and
@@ -615,12 +742,14 @@ func addedAuthoredFamilies(baseTree, headTree string) ([]string, error) {
 //     negative: the detector correctly stays silent on a benign look-alike).
 //
 // Requiring the benign twin ties "X detects its target" to "X does NOT fire on
-// its benign neighbor", both present and passing, before an authored detector
-// merges — so the loop cannot grow a trigger-happy detector proven only on its
-// happy path. It runs ONLY when the proposal adds an authored package
-// (addedFamilies non-empty); pure data/tuning widens pass through untouched.
-// Pure function over the head report — no I/O; findings are emitted in sorted
-// family order (addedFamilies is pre-sorted) for determinism.
+// its benign neighbor", both present and passing, before a detector merges — so
+// the loop cannot grow a trigger-happy detector proven only on its happy path.
+// The check is lane-agnostic (the caller unions the authored and declarative
+// added-family sets), which is what gives the "detect anything" declarative lane
+// the SAME false-positive floor as the authored lane. It runs ONLY when the
+// proposal adds a family (addedFamilies non-empty); pure data/tuning widens pass
+// through untouched. Pure function over the head report — no I/O; findings are
+// emitted in sorted family order (addedFamilies is pre-sorted) for determinism.
 func checkAuthoredBenignTwins(addedFamilies []string, head examReport) []GuardFinding {
 	if len(addedFamilies) == 0 {
 		return nil
@@ -647,14 +776,14 @@ func checkAuthoredBenignTwins(addedFamilies []string, head examReport) []GuardFi
 			findings = append(findings, GuardFinding{
 				Path:   StageExamDetect,
 				Rule:   RuleExamMissingMustFire,
-				Detail: fmt.Sprintf("authored detector family %q was added but no passing must_fire scenario labels it — an authored detector must ship a labeled scenario proving it fires on its target", fam),
+				Detail: fmt.Sprintf("detector family %q was added but no passing must_fire scenario labels it — an added detector (authored or declarative) must ship a labeled scenario proving it fires on its target", fam),
 			})
 		}
 		if !twinPassing[fam] {
 			findings = append(findings, GuardFinding{
 				Path:   StageExamDetect,
 				Rule:   RuleExamMissingBenignTwin,
-				Detail: fmt.Sprintf("authored detector family %q was added without a passing must_not_fire benign twin — every authored detector must ship a benign look-alike scenario it correctly does NOT fire on (consensus-not-rules false-positive floor)", fam),
+				Detail: fmt.Sprintf("detector family %q was added without a passing must_not_fire benign twin — every added detector (authored or declarative) must ship a benign look-alike scenario it correctly does NOT fire on (consensus-not-rules false-positive floor)", fam),
 			})
 		}
 	}

@@ -10,7 +10,9 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/mallcop-app/mallcop/connect/decl"
 	"github.com/mallcop-app/mallcop/connect/github"
+	"github.com/mallcop-app/mallcop/connect/overlay"
 	"github.com/mallcop-app/mallcop/core/agent"
 	"github.com/mallcop-app/mallcop/core/connect"
 	"github.com/mallcop-app/mallcop/core/inference"
@@ -37,6 +39,10 @@ const (
 	// behaves exactly as today (no network). Set → escalated findings are posted
 	// to the Discord incoming webhook. No bot token is involved.
 	envDiscordWebhook = "DISCORD_WEBHOOK_URL"
+	// envLearnedMappings optionally names a learned-mappings YAML (the overlay
+	// data). The --learned-mappings flag wins over it; both absent => no overlay
+	// (classification is byte-identical to the pre-overlay behavior).
+	envLearnedMappings = "MALLCOP_LEARNED_MAPPINGS"
 )
 
 // ScanSummary holds the results of a completed scan cycle.
@@ -81,9 +87,12 @@ func runScan(args []string) error {
 	baseURL := fs.String("base-url", "", "Inference endpoint base URL (overrides $"+envInferenceURL+")")
 	workers := fs.Int("workers", 0, "Bounded resolve-pool size (0 = pipeline default)")
 	asJSON := fs.Bool("json", false, "Output the summary as JSON")
-	connector := fs.String("connector", "file", `Connector: "file" (default, reads --events) or "github"`)
+	connector := fs.String("connector", "file", `Connector: "file" (default, reads --events), "github", or "decl"`)
 	githubOrg := fs.String("github-org", "", "GitHub org to scan (required when --connector github)")
+	connectorSpec := fs.String("connector-spec", "", "Path to a declarative connector spec YAML (required when --connector decl)")
+	learnedMappings := fs.String("learned-mappings", "", "Optional learned-mappings YAML overlay (overrides $"+envLearnedMappings+")")
 	tuningPath := fs.String("tuning", "", "Optional path to a detector tuning YAML (widen-only extra_* knobs)")
+	rulesPath := fs.String("rules", "", "Optional declarative detector rules YAML (overrides $"+envDeclRules+"; else auto-discovered at <repo>/detectors/rules.yaml)")
 	maxFindings := fs.Int("max-findings", 0, "Volume circuit-breaker ceiling: a scan producing MORE findings than this force-escalates a critical meta-finding to a human (0 = default 25)")
 
 	if err := fs.Parse(args); err != nil {
@@ -94,9 +103,13 @@ func runScan(args []string) error {
 		return fmt.Errorf("scan: --store is required (the git-repo path where findings/resolutions are written)")
 	}
 
-	// (0) Apply the optional widen-only detector tuning BEFORE any detection
-	// runs. Fatal on error (exit 2); no auto-discovery when the flag is unset.
+	// (0) Apply the optional widen-only detector tuning + register the
+	// declarative detector rules BEFORE any detection runs. Fatal on error
+	// (exit 2). Tuning is flag-only; rules auto-discover from the repo root.
 	if err := applyTuningFlag(*tuningPath); err != nil {
+		return fmt.Errorf("scan: %w", err)
+	}
+	if err := loadDeclRulesAutodiscover(*rulesPath); err != nil {
 		return fmt.Errorf("scan: %w", err)
 	}
 
@@ -135,8 +148,23 @@ func runScan(args []string) error {
 		}
 	}
 
+	// (3.4) Resolve the optional learned-mapping overlay: the --learned-mappings
+	// flag wins, then $MALLCOP_LEARNED_MAPPINGS; both absent => nil (no overlay).
+	// A named-but-unreadable/invalid file is fatal (exit 2). Every mapped target
+	// is validated against detect.KnownEventTypes() inside LoadLearnedMappings.
+	ovPath := *learnedMappings
+	if ovPath == "" {
+		ovPath = os.Getenv(envLearnedMappings)
+	}
+	ov, err := overlay.LoadLearnedMappings(ovPath)
+	if err != nil {
+		return fmt.Errorf("scan: %w", err)
+	}
+
 	// (3.5) Build the connector. "file" (default) is byte-identical to the prior
-	// behavior; "github" builds the portable GitHub connector from env creds.
+	// behavior; "github" builds the portable GitHub connector from env creds;
+	// "decl" interprets a declarative connector spec. The overlay (when set) is
+	// attached to the github and decl connectors (github-first).
 	var conn connect.Connector
 	switch *connector {
 	case "file":
@@ -149,7 +177,21 @@ func runScan(args []string) error {
 		if gerr != nil {
 			return fmt.Errorf("scan: github connector: %w", gerr)
 		}
+		gc.SetOverlay(ov)
 		conn = gc
+	case "decl":
+		if *connectorSpec == "" {
+			return fmt.Errorf("scan: --connector-spec is required with --connector decl")
+		}
+		spec, serr := decl.LoadSpecFile(*connectorSpec)
+		if serr != nil {
+			return fmt.Errorf("scan: %w", serr)
+		}
+		dc, derr := decl.NewFromSpec(spec, ov)
+		if derr != nil {
+			return fmt.Errorf("scan: %w", derr)
+		}
+		conn = dc
 	default:
 		return fmt.Errorf("scan: unknown --connector %q", *connector)
 	}

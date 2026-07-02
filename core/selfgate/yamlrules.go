@@ -303,6 +303,157 @@ func checkWidenOnlyYAML(p string, baseData, headData []byte) []GuardFinding {
 	return findings
 }
 
+// ---- learned_mappings.yaml (source -> action -> event_type) -----------------
+
+// checkMappingWidenOnly enforces the widen-direction rule on
+// detectors/learned_mappings.yaml — the connect learned-mapping overlay. Its
+// shape is mapping -> mapping -> SCALAR (source -> rawAction -> event_type),
+// which does NOT fit checkWidenOnlyYAML's section -> field -> list contract, so
+// it gets its own checker. Every base (source, action) mapping must survive into
+// head with an IDENTICAL target; new source/action keys are allowed. A removed
+// key, a retargeted existing key, or an unparseable document is a rejection
+// (fail closed). The loader (connect/overlay), not the guard, enforces that every
+// target is a KnownEventTypes member.
+func checkMappingWidenOnly(p string, baseData, headData []byte) []GuardFinding {
+	reject := func(format string, args ...any) []GuardFinding {
+		return []GuardFinding{{Path: p, Rule: RuleDetectorDataWidenOnly, Detail: fmt.Sprintf(format, args...)}}
+	}
+
+	base, err := decodeMappingDoc(baseData)
+	if err != nil {
+		return reject("base version: %v — cannot prove a widen, fail closed", err)
+	}
+	head, err := decodeMappingDoc(headData)
+	if err != nil {
+		return reject("head version: %v — fail closed", err)
+	}
+
+	var findings []GuardFinding
+	for _, source := range sortedKeys(base) {
+		headActions, ok := head[source]
+		if !ok {
+			findings = append(findings, GuardFinding{Path: p, Rule: RuleDetectorDataWidenOnly,
+				Detail: fmt.Sprintf("source %q removed — a learned mapping may only grow (widen-only)", source)})
+			continue
+		}
+		for _, action := range sortedKeys(base[source]) {
+			baseTarget := base[source][action]
+			headTarget, ok := headActions[action]
+			if !ok {
+				findings = append(findings, GuardFinding{Path: p, Rule: RuleDetectorDataWidenOnly,
+					Detail: fmt.Sprintf("mapping %q.%q removed — every base mapping must survive into head (widen-only)", source, action)})
+				continue
+			}
+			if headTarget != baseTarget {
+				findings = append(findings, GuardFinding{Path: p, Rule: RuleDetectorDataWidenOnly,
+					Detail: fmt.Sprintf("mapping %q.%q retargeted %q → %q — an existing mapping is frozen; only NEW source/action keys may be added", source, action, baseTarget, headTarget)})
+			}
+		}
+	}
+	// Head-only sources/actions are the widen — allowed.
+	return findings
+}
+
+// ---- rules.yaml (declarative detector rules, append-only) -------------------
+
+// checkDeclRulesAppendOnly enforces the APPEND-ONLY widen rule on
+// detectors/rules.yaml — the K6 declarative detector corpus. A rule is a data
+// unit that ADDS a new finding family ("decl:<name>"); a widen may only APPEND a
+// new rule Name. Every base rule (keyed by Name) must survive into head
+// DEEP-EQUAL (frozen — its match/severity/template/gate cannot change), and only
+// NEW Names may appear. A removed rule, a mutated existing rule, a duplicate
+// Name, a rule with no name, or an unparseable/unrecognized document is a
+// rejection (fail closed). Style mirrors checkOperatorDecisions/routesByID: the
+// loader (core/detect.LoadRules), not the guard, enforces enum/event-type/regex
+// validity — the guard only proves the DIFF is a monotonic append.
+func checkDeclRulesAppendOnly(p string, baseData, headData []byte) []GuardFinding {
+	baseRules, errs := rulesByName(p, baseData, "base")
+	if len(errs) > 0 {
+		return errs
+	}
+	headRules, errs := rulesByName(p, headData, "head")
+	if len(errs) > 0 {
+		return errs
+	}
+
+	var findings []GuardFinding
+	for _, name := range sortedKeys(baseRules) {
+		headRule, ok := headRules[name]
+		if !ok {
+			findings = append(findings, GuardFinding{Path: p, Rule: RuleDetectorDataWidenOnly,
+				Detail: fmt.Sprintf("rule %q removed — a declarative rule corpus may only APPEND new rules (removing one narrows what the committee sees)", name)})
+			continue
+		}
+		if !reflect.DeepEqual(baseRules[name], headRule) {
+			findings = append(findings, GuardFinding{Path: p, Rule: RuleDetectorDataWidenOnly,
+				Detail: fmt.Sprintf("rule %q mutated — an existing declarative rule is FROZEN; only NEW rule names may be appended", name)})
+		}
+	}
+	if len(findings) > 0 {
+		return findings
+	}
+	// Head-only names are new rules — the sanctioned widen.
+	return nil
+}
+
+// rulesByName decodes a rules.yaml document into a map keyed by each rule's Name
+// (its full decoded value preserved for the deep-equal freeze check). The shape
+// must be a top-level `rules:` sequence of mappings, each with a unique non-empty
+// string name; any other top-level key, a non-sequence rules value, a non-map
+// entry, a missing/empty/non-string name, or a duplicate name fails closed.
+func rulesByName(p string, data []byte, which string) (map[string]any, []GuardFinding) {
+	reject := func(format string, args ...any) (map[string]any, []GuardFinding) {
+		return nil, []GuardFinding{{Path: p, Rule: RuleDetectorDataWidenOnly, Detail: fmt.Sprintf(format, args...)}}
+	}
+	doc, err := decodeYAMLMap(data)
+	if err != nil {
+		return reject("%s version unparseable (%v) — cannot prove an append, fail closed", which, err)
+	}
+	for key := range doc {
+		if key != "rules" {
+			return reject("%s rules.yaml has unrecognized top-level section %q — only `rules:` is allowed, fail closed", which, key)
+		}
+	}
+	out := map[string]any{}
+	raw, ok := doc["rules"]
+	if !ok || raw == nil {
+		return out, nil // no rules => empty (a seed `rules: []` or absent section).
+	}
+	list, ok := raw.([]any)
+	if !ok {
+		return reject("%s rules: is not a sequence — fail closed", which)
+	}
+	for i, item := range list {
+		rule, ok := item.(map[string]any)
+		if !ok {
+			return reject("%s rules[%d] is not a mapping — fail closed", which, i)
+		}
+		name, ok := rule["name"].(string)
+		if !ok || strings.TrimSpace(name) == "" {
+			return reject("%s rules[%d] has no non-empty string name — fail closed", which, i)
+		}
+		if _, dup := out[name]; dup {
+			return reject("%s rules has duplicate name %q — fail closed", which, name)
+		}
+		out[name] = rule
+	}
+	return out, nil
+}
+
+// decodeMappingDoc decodes a source -> action -> event_type document. A nil
+// (empty) document is an empty map. Any non-string value or non-mapping shape is
+// an error (fail closed) — this is exactly the shape connect/overlay loads.
+func decodeMappingDoc(data []byte) (map[string]map[string]string, error) {
+	var doc map[string]map[string]string
+	if err := yaml.Unmarshal(data, &doc); err != nil {
+		return nil, fmt.Errorf("unparseable / not a source->action->event_type mapping (%v)", err)
+	}
+	if doc == nil {
+		doc = map[string]map[string]string{}
+	}
+	return doc, nil
+}
+
 // decodeWidenDoc decodes and shape-validates a widen-only data document:
 // mapping of section → mapping of field → list of strings. Elements are
 // normalized with the SAME lowercase/trim rule core/detect's ApplyTuning uses,

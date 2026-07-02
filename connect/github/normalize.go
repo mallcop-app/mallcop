@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/mallcop-app/mallcop/connect/overlay"
 	"github.com/mallcop-app/mallcop/pkg/event"
 )
 
@@ -169,8 +170,10 @@ type synthPayload struct {
 
 // normalizeEvent normalizes one GitHub Event object (events feed) to event.Event.
 // Returns ok=false when the entry has no usable timestamp (skipped, not
-// zero-valued — port connector.py:223-226).
-func normalizeEvent(raw json.RawMessage, org string) (event.Event, bool) {
+// zero-valued — port connector.py:223-226). ov (may be nil) fills the
+// "github_other" default bucket from the learned-mapping overlay; base-wins is
+// enforced by Overlay.Apply (a real classification is never overridden).
+func normalizeEvent(raw json.RawMessage, org string, ov *overlay.Overlay) (event.Event, bool) {
 	var ge ghEvent
 	if err := json.Unmarshal(raw, &ge); err != nil {
 		return event.Event{}, false
@@ -192,6 +195,8 @@ func normalizeEvent(raw json.RawMessage, org string) (event.Event, bool) {
 		parseErr = json.Unmarshal(ge.Payload, &mp)
 	}
 	normType := classifyEventType(ge.Type, mp)
+	// Learned-mapping overlay (github-first): rawAction = the GitHub event type.
+	normType = ov.Apply(sourceGitHub, ge.Type, normType)
 
 	actor := ge.Actor.Login
 	if actor == "" {
@@ -233,8 +238,10 @@ func normalizeEvent(raw json.RawMessage, org string) (event.Event, bool) {
 
 // normalizeAuditEntry normalizes one audit-log entry to event.Event. Timestamp is
 // epoch-ms (@timestamp, then created_at). Returns ok=false when no timestamp is
-// present (skip, do not zero-value).
-func normalizeAuditEntry(raw json.RawMessage, org string) (event.Event, bool) {
+// present (skip, do not zero-value). ov (may be nil) fills the "github_other"
+// default bucket from the learned-mapping overlay; base-wins is enforced by
+// Overlay.Apply.
+func normalizeAuditEntry(raw json.RawMessage, org string, ov *overlay.Overlay) (event.Event, bool) {
 	var ae auditEntry
 	if err := json.Unmarshal(raw, &ae); err != nil {
 		return event.Event{}, false
@@ -246,6 +253,8 @@ func normalizeAuditEntry(raw json.RawMessage, org string) (event.Event, bool) {
 	ts := time.UnixMilli(ms).UTC()
 
 	normType := classifyAuditAction(ae.Action)
+	// Learned-mapping overlay (github-first): rawAction = the audit action.
+	normType = ov.Apply(sourceGitHub, ae.Action, normType)
 
 	actor := ae.Actor
 	if actor == "" {

@@ -29,6 +29,7 @@ func runExamDetect(args []string) error {
 	fs := flag.NewFlagSet("exam-detect", flag.ContinueOnError)
 	jsonOut := fs.Bool("json", false, "Output the report as JSON")
 	tuningPath := fs.String("tuning", "", "Optional path to a detector tuning YAML (widen-only extra_* knobs)")
+	rulesPath := fs.String("rules", "", "Optional declarative detector rules YAML (overrides $"+envDeclRules+"; else auto-discovered at <repo>/detectors/rules.yaml)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -44,6 +45,14 @@ func runExamDetect(args []string) error {
 	root, err := eval.RepoRoot()
 	if err != nil {
 		return fmt.Errorf("resolving repo root: %w", err)
+	}
+
+	// Register the declarative detector rules from the SAME resolved root before
+	// grading, so `mallcop exam-detect` scores the head tree WITH the proposed
+	// rules loaded — the mechanism that lets a loop rule-proposal grade through
+	// the validate-proposal exam-detect stage. Fatal on a corrupt corpus.
+	if err := loadDeclRulesAt(resolveDeclRulesPath(*rulesPath, root)); err != nil {
+		return err
 	}
 
 	report, err := eval.RunExamDetect(root)

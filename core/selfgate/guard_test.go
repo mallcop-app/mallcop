@@ -142,6 +142,18 @@ func requireClean(t *testing.T, findings []GuardFinding) {
 	}
 }
 
+// requireDetailContains asserts at least one finding with the given rule whose
+// Detail contains the substring — used to prove a finding names the right family.
+func requireDetailContains(t *testing.T, findings []GuardFinding, rule, sub string) {
+	t.Helper()
+	for _, f := range findings {
+		if f.Rule == rule && strings.Contains(f.Detail, sub) {
+			return
+		}
+	}
+	t.Fatalf("expected a %q finding whose detail contains %q; got %+v", rule, sub, findings)
+}
+
 // ---- REJECT proofs (real content, real attack shapes) -----------------------
 
 // (a) A hand-fed diff editing the REAL core/agent/hardconstraints.go to add a

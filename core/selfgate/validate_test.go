@@ -464,6 +464,83 @@ func TestDiffExamReports_AllowNoCoverageGainWaivesOnlyCoverage(t *testing.T) {
 	})
 }
 
+// TestAdversK6_NoNewFiringsExcusesDeclaredFamilyOnBenign is the Fix #5 red-team
+// regression: the no-new-firings excusal must be SCENARIO-SCOPED. An over-broad
+// NEW decl family, declared as a passing must_fire target on ITS OWN scenario, is
+// legitimately excused THERE — but if it ALSO fires on an unrelated existing
+// benign corpus scenario, that firing must NOT be excused just because the family
+// is "declared somewhere". Before the fix, a blanket family excusal let such a
+// trigger-happy rule sail through with zero new-firing findings.
+func TestAdversK6_NoNewFiringsExcusesDeclaredFamilyOnBenign(t *testing.T) {
+	base := examReport{Rows: []examRow{
+		// The rule's own target: failing at base (family does not fire yet).
+		{ScenarioID: "OWN-TARGET", MustFire: []string{"decl:overbroad"}, Emitted: []string{}, Pass: false},
+		// An unrelated existing benign scenario: decl:overbroad is absent at base.
+		{ScenarioID: "EXISTING-BENIGN", Emitted: []string{"config-drift"}, Pass: true},
+	}}
+	head := examReport{Rows: []examRow{
+		// OWN-TARGET now fires and passes → declares decl:overbroad ON OWN-TARGET.
+		{ScenarioID: "OWN-TARGET", MustFire: []string{"decl:overbroad"}, Emitted: []string{"decl:overbroad"}, Pass: true},
+		// The over-broad rule ALSO fires on the unrelated benign scenario.
+		{ScenarioID: "EXISTING-BENIGN", Emitted: []string{"config-drift", "decl:overbroad"}, Pass: true},
+	}}
+
+	findings, coverage, newFirings := diffExamReports(base, head, false)
+
+	// The unrelated benign firing is flagged.
+	requireRejected(t, findings, RuleExamNewFiring, "EXISTING-BENIGN")
+	foundBenign := false
+	for _, nf := range newFirings {
+		if nf == "EXISTING-BENIGN: decl:overbroad" {
+			foundBenign = true
+		}
+		if nf == "OWN-TARGET: decl:overbroad" {
+			t.Fatalf("decl:overbroad firing on its OWN declared scenario must be excused, got new firing %q", nf)
+		}
+	}
+	if !foundBenign {
+		t.Fatalf("newFirings = %v, want it to contain \"EXISTING-BENIGN: decl:overbroad\"", newFirings)
+	}
+	// The real gain on the declared target still counts.
+	if coverage != 1 {
+		t.Fatalf("coverage = %d, want 1 (OWN-TARGET newly passing)", coverage)
+	}
+}
+
+// TestDiffExamReports_NewLabeledScenarioFailingIsRejected is the Fix #4 proof: a
+// labeled scenario the proposal ADDS (absent at base) that does NOT pass at head
+// is a hard rejection — the exact hole a benign-twin must_not_fire the new rule
+// wrongly fires on would otherwise fall through, since the regression check only
+// covers base rows.
+func TestDiffExamReports_NewLabeledScenarioFailingIsRejected(t *testing.T) {
+	base := examReport{Rows: []examRow{
+		{ScenarioID: "S-1", MustFire: []string{"fam-a"}, Emitted: []string{"fam-a"}, Pass: true},
+	}}
+
+	t.Run("new benign twin the rule wrongly fires on is rejected", func(t *testing.T) {
+		head := examReport{Rows: []examRow{
+			{ScenarioID: "S-1", MustFire: []string{"fam-a"}, Emitted: []string{"fam-a"}, Pass: true},
+			// New benign twin: must_not_fire decl:x, but the rule fired → fails at head.
+			{ScenarioID: "NEW-BENIGN", MustNotFire: []string{"decl:x"}, Emitted: []string{"decl:x"}, Pass: false},
+		}}
+		findings, _, _ := diffExamReports(base, head, true)
+		requireRejected(t, findings, RuleExamNewScenarioFails, "NEW-BENIGN")
+	})
+
+	t.Run("new labeled scenario that passes is clean", func(t *testing.T) {
+		head := examReport{Rows: []examRow{
+			{ScenarioID: "S-1", MustFire: []string{"fam-a"}, Emitted: []string{"fam-a"}, Pass: true},
+			{ScenarioID: "NEW-BENIGN", MustNotFire: []string{"decl:x"}, Emitted: []string{}, Pass: true},
+		}}
+		findings, _, _ := diffExamReports(base, head, true)
+		for _, f := range findings {
+			if f.Rule == RuleExamNewScenarioFails {
+				t.Fatalf("a passing new labeled scenario must not be flagged: %+v", f)
+			}
+		}
+	})
+}
+
 // TestRunToolCtx_WallClockTimeoutKillsHang is the K7 re-red-team regression for
 // the stage-3 defense-in-depth timeout (Fix #3). An authored detector that slips
 // an unbounded loop / blocking call past the L3 shape gate would otherwise let
