@@ -5,7 +5,7 @@
 //	mallcop scan        --store <dir> [--events <file> | --connector github --github-org <org>] [--tuning <yaml>] [--json]
 //	mallcop detect      [--baseline <path>] [--tuning <yaml>]   < events.jsonl   > findings.jsonl
 //	mallcop exam-detect [--json] [--tuning <yaml>]
-//	mallcop validate-proposal --base <ref> [--head <ref>] [--guard-only] [--json]
+//	mallcop validate-proposal --base <ref> [--head <ref>] [--guard-only] [--allow-no-coverage-gain] [--json]
 //	mallcop init        [--dir <path>]
 //	mallcop status      --store <dir>
 //	mallcop config
@@ -96,17 +96,23 @@ Commands:
                families) and reports per-scenario pass/fail. Offline and
                deterministic — no inference key. Exit 1 = detection gap(s).
 
-  validate-proposal  Gate a self-extension proposal diff (static invariant guard)
+  validate-proposal  Run the FREE-TIER gate over a self-extension proposal diff
     --base       Base git ref the proposal diffs against (required)
     --head       Head git ref of the proposal (default: HEAD)
     --guard-only Run only the static invariant guard stage
-    --json       Output the report as JSON
-                 Checks the base..head diff against the self-extension
-                 invariants: protected paths are untouchable, existing
-                 detector code / exam scenarios are frozen, and YAML data
-                 (detectors/tuning.yaml, operator-decision routes) may only
-                 WIDEN what the detection committee sees. Run from inside
-                 the repo being validated. Exit 1 = proposal rejected.
+    --allow-no-coverage-gain
+                 Waive the coverage-+1 requirement (plumbing/no-op diffs)
+    --json       Output the full versioned GateResult as JSON
+                 Ordered $0 stages, short-circuiting on the first failure:
+                 (1) guard — the static invariant guard: protected paths are
+                 untouchable, existing detector code / exam scenarios are
+                 frozen, and YAML data (detectors/tuning.yaml, operator-
+                 decision routes) may only WIDEN what the detection committee
+                 sees; (2) structural — the head tree builds and the authored
+                 detector tree passes the import allow-list; (3) exam-detect —
+                 base vs head exam reports must show no regression, at least
+                 one closed detection gap, and no undeclared new firings.
+                 Run from inside the repo being validated. Exit 1 = rejected.
 
   init    Scaffold a findings store + sample events and print runnable next steps
     --dir      Directory to initialize (default: current directory)

@@ -9,16 +9,20 @@ import (
 	"github.com/mallcop-app/mallcop/core/selfgate"
 )
 
-// runValidateProposal implements `mallcop validate-proposal` — the merge gate
-// for self-extension proposals. A proposal is a git diff (--base ref → --head
-// ref, head defaulting to HEAD) authored by the self-extension loop; the gate
-// runs it through ordered stages and rejects on the first stage's findings.
+// runValidateProposal implements `mallcop validate-proposal` — the FREE-TIER
+// merge gate for self-extension proposals (K4). A proposal is a git diff
+// (--base ref → --head ref, head defaulting to HEAD) authored by the
+// self-extension loop; the gate runs the ordered $0 stages and SHORT-CIRCUITS
+// on the first failing stage:
 //
-// K3 ships STAGE 1 only: the static invariant guard (core/selfgate) — the
-// diff may only ever WIDEN what the detection committee sees. Later stages
-// (exam-detect regression over the proposal's tuning, the eval interlock, ...)
-// APPEND to the stages run below in the K4 step; --guard-only pins the run to
-// stage 1 regardless of what ships later.
+//  1. guard       — the K3 static invariant guard (widen-only diff rules)
+//  2. structural  — head tree builds + authored-detector import allow-list
+//  3. exam-detect — base vs head exam reports: no regression, coverage +1,
+//     no undeclared new firings (monotonic-widen contract)
+//
+// --guard-only pins the run to stage 1. --json emits the full versioned
+// selfgate.GateResult — the exact document the mallcop-pro metered tier
+// consumes across the process boundary.
 //
 // Exit codes (mirror scan / detect / exam-detect):
 //
@@ -30,7 +34,9 @@ func runValidateProposal(args []string) error {
 	base := fs.String("base", "", "Base git ref the proposal diffs against (required)")
 	head := fs.String("head", "HEAD", "Head git ref of the proposal")
 	guardOnly := fs.Bool("guard-only", false, "Run only the static invariant guard stage")
-	jsonOut := fs.Bool("json", false, "Output the report as JSON")
+	allowNoCoverageGain := fs.Bool("allow-no-coverage-gain", false,
+		"Waive the coverage-+1 requirement (plumbing/no-op diffs); no-regression and no-new-firings are never waivable")
+	jsonOut := fs.Bool("json", false, "Output the full GateResult as JSON")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -38,78 +44,52 @@ func runValidateProposal(args []string) error {
 		return fmt.Errorf("--base is required (the ref the proposal diffs against)")
 	}
 
-	report := proposalReport{Base: *base, Head: *head, Pass: true}
-
-	// Stage 1: the static invariant guard. The working directory anchors the
-	// repo — git resolves the tree, and every guard path is repo-root-relative.
-	findings, err := selfgate.Guard(".", *base, *head)
+	// The working directory anchors the repo — git resolves the tree, and
+	// every gate path is repo-root-relative.
+	result, err := selfgate.ValidateProposal(".", *base, *head, selfgate.Options{
+		GuardOnly:           *guardOnly,
+		AllowNoCoverageGain: *allowNoCoverageGain,
+	})
 	if err != nil {
 		return err
 	}
-	report.addStage("guard", findings)
-
-	// FUTURE STAGES (K4+): exam-detect regression with the proposal's tuning
-	// applied, the eval corpus interlock, ... Each appends here as
-	//
-	//	if !*guardOnly {
-	//		report.addStage("<stage>", findings)
-	//	}
-	//
-	// and the aggregate Pass / exit-code behavior below stays unchanged.
-	_ = *guardOnly
 
 	if *jsonOut {
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetEscapeHTML(false)
 		enc.SetIndent("", "  ")
-		if err := enc.Encode(report); err != nil {
-			return fmt.Errorf("encoding report: %w", err)
+		if err := enc.Encode(result); err != nil {
+			return fmt.Errorf("encoding gate result: %w", err)
 		}
 	} else {
-		printProposalReport(report)
+		printGateResult(result)
 	}
 
-	if !report.Pass {
+	if !result.Passed {
 		return errFindings
 	}
 	return nil
 }
 
-// proposalReport is the aggregate validate-proposal result across stages.
-type proposalReport struct {
-	Base   string        `json:"base"`
-	Head   string        `json:"head"`
-	Stages []stageReport `json:"stages"`
-	Pass   bool          `json:"pass"`
-}
-
-// stageReport is one gate stage's outcome.
-type stageReport struct {
-	Name     string                  `json:"name"`
-	Pass     bool                    `json:"pass"`
-	Findings []selfgate.GuardFinding `json:"findings"`
-}
-
-func (r *proposalReport) addStage(name string, findings []selfgate.GuardFinding) {
-	pass := len(findings) == 0
-	if findings == nil {
-		findings = []selfgate.GuardFinding{} // JSON: [] not null
-	}
-	r.Stages = append(r.Stages, stageReport{Name: name, Pass: pass, Findings: findings})
-	r.Pass = r.Pass && pass
-}
-
-func printProposalReport(r proposalReport) {
+func printGateResult(r selfgate.GateResult) {
 	total := 0
 	for _, stage := range r.Stages {
+		status := "PASS"
+		if !stage.Passed {
+			status = "FAIL"
+		}
+		fmt.Printf("%-4s %-11s %s\n", status, stage.Name, stage.Evidence)
 		for _, f := range stage.Findings {
 			total++
 			fmt.Printf("REJECT [%s/%s] %s: %s\n", stage.Name, f.Rule, f.Path, f.Detail)
 		}
 	}
-	if r.Pass {
-		fmt.Printf("validate-proposal: PASS (%s..%s, %d stage(s))\n", r.Base, r.Head, len(r.Stages))
+	if r.Passed {
+		fmt.Printf("validate-proposal: PASS (%.12s..%.12s, %d stage(s), coverage +%d)\n",
+			r.BaseSHA, r.HeadSHA, len(r.Stages), r.CoveragePlus)
 		return
 	}
-	fmt.Printf("validate-proposal: REJECTED — %d finding(s) (%s..%s)\n", total, r.Base, r.Head)
+	last := r.Stages[len(r.Stages)-1]
+	fmt.Printf("validate-proposal: REJECTED at stage %q — %d finding(s) (%.12s..%.12s)\n",
+		last.Name, total, r.BaseSHA, r.HeadSHA)
 }
