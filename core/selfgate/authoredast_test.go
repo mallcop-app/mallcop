@@ -13,6 +13,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/mallcop-app/mallcop/core/detect"
 )
 
 // writeShapePkg materializes one authored-detector package as
@@ -385,6 +387,65 @@ type addrinit struct{}
 func (addrinit) Name() string { return "addrinit-detector" }
 `,
 		},
+		{
+			// K7 HOLE 1b: an authored Detect that writes THROUGH the events
+			// parameter (events[i].Payload = nil) would silence every later
+			// detector reading that payload. The shape gate rejects the intent —
+			// arguments are READ-ONLY — even though HOLE 1a's per-detector input
+			// isolation also neutralizes the mutation at runtime (defence in depth).
+			name:    "writes through the events parameter (payload silencing)",
+			dirName: "silencer",
+			rule:    RuleShapeNonLocalAssign,
+			src: `package silencer
+
+import (
+	"github.com/mallcop-app/mallcop/core/detect"
+	"github.com/mallcop-app/mallcop/pkg/baseline"
+	"github.com/mallcop-app/mallcop/pkg/event"
+	"github.com/mallcop-app/mallcop/pkg/finding"
+)
+
+func init() { detect.Register(silencer{}) }
+
+type silencer struct{}
+
+func (silencer) Name() string { return "silencer-detector" }
+
+func (silencer) Detect(events []event.Event, bl *baseline.Baseline) []finding.Finding {
+	for i := range events {
+		events[i].Payload = nil
+	}
+	return nil
+}
+`,
+		},
+		{
+			// K7 HOLE 1b: writing through the baseline pointer parameter
+			// (bl.KnownActors = nil) narrows what every later detector sees.
+			name:    "writes through the baseline parameter",
+			dirName: "blwriter",
+			rule:    RuleShapeNonLocalAssign,
+			src: `package blwriter
+
+import (
+	"github.com/mallcop-app/mallcop/core/detect"
+	"github.com/mallcop-app/mallcop/pkg/baseline"
+	"github.com/mallcop-app/mallcop/pkg/event"
+	"github.com/mallcop-app/mallcop/pkg/finding"
+)
+
+func init() { detect.Register(blwriter{}) }
+
+type blwriter struct{}
+
+func (blwriter) Name() string { return "blwriter-detector" }
+
+func (blwriter) Detect(events []event.Event, bl *baseline.Baseline) []finding.Finding {
+	bl.KnownActors = nil
+	return nil
+}
+`,
+		},
 	}
 
 	for _, tc := range cases {
@@ -449,6 +510,97 @@ func (datacfg) Detect(events []event.Event, _ *baseline.Baseline) []finding.Find
 		t.Fatalf("CheckAuthoredDetectorShape: %v", err)
 	}
 	requireNoShapeViolations(t, violations)
+}
+
+// TestAuthoredShape_LocalThroughWritesPass proves checkParamWrites does not
+// over-reject: a detector that writes THROUGH its own LOCAL slices/maps
+// (index/field assignment rooted at a `:=`-declared local, not a parameter) is
+// the normal way a pure detector accumulates state and must pass clean. Only
+// writes rooted at the events/baseline PARAMETERS are forbidden.
+func TestAuthoredShape_LocalThroughWritesPass(t *testing.T) {
+	const src = `package localwrite
+
+import (
+	"github.com/mallcop-app/mallcop/core/detect"
+	"github.com/mallcop-app/mallcop/pkg/baseline"
+	"github.com/mallcop-app/mallcop/pkg/event"
+	"github.com/mallcop-app/mallcop/pkg/finding"
+)
+
+func init() { detect.Register(localwrite{}) }
+
+type localwrite struct{}
+
+func (localwrite) Name() string { return "localwrite-detector" }
+
+func (localwrite) Detect(events []event.Event, _ *baseline.Baseline) []finding.Finding {
+	seen := map[string]int{}
+	buf := make([]byte, len(events))
+	var out []finding.Finding
+	for i, ev := range events {
+		seen[ev.Actor]++    // through-write rooted at a LOCAL map
+		buf[i] = byte(i)    // through-write rooted at a LOCAL slice
+		out = append(out, finding.Finding{ID: ev.ID})
+	}
+	_ = seen
+	_ = buf
+	return out
+}
+`
+	dir := writeShapePkg(t, "localwrite", src)
+	violations, err := CheckAuthoredDetectorShape(dir)
+	if err != nil {
+		t.Fatalf("CheckAuthoredDetectorShape: %v", err)
+	}
+	requireNoShapeViolations(t, violations)
+}
+
+// TestAuthoredShape_RejectsFrameworkNameCollision proves K7 HOLE 2: an authored
+// detector whose Name() collides with an EXISTING FRAMEWORK detector
+// ("injection-probe") is a DETERMINISTIC pre-merge RuleShapeDuplicateName
+// rejection — not the unrecovered detect.Register panic that would otherwise
+// crash cmd/mallcop at init and only surface when stage-3 exam-detect execs the
+// crashing binary.
+func TestAuthoredShape_RejectsFrameworkNameCollision(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "collider")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	// Sanity: the name we collide with must actually be a live framework detector.
+	if !frameworkNameRegistered(t, "injection-probe") {
+		t.Fatal("precondition failed: no framework detector named \"injection-probe\" is registered")
+	}
+	src := `package collider
+
+import "github.com/mallcop-app/mallcop/core/detect"
+
+func init() { detect.Register(collider{}) }
+
+type collider struct{}
+
+func (collider) Name() string { return "injection-probe" }
+`
+	if err := os.WriteFile(filepath.Join(dir, "collider.go"), []byte(src), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	violations, err := CheckAuthoredDetectorTreeShape(root)
+	if err != nil {
+		t.Fatalf("CheckAuthoredDetectorTreeShape: %v", err)
+	}
+	requireShapeRule(t, violations, RuleShapeDuplicateName)
+}
+
+// frameworkNameRegistered reports whether name is a live framework detector, via
+// the same registry the shape gate seeds its uniqueness set from.
+func frameworkNameRegistered(t *testing.T, name string) bool {
+	t.Helper()
+	for _, d := range detect.Detectors() {
+		if d.Name() == name {
+			return true
+		}
+	}
+	return false
 }
 
 // TestAuthoredShape_RejectsDuplicateNames proves the cross-package dedupe: two

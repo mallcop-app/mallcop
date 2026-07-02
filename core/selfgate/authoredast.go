@@ -29,6 +29,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/mallcop-app/mallcop/core/detect"
 )
 
 // RuleAuthoredShape is the stable Rule identifier carried on GuardFinding when
@@ -65,6 +67,11 @@ const (
 	// closed.
 	RuleShapeParse = "parse-error"
 )
+
+// frameworkRegistryOrigin is the origin string recorded for a Name seeded from
+// the live framework detector registry, so a collision diagnostic reads
+// "already registered by the framework detector registry (core/detect)".
+const frameworkRegistryOrigin = "the framework detector registry (core/detect)"
 
 // Violation is one authored-detector shape defect. File is the offending file
 // path (as provided to the checker — absolute in production, since callers pass
@@ -103,6 +110,21 @@ func CheckAuthoredDetectorTreeShape(root string) ([]Violation, error) {
 	// nameFirstSeen maps a registered detector Name to the package dir that
 	// first declared it, so a collision points at the offending sibling.
 	nameFirstSeen := map[string]string{}
+	// Seed with the FRAMEWORK detector names (K7 HOLE 2). detect.Register panics
+	// at binary startup on a duplicate Name, so an authored detector whose Name()
+	// collides with a built-in (e.g. "injection-probe") would crash cmd/mallcop
+	// at init — an unrecovered panic surfaced only when stage-3 exam-detect execs
+	// the crashing binary. Seeding the uniqueness set turns that into a
+	// DETERMINISTIC pre-merge RuleShapeDuplicateName rejection. We use the
+	// checked-in framework list (detect.FrameworkDetectorNames), NOT the live
+	// registry: this gate also runs inside cmd/mallcop, which links the authored
+	// aggregator, so a live-registry seed would re-discover an already-merged
+	// authored detector that is ALSO on disk in the head tree and flag it as
+	// colliding with itself. Authored-vs-authored collisions are caught by the
+	// tree walk's own accumulating dedup below.
+	for _, name := range detect.FrameworkDetectorNames() {
+		nameFirstSeen[name] = frameworkRegistryOrigin
+	}
 	for _, e := range entries {
 		if !e.IsDir() {
 			continue
@@ -201,6 +223,7 @@ func shapeCheckPackage(dir string) (name string, violations []Violation, err err
 		violations = append(violations, checkFileDirectives(p, f)...)
 		violations = append(violations, checkFileImportsC(p, f)...)
 		violations = append(violations, checkFileAssignments(p, f)...)
+		violations = append(violations, checkParamWrites(p, f)...)
 		violations = append(violations, checkPackageInitializers(p, f)...)
 	}
 
@@ -332,6 +355,94 @@ func nonLocalWrites(path string, node ast.Node, locals map[string]bool) []Violat
 	return violations
 }
 
+// checkParamWrites flags any write whose target is a COMPOUND lvalue — a field
+// selector, index, pointer deref, or the address-of one — rooted at a function
+// PARAMETER or RECEIVER. This is the K7 HOLE 1b shape gate: detect.Detect threads
+// ONE events slice and ONE *baseline.Baseline through every registered detector,
+// so an authored Detect that writes THROUGH its arguments (events[i].Payload =
+// nil, (&events[i]).Actor = "", bl.KnownActors = nil, *bl = baseline.Baseline{})
+// mutates the SHARED input and silences every later security detector. An
+// authored detector must treat its args as READ-ONLY.
+//
+// Only writes THROUGH a parameter are flagged, not a bare rebinding of the
+// parameter identifier itself (events = someLocal): reassigning the local
+// parameter variable does not touch the caller's backing data. Writes through a
+// LOCAL variable (a slice/map the detector allocated itself) are likewise fine —
+// the root there is a `:=`/var-declared local, never a parameter.
+//
+// The walk descends into nested func literals (ast.Inspect), so a write through
+// an outer parameter captured by a closure is caught too; the param set is the
+// union of every enclosing FuncDecl/FuncLit receiver+parameter, an
+// over-approximation that is sound (it can only flag more, never fewer, writes
+// through argument-derived state).
+func checkParamWrites(path string, f *ast.File) []Violation {
+	var violations []Violation
+	for _, decl := range f.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok || fn.Body == nil {
+			continue
+		}
+		params := collectParamAndReceiverNames(fn)
+		if len(params) == 0 {
+			continue
+		}
+		for _, tgt := range collectAssignmentTargets(fn.Body) {
+			if !isCompoundLValue(tgt.expr) {
+				continue // a bare-ident rebind of a param is not a write THROUGH it
+			}
+			root := rootIdent(tgt.expr)
+			if root == nil || !params[root.Name] {
+				continue
+			}
+			violations = append(violations, Violation{
+				File:   path,
+				Rule:   RuleShapeNonLocalAssign,
+				Detail: fmt.Sprintf("write through parameter %q — an authored detector must treat its events/baseline arguments as READ-ONLY; mutating them (through an index, field, or deref) corrupts the shared input and silences every later detector", root.Name),
+			})
+		}
+	}
+	return violations
+}
+
+// collectParamAndReceiverNames gathers the receiver, parameter, AND every nested
+// func-literal parameter name for a function. Named RESULTS are deliberately
+// excluded: a named return value is writable local output, not shared caller
+// state. This is the "which identifiers name an incoming argument" set that
+// checkParamWrites tests write-through targets against.
+func collectParamAndReceiverNames(fn *ast.FuncDecl) map[string]bool {
+	params := map[string]bool{}
+	addFieldNames(fn.Recv, params)
+	if fn.Type != nil {
+		addFieldNames(fn.Type.Params, params)
+	}
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		if fl, ok := n.(*ast.FuncLit); ok && fl.Type != nil {
+			addFieldNames(fl.Type.Params, params)
+		}
+		return true
+	})
+	return params
+}
+
+// isCompoundLValue reports whether e is an lvalue that reaches THROUGH a variable
+// — a field selector, index, or pointer deref (and the address-of / parenthesized
+// forms of those) — as opposed to a bare identifier. A bare identifier target is
+// a rebinding of the variable itself; a compound target mutates the pointee /
+// element / field the variable refers to.
+func isCompoundLValue(e ast.Expr) bool {
+	switch x := e.(type) {
+	case *ast.SelectorExpr, *ast.IndexExpr, *ast.IndexListExpr, *ast.StarExpr:
+		return true
+	case *ast.ParenExpr:
+		return isCompoundLValue(x.X)
+	case *ast.UnaryExpr:
+		if x.Op == token.AND {
+			return isCompoundLValue(x.X)
+		}
+	}
+	return false
+}
+
 // checkPackageInitializers enforces the "the only init-time code is a single
 // detect.Register" invariant against package-level var/const declarations: any
 // initializer that IS or CONTAINS a function call or a function literal executes
@@ -444,6 +555,8 @@ func isLValue(e ast.Expr) bool {
 		return isLValue(x.X)
 	case *ast.ParenExpr:
 		return isLValue(x.X)
+	case *ast.UnaryExpr:
+		return x.Op == token.AND && isLValue(x.X)
 	default:
 		return false
 	}
@@ -482,6 +595,11 @@ func rootIdent(e ast.Expr) *ast.Ident {
 		return rootIdent(x.X)
 	case *ast.ParenExpr:
 		return rootIdent(x.X)
+	case *ast.UnaryExpr:
+		if x.Op == token.AND {
+			return rootIdent(x.X)
+		}
+		return nil
 	default:
 		return nil
 	}

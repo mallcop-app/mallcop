@@ -50,6 +50,53 @@ func Register(d Detector) {
 	registry[name] = d
 }
 
+// frameworkDetectorNames is the checked-in set of BUILT-IN ("framework")
+// detector Names — the detectors declared in core/detect/*.go and registered by
+// their own files' init(). It is maintained by hand and kept honest by
+// TestFrameworkDetectorNamesMatchRegistry (the detect package test binary links
+// no authored detectors, so the live registry there is exactly this set).
+//
+// Why a checked-in list and not the live registry: the K7 shape gate
+// (core/selfgate) seeds its detector-Name-uniqueness set with these to reject —
+// BEFORE merge — an authored detector whose Name collides with a built-in, which
+// would otherwise be an unrecovered detect.Register panic that crashes
+// cmd/mallcop at init. The gate must return the SAME framework set regardless of
+// whether the process running it ALSO links authored detectors (cmd/mallcop
+// does): reading the live registry there would re-discover an already-merged
+// authored detector that is present both in the registry AND on disk in the head
+// tree, and the tree walk would flag it as colliding with itself. A
+// process-independent list avoids that false positive.
+var frameworkDetectorNames = []string{
+	"auth-failure-burst",
+	"config-drift",
+	"dependency-tamper",
+	"exfil-pattern",
+	"git-oops",
+	"injection-probe",
+	"log-format-drift",
+	"malicious-skill",
+	"new-actor",
+	"new-external-access",
+	"priv-escalation",
+	"rate-anomaly",
+	"secrets-exposure",
+	"unusual-login",
+	"unusual-resource-access",
+	"unusual-timing",
+	"volume-anomaly",
+}
+
+// FrameworkDetectorNames returns a fresh, sorted copy of the built-in detector
+// Names. The K7 shape gate seeds its Name-uniqueness set with these so an
+// authored Name colliding with a framework detector is a deterministic pre-merge
+// rejection rather than a startup panic. Independent of the live registry so it
+// is stable no matter what a given binary links (see frameworkDetectorNames).
+func FrameworkDetectorNames() []string {
+	out := make([]string, len(frameworkDetectorNames))
+	copy(out, frameworkDetectorNames)
+	return out
+}
+
 // Detectors returns the registered detectors ordered by name. The slice is a
 // fresh copy; mutating it does not affect the registry.
 func Detectors() []Detector {
@@ -127,7 +174,17 @@ func Detect(events []event.Event, bl *baseline.Baseline) []finding.Finding {
 func detectAll(detectors []Detector, timeout time.Duration, events []event.Event, bl *baseline.Baseline) []finding.Finding {
 	var all []finding.Finding
 	for _, d := range detectors {
-		out, ok := runDetectorSafely(d, timeout, events, bl)
+		// INPUT ISOLATION (K7 HOLE 1a — framework defence-in-depth). Every
+		// detector gets a FRESH, DEEP copy of the events (each event's mutable
+		// Payload []byte reallocated) and its own baseline clone, so no
+		// detector — a framework bug OR a malicious authored one that mutates
+		// its arguments (events[i].Payload = nil, bl.KnownActors = nil) — can
+		// corrupt what any OTHER detector sees. The 17 framework detectors are
+		// pure readers, so this is behaviour-identical for them; it is a floor
+		// for agent-authored code. It also removes the data race the previous
+		// shared-slice threading had: a timed-out detector's LEAKED goroutine
+		// now mutates only its own copy, never the input the next detector reads.
+		out, ok := runDetectorSafely(d, timeout, cloneEventsForDetector(events), bl.Clone())
 		if !ok {
 			continue // quarantined; diagnostic already recorded by runDetectorSafely
 		}

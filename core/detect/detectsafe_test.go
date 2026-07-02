@@ -13,6 +13,7 @@ package detect
 // under test is the same one production runs.
 
 import (
+	"encoding/json"
 	"sync"
 	"testing"
 	"time"
@@ -137,6 +138,81 @@ func TestDetect_QuarantinesTimingOutDetector(t *testing.T) {
 	}
 	if _, ok := got["test-sleeper"]; !ok {
 		t.Fatalf("timing-out detector was not recorded as quarantined; recorded=%v", got)
+	}
+}
+
+// mutatingDetector is a MALICIOUS authored-style detector: it writes THROUGH its
+// arguments — nil-ing every event Payload and clearing the baseline — then emits
+// nothing. Its Name sorts FIRST, so absent input isolation it runs before and
+// SILENCES the reader below. This is exactly the K7 HOLE 1 shared-input mutation.
+type mutatingDetector struct{}
+
+func (mutatingDetector) Name() string { return "aaa-mutator" }
+func (mutatingDetector) Detect(events []event.Event, bl *baseline.Baseline) []finding.Finding {
+	for i := range events {
+		events[i].Payload = nil
+	}
+	bl.KnownActors = nil
+	for k := range bl.KnownUsers {
+		delete(bl.KnownUsers, k)
+	}
+	return nil
+}
+
+// payloadReaderDetector fires one finding per event that STILL carries a
+// non-empty Payload, but only when the baseline STILL lists a known actor — so
+// it fires IFF its input was NOT silenced by the mutating sibling. Its Name sorts
+// LAST, so it runs after the mutator.
+type payloadReaderDetector struct{}
+
+func (payloadReaderDetector) Name() string { return "zzz-reader" }
+func (payloadReaderDetector) Detect(events []event.Event, bl *baseline.Baseline) []finding.Finding {
+	if len(bl.KnownActors) == 0 {
+		return nil
+	}
+	var out []finding.Finding
+	for _, ev := range events {
+		if len(ev.Payload) > 0 {
+			out = append(out, finding.Finding{ID: "read-" + ev.ID, Type: "read"})
+		}
+	}
+	return out
+}
+
+// TestDetectAll_IsolatesInputFromMutatingSibling is the framework half of the K7
+// HOLE 1a proof: a first-running (name-sorted-earliest) detector that mutates its
+// events/baseline arguments CANNOT silence a later sibling, because detectAll
+// hands each detector its own DEEP copy of the input. It also proves detectAll
+// never mutates the CALLER's original events slice or baseline.
+func TestDetectAll_IsolatesInputFromMutatingSibling(t *testing.T) {
+	events := []event.Event{
+		{ID: "e1", Actor: "alice", Payload: json.RawMessage(`{"k":"v"}`)},
+		{ID: "e2", Actor: "bob", Payload: json.RawMessage(`{"k":"w"}`)},
+	}
+	bl := &baseline.Baseline{
+		KnownActors: []string{"alice", "bob"},
+		KnownUsers:  map[string]baseline.UserProfile{"alice": {}},
+	}
+
+	// aaa-mutator sorts before zzz-reader; detectAll runs them in that order.
+	findings := detectAll(
+		[]Detector{mutatingDetector{}, payloadReaderDetector{}},
+		detectorTimeout, events, bl,
+	)
+
+	if fams := familiesOf(findings); !fams["read"] {
+		t.Fatalf("the reader was SILENCED by a mutating sibling — per-detector input isolation failed: got %+v", findings)
+	}
+	if n := len(findings); n != 2 {
+		t.Fatalf("reader should fire once per event that kept its payload (want 2), got %d: %+v", n, findings)
+	}
+	// The caller's original input must survive intact — detectAll clones, so the
+	// mutator only ever touched its own copy.
+	if events[0].Payload == nil || events[1].Payload == nil {
+		t.Fatalf("detectAll mutated the caller's event payloads: %+v", events)
+	}
+	if len(bl.KnownActors) != 2 || len(bl.KnownUsers) != 1 {
+		t.Fatalf("detectAll mutated the caller's baseline: KnownActors=%v KnownUsers=%v", bl.KnownActors, bl.KnownUsers)
 	}
 }
 

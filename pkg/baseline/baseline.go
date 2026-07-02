@@ -197,6 +197,79 @@ func (b *Baseline) RelationshipsFor(entity string) map[string]Relationship {
 	return out
 }
 
+// Clone returns a DEEP copy of the baseline: every map and slice is reallocated
+// so a caller that mutates the returned value (or any nested slice/map inside it)
+// cannot corrupt the original or any other holder of the original. Scalar,
+// string, and time.Time fields are value-copied. A nil receiver clones to a
+// fresh empty &Baseline{} so callers always get a usable, isolated value.
+//
+// This is the per-detector input-isolation primitive (K7 HOLE 1a): detect.Detect
+// threads ONE *Baseline through every registered detector, so a detector that
+// mutated it would silently narrow what every later detector sees. Handing each
+// detector its own clone makes that structurally impossible.
+func (b *Baseline) Clone() *Baseline {
+	if b == nil {
+		return &Baseline{}
+	}
+	out := &Baseline{}
+
+	if b.KnownUsers != nil {
+		out.KnownUsers = make(map[string]UserProfile, len(b.KnownUsers))
+		for k, p := range b.KnownUsers {
+			out.KnownUsers[k] = UserProfile{
+				KnownIPs:  cloneStrings(p.KnownIPs),
+				KnownGeos: cloneStrings(p.KnownGeos),
+				LastSeen:  p.LastSeen,
+			}
+		}
+	}
+
+	out.KnownActors = cloneStrings(b.KnownActors)
+
+	if b.FrequencyTables != nil {
+		out.FrequencyTables = make(map[string]int, len(b.FrequencyTables))
+		for k, v := range b.FrequencyTables {
+			out.FrequencyTables[k] = v
+		}
+	}
+
+	if b.ActorHours != nil {
+		out.ActorHours = make(map[string][]int, len(b.ActorHours))
+		for k, hrs := range b.ActorHours {
+			cp := make([]int, len(hrs))
+			copy(cp, hrs)
+			out.ActorHours[k] = cp
+		}
+	}
+
+	if b.ActorRoles != nil {
+		out.ActorRoles = make(map[string][]string, len(b.ActorRoles))
+		for k, roles := range b.ActorRoles {
+			out.ActorRoles[k] = cloneStrings(roles)
+		}
+	}
+
+	if b.Relationships != nil {
+		out.Relationships = make(map[string]Relationship, len(b.Relationships))
+		for k, r := range b.Relationships {
+			out.Relationships[k] = r // Relationship is all value fields (int + strings)
+		}
+	}
+
+	return out
+}
+
+// cloneStrings returns a reallocated copy of s, preserving nil (a nil slice
+// clones to nil, not an empty slice, so a round-tripped baseline is unchanged).
+func cloneStrings(s []string) []string {
+	if s == nil {
+		return nil
+	}
+	cp := make([]string, len(s))
+	copy(cp, s)
+	return cp
+}
+
 // IsKnownRole returns true when actor+role is in the actor roles baseline.
 func (b *Baseline) IsKnownRole(actor, role string) bool {
 	roles, ok := b.ActorRoles[actor]
