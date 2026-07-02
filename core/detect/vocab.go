@@ -88,12 +88,30 @@ func KnownEventTypes() map[string]bool {
 	return out
 }
 
+// CanonicalEventType is the SINGLE normalization applied to an event type before
+// membership/gate comparison: lowercase + trim (mirrors config_drift.go's ev.Type
+// handling). It is the canonical spelling every KnownEventTypes member is already
+// in (the gate literals are lowercase, untrimmed), so it is BOTH the form
+// IsKnownEventType matches against AND the form the self-extension DATA lanes must
+// EMIT a mapped target in.
+//
+// SOUNDNESS (invariant 10): the case-sensitive typed detectors gate on the bare
+// lowercase literal (e.g. unusual_login.go `ev.Type != "login"`, git_oops.go
+// `ev.Type != "push"`), so a validated-but-non-canonical target like "PUSH" or
+// " login " would pass IsKnownEventType (which normalizes the QUERY) yet be
+// EMITTED verbatim and silently never fire. The K5 ActionMap path and the
+// learned-mapping overlay therefore canonicalize the target through THIS function
+// before emitting/storing it, so a target that validates as known is emitted in
+// the exact spelling the typed detectors gate on.
+func CanonicalEventType(s string) string {
+	return strings.ToLower(strings.TrimSpace(s))
+}
+
 // IsKnownEventType reports whether s names an event type some built-in detector
-// gates on. Normalization mirrors config_drift.go's ev.Type handling (lower +
-// trim) so a target spelled with different case/whitespace still matches; every
-// KnownEventTypes member is itself already lowercase (the gate literals are), so
-// normalizing only the query is sufficient. This is the fail-loud membership
-// check the K5/K6 loaders use to reject an unknown target.
+// gates on. It normalizes the query through CanonicalEventType; every
+// KnownEventTypes member is itself already canonical, so normalizing the query is
+// sufficient. This is the fail-loud membership check the K5/K6 loaders use to
+// reject an unknown target.
 func IsKnownEventType(s string) bool {
-	return KnownEventTypes()[strings.ToLower(strings.TrimSpace(s))]
+	return KnownEventTypes()[CanonicalEventType(s)]
 }

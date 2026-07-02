@@ -21,9 +21,20 @@
 //     gate on all events) — a rule can only act on a type some detector already
 //     recognizes.
 //   - The reason template substitutes ONLY the fixed tokens {actor} {event_type}
-//     {match} {rule} in a SINGLE pass (strings.Replacer), so a payload-derived
-//     value that itself contains "{rule}" cannot inject a second expansion into
-//     what the committee reads. There is no arbitrary payload interpolation.
+//     {match} {rule} in a SINGLE pass (strings.Replacer): replacement text is not
+//     re-scanned, so a payload-derived value that itself contains "{rule}" cannot
+//     inject a SECOND expansion into what the committee reads. Scope precisely:
+//     the payload-derived values ({actor}, {event_type}, and the regex {match}
+//     substring) are ATTACKER-CONTROLLED. This engine does NOT sanitize their
+//     content; it BOUNDS the blast radius before they reach the committee-facing
+//     free-text Reason — each is stripped of control chars/newlines, length-capped,
+//     and wrapped in an untrusted-evidence delimiter (boxUntrusted) the committee
+//     prompt treats as quoted evidence, never as instructions. The full raw matched
+//     value is emitted losslessly ONLY in the structured Evidence JSON, mirroring
+//     the framework detectors (injection_probe.go, which never echoes the attacker
+//     payload into its Reason). Single-pass render prevents second-order token
+//     re-expansion; the attacker-controlled match is bounded+quoted, not
+//     interpolated verbatim.
 //   - Detect is pure: no I/O, no network, no shared mutable state. It reads the
 //     event's Payload (decoded per call) and emits findings; the leaked-goroutine
 //     isolation contract in detect.go holds because a declRule owns only its own
@@ -42,6 +53,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"unicode"
 
 	"gopkg.in/yaml.v3"
 
@@ -129,7 +141,10 @@ type Rule struct {
 	Severity string `yaml:"severity"`
 	// ReasonTemplate is the emitted finding reason. ONLY the fixed placeholders
 	// {actor} {event_type} {match} {rule} are substituted, at render time, in a
-	// single pass — no arbitrary payload interpolation (invariant 9).
+	// single pass. The payload-derived values ({actor}/{event_type}/{match}) are
+	// attacker-controlled, so renderReason bounds+delimits them (boxUntrusted)
+	// before they enter the committee-facing free-text; the raw value lives only in
+	// the structured Evidence (invariant 9/10).
 	ReasonTemplate string `yaml:"reason_template"`
 	// DedupKey composes the finding ID (actor|actor_type|event).
 	DedupKey DedupKey `yaml:"dedup_key"`
@@ -194,15 +209,18 @@ func LoadRules(path string) (int, error) {
 	// registered until all rules pass, so a rejected corpus never leaves a
 	// partially-mutated registry.
 	existing := existingDetectorNames()
-	seen := map[string]bool{} // derived names claimed by THIS file
+	existingFold := lowerKeySet(existing)
+	seen := map[string]bool{}     // derived names claimed by THIS file
+	seenFold := map[string]bool{} // case-folded derived names claimed by THIS file
 	built := make([]*declRule, 0, len(file.Rules))
 	known := KnownEventTypes()
 	for i, r := range file.Rules {
-		dr, err := compileRule(r, existing, seen, known)
+		dr, err := compileRule(r, existing, existingFold, seen, seenFold, known)
 		if err != nil {
 			return 0, fmt.Errorf("detect: rules file %s: rule[%d]: %w", path, i, err)
 		}
 		seen[dr.Name()] = true
+		seenFold[strings.ToLower(dr.Name())] = true
 		built = append(built, dr)
 	}
 
@@ -232,12 +250,22 @@ func existingDetectorNames() map[string]bool {
 	return out
 }
 
+// lowerKeySet returns a copy of m keyed by the lowercased key, for the
+// case-insensitive rule-name collision check (fix: decl:foo vs decl:Foo).
+func lowerKeySet(m map[string]bool) map[string]bool {
+	out := make(map[string]bool, len(m))
+	for k := range m {
+		out[strings.ToLower(k)] = true
+	}
+	return out
+}
+
 // compileRule validates one Rule and returns its ready-to-register declRule.
 // existing is the pre-existing detector-name set; seen is the set of derived
 // names already claimed by earlier rules in the same file; known is the event
 // vocabulary. Every failure is a returned error (fail-loud) — compileRule never
 // registers or mutates shared state.
-func compileRule(r Rule, existing, seen map[string]bool, known map[string]bool) (*declRule, error) {
+func compileRule(r Rule, existing, existingFold, seen, seenFold map[string]bool, known map[string]bool) (*declRule, error) {
 	name := strings.TrimSpace(r.Name)
 	if name == "" {
 		return nil, errors.New("rule has an empty name")
@@ -250,6 +278,16 @@ func compileRule(r Rule, existing, seen map[string]bool, known map[string]bool) 
 	derived := DeclNamePrefix + name
 	if existing[derived] || seen[derived] {
 		return nil, fmt.Errorf("rule name %q collides with an already-registered detector %q (a duplicate would panic Register)", name, derived)
+	}
+	// Case-fold collision: eval aliases a finding family to a single lowercased
+	// token, so "decl:foo" and "decl:Foo" would register as two DISTINCT detectors
+	// yet collapse to ONE family token downstream — an ambiguous alias. Reject a
+	// case-variant collision (with an existing detector OR an earlier rule in this
+	// file) fail-loud rather than silently aliasing. (The exact-case checks above
+	// catch true duplicates first with a Register-panic-specific message.)
+	foldDerived := strings.ToLower(derived)
+	if existingFold[foldDerived] || seenFold[foldDerived] {
+		return nil, fmt.Errorf("rule name %q collides case-insensitively with an already-registered detector family (%q folds to %q) — decl rule names must be unique ignoring case so eval cannot alias two rules onto one family token", name, derived, foldDerived)
 	}
 
 	if !validMatchKinds[r.Match.Kind] {
@@ -429,13 +467,70 @@ func (d *declRule) scanTargets(payload []byte) []string {
 // re-scanned, so a payload-derived {match}/{actor} value that itself contains
 // "{rule}" (or any other token) cannot inject a second substitution into what
 // the committee reads (invariant 9).
+//
+// The payload-derived values ({actor}, {event_type}, and the regex {match}
+// substring) are ATTACKER-CONTROLLED and could otherwise carry unbounded prose or
+// fake prompt structure into the committee-facing free-text, so each is passed
+// through boxUntrusted (control-char strip + length cap + untrusted delimiter)
+// before interpolation. {rule} is the rule-authored name (loop DATA gated by K3),
+// not payload-derived, so it is interpolated as-is. The full raw matched value is
+// still surfaced losslessly in the structured Evidence (see evidence()).
 func (d *declRule) renderReason(ev event.Event, matchStr string) string {
 	return strings.NewReplacer(
-		"{actor}", ev.Actor,
-		"{event_type}", ev.Type,
-		"{match}", matchStr,
+		"{actor}", boxUntrusted(ev.Actor),
+		"{event_type}", boxUntrusted(ev.Type),
+		"{match}", boxUntrusted(matchStr),
 		"{rule}", d.name,
 	).Replace(d.reasonTemplate)
+}
+
+const (
+	// maxReasonValueRunes caps each payload-derived value interpolated into the
+	// committee-facing free-text Reason, so a broad regex over an attacker field
+	// cannot carry unbounded attacker prose into the prompt the committee reads.
+	maxReasonValueRunes = 120
+	// untrustedOpen / untrustedClose delimit a payload-derived value in the Reason
+	// so the committee prompt treats the span as QUOTED EVIDENCE, never as
+	// instructions. Distinctive markers unlikely to occur in a legitimate template.
+	untrustedOpen  = "«untrusted:"
+	untrustedClose = "»"
+)
+
+// boxUntrusted bounds, sanitizes, and delimits an attacker-controlled value before
+// it is interpolated into the committee-facing free-text Reason. It (1) strips
+// control characters and collapses whitespace so the value cannot inject newlines
+// or fake prompt scaffolding, (2) caps it on a rune boundary, and (3) wraps it in
+// an untrusted-evidence delimiter. The RAW, unbounded value is preserved losslessly
+// in the structured Evidence JSON (evidence()) — nothing is lost for machine
+// consumers; it is only kept out of the free-text prose. Mirrors injection_probe.go,
+// which never echoes the attacker payload into its Reason.
+func boxUntrusted(s string) string {
+	s = sanitizeReasonValue(s)
+	if r := []rune(s); len(r) > maxReasonValueRunes {
+		s = string(r[:maxReasonValueRunes]) + "…"
+	}
+	return untrustedOpen + s + untrustedClose
+}
+
+// sanitizeReasonValue replaces every control character (incl. newlines/tabs) and
+// whitespace run with a single space and trims the edges, so a payload-derived
+// value cannot inject line structure into the committee prompt.
+func sanitizeReasonValue(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	pendingSpace := false
+	for _, r := range s {
+		if unicode.IsControl(r) || unicode.IsSpace(r) {
+			pendingSpace = true
+			continue
+		}
+		if pendingSpace && b.Len() > 0 {
+			b.WriteByte(' ')
+		}
+		pendingSpace = false
+		b.WriteRune(r)
+	}
+	return b.String()
 }
 
 // evidence emits structured (JSON) supporting data. It is machine-structured,

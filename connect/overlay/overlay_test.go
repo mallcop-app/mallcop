@@ -7,6 +7,22 @@ import (
 	"testing"
 )
 
+// TestOverlayTargetCanonicalizedOnStore proves emission soundness for the learned-
+// mapping lane: a validated-but-non-canonical target (" Config_Change " — spaces +
+// mixed case, accepted because IsKnownEventType normalizes the QUERY) is STORED and
+// APPLIED in canonical form ("config_change"), the exact spelling the typed
+// detectors gate on. Without canonicalization Apply would return " Config_Change ",
+// which the case-sensitive gates would never match — a validated-but-dead mapping.
+func TestOverlayTargetCanonicalizedOnStore(t *testing.T) {
+	ov, err := ParseLearnedMappings([]byte("acme:\n  brand_new: \" Config_Change \"\n"))
+	if err != nil {
+		t.Fatalf("ParseLearnedMappings: %v", err)
+	}
+	if got := ov.Apply("acme", "brand_new", "acme_other"); got != "config_change" {
+		t.Errorf("Apply returned %q, want canonical %q so the typed gate matches", got, "config_change")
+	}
+}
+
 // TestApplyBaseWinsStructurally proves the base-wins rule: an overlay entry for
 // an action the connector already classified (baseType != default bucket) is
 // unreachable; only a fall-through to "<sourceID>_other" is filled.

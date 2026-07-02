@@ -14,7 +14,8 @@
 // SSRF DEFENSE (two layers, the dialer is the real one):
 //   - construction: BaseURL must be https and its host must resolve to a PUBLIC
 //     unicast address (loopback / RFC1918 / link-local / 169.254.169.254 / ULA /
-//     localhost all rejected);
+//     localhost rejected, plus the IANA special-purpose ranges in nonPublicCIDRs:
+//     CGNAT 100.64/10, benchmarking, TEST-NET, reserved, and the NAT64 prefix);
 //   - EVERY connection: a net.Dialer.Control callback inspects the ALREADY-
 //     RESOLVED dial IP and rejects any non-public destination. Control runs
 //     post-DNS on the real IP, so it closes the DNS-rebinding TOCTOU that a
@@ -382,9 +383,17 @@ func (c *Connector) buildEvent(ep *Endpoint, item map[string]any) event.Event {
 
 	// Classify: ActionMap wins; else the overlay may fill the default bucket;
 	// else the "<sourceID>_other" fallback. base-wins is enforced in Apply.
+	//
+	// EMISSION SOUNDNESS (invariant 10): the mapped target is emitted in the SAME
+	// canonical form IsKnownEventType validated it against (detect.CanonicalEventType
+	// = lower+trim). Without this, a validated-but-non-canonical target like "PUSH"
+	// or " login " would pass construction validation yet be emitted verbatim and
+	// silently never match a case-sensitive typed gate (git_oops `ev.Type=="push"`,
+	// unusual_login `ev.Type=="login"`) — a dead mapping. The default bucket is left
+	// as-is (no detector gates on it, so its casing is immaterial).
 	base := c.spec.SourceID + "_other"
 	if t, ok := ep.ActionMap[action]; ok {
-		base = t
+		base = detect.CanonicalEventType(t)
 	}
 	typ := c.overlay.Apply(c.spec.SourceID, action, base)
 
@@ -546,9 +555,50 @@ func guardedTransport(ipGuard ipGuardFunc) *http.Transport {
 	}
 }
 
+// nonPublicCIDRs are IANA special-purpose ranges that Go's net stdlib predicates
+// (IsPrivate / IsLoopback / IsLinkLocal* / IsMulticast / IsUnspecified) do NOT
+// cover but which are never a valid PUBLIC unicast destination for a declarative
+// connector. Blocking them explicitly closes SSRF avenues that ride these ranges:
+//   - 100.64.0.0/10   RFC6598 shared address space (CGNAT) — commonly the
+//     Kubernetes/cloud pod- and service-network CIDR, so a rebind or misconfigured
+//     base_url must NOT be able to reach cluster-internal services;
+//   - 198.18.0.0/15   RFC2544 benchmarking;
+//   - 192.0.2.0/24    RFC5737 TEST-NET-1;
+//   - 198.51.100.0/24 RFC5737 TEST-NET-2;
+//   - 203.0.113.0/24  RFC5737 TEST-NET-3;
+//   - 192.0.0.0/24    RFC6890 IETF protocol assignments;
+//   - 240.0.0.0/4     RFC1112 reserved (former class E);
+//   - 64:ff9b::/96    RFC6052 NAT64 well-known prefix (an embedded IPv4 that a
+//     NAT64 gateway would translate back to a v4 destination we must also block).
+//
+// ip.IsPrivate() does not report true for any of these, so we test membership
+// explicitly (net.ParseCIDR + IPNet.Contains).
+var nonPublicCIDRs = func() []*net.IPNet {
+	cidrs := []string{
+		"100.64.0.0/10",
+		"198.18.0.0/15",
+		"192.0.2.0/24",
+		"198.51.100.0/24",
+		"203.0.113.0/24",
+		"192.0.0.0/24",
+		"240.0.0.0/4",
+		"64:ff9b::/96",
+	}
+	out := make([]*net.IPNet, 0, len(cidrs))
+	for _, c := range cidrs {
+		_, n, err := net.ParseCIDR(c)
+		if err != nil {
+			panic(fmt.Sprintf("decl: bad nonPublicCIDR %q: %v", c, err))
+		}
+		out = append(out, n)
+	}
+	return out
+}()
+
 // rejectNonPublicIP is the production dial guard: it refuses loopback, RFC1918,
-// link-local (incl. 169.254.169.254), ULA (fc00::/7), unspecified, and multicast
-// addresses — anything that is not a public unicast destination.
+// link-local (incl. 169.254.169.254), ULA (fc00::/7), unspecified, multicast, AND
+// the IANA special-purpose ranges in nonPublicCIDRs (CGNAT / benchmarking /
+// TEST-NET / reserved / NAT64) — anything that is not a public unicast destination.
 func rejectNonPublicIP(ip net.IP) error {
 	if isPublicIP(ip) {
 		return nil
@@ -565,6 +615,11 @@ func isPublicIP(ip net.IP) bool {
 		ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() ||
 		ip.IsInterfaceLocalMulticast() || ip.IsMulticast() {
 		return false
+	}
+	for _, n := range nonPublicCIDRs {
+		if n.Contains(ip) {
+			return false
+		}
 	}
 	return true
 }

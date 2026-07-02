@@ -33,6 +33,67 @@ func TestRejectNonPublicIP(t *testing.T) {
 	}
 }
 
+// hostForURL brackets an IPv6 literal so it can be embedded in a URL authority.
+func hostForURL(ip string) string {
+	if strings.Contains(ip, ":") {
+		return "[" + ip + "]"
+	}
+	return ip
+}
+
+// TestRejectSpecialPurposeRanges proves the dial guard also refuses the IANA
+// special-purpose ranges that Go's ip.IsPrivate()/IsLoopback()/… predicates do
+// NOT cover — CGNAT (RFC6598, the common k8s/cloud pod-service CIDR), RFC2544
+// benchmarking, the RFC5737 TEST-NET blocks, 192.0.0.0/24, the 240/4 reserved
+// space, and the RFC6052 NAT64 well-known prefix. Each representative address is
+// rejected at ALL THREE enforcement points: the rejectNonPublicIP predicate, the
+// dialer Control callback (via the real guarded transport), and NewFromSpec
+// construction (an IP-literal base_url short-circuits DNS and is checked directly).
+func TestRejectSpecialPurposeRanges(t *testing.T) {
+	cases := []struct{ name, ip string }{
+		{"cgnat-rfc6598", "100.64.0.1"},
+		{"cgnat-rfc6598-high", "100.127.255.254"},
+		{"benchmarking-rfc2544", "198.18.0.1"},
+		{"benchmarking-rfc2544-high", "198.19.255.254"},
+		{"test-net-1-rfc5737", "192.0.2.1"},
+		{"test-net-2-rfc5737", "198.51.100.1"},
+		{"test-net-3-rfc5737", "203.0.113.1"},
+		{"protocol-assignments-rfc6890", "192.0.0.1"},
+		{"reserved-class-e", "240.0.0.1"},
+		{"nat64-rfc6052", "64:ff9b::1"},
+		{"nat64-rfc6052-embedded-v4", "64:ff9b::808:808"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ip := net.ParseIP(tc.ip)
+			if ip == nil {
+				t.Fatalf("test bug: %q is not a parseable IP", tc.ip)
+			}
+
+			// 1) predicate (exactly what the Control callback invokes).
+			if err := rejectNonPublicIP(ip); err == nil {
+				t.Errorf("rejectNonPublicIP(%s) = nil, want rejection", tc.ip)
+			}
+
+			// 2) dialer Control callback via the REAL guarded transport.
+			client := &http.Client{Transport: guardedTransport(rejectNonPublicIP), Timeout: 3 * time.Second}
+			_, err := client.Get("https://" + hostForURL(tc.ip) + ":9/")
+			if err == nil {
+				t.Errorf("GET %s succeeded through the guarded transport; the Control guard did not fire", tc.ip)
+			} else if !strings.Contains(err.Error(), "non-public") {
+				t.Errorf("GET %s error = %v, want SSRF dial rejection", tc.ip, err)
+			}
+
+			// 3) NewFromSpec construction (IP-literal base_url, checked pre-DNS).
+			if _, err := NewFromSpec(validSpecExcept("https://"+hostForURL(tc.ip)), nil); err == nil {
+				t.Errorf("NewFromSpec(base_url=%s) = nil error, want non-public rejection", tc.ip)
+			} else if !strings.Contains(err.Error(), "non-public") {
+				t.Errorf("NewFromSpec(base_url=%s) error = %v, want non-public rejection", tc.ip, err)
+			}
+		})
+	}
+}
+
 // TestDialGuardRejectsPrivateDestination proves the REAL guarded transport
 // rejects a connection to a private address at DIAL time (the Control callback
 // fires post-resolution on the actual dial IP). This IS the DNS-rebinding

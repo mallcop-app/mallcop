@@ -149,6 +149,61 @@ func TestPullPaginationExtractionAndDetect(t *testing.T) {
 	}
 }
 
+// TestActionMapTargetCanonicalizedFiresDetector proves emission soundness: an
+// ActionMap target that is NOT already canonical (" LOGIN " — uppercase + spaces)
+// passes construction validation (IsKnownEventType normalizes the QUERY) AND is
+// then EMITTED in canonical form ("login") so the case-sensitive typed detector
+// gate (unusual_login.go `ev.Type != "login"`) actually fires end-to-end through
+// the real detect.Detect. Without canonicalization the emitted Type " LOGIN "
+// would silently never match — a validated-but-dead mapping.
+func TestActionMapTargetCanonicalizedFiresDetector(t *testing.T) {
+	ts := time.Now().UTC().Format(time.RFC3339)
+
+	mux := http.NewServeMux()
+	srv := httptest.NewTLSServer(mux)
+	defer srv.Close()
+	mux.HandleFunc("/audit", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"events":[{"id":"a1","ts":%q,"who":"mallory","act":"signin"}]}`, ts)
+	})
+
+	spec := &Spec{
+		SourceID:   "acme",
+		BaseURL:    srv.URL,
+		AuthScheme: AuthNone,
+		Endpoints: []Endpoint{{
+			Path:         "/audit",
+			Pagination:   PageNone,
+			ResponsePath: "events",
+			FieldMap:     FieldMap{ID: "id", Timestamp: "ts", Actor: "who", Action: "act"},
+			// Non-canonical target: uppercase + surrounding whitespace.
+			ActionMap: map[string]string{"signin": " LOGIN "},
+		}},
+	}
+
+	c := permissiveConnector(t, spec, nil, srv)
+	evs, err := c.Pull(context.Background())
+	if err != nil {
+		t.Fatalf("Pull: %v", err)
+	}
+	if len(evs) != 1 {
+		t.Fatalf("got %d events, want 1", len(evs))
+	}
+	if evs[0].Type != "login" {
+		t.Fatalf("emitted Type = %q, want canonical %q so the typed gate matches", evs[0].Type, "login")
+	}
+
+	fired := false
+	for _, f := range detect.Detect(evs, &baseline.Baseline{}) {
+		if f.Type == "unusual-login" && f.Actor == "mallory" {
+			fired = true
+		}
+	}
+	if !fired {
+		t.Fatal("unusual-login did not fire on the canonicalized 'login' event — a validated ActionMap target was emitted in a form the typed detector cannot gate on")
+	}
+}
+
 // TestOverlayBaseWins proves, through buildEvent (no network), that a learned
 // mapping fills ONLY the default bucket: an action the ActionMap already
 // classifies is not overridden (base wins), while a previously-unmapped action

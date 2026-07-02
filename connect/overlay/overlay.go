@@ -91,7 +91,12 @@ func ParseLearnedMappings(data []byte) (*Overlay, error) {
 			if ov.bySource[source] == nil {
 				ov.bySource[source] = map[string]string{}
 			}
-			ov.bySource[source][action] = target
+			// Store the target in the SAME canonical form IsKnownEventType validated
+			// it against (lower+trim), so Apply emits a target in the exact spelling
+			// the typed detectors gate on. Otherwise a validated-but-non-canonical
+			// target ("PUSH", " login ") would fill the default bucket yet silently
+			// never fire a case-sensitive typed gate (invariant 10).
+			ov.bySource[source][action] = detect.CanonicalEventType(target)
 		}
 	}
 	return ov, nil
