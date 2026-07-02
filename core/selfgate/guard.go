@@ -288,10 +288,14 @@ func Guard(repoRoot, baseRef, headRef string) ([]GuardFinding, error) {
 				// the filename. tuning.yaml (and any unknown data file, which
 				// checkWidenOnlyYAML still fails closed on) is section→field→list
 				// widen. learned_mappings.yaml is source→action→SCALAR, which does
-				// not fit that contract, so it gets its own mapping-widen checker.
+				// not fit that contract. rules.yaml is a `rules:` sequence keyed by
+				// Name — append-only (existing rules frozen). Each gets its own
+				// checker; the default still fails closed on unknown sections.
 				switch path.Base(c.path) {
 				case "learned_mappings.yaml":
 					findings = append(findings, checkMappingWidenOnly(c.path, base, head)...)
+				case "rules.yaml":
+					findings = append(findings, checkDeclRulesAppendOnly(c.path, base, head)...)
 				default:
 					findings = append(findings, checkWidenOnlyYAML(c.path, base, head)...)
 				}

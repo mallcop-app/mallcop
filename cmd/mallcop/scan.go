@@ -92,6 +92,7 @@ func runScan(args []string) error {
 	connectorSpec := fs.String("connector-spec", "", "Path to a declarative connector spec YAML (required when --connector decl)")
 	learnedMappings := fs.String("learned-mappings", "", "Optional learned-mappings YAML overlay (overrides $"+envLearnedMappings+")")
 	tuningPath := fs.String("tuning", "", "Optional path to a detector tuning YAML (widen-only extra_* knobs)")
+	rulesPath := fs.String("rules", "", "Optional declarative detector rules YAML (overrides $"+envDeclRules+"; else auto-discovered at <repo>/detectors/rules.yaml)")
 	maxFindings := fs.Int("max-findings", 0, "Volume circuit-breaker ceiling: a scan producing MORE findings than this force-escalates a critical meta-finding to a human (0 = default 25)")
 
 	if err := fs.Parse(args); err != nil {
@@ -102,9 +103,13 @@ func runScan(args []string) error {
 		return fmt.Errorf("scan: --store is required (the git-repo path where findings/resolutions are written)")
 	}
 
-	// (0) Apply the optional widen-only detector tuning BEFORE any detection
-	// runs. Fatal on error (exit 2); no auto-discovery when the flag is unset.
+	// (0) Apply the optional widen-only detector tuning + register the
+	// declarative detector rules BEFORE any detection runs. Fatal on error
+	// (exit 2). Tuning is flag-only; rules auto-discover from the repo root.
 	if err := applyTuningFlag(*tuningPath); err != nil {
+		return fmt.Errorf("scan: %w", err)
+	}
+	if err := loadDeclRulesAutodiscover(*rulesPath); err != nil {
 		return fmt.Errorf("scan: %w", err)
 	}
 
