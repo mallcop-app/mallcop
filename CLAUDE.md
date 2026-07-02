@@ -1,7 +1,8 @@
-# CLAUDE.md — mallcop-legion
+# CLAUDE.md — mallcop
 
-> Go binary: mallcop security scanner on legion runtime.
-> Scaffolded under work item mallcoppro-eb1.
+> The ACTIVE Go OSS security scanner. Module `github.com/mallcop-app/mallcop`.
+> Ships as a one-shot CLI (`cmd/mallcop`): scan → detect → committee → findings.
+> No legion/automaton runtime — that scaffolding was removed; the product is the CLI.
 
 ## Cross-Repo Architecture
 
@@ -12,10 +13,12 @@ See ~/projects/mallcop-pro/CLAUDE.md for full cross-repo architecture, including
 
 ## This Repo
 
-mallcop-legion integrates the mallcop scanner with the legion automaton runtime:
-- `chart.toml` — legion automaton config for the connector factory
-- `cmd/mallcop-legion/` — CLI binary entrypoint
-- Legion workers invoke mallcop-specific tools from this repo
+mallcop is the standalone Go scanner. The runtime is the one-shot `cmd/mallcop`
+binary — no external orchestrator:
+- `core/` — pure product logic (detectors, committee agent, eval harness, pipeline).
+  An import-lint (`core/lint`) bans any agent-framework / transport / vendor-SDK dep.
+- `cmd/mallcop` — the CLI entrypoint (`scan`, `exam`, ...).
+- `connect/` — connectors (github, file, ...).
 
 ## Related Items
 
