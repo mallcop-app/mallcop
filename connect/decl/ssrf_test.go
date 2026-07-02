@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -151,6 +152,117 @@ endpoints:
 	}
 	if !strings.Contains(err.Error(), "token") {
 		t.Errorf("error %q should name the offending field", err.Error())
+	}
+}
+
+// TestNewFromSpecRejectsHostileEndpointPath proves the HOST PIN closes the
+// endpoint-path takeover: an ep.Path that, string-concatenated onto the base the
+// legacy way, would move the request authority off the allowlisted host (the
+// "@evil.com" userinfo/host-swap that the public-IP dial guard would happily
+// dial, leaking the auth header to the attacker) is a hard CONSTRUCTION error.
+// Every syntactic authority-injection form is rejected up front.
+func TestNewFromSpecRejectsHostileEndpointPath(t *testing.T) {
+	cases := []struct{ name, path string }{
+		{"userinfo-host-takeover", "@evil.com/x"},    // base+path => host=evil.com, base=>userinfo (credential exfil)
+		{"protocol-relative", "//evil.com/x"},        // leading // => authority evil.com
+		{"absolute-url", "https://evil.com/x"},       // a full off-host URL
+		{"absolute-url-http", "http://evil.com/x"},   // scheme downgrade + off-host
+		{"userinfo-then-host", "@169.254.169.254/x"}, // metadata endpoint via userinfo swap
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			spec := validSpecExcept("https://8.8.8.8") // public IP literal: base passes host check w/o DNS
+			spec.Endpoints[0].Path = tc.path
+			_, err := NewFromSpec(spec, nil)
+			if err == nil {
+				t.Fatalf("NewFromSpec accepted hostile endpoint path %q — the host pin did not fire", tc.path)
+			}
+			// The rejection must name the offending path and the authority concern.
+			if !strings.Contains(err.Error(), tc.path) {
+				t.Errorf("error %q should name the offending path %q", err.Error(), tc.path)
+			}
+		})
+	}
+}
+
+// TestEndpointURLStructurallyPinsHost is the request-time BACKSTOP behind the
+// construction belt: even if a hostile path reached URL construction, endpointURL
+// resolves it against the parsed base and takes ONLY the path+query, so the
+// authority can NEVER leave the allowlisted host. Built directly (no network) so
+// it exercises endpointURL past the construction guard that would otherwise
+// reject these paths first.
+func TestEndpointURLStructurallyPinsHost(t *testing.T) {
+	base, err := url.Parse("https://api.acme.example")
+	if err != nil {
+		t.Fatalf("parse base: %v", err)
+	}
+	c := &Connector{base: base, apiHost: base.Host}
+	for _, path := range []string{"/audit", "@evil.com/x", "//evil.com/x", "https://evil.com/x", "/audit?scope=all"} {
+		got, err := c.endpointURL(path)
+		if err != nil {
+			t.Fatalf("endpointURL(%q) errored: %v", path, err)
+		}
+		u, perr := url.Parse(got)
+		if perr != nil {
+			t.Fatalf("endpointURL(%q) produced unparseable URL %q: %v", path, got, perr)
+		}
+		if u.Host != base.Host {
+			t.Errorf("endpointURL(%q) = %q — host %q escaped the pinned host %q", path, got, u.Host, base.Host)
+		}
+		if u.User != nil {
+			t.Errorf("endpointURL(%q) = %q — userinfo %q was introduced (credential-exfil vector)", path, got, u.User)
+		}
+	}
+}
+
+// TestFetchRefusesRedirect proves the guarded client refuses to FOLLOW any
+// redirect. A 3xx to a public off-host target would otherwise leak the custom
+// auth header (AuthScheme=header), since net/http strips only the standard
+// sensitive headers cross-host. The server issues a 302 to a foreign host; Pull
+// must fail with the redirect-refusal, and the leaked secret must never appear.
+func TestFetchRefusesRedirect(t *testing.T) {
+	t.Setenv("TEST_DECL_HDR", "sekret-header-value")
+
+	var authHeaderSeen string
+	mux := http.NewServeMux()
+	srv := httptest.NewTLSServer(mux)
+	defer srv.Close()
+	mux.HandleFunc("/audit", func(w http.ResponseWriter, r *http.Request) {
+		authHeaderSeen = r.Header.Get("X-Api-Token")
+		http.Redirect(w, r, "https://evil.example.com/steal", http.StatusFound)
+	})
+
+	spec := &Spec{
+		SourceID:      "acme",
+		BaseURL:       srv.URL,
+		AuthScheme:    AuthHeader,
+		HeaderName:    "X-Api-Token",
+		CredentialRef: "TEST_DECL_HDR",
+		Endpoints: []Endpoint{{
+			Path:         "/audit",
+			Pagination:   PageLinkHeader,
+			ResponsePath: "events",
+			FieldMap:     FieldMap{ID: "id", Actor: "who", Action: "act"},
+		}},
+	}
+	c := permissiveConnector(t, spec, nil, srv)
+
+	_, err := c.Pull(context.Background())
+	if err == nil {
+		t.Fatal("Pull followed a redirect; the guarded client did not refuse it")
+	}
+	if !strings.Contains(err.Error(), "refusing to follow redirect") {
+		t.Fatalf("error %q is not the redirect refusal", err.Error())
+	}
+	// The redirect target's host must never appear as a dialed error, and the
+	// secret must never leak into the surfaced error.
+	if strings.Contains(err.Error(), "sekret-header-value") {
+		t.Fatalf("the auth header value leaked into the error: %q", err.Error())
+	}
+	// The header WAS sent to the (trusted) origin on the first hop — that is
+	// expected; what matters is the redirect to evil.example.com was NOT followed.
+	if authHeaderSeen != "sekret-header-value" {
+		t.Errorf("first-hop auth header = %q, want the credential (sanity check the header was applied)", authHeaderSeen)
 	}
 }
 

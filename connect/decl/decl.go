@@ -70,9 +70,9 @@ var linkNextRe = regexp.MustCompile(`<([^>]+)>\s*;\s*rel="next"`)
 // NewFromSpec. It satisfies core/connect.Connector.
 type Connector struct {
 	spec       *Spec
-	baseURL    string
-	apiHost    string // allowlisted host for the pagination string belt-check
-	authValue  string // resolved Authorization value (or header value); "" for none
+	base       *url.URL // parsed, validated base URL; request URLs are built from THIS, never string-concatenated
+	apiHost    string   // allowlisted host for the pagination + endpoint-URL belt-check
+	authValue  string   // resolved Authorization value (or header value); "" for none
 	httpClient *http.Client
 	overlay    *overlay.Overlay
 	maxPages   int
@@ -128,6 +128,14 @@ func newFromSpec(spec *Spec, ov *overlay.Overlay, ipGuard ipGuardFunc) (*Connect
 		if strings.TrimSpace(ep.Path) == "" {
 			return nil, fmt.Errorf("decl: endpoint[%d] has empty path", i)
 		}
+		// HOST PIN (construction belt): an endpoint path must be host-relative and
+		// cannot introduce an authority. This closes the "@attacker/x" host-takeover
+		// + credential-exfil (base+"@evil.com" reparses with host=evil.com, which the
+		// public-IP dial guard would happily dial). The request-time endpointURL is
+		// the structural backstop; this fails such a spec LOUD at construction.
+		if err := validateEndpointPath(u, ep.Path); err != nil {
+			return nil, fmt.Errorf("decl: endpoint[%d]: %w", i, err)
+		}
 		switch ep.Pagination {
 		case PageNone, PageLinkHeader:
 		case PagePageParam:
@@ -151,13 +159,22 @@ func newFromSpec(spec *Spec, ov *overlay.Overlay, ipGuard ipGuardFunc) (*Connect
 	}
 
 	return &Connector{
-		spec:       spec,
-		baseURL:    strings.TrimRight(spec.BaseURL, "/"),
-		apiHost:    u.Host,
-		authValue:  authValue,
-		httpClient: &http.Client{Timeout: clientTimeout, Transport: guardedTransport(ipGuard)},
-		overlay:    ov,
-		maxPages:   defaultMaxPages,
+		spec:      spec,
+		base:      u,
+		apiHost:   u.Host,
+		authValue: authValue,
+		httpClient: &http.Client{
+			Timeout:   clientTimeout,
+			Transport: guardedTransport(ipGuard),
+			// Refuse to follow ANY redirect: a declarative connector paginates via
+			// Link/cursor, never 3xx, and net/http does NOT strip a custom auth
+			// header (AuthScheme=header) on a cross-host redirect — only
+			// Authorization/WWW-Authenticate/Cookie — so following a 3xx to a public
+			// off-host target would leak the credential. Stop at the redirect.
+			CheckRedirect: refuseRedirect,
+		},
+		overlay:  ov,
+		maxPages: defaultMaxPages,
 	}, nil
 }
 
@@ -223,9 +240,14 @@ func (c *Connector) Pull(ctx context.Context) ([]event.Event, error) {
 func (c *Connector) pullEndpoint(ctx context.Context, ep *Endpoint) ([]event.Event, error) {
 	var out []event.Event
 
+	first, err := c.endpointURL(ep.Path)
+	if err != nil {
+		return nil, err
+	}
+
 	switch ep.Pagination {
 	case PageNone:
-		body, _, err := c.fetch(ctx, c.baseURL+ep.Path)
+		body, _, err := c.fetch(ctx, first)
 		if err != nil {
 			return nil, err
 		}
@@ -236,7 +258,7 @@ func (c *Connector) pullEndpoint(ctx context.Context, ep *Endpoint) ([]event.Eve
 		out = append(out, evs...)
 
 	case PageLinkHeader:
-		next := c.baseURL + ep.Path
+		next := first
 		for page := 0; page < c.maxPages && next != ""; page++ {
 			if err := ctx.Err(); err != nil {
 				return nil, fmt.Errorf("decl: cancelled after %d pages: %w", page, err)
@@ -265,7 +287,7 @@ func (c *Connector) pullEndpoint(ctx context.Context, ep *Endpoint) ([]event.Eve
 			if err := ctx.Err(); err != nil {
 				return nil, fmt.Errorf("decl: cancelled after %d pages: %w", page-1, err)
 			}
-			pageURL, err := withQuery(c.baseURL+ep.Path, ep.PageParam, strconv.Itoa(page))
+			pageURL, err := withQuery(first, ep.PageParam, strconv.Itoa(page))
 			if err != nil {
 				return nil, err
 			}
@@ -289,7 +311,7 @@ func (c *Connector) pullEndpoint(ctx context.Context, ep *Endpoint) ([]event.Eve
 			if err := ctx.Err(); err != nil {
 				return nil, fmt.Errorf("decl: cancelled after %d pages: %w", page, err)
 			}
-			pageURL := c.baseURL + ep.Path
+			pageURL := first
 			if cursor != "" {
 				var err error
 				pageURL, err = withQuery(pageURL, ep.CursorParam, cursor)
@@ -432,6 +454,67 @@ func (c *Connector) validateNextLink(raw string) error {
 		return fmt.Errorf("decl: refusing pagination URL to unexpected host %q (allowed: %q)", u.Host, c.apiHost)
 	}
 	return nil
+}
+
+// endpointURL builds the absolute request URL for an endpoint path by RESOLVING
+// it against the parsed base — taking ONLY the path and query and discarding any
+// authority/scheme the path might carry — then running the same host+scheme belt-
+// check as a rel=next link. This is the STRUCTURAL host pin: the endpoint path is
+// only ever assigned to url.Path, never string-concatenated into the authority,
+// so it cannot move the request off c.apiHost regardless of what it contains
+// ("@evil.com", "//evil.com", "https://evil.com" all resolve back onto the base
+// host). The construction-time validateEndpointPath belt rejects such paths loud
+// up front; this is the request-time backstop.
+func (c *Connector) endpointURL(epPath string) (string, error) {
+	rel, err := url.Parse(epPath)
+	if err != nil {
+		return "", fmt.Errorf("decl: unparseable endpoint path %q: %w", epPath, err)
+	}
+	ref := &url.URL{Path: rel.Path, RawQuery: rel.RawQuery}
+	final := c.base.ResolveReference(ref).String()
+	if err := c.validateNextLink(final); err != nil {
+		return "", err
+	}
+	return final, nil
+}
+
+// validateEndpointPath rejects, at construction, any endpoint path that would
+// alter the request authority. Two independent checks:
+//
+//  1. Parsed STANDALONE, the path may not itself carry a scheme, host, userinfo,
+//     or a leading "//" (a protocol-relative "//host" reference).
+//  2. CONCATENATED onto the base the legacy way (base+path), the resulting URL's
+//     authority must be UNCHANGED — this is what closes the "@evil.com" takeover:
+//     "https://api.example"+"@evil.com/x" reparses with host=evil.com and the
+//     base moved into userinfo, so the credentialed request would go to (and leak
+//     its auth header at) evil.com, which the public-IP dial guard would allow.
+func validateEndpointPath(base *url.URL, epPath string) error {
+	rel, err := url.Parse(epPath)
+	if err != nil {
+		return fmt.Errorf("unparseable path %q: %w", epPath, err)
+	}
+	if rel.IsAbs() || rel.Scheme != "" || rel.Host != "" || rel.User != nil || strings.HasPrefix(epPath, "//") {
+		return fmt.Errorf("path %q must be host-relative — it may not carry a scheme, host, userinfo, or a leading '//'", epPath)
+	}
+	combined, err := url.Parse(base.String() + epPath)
+	if err != nil {
+		return fmt.Errorf("path %q makes an unparseable URL: %w", epPath, err)
+	}
+	if combined.Scheme != base.Scheme || combined.Host != base.Host || combined.User != nil {
+		return fmt.Errorf("path %q alters the request authority (would target host %q) — a path may not introduce a host, scheme, or userinfo", epPath, combined.Host)
+	}
+	return nil
+}
+
+// refuseRedirect is the http.Client.CheckRedirect for the guarded client: it
+// refuses to follow ANY redirect. A declarative connector paginates via
+// Link/cursor, never 3xx. Crucially, net/http strips only the STANDARD sensitive
+// headers (Authorization / WWW-Authenticate / Cookie) on a cross-host redirect —
+// NOT a custom header — so following a 3xx to a public off-host target would leak
+// a custom-header credential (AuthScheme=header). Stopping at the redirect
+// response (returned to fetch as a non-2xx, then a hard error) closes that leak.
+func refuseRedirect(req *http.Request, _ []*http.Request) error {
+	return fmt.Errorf("decl: refusing to follow redirect to %q — declarative connectors paginate via Link/cursor, not 3xx; a redirect could leak the auth header off-host", req.URL.Redacted())
 }
 
 // ---- SSRF primitives --------------------------------------------------------
