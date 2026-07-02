@@ -273,6 +273,118 @@ type mismatch struct{}
 func (mismatch) Name() string { return "mismatch-detector" }
 `,
 		},
+		{
+			// Fix #4 regression (a): a func-literal package-var initializer that
+			// writes a sibling package var. The write lives in NO top-level
+			// FuncDecl, so the FuncDecl-only walk missed it; checkFileAssignments
+			// now scans package-level initializer func literals for non-local
+			// writes.
+			name:    "func-literal package-var initializer writes a non-local",
+			dirName: "initwrite",
+			rule:    RuleShapeNonLocalAssign,
+			src: `package initwrite
+
+import "github.com/mallcop-app/mallcop/core/detect"
+
+var sibling int
+
+var _ = func() int { sibling = 42; return 0 }()
+
+func init() { detect.Register(initwrite{}) }
+
+type initwrite struct{}
+
+func (initwrite) Name() string { return "initwrite-detector" }
+`,
+		},
+		{
+			// Fix #4 regression (b): a call-backed package var runs code at
+			// package init. checkPackageInitializers flags the impure initializer.
+			name:    "call-backed package-var initializer",
+			dirName: "callinit",
+			rule:    RuleShapeInit,
+			src: `package callinit
+
+import "github.com/mallcop-app/mallcop/core/detect"
+
+func sideEffect() int { return 0 }
+
+var sink = sideEffect()
+
+func init() { detect.Register(callinit{}) }
+
+type callinit struct{}
+
+func (callinit) Name() string { return "callinit-detector" }
+`,
+		},
+		{
+			// Fix #4 regression (c): a func-literal initializer that invokes code
+			// but writes nothing still runs at init and is forbidden.
+			name:    "func-literal package-var initializer with a call, no write",
+			dirName: "initcall",
+			rule:    RuleShapeInit,
+			src: `package initcall
+
+import "github.com/mallcop-app/mallcop/core/detect"
+
+var _ = func() int { println("side effect at init"); return 0 }()
+
+func init() { detect.Register(initcall{}) }
+
+type initcall struct{}
+
+func (initcall) Name() string { return "initcall-detector" }
+`,
+		},
+		{
+			// Fix #4: a SECOND detect.Register smuggled through a package-var
+			// initializer func literal. checkRegistration counts only init()
+			// FuncDecls, so this was invisible to the single-init invariant;
+			// checkPackageInitializers now rejects the init-time code that carries
+			// it.
+			name:    "smuggled second detect.Register via package-var initializer",
+			dirName: "smuggle",
+			rule:    RuleShapeInit,
+			src: `package smuggle
+
+import "github.com/mallcop-app/mallcop/core/detect"
+
+var _ = func() int { detect.Register(evil{}); return 0 }()
+
+func init() { detect.Register(smuggle{}) }
+
+type smuggle struct{}
+
+func (smuggle) Name() string { return "smuggle-detector" }
+
+type evil struct{}
+
+func (evil) Name() string { return "evil-detector" }
+`,
+		},
+		{
+			// Fix #4 defence-in-depth: taking the address of a sibling package var
+			// in a package-level initializer enables later mutation and is a
+			// non-local write target.
+			name:    "package-var initializer takes address of a package var",
+			dirName: "addrinit",
+			rule:    RuleShapeNonLocalAssign,
+			src: `package addrinit
+
+import "github.com/mallcop-app/mallcop/core/detect"
+
+var sink int
+
+var leak = &sink
+
+func init() { detect.Register(addrinit{}) }
+
+type addrinit struct{}
+
+func (addrinit) Name() string { return "addrinit-detector" }
+`,
+		},
 	}
 
 	for _, tc := range cases {
@@ -285,6 +397,58 @@ func (mismatch) Name() string { return "mismatch-detector" }
 			requireShapeRule(t, violations, tc.rule)
 		})
 	}
+}
+
+// TestAuthoredShape_PureDataInitializersPass proves the hardened package-level
+// initializer check does not over-reject: a detector with pure literal and
+// composite-literal package vars/consts (thresholds, pattern slices, a marker
+// map) — the legitimate way to carry additive config — passes clean. Only
+// initializers that RUN code (calls / func literals) are forbidden.
+func TestAuthoredShape_PureDataInitializersPass(t *testing.T) {
+	const src = `package datacfg
+
+import (
+	"github.com/mallcop-app/mallcop/core/detect"
+	"github.com/mallcop-app/mallcop/pkg/baseline"
+	"github.com/mallcop-app/mallcop/pkg/event"
+	"github.com/mallcop-app/mallcop/pkg/finding"
+)
+
+const threshold = 5
+
+const markerType = "marker"
+
+var patterns = []string{"alpha", "beta"}
+
+var severities = map[string]string{"marker": "low"}
+
+func init() { detect.Register(datacfg{}) }
+
+type datacfg struct{}
+
+func (datacfg) Name() string { return "datacfg-detector" }
+
+func (datacfg) Detect(events []event.Event, _ *baseline.Baseline) []finding.Finding {
+	var out []finding.Finding
+	count := 0
+	for _, ev := range events {
+		if ev.Type == markerType {
+			count++
+			if count <= threshold {
+				out = append(out, finding.Finding{ID: ev.ID, Severity: severities[ev.Type]})
+			}
+		}
+	}
+	_ = patterns
+	return out
+}
+`
+	dir := writeShapePkg(t, "datacfg", src)
+	violations, err := CheckAuthoredDetectorShape(dir)
+	if err != nil {
+		t.Fatalf("CheckAuthoredDetectorShape: %v", err)
+	}
+	requireNoShapeViolations(t, violations)
 }
 
 // TestAuthoredShape_RejectsDuplicateNames proves the cross-package dedupe: two

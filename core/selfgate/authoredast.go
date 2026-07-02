@@ -201,6 +201,7 @@ func shapeCheckPackage(dir string) (name string, violations []Violation, err err
 		violations = append(violations, checkFileDirectives(p, f)...)
 		violations = append(violations, checkFileImportsC(p, f)...)
 		violations = append(violations, checkFileAssignments(p, f)...)
+		violations = append(violations, checkPackageInitializers(p, f)...)
 	}
 
 	if len(files) == 0 {
@@ -274,45 +275,136 @@ func checkFileImportsC(path string, f *ast.File) []Violation {
 	return violations
 }
 
-// checkFileAssignments walks every function in the file and flags any
-// assignment (=, op-assign), IncDec (++/--), or address-of (&) whose target
-// resolves to an identifier that is NOT locally declared within the enclosing
-// function. A package-scope var, an imported-package selector, or a deref/index
-// rooted at either is a non-local target and a violation — the
-// same-package-mutation defence, applied even though L1 makes it structurally
-// impossible.
+// checkFileAssignments walks every function AND every package-level var/const
+// initializer expression in the file and flags any assignment (=, op-assign),
+// IncDec (++/--), or address-of (&) whose target resolves to an identifier that
+// is NOT locally declared within the enclosing scope. A package-scope var, an
+// imported-package selector, or a deref/index rooted at either is a non-local
+// target and a violation — the same-package-mutation defence, applied even
+// though L1 makes it structurally impossible.
+//
+// Package-level initializers are covered because a func literal invoked (or
+// merely nested) inside one runs at package-initialization time and is NOT
+// contained in any top-level FuncDecl body, so `var _ = func(){ sibling = nil
+// }()` would otherwise slip past the FuncDecl-only walk. checkPackageInitializers
+// independently forbids the presence of that init-time code; this is the
+// non-local-write half of the same defence applied to it.
 func checkFileAssignments(path string, f *ast.File) []Violation {
 	var violations []Violation
 	for _, decl := range f.Decls {
-		fn, ok := decl.(*ast.FuncDecl)
-		if !ok || fn.Body == nil {
-			continue
-		}
-		locals := collectLocals(fn)
-		targets := collectAssignmentTargets(fn.Body)
-		for _, tgt := range targets {
-			if bad, detail := targetIsNonLocal(tgt.expr, locals); bad {
-				violations = append(violations, Violation{
-					File:   path,
-					Rule:   RuleShapeNonLocalAssign,
-					Detail: detail,
-				})
+		switch d := decl.(type) {
+		case *ast.FuncDecl:
+			if d.Body == nil {
+				continue
+			}
+			violations = append(violations, nonLocalWrites(path, d.Body, collectLocals(d))...)
+		case *ast.GenDecl:
+			if d.Tok != token.VAR && d.Tok != token.CONST {
+				continue
+			}
+			for _, spec := range d.Specs {
+				vs, ok := spec.(*ast.ValueSpec)
+				if !ok {
+					continue
+				}
+				for _, v := range vs.Values {
+					violations = append(violations, nonLocalWrites(path, v, collectLocalsInNode(v))...)
+				}
 			}
 		}
 	}
 	return violations
 }
 
+// nonLocalWrites reports a RuleShapeNonLocalAssign Violation for every write
+// target within node whose root identifier is not in locals.
+func nonLocalWrites(path string, node ast.Node, locals map[string]bool) []Violation {
+	var violations []Violation
+	for _, tgt := range collectAssignmentTargets(node) {
+		if bad, detail := targetIsNonLocal(tgt.expr, locals); bad {
+			violations = append(violations, Violation{
+				File:   path,
+				Rule:   RuleShapeNonLocalAssign,
+				Detail: detail,
+			})
+		}
+	}
+	return violations
+}
+
+// checkPackageInitializers enforces the "the only init-time code is a single
+// detect.Register" invariant against package-level var/const declarations: any
+// initializer that IS or CONTAINS a function call or a function literal executes
+// code during package initialization and is a RuleShapeInit violation. That
+// closes two bypasses of the FuncDecl-only registration check — a package-var
+// initializer that smuggles a second detect.Register (`var _ = func(){
+// detect.Register(evil{}) }()`) and one that runs any other init-time side
+// effect. Pure literal / composite-literal / operator initializers over
+// constants (thresholds, pattern slices, marker strings) are permitted; a
+// detector computes inside Detect, never at package init.
+func checkPackageInitializers(path string, f *ast.File) []Violation {
+	var violations []Violation
+	for _, decl := range f.Decls {
+		gd, ok := decl.(*ast.GenDecl)
+		if !ok || (gd.Tok != token.VAR && gd.Tok != token.CONST) {
+			continue
+		}
+		for _, spec := range gd.Specs {
+			vs, ok := spec.(*ast.ValueSpec)
+			if !ok {
+				continue
+			}
+			for _, v := range vs.Values {
+				if kind, found := impureInitializer(v); found {
+					violations = append(violations, Violation{
+						File:   path,
+						Rule:   RuleShapeInit,
+						Detail: fmt.Sprintf("package-level %s initializer runs code at package initialization (contains a %s) — an authored detector's only init-time code is the single detect.Register(T{}) in init(); use literal/composite-literal initializers and compute inside Detect", declKeyword(gd.Tok), kind),
+					})
+				}
+			}
+		}
+	}
+	return violations
+}
+
+// impureInitializer reports whether expr evaluates any code — it IS or CONTAINS
+// a function call or a function literal anywhere within it. A pure literal,
+// composite-literal, or operator expression over constants returns false.
+func impureInitializer(expr ast.Expr) (kind string, found bool) {
+	ast.Inspect(expr, func(n ast.Node) bool {
+		switch n.(type) {
+		case *ast.CallExpr:
+			kind, found = "function call", true
+			return false
+		case *ast.FuncLit:
+			kind, found = "function literal", true
+			return false
+		}
+		return true
+	})
+	return kind, found
+}
+
+// declKeyword renders a GenDecl token as its source keyword for diagnostics.
+func declKeyword(tok token.Token) string {
+	if tok == token.CONST {
+		return "const"
+	}
+	return "var"
+}
+
 // assignTarget is one lvalue expression that a statement writes through.
 type assignTarget struct{ expr ast.Expr }
 
-// collectAssignmentTargets gathers every write target in a function body: the
-// LHS of ASSIGN/op-assign AssignStmts (DEFINE `:=` introduces locals, not
-// targets, so it is skipped), IncDecStmt operands, and address-of (&) operands
-// that are lvalues.
-func collectAssignmentTargets(body *ast.BlockStmt) []assignTarget {
+// collectAssignmentTargets gathers every write target reachable from node (a
+// function body or a package-level initializer expression, including any func
+// literals nested within it): the LHS of ASSIGN/op-assign AssignStmts (DEFINE
+// `:=` introduces locals, not targets, so it is skipped), IncDecStmt operands,
+// and address-of (&) operands that are lvalues.
+func collectAssignmentTargets(node ast.Node) []assignTarget {
 	var targets []assignTarget
-	ast.Inspect(body, func(n ast.Node) bool {
+	ast.Inspect(node, func(n ast.Node) bool {
 		switch s := n.(type) {
 		case *ast.AssignStmt:
 			if s.Tok != token.DEFINE {
@@ -411,49 +503,74 @@ func collectLocals(fn *ast.FuncDecl) map[string]bool {
 		addFieldNames(fn.Type.Results, locals)
 	}
 	ast.Inspect(fn.Body, func(n ast.Node) bool {
-		switch s := n.(type) {
-		case *ast.AssignStmt:
-			if s.Tok == token.DEFINE {
-				for _, lhs := range s.Lhs {
-					if id, ok := lhs.(*ast.Ident); ok {
-						locals[id.Name] = true
-					}
-				}
-			}
-		case *ast.GenDecl:
-			if s.Tok == token.VAR || s.Tok == token.CONST {
-				for _, spec := range s.Specs {
-					if vs, ok := spec.(*ast.ValueSpec); ok {
-						for _, id := range vs.Names {
-							locals[id.Name] = true
-						}
-					}
-				}
-			}
-		case *ast.RangeStmt:
-			if s.Tok == token.DEFINE {
-				if id, ok := s.Key.(*ast.Ident); ok {
-					locals[id.Name] = true
-				}
-				if id, ok := s.Value.(*ast.Ident); ok {
-					locals[id.Name] = true
-				}
-			}
-		case *ast.TypeSwitchStmt:
-			if as, ok := s.Assign.(*ast.AssignStmt); ok && as.Tok == token.DEFINE {
-				for _, lhs := range as.Lhs {
-					if id, ok := lhs.(*ast.Ident); ok {
-						locals[id.Name] = true
-					}
-				}
-			}
-		case *ast.FuncLit:
-			addFieldNames(s.Type.Params, locals)
-			addFieldNames(s.Type.Results, locals)
-		}
+		collectLocalName(n, locals)
 		return true
 	})
 	return locals
+}
+
+// collectLocalsInNode is collectLocals for an arbitrary node with no enclosing
+// FuncDecl — e.g. a package-level var/const initializer expression. Any name a
+// func literal nested inside the expression declares (its params/results, `:=`
+// defines, inner var/const, range keys/values, type-switch guards) is a local
+// of that closure; everything else the expression writes is package-scope or
+// imported state and therefore non-local.
+func collectLocalsInNode(node ast.Node) map[string]bool {
+	locals := map[string]bool{}
+	ast.Inspect(node, func(n ast.Node) bool {
+		collectLocalName(n, locals)
+		return true
+	})
+	return locals
+}
+
+// collectLocalName adds the names a single node introduces into the locals set.
+// It is the shared body of collectLocals / collectLocalsInNode: `:=` defines,
+// var/const declarations, range keys/values, type-switch guards, and func
+// literal params/results. This over-approximates "local", which is sound for
+// the non-local-write defence — a package-scope var or imported selector is
+// never in this set, so writes to them are always caught.
+func collectLocalName(n ast.Node, locals map[string]bool) {
+	switch s := n.(type) {
+	case *ast.AssignStmt:
+		if s.Tok == token.DEFINE {
+			for _, lhs := range s.Lhs {
+				if id, ok := lhs.(*ast.Ident); ok {
+					locals[id.Name] = true
+				}
+			}
+		}
+	case *ast.GenDecl:
+		if s.Tok == token.VAR || s.Tok == token.CONST {
+			for _, spec := range s.Specs {
+				if vs, ok := spec.(*ast.ValueSpec); ok {
+					for _, id := range vs.Names {
+						locals[id.Name] = true
+					}
+				}
+			}
+		}
+	case *ast.RangeStmt:
+		if s.Tok == token.DEFINE {
+			if id, ok := s.Key.(*ast.Ident); ok {
+				locals[id.Name] = true
+			}
+			if id, ok := s.Value.(*ast.Ident); ok {
+				locals[id.Name] = true
+			}
+		}
+	case *ast.TypeSwitchStmt:
+		if as, ok := s.Assign.(*ast.AssignStmt); ok && as.Tok == token.DEFINE {
+			for _, lhs := range as.Lhs {
+				if id, ok := lhs.(*ast.Ident); ok {
+					locals[id.Name] = true
+				}
+			}
+		}
+	case *ast.FuncLit:
+		addFieldNames(s.Type.Params, locals)
+		addFieldNames(s.Type.Results, locals)
+	}
 }
 
 // addFieldNames adds every declared name in a field list (params/results/
