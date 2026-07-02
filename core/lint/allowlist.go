@@ -23,9 +23,12 @@ package lint
 // human-written, reviewed product code. pkg/baseline legitimately imports os
 // (it persists baselines); recursing into the framework would force the
 // authored-code allow list onto packages it was never meant to govern. The
-// framework itself is covered by the existing repo-level gates — the
-// core-wide deny gate in imports_test.go and ordinary code review — so the
-// checker treats an exact framework import as OK and does NOT recurse.
+// framework itself is guarded by being human-authored, PR-reviewed product
+// code behind the self-extension invariant guard's protected paths (note:
+// the core-wide deny gate in imports_test.go walks core/ only — pkg/event,
+// pkg/finding and pkg/baseline are OUTSIDE its scope, and it is a
+// framework/SDK substring denylist, not an os/net gate) — so the checker
+// treats an exact framework import as OK and does NOT recurse.
 //
 // Consensus-not-rules invariant: this gate only constrains what authored
 // detector CODE may link. The allow list is fixed in this file — there is no
