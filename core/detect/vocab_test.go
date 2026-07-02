@@ -241,8 +241,8 @@ func TestKnownEventTypesReflectRealBehavior(t *testing.T) {
 	known := KnownEventTypes()
 
 	cases := []struct {
-		name       string
-		ev         event.Event
+		name        string
+		ev          event.Event
 		wantFinding string // finding.Type the owning detector emits
 	}{
 		{
