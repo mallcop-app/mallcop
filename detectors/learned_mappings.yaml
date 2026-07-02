@@ -1,0 +1,19 @@
+# learned_mappings.yaml — the connect LEARNED-MAPPING overlay (widen-only DATA).
+#
+# Shape: a top-level mapping   source -> { rawAction: event_type }.
+# Consulted by a connector (github-first; the decl engine too) ONLY when the
+# connector's own classification fell through to its default bucket
+# "<source>_other" — so a mapping can only ever WIDEN coverage of the long tail,
+# never override a real classification (base-wins is structural, see
+# connect/overlay.Apply).
+#
+# Every event_type target MUST be a member of detect.KnownEventTypes() (the
+# derived detector-gate vocabulary); connect/overlay validates this fail-loud at
+# load time. The self-extension guard (core/selfgate: checkMappingWidenOnly)
+# treats this file as widen-only: existing (source, action) mappings are frozen
+# (removal or retarget rejected); only NEW source/action keys may be appended.
+#
+# Empty by default (a no-op overlay). Example of an eligible entry:
+#
+#   github:
+#     repo.rename: config_change

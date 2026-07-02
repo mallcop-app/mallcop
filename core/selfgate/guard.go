@@ -284,7 +284,17 @@ func Guard(repoRoot, baseRef, headRef string) ([]GuardFinding, error) {
 				if err != nil {
 					return nil, err
 				}
-				findings = append(findings, checkWidenOnlyYAML(c.path, base, head)...)
+				// The widen SEMANTICS differ by data file shape, so dispatch on
+				// the filename. tuning.yaml (and any unknown data file, which
+				// checkWidenOnlyYAML still fails closed on) is section→field→list
+				// widen. learned_mappings.yaml is source→action→SCALAR, which does
+				// not fit that contract, so it gets its own mapping-widen checker.
+				switch path.Base(c.path) {
+				case "learned_mappings.yaml":
+					findings = append(findings, checkMappingWidenOnly(c.path, base, head)...)
+				default:
+					findings = append(findings, checkWidenOnlyYAML(c.path, base, head)...)
+				}
 			}
 			// 'A' passes: a brand-new data file widens by definition at this
 			// layer (its loader strictly rejects non-additive fields).

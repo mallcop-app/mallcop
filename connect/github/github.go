@@ -35,6 +35,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/mallcop-app/mallcop/connect/overlay"
 	"github.com/mallcop-app/mallcop/core/connect"
 	"github.com/mallcop-app/mallcop/pkg/event"
 	"github.com/mallcop-app/mallcop/pkg/ghauth"
@@ -67,7 +68,19 @@ type Connector struct {
 	// apiHost is the allowlisted host for pagination (SSRF guard): only rel=next
 	// URLs to this exact host over https are followed.
 	apiHost string
+
+	// overlay is the optional learned-mapping overlay (github-first). When set,
+	// an action/type that classifyEventType/classifyAuditAction leaves at the
+	// default bucket ("github_other") is consulted against overlay["github"];
+	// base-wins is enforced structurally by Overlay.Apply. nil => byte-identical
+	// to the pre-overlay behavior.
+	overlay *overlay.Overlay
 }
+
+// SetOverlay attaches a learned-mapping overlay (github-first). A nil overlay
+// leaves classification byte-identical. Called by the scan wiring after
+// NewFromEnv so the constructor signature stays credential-only.
+func (c *Connector) SetOverlay(ov *overlay.Overlay) { c.overlay = ov }
 
 // compile-time proof the connector satisfies the seam.
 var _ connect.Connector = (*Connector)(nil)
@@ -201,7 +214,7 @@ func (c *Connector) pullEvents(ctx context.Context, cutoff time.Time) ([]event.E
 			return fmt.Errorf("github: decode events page: %w", err)
 		}
 		for _, raw := range raws {
-			ev, ok := normalizeEvent(raw, c.org)
+			ev, ok := normalizeEvent(raw, c.org, c.overlay)
 			if !ok {
 				continue
 			}
@@ -227,7 +240,7 @@ func (c *Connector) pullAuditLog(ctx context.Context, cutoff time.Time) ([]event
 			return fmt.Errorf("github: decode audit-log page: %w", err)
 		}
 		for _, raw := range entries {
-			ev, ok := normalizeAuditEntry(raw, c.org)
+			ev, ok := normalizeAuditEntry(raw, c.org, c.overlay)
 			if !ok {
 				continue
 			}

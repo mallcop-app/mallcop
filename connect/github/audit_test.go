@@ -24,7 +24,7 @@ func TestAuditLogNormalizationFiresDetectors(t *testing.T) {
 	var evs []event.Event
 	var sawAddMember bool
 	for _, raw := range loadAuditFixture(t, "testdata/audit_log_new_collaborator.json") {
-		ev, ok := normalizeAuditEntry(raw, "acme-corp")
+		ev, ok := normalizeAuditEntry(raw, "acme-corp", nil)
 		if !ok {
 			t.Fatalf("normalizeAuditEntry ok=false for %s", raw)
 		}
@@ -59,7 +59,7 @@ func TestAuditLogNormalizationFiresDetectors(t *testing.T) {
 	// (2) the all-types fixture: every action normalizes with a valid timestamp +
 	// a non-empty routing type (exercises classifyAuditAction + epochMS broadly).
 	for _, raw := range loadAuditFixture(t, "testdata/audit_log_all_types.json") {
-		ev, ok := normalizeAuditEntry(raw, "acme-corp")
+		ev, ok := normalizeAuditEntry(raw, "acme-corp", nil)
 		if !ok {
 			t.Errorf("normalizeAuditEntry ok=false for %s", raw)
 			continue

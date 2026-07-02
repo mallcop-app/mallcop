@@ -303,6 +303,71 @@ func checkWidenOnlyYAML(p string, baseData, headData []byte) []GuardFinding {
 	return findings
 }
 
+// ---- learned_mappings.yaml (source -> action -> event_type) -----------------
+
+// checkMappingWidenOnly enforces the widen-direction rule on
+// detectors/learned_mappings.yaml — the connect learned-mapping overlay. Its
+// shape is mapping -> mapping -> SCALAR (source -> rawAction -> event_type),
+// which does NOT fit checkWidenOnlyYAML's section -> field -> list contract, so
+// it gets its own checker. Every base (source, action) mapping must survive into
+// head with an IDENTICAL target; new source/action keys are allowed. A removed
+// key, a retargeted existing key, or an unparseable document is a rejection
+// (fail closed). The loader (connect/overlay), not the guard, enforces that every
+// target is a KnownEventTypes member.
+func checkMappingWidenOnly(p string, baseData, headData []byte) []GuardFinding {
+	reject := func(format string, args ...any) []GuardFinding {
+		return []GuardFinding{{Path: p, Rule: RuleDetectorDataWidenOnly, Detail: fmt.Sprintf(format, args...)}}
+	}
+
+	base, err := decodeMappingDoc(baseData)
+	if err != nil {
+		return reject("base version: %v — cannot prove a widen, fail closed", err)
+	}
+	head, err := decodeMappingDoc(headData)
+	if err != nil {
+		return reject("head version: %v — fail closed", err)
+	}
+
+	var findings []GuardFinding
+	for _, source := range sortedKeys(base) {
+		headActions, ok := head[source]
+		if !ok {
+			findings = append(findings, GuardFinding{Path: p, Rule: RuleDetectorDataWidenOnly,
+				Detail: fmt.Sprintf("source %q removed — a learned mapping may only grow (widen-only)", source)})
+			continue
+		}
+		for _, action := range sortedKeys(base[source]) {
+			baseTarget := base[source][action]
+			headTarget, ok := headActions[action]
+			if !ok {
+				findings = append(findings, GuardFinding{Path: p, Rule: RuleDetectorDataWidenOnly,
+					Detail: fmt.Sprintf("mapping %q.%q removed — every base mapping must survive into head (widen-only)", source, action)})
+				continue
+			}
+			if headTarget != baseTarget {
+				findings = append(findings, GuardFinding{Path: p, Rule: RuleDetectorDataWidenOnly,
+					Detail: fmt.Sprintf("mapping %q.%q retargeted %q → %q — an existing mapping is frozen; only NEW source/action keys may be added", source, action, baseTarget, headTarget)})
+			}
+		}
+	}
+	// Head-only sources/actions are the widen — allowed.
+	return findings
+}
+
+// decodeMappingDoc decodes a source -> action -> event_type document. A nil
+// (empty) document is an empty map. Any non-string value or non-mapping shape is
+// an error (fail closed) — this is exactly the shape connect/overlay loads.
+func decodeMappingDoc(data []byte) (map[string]map[string]string, error) {
+	var doc map[string]map[string]string
+	if err := yaml.Unmarshal(data, &doc); err != nil {
+		return nil, fmt.Errorf("unparseable / not a source->action->event_type mapping (%v)", err)
+	}
+	if doc == nil {
+		doc = map[string]map[string]string{}
+	}
+	return doc, nil
+}
+
 // decodeWidenDoc decodes and shape-validates a widen-only data document:
 // mapping of section → mapping of field → list of strings. Elements are
 // normalized with the SAME lowercase/trim rule core/detect's ApplyTuning uses,
