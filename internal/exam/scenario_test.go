@@ -99,6 +99,76 @@ func TestLoad_GroundTruthRoundtrip(t *testing.T) {
 	}
 }
 
+// TestLoad_ExpectedDetectionRoundtrip verifies the expected_detection block
+// round-trips through the loader: must_fire and must_not_fire family tokens are
+// preserved exactly.
+func TestLoad_ExpectedDetectionRoundtrip(t *testing.T) {
+	yaml := `id: test-scenario
+failure_mode: KA
+detector: volume-anomaly
+category: behavioral
+difficulty: malicious-hard
+finding:
+  id: fnd_001
+  detector: volume-anomaly
+  title: Test finding
+  severity: warn
+events:
+- id: evt_001
+  timestamp: "2026-01-01T00:00:00Z"
+  source: azure
+  event_type: storage_access
+  actor: ci-bot
+  action: read_blob
+  target: sub-1/storageAccounts/foo
+  severity: warn
+baseline:
+  known_entities:
+    actors:
+    - ci-bot
+    sources:
+    - azure
+expected:
+  chain_action: escalated
+  triage_action: escalated
+expected_detection:
+  must_fire:
+  - volume-anomaly
+  must_not_fire:
+  - new-actor
+  - unusual-timing
+`
+	path := writeTempYAML(t, yaml)
+	s, err := exam.Load(path)
+	if err != nil {
+		t.Fatalf("Load returned unexpected error: %v", err)
+	}
+	if s.ExpectedDetection == nil {
+		t.Fatal("ExpectedDetection is nil — expected_detection block should round-trip")
+	}
+	if got, want := s.ExpectedDetection.MustFire, []string{"volume-anomaly"}; len(got) != 1 || got[0] != want[0] {
+		t.Errorf("MustFire = %v, want %v", got, want)
+	}
+	wantNot := []string{"new-actor", "unusual-timing"}
+	if got := s.ExpectedDetection.MustNotFire; len(got) != 2 || got[0] != wantNot[0] || got[1] != wantNot[1] {
+		t.Errorf("MustNotFire = %v, want %v", got, wantNot)
+	}
+}
+
+// TestLoad_ExpectedDetectionAbsent verifies a scenario WITHOUT an
+// expected_detection block unmarshals to a nil pointer (the additive-field
+// contract) — such scenarios are skipped by the exam-detect grader.
+func TestLoad_ExpectedDetectionAbsent(t *testing.T) {
+	path := scenarioPath(t, "exams/scenarios/identity/ID-01-new-actor-benign-onboarding.yaml")
+	s, err := exam.Load(path)
+	if err != nil {
+		t.Fatalf("Load returned unexpected error: %v", err)
+	}
+	if s.ExpectedDetection != nil {
+		t.Errorf("ExpectedDetection = %+v, want nil for a scenario without the block", s.ExpectedDetection)
+	}
+}
+
 // writeTempYAML writes content to a temp file and returns its path.
 func writeTempYAML(t *testing.T, content string) string {
 	t.Helper()

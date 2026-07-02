@@ -17,3 +17,13 @@
 #   trap_resolved_means: string — what it means if the model resolves incorrectly
 #   connector_tools: sequence — canned connector tool definitions
 #   tags: sequence — additional tags for filtering
+#   expected_detection: mapping — GROUND TRUTH for the offline detect layer
+#     (mallcop exam-detect). Grades what core/detect.Detect emits over the
+#     scenario's events + baseline, independent of any agent resolution.
+#     NEVER rendered to worker input (same contract as expected/trap_*).
+#       must_fire: sequence — detector family tokens (e.g. volume-anomaly)
+#         that MUST appear among the emitted findings' families
+#       must_not_fire: sequence — detector family tokens that MUST be absent
+#     Grading is on family PRESENCE over the whole emitted set — not counts or
+#     actors (multi-firing detectors may emit several findings per family).
+#     Scenarios without this block are skipped-but-counted (unlabeled).

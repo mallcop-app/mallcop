@@ -113,6 +113,25 @@ type ExpectedResolution struct {
 	MinInvestigationQuality  int      `yaml:"min_investigation_quality"`
 }
 
+// ExpectedDetection mirrors the expected_detection: block — the ground truth
+// for grading the OFFLINE detect layer (core/detect) against a scenario's
+// events, independent of any agent resolution.
+//
+// ExpectedDetection is a ground-truth field. It MUST NOT be rendered to worker
+// input. The blind-render layer (exam-seed) is responsible for stripping it
+// before posting scenarios to worker campfires.
+//
+// MustFire lists detector family tokens (e.g. "volume-anomaly") that must
+// appear among the findings core/detect emits for the scenario's events +
+// baseline. MustNotFire lists family tokens that must be absent. Grading is on
+// family PRESENCE over the whole emitted set — not counts or actors. Scenarios
+// without the block unmarshal to a nil pointer (additive yaml-tagged fields are
+// safe — see the KnownEntities doc above) and are skipped by the grader.
+type ExpectedDetection struct {
+	MustFire    []string `yaml:"must_fire"`
+	MustNotFire []string `yaml:"must_not_fire"`
+}
+
 // Scenario is the Go representation of a mallcop exam scenario YAML file.
 //
 // Ground-truth fields (ExpectedResolution, TrapDescription, TrapResolvedMeans)
@@ -156,6 +175,12 @@ type Scenario struct {
 	// TrapResolvedMeans describes what an incorrect resolution indicates about
 	// the worker's reasoning failure. NEVER rendered to worker input.
 	TrapResolvedMeans string `yaml:"trap_resolved_means"`
+
+	// ExpectedDetection is the ground truth for grading the offline detect
+	// layer (must_fire / must_not_fire detector families). NEVER rendered to
+	// worker input. nil when the scenario carries no expected_detection block —
+	// such scenarios are skipped (but counted) by the exam-detect grader.
+	ExpectedDetection *ExpectedDetection `yaml:"expected_detection"`
 }
 
 // Load reads the YAML file at path, unmarshals it into a Scenario, and

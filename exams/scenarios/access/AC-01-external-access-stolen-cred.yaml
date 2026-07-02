@@ -165,3 +165,6 @@ expected:
   investigate_must_use_tools: true
   min_investigate_iterations: 2
   min_investigation_quality: 4
+expected_detection:
+  must_fire:
+  - new-external-access

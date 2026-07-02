@@ -2,10 +2,11 @@
 //
 // Usage:
 //
-//	mallcop scan   --store <dir> [--events <file> | --connector github --github-org <org>] [--json]
-//	mallcop detect [--baseline <path>]   < events.jsonl   > findings.jsonl
-//	mallcop init   [--dir <path>]
-//	mallcop status --store <dir>
+//	mallcop scan        --store <dir> [--events <file> | --connector github --github-org <org>] [--json]
+//	mallcop detect      [--baseline <path>]   < events.jsonl   > findings.jsonl
+//	mallcop exam-detect [--json]
+//	mallcop init        [--dir <path>]
+//	mallcop status      --store <dir>
 //	mallcop config
 package main
 
@@ -33,6 +34,8 @@ func main() {
 		err = runScan(args)
 	case "detect":
 		err = runDetect(args)
+	case "exam-detect":
+		err = runExamDetect(args)
 	case "init":
 		err = runInit(args)
 	case "status":
@@ -77,6 +80,13 @@ Commands:
   detect  Run offline detection over events JSONL on stdin (no inference key)
     --baseline  Optional path to a baseline JSON file
                Reads events JSONL from stdin, writes findings JSONL to stdout.
+
+  exam-detect  Grade the offline detect layer against the labeled exam corpus
+    --json     Output the report as JSON
+               Runs core/detect over every exam scenario labeled with an
+               expected_detection block (must_fire / must_not_fire detector
+               families) and reports per-scenario pass/fail. Offline and
+               deterministic — no inference key. Exit 1 = detection gap(s).
 
   init    Scaffold a findings store + sample events and print runnable next steps
     --dir      Directory to initialize (default: current directory)
