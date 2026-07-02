@@ -5,6 +5,7 @@
 //	mallcop scan        --store <dir> [--events <file> | --connector github --github-org <org>] [--tuning <yaml>] [--json]
 //	mallcop detect      [--baseline <path>] [--tuning <yaml>]   < events.jsonl   > findings.jsonl
 //	mallcop exam-detect [--json] [--tuning <yaml>]
+//	mallcop validate-proposal --base <ref> [--head <ref>] [--guard-only] [--json]
 //	mallcop init        [--dir <path>]
 //	mallcop status      --store <dir>
 //	mallcop config
@@ -36,6 +37,8 @@ func main() {
 		err = runDetect(args)
 	case "exam-detect":
 		err = runExamDetect(args)
+	case "validate-proposal":
+		err = runValidateProposal(args)
 	case "init":
 		err = runInit(args)
 	case "status":
@@ -92,6 +95,18 @@ Commands:
                expected_detection block (must_fire / must_not_fire detector
                families) and reports per-scenario pass/fail. Offline and
                deterministic — no inference key. Exit 1 = detection gap(s).
+
+  validate-proposal  Gate a self-extension proposal diff (static invariant guard)
+    --base       Base git ref the proposal diffs against (required)
+    --head       Head git ref of the proposal (default: HEAD)
+    --guard-only Run only the static invariant guard stage
+    --json       Output the report as JSON
+                 Checks the base..head diff against the self-extension
+                 invariants: protected paths are untouchable, existing
+                 detector code / exam scenarios are frozen, and YAML data
+                 (detectors/tuning.yaml, operator-decision routes) may only
+                 WIDEN what the detection committee sees. Run from inside
+                 the repo being validated. Exit 1 = proposal rejected.
 
   init    Scaffold a findings store + sample events and print runnable next steps
     --dir      Directory to initialize (default: current directory)
