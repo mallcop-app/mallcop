@@ -129,6 +129,36 @@ func CheckAuthoredDetectorTreeShape(root string) ([]Violation, error) {
 	return violations, nil
 }
 
+// collectAuthoredDetectorNames returns the set of registered detector Names
+// declared by the authored-detector packages directly under root (each immediate
+// subdirectory is one own-package detector). Names are extracted the same way the
+// shape gate does — the single compile-time string-literal Name() — so a package
+// whose Name cannot be statically determined contributes nothing. It is used to
+// compute which authored detectors a PROPOSAL adds (head names minus base names),
+// which the mandatory benign-twin check keys on. The error return is for root I/O
+// only; a missing root (fs.ErrNotExist) is the caller's signal that no authored
+// tree exists at that ref.
+func collectAuthoredDetectorNames(root string) (map[string]bool, error) {
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return nil, err
+	}
+	names := map[string]bool{}
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		name, _, cerr := shapeCheckPackage(filepath.Join(root, e.Name()))
+		if cerr != nil {
+			return nil, cerr
+		}
+		if name != "" {
+			names[name] = true
+		}
+	}
+	return names, nil
+}
+
 // shapeCheckPackage is the shared implementation: it returns the registered
 // detector Name literal (empty if it could not be determined) alongside the
 // violations. The error return is for directory I/O only.

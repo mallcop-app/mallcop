@@ -224,6 +224,24 @@ func runTierWithContext(ctx context.Context, client Client, f finding.Finding, t
 // runner that only set the legacy ev.Text is still boxed as one tools.transcript
 // field (pre-FIX-1 behavior). The SECURITY INVARIANT holds: every field is still
 // WrapUntrusted + sanitized, and the verdict is parsed only from the model reply.
+//
+// AUTHORED-DETECTOR FREE-TEXT ARMOR (K7 L4d, invariant 9 / rd 139). An authored
+// (agent-written) detector can only ever populate finding.Finding's FIXED fields.
+// Every author-influenceable SCALAR rendered here (ID / Type / Severity / Actor /
+// Source / Reason) is boxed via WrapUntrusted, so a malicious title/description an
+// authored detector plants is neutralized + contained inside USER_DATA markers and
+// can never pose as a system instruction to the committee. The two remaining
+// author-settable fields are DELIBERATELY EXCLUDED from the prompt entirely:
+// finding.Evidence (a free-form json.RawMessage — the widest author-controlled
+// surface) and finding.Timestamp. The control is therefore EXCLUSION + BOXING: the
+// committee never receives an author free-form string on the trusted side.
+//
+// DO NOT render finding.Evidence (or any future author-influenced field) into this
+// prompt as a raw string. If Evidence must ever be shown to a tier, it MUST go
+// through WrapUntrusted(label, string(f.Evidence)) exactly like every scalar above
+// — never concatenated raw. TestBuildTierRequest_AuthoredFreeTextIsBoxedOrExcluded
+// freezes this guarantee: it fails if Evidence content leaks into the prompt or if
+// any scalar stops being boxed.
 func buildTierRequest(f finding.Finding, model, systemPrompt string, ev ToolEvidence, parentTranscript string, temperature float64) MessagesRequest {
 	var b strings.Builder
 	b.WriteString("Analyze this security finding and decide.\n\n")
