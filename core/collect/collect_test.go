@@ -280,18 +280,50 @@ func TestDetectorGapsSurfacesAllThree(t *testing.T) {
 // TestDissentMarkerDriftGuard is the DRIFT GUARD (invariant 10 / brittle-parse
 // isolation): the dissent parse keys on an unstructured marker in
 // core/agent/fanout.go. If that marker string ever changes, the dissent collector
-// silently stops working — so this test FAILS the moment the marker leaves
-// fanout.go's source, forcing whoever changed it to update dissentReasonMarker
-// (or replace it with a structured dissent field).
+// silently stops working — so this test FAILS the moment the marker leaves the
+// REASON-BUILDING code of fanout.go, forcing whoever changed it to update
+// dissentReasonMarker (or replace it with a structured dissent field).
+//
+// The guard deliberately ignores whole-line // comments: fanout.go's dissentNames
+// doc comment quotes the marker verbatim (`("dissent (malicious) cited")`), so a
+// naive Contains over the raw source would keep passing even if BOTH runtime
+// format strings were reworded to drop the marker. We therefore assert the marker
+// survives in non-comment source AND appears in the reason-building assignments
+// (`reason += …`) the collector actually parses — one per documented dissent form
+// (majority-resolve and majority-escalate). A reword of those format strings now
+// fails the guard even though the doc comment is untouched.
 func TestDissentMarkerDriftGuard(t *testing.T) {
 	src, err := os.ReadFile(filepath.Join("..", "agent", "fanout.go"))
 	if err != nil {
 		t.Fatalf("read fanout.go: %v", err)
 	}
-	if !strings.Contains(string(src), dissentReasonMarker) {
-		t.Fatalf("dissent marker %q no longer present in core/agent/fanout.go — the dissent "+
-			"collector's brittle parse has drifted; update dissentReasonMarker in gaps.go "+
+
+	var codeLines []string    // source with whole-line comments stripped
+	var reasonBuildHits int   // `reason += …` lines that still cite the marker
+	for _, line := range strings.Split(string(src), "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "//") {
+			continue // a doc/example comment cannot satisfy the guard on its own
+		}
+		codeLines = append(codeLines, line)
+		if strings.Contains(line, "reason +=") && strings.Contains(line, dissentReasonMarker) {
+			reasonBuildHits++
+		}
+	}
+	code := strings.Join(codeLines, "\n")
+
+	if !strings.Contains(code, dissentReasonMarker) {
+		t.Fatalf("dissent marker %q no longer present in NON-COMMENT code of core/agent/fanout.go — "+
+			"the dissent collector's brittle parse has drifted; update dissentReasonMarker in gaps.go "+
 			"(or replace it with a structured dissent field)", dissentReasonMarker)
+	}
+	// Both documented dissent forms must keep citing the marker; if either
+	// reason-building format string is reworded, the collector silently misses that
+	// dissent case, so require the marker on both `reason += …` sites.
+	if reasonBuildHits < 2 {
+		t.Fatalf("dissent marker %q found on %d reason-building line(s), want >= 2 — a "+
+			"core/agent/fanout.go `reason += …` format string that cites dissent has been reworded "+
+			"(the line-344 doc comment does NOT count); update dissentReasonMarker in gaps.go "+
+			"(or replace it with a structured dissent field)", dissentReasonMarker, reasonBuildHits)
 	}
 }
 
