@@ -15,6 +15,7 @@ import (
 	"github.com/mallcop-app/mallcop/connect/overlay"
 	"github.com/mallcop-app/mallcop/core/detect"
 	"github.com/mallcop-app/mallcop/pkg/baseline"
+	"github.com/mallcop-app/mallcop/pkg/event"
 )
 
 // permissiveConnector builds a decl connector via the injectable core with a
@@ -244,6 +245,50 @@ acme:
 	ev = c.buildEvent(ep, map[string]any{"id": "x3", "who": "ghost", "act": "unheard_of"})
 	if ev.Type != "acme_other" {
 		t.Errorf("default bucket wrong: unheard_of classified %q, want acme_other", ev.Type)
+	}
+}
+
+// TestUnmappedActionTagged proves buildEvent writes the "unmapped_action"
+// mapping-gap tag into the payload EXACTLY when an action falls through to the
+// "<sourceID>_other" default bucket, and never on an ActionMap/overlay-classified
+// event. This is the feedstock core/collect.UnmappedActions mines.
+func TestUnmappedActionTagged(t *testing.T) {
+	readTag := func(ev event.Event) (string, bool) {
+		var pl struct {
+			UnmappedAction string `json:"unmapped_action"`
+		}
+		if err := json.Unmarshal(ev.Payload, &pl); err != nil {
+			t.Fatalf("decode payload: %v", err)
+		}
+		return pl.UnmappedAction, pl.UnmappedAction != ""
+	}
+
+	spec := &Spec{
+		SourceID: "acme",
+		Endpoints: []Endpoint{{
+			FieldMap:  FieldMap{ID: "id", Actor: "who", Action: "act"},
+			ActionMap: map[string]string{"sign_in": "login"},
+		}},
+	}
+	c := &Connector{spec: spec}
+	ep := &spec.Endpoints[0]
+
+	// Unmapped action → default bucket + tagged with the raw action.
+	ev := c.buildEvent(ep, map[string]any{"id": "x1", "who": "ghost", "act": "unheard_of"})
+	if ev.Type != "acme_other" {
+		t.Fatalf("want default bucket acme_other, got %q", ev.Type)
+	}
+	if tag, tagged := readTag(ev); !tagged || tag != "unheard_of" {
+		t.Fatalf("unmapped: want unmapped_action=unheard_of, got %q (tagged=%v)", tag, tagged)
+	}
+
+	// ActionMap-classified action → NOT tagged.
+	ev = c.buildEvent(ep, map[string]any{"id": "x2", "who": "ghost", "act": "sign_in"})
+	if ev.Type != "login" {
+		t.Fatalf("want login, got %q", ev.Type)
+	}
+	if tag, tagged := readTag(ev); tagged {
+		t.Fatalf("classified event must not carry unmapped_action, got %q", tag)
 	}
 }
 

@@ -411,6 +411,14 @@ func (c *Connector) buildEvent(ep *Endpoint, item map[string]any) event.Event {
 	if org != "" {
 		payload["org"] = org
 	}
+	// Mapping-gap tag: when the event stayed in the "<sourceID>_other" default
+	// bucket after the overlay had its chance, record the RAW source action under
+	// the uniform "unmapped_action" key so the offline UNMAPPED-ACTION collector
+	// (core/collect.UnmappedActions) can mine and rank it. base-wins means a
+	// real ActionMap/overlay classification is never the default bucket here.
+	if typ == c.spec.SourceID+"_other" && action != "" {
+		payload["unmapped_action"] = action
+	}
 	payloadBytes, _ := json.Marshal(payload)
 
 	return event.Event{
