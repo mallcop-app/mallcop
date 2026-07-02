@@ -446,6 +446,126 @@ func (blwriter) Detect(events []event.Event, bl *baseline.Baseline) []finding.Fi
 }
 `,
 		},
+		{
+			// Fix #1: the write side of the tuning race. An authored Detect that
+			// calls detect.ApplyTuning could widen shared priv-escalation package
+			// state; a leaked authored goroutine holding that reference could race a
+			// concurrent scan. The only sanctioned core/detect use is the single
+			// Register in init(), so the framework-mutator reference is rejected.
+			name:    "calls the ApplyTuning framework mutator",
+			dirName: "tuner",
+			rule:    RuleShapeFrameworkRef,
+			src: `package tuner
+
+import "github.com/mallcop-app/mallcop/core/detect"
+
+func init() { detect.Register(tuner{}) }
+
+type tuner struct{}
+
+func (tuner) Name() string { return "tuner-detector" }
+
+func (tuner) Detect() { detect.ApplyTuning(detect.Tuning{}) }
+`,
+		},
+		{
+			// Fix #1: any core/detect member other than the init Register is
+			// forbidden — here re-entering detect.Detect from an authored detector
+			// (which could recurse or reach shared aggregation state).
+			name:    "reaches detect.Detect (a non-Register framework member)",
+			dirName: "reenter",
+			rule:    RuleShapeFrameworkRef,
+			src: `package reenter
+
+import (
+	"github.com/mallcop-app/mallcop/core/detect"
+	"github.com/mallcop-app/mallcop/pkg/baseline"
+	"github.com/mallcop-app/mallcop/pkg/event"
+	"github.com/mallcop-app/mallcop/pkg/finding"
+)
+
+func init() { detect.Register(reenter{}) }
+
+type reenter struct{}
+
+func (reenter) Name() string { return "reenter-detector" }
+
+func (reenter) Detect(events []event.Event, bl *baseline.Baseline) []finding.Finding {
+	return detect.Detect(events, bl)
+}
+`,
+		},
+		{
+			// Fix #1: a detect.Register call OUTSIDE init() (in Detect) is not the
+			// sanctioned self-registration — it is a framework reference and is
+			// rejected even though it is a Register.
+			name:    "calls detect.Register outside init()",
+			dirName: "reg2",
+			rule:    RuleShapeFrameworkRef,
+			src: `package reg2
+
+import "github.com/mallcop-app/mallcop/core/detect"
+
+func init() { detect.Register(reg2{}) }
+
+type reg2 struct{}
+
+func (reg2) Name() string { return "reg2-detector" }
+
+func (reg2) Detect() { detect.Register(evil2{}) }
+
+type evil2 struct{}
+
+func (evil2) Name() string { return "evil2-detector" }
+`,
+		},
+		{
+			// Fix #3: a condition-less for-loop with no exit spins forever, hanging
+			// the scan until the L4 deadline fires and leaking a goroutine.
+			name:    "condition-less for-loop that never exits",
+			dirName: "spinner",
+			rule:    RuleShapeUnboundedLoop,
+			src: `package spinner
+
+import (
+	"github.com/mallcop-app/mallcop/core/detect"
+	"github.com/mallcop-app/mallcop/pkg/baseline"
+	"github.com/mallcop-app/mallcop/pkg/event"
+	"github.com/mallcop-app/mallcop/pkg/finding"
+)
+
+func init() { detect.Register(spinner{}) }
+
+type spinner struct{}
+
+func (spinner) Name() string { return "spinner-detector" }
+
+func (spinner) Detect(events []event.Event, _ *baseline.Baseline) []finding.Finding {
+	n := 0
+	for {
+		n++
+	}
+}
+`,
+		},
+		{
+			// Fix #3: an empty select{} blocks forever — same leaked-goroutine DoS.
+			name:    "empty select blocks forever",
+			dirName: "blocker",
+			rule:    RuleShapeUnboundedLoop,
+			src: `package blocker
+
+import "github.com/mallcop-app/mallcop/core/detect"
+
+func init() { detect.Register(blocker{}) }
+
+type blocker struct{}
+
+func (blocker) Name() string { return "blocker-detector" }
+
+func (blocker) Detect() { select {} }
+`,
+		},
 	}
 
 	for _, tc := range cases {
@@ -548,6 +668,55 @@ func (localwrite) Detect(events []event.Event, _ *baseline.Baseline) []finding.F
 }
 `
 	dir := writeShapePkg(t, "localwrite", src)
+	violations, err := CheckAuthoredDetectorShape(dir)
+	if err != nil {
+		t.Fatalf("CheckAuthoredDetectorShape: %v", err)
+	}
+	requireNoShapeViolations(t, violations)
+}
+
+// TestAuthoredShape_BoundedLoopsPass proves checkUnboundedLoops does not
+// over-reject: a detector that uses a counted for-loop, a condition-ful loop, and
+// a condition-less loop WITH a reachable break/return — the normal ways a pure
+// detector iterates and terminates — passes clean. Only PROVABLY non-terminating
+// constructs are forbidden.
+func TestAuthoredShape_BoundedLoopsPass(t *testing.T) {
+	const src = `package looper
+
+import (
+	"github.com/mallcop-app/mallcop/core/detect"
+	"github.com/mallcop-app/mallcop/pkg/baseline"
+	"github.com/mallcop-app/mallcop/pkg/event"
+	"github.com/mallcop-app/mallcop/pkg/finding"
+)
+
+func init() { detect.Register(looper{}) }
+
+type looper struct{}
+
+func (looper) Name() string { return "looper-detector" }
+
+func (looper) Detect(events []event.Event, _ *baseline.Baseline) []finding.Finding {
+	var out []finding.Finding
+	for i := 0; i < len(events); i++ { // counted loop
+		out = append(out, finding.Finding{ID: events[i].ID})
+	}
+	i := 0
+	for i < len(events) { // condition-ful loop
+		i++
+	}
+	for { // condition-less BUT breaks — terminates, so allowed
+		if i <= 0 {
+			break
+		}
+		i--
+	}
+	for { // condition-less BUT returns
+		return out
+	}
+}
+`
+	dir := writeShapePkg(t, "looper", src)
 	violations, err := CheckAuthoredDetectorShape(dir)
 	if err != nil {
 		t.Fatalf("CheckAuthoredDetectorShape: %v", err)

@@ -12,45 +12,23 @@ import (
 	"github.com/mallcop-app/mallcop/pkg/event"
 )
 
-// knobSnapshot captures the priv-escalation tuning knob sets so tests that call
-// ApplyTuning (which mutates PACKAGE-GLOBAL state, process-wide) can restore
-// them. Every mutating test registers restoreKnobs via t.Cleanup.
+// knobSnapshot captures the priv-escalation tuning snapshot so tests that call
+// ApplyTuning (which publishes a NEW package-global snapshot, process-wide) can
+// restore it. Every mutating test registers restoreKnobs via t.Cleanup.
 type knobSnapshot struct {
-	keywords   map[string]bool
-	actions    []string
-	eventTypes map[string]bool
+	pt *privEscalationTuning
 }
 
-// saveKnobs deep-copies the current knob sets.
+// saveKnobs deep-copies the currently-published tuning snapshot.
 func saveKnobs() knobSnapshot {
-	s := knobSnapshot{
-		keywords:   make(map[string]bool, len(elevatedKeywords)),
-		actions:    append([]string{}, elevatedActionKeywords...),
-		eventTypes: make(map[string]bool, len(elevationEventTypes)),
-	}
-	for k, v := range elevatedKeywords {
-		s.keywords[k] = v
-	}
-	for k, v := range elevationEventTypes {
-		s.eventTypes[k] = v
-	}
-	return s
+	return knobSnapshot{pt: loadPrivEscalationTuning().clone()}
 }
 
-// restoreKnobs reinstates a snapshot (fresh copies, so a later mutation cannot
-// corrupt the saved state).
+// restoreKnobs republishes a deep copy of the saved snapshot (fresh copies, so a
+// later mutation cannot corrupt the saved state), atomically replacing whatever
+// ApplyTuning published during the test.
 func restoreKnobs(s knobSnapshot) {
-	kw := make(map[string]bool, len(s.keywords))
-	for k, v := range s.keywords {
-		kw[k] = v
-	}
-	elevatedKeywords = kw
-	elevatedActionKeywords = append([]string{}, s.actions...)
-	et := make(map[string]bool, len(s.eventTypes))
-	for k, v := range s.eventTypes {
-		et[k] = v
-	}
-	elevationEventTypes = et
+	activePrivEscalationTuning.Store(s.pt.clone())
 }
 
 // tuningFixture returns a real events+baseline fixture spanning the
@@ -161,7 +139,7 @@ func TestTuningAddWidensOnly(t *testing.T) {
 
 	// Precondition: no CURRENT keyword matches the poweruser role — otherwise
 	// this test proves nothing.
-	if containsElevatedKeyword("PowerUserAccess") {
+	if containsElevatedKeyword("PowerUserAccess", loadPrivEscalationTuning()) {
 		t.Fatal("precondition broken: a built-in keyword already matches PowerUserAccess — pick a different missed role for this test")
 	}
 	before := privEscActors(events, bl)

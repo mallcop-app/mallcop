@@ -20,6 +20,16 @@ import (
 // its own deep copy makes that structurally impossible while staying
 // behaviour-identical for the pure framework detectors.
 //
+// SCOPE: this isolates the INPUT only. It is one of three things that together
+// let detect.go accept a leaked timed-out goroutine: the other two are the
+// immutable priv-escalation tuning snapshot (privEscalationTuning — so a leaked
+// goroutine reads a frozen copy of the knobs, never the live maps ApplyTuning
+// writes) and the K7 shape gate's ban on an authored detector naming any
+// framework mutator (core/selfgate RuleShapeFrameworkRef). Do not read the old
+// claim that the input clone alone means a leaked goroutine "mutates only its own
+// copy": that was false while detect.ApplyTuning was reachable from an authored
+// Detect; it holds now because all three pieces are in place.
+//
 // A nil events slice clones to nil (detectors treat nil and empty identically),
 // and a nil Payload stays nil rather than becoming an empty non-nil slice, so
 // the copy is byte-for-byte equivalent to the input for every reader.

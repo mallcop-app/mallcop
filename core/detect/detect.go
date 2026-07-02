@@ -129,6 +129,16 @@ func Detectors() []Detector {
 // mallcop is a one-shot CLI, so a leaked goroutine lives only until the scan
 // process exits, and a well-behaved detector never times out. The recover()
 // side has no such caveat: a panic is fully contained.
+//
+// The leak is SAFE only because a leaked goroutine can touch nothing but its own
+// state: (1) its events/baseline are per-detector deep clones (cloneEventsForDetector
+// + bl.Clone below), (2) the priv-escalation tuning knobs it reads are an
+// IMMUTABLE snapshot loaded once (see privEscalationTuning — ApplyTuning swaps a
+// new snapshot, never mutates the loaded one), and (3) the K7 shape gate
+// (core/selfgate: RuleShapeFrameworkRef) forbids an authored detector from even
+// NAMING a framework mutator like ApplyTuning, so a leaked authored goroutine
+// has no reference through which to mutate shared package state. Take any one of
+// those away and a leaked goroutine could race the next detector.
 const detectorTimeout = 5 * time.Second
 
 // quarantineReporter records that a detector was QUARANTINED (panicked or blew
@@ -183,7 +193,13 @@ func detectAll(detectors []Detector, timeout time.Duration, events []event.Event
 		// pure readers, so this is behaviour-identical for them; it is a floor
 		// for agent-authored code. It also removes the data race the previous
 		// shared-slice threading had: a timed-out detector's LEAKED goroutine
-		// now mutates only its own copy, never the input the next detector reads.
+		// now mutates only its own copy of the EVENTS/BASELINE, never the input
+		// the next detector reads. That covers the INPUT; the other shared state a
+		// leaked goroutine could once reach — the priv-escalation tuning knobs — is
+		// now an immutable per-scan snapshot (privEscalationTuning), and the K7
+		// shape gate forbids authored code from naming any framework mutator, so
+		// "touches only its own state" now holds for the whole leaked goroutine,
+		// not just its input slice.
 		out, ok := runDetectorSafely(d, timeout, cloneEventsForDetector(events), bl.Clone())
 		if !ok {
 			continue // quarantined; diagnostic already recorded by runDetectorSafely

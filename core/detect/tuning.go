@@ -83,27 +83,38 @@ func LoadTuningFile(path string) (Tuning, error) {
 
 // ApplyTuning WIDENS the priv-escalation knob sets with the tuning's extra_*
 // values: each value is trimmed, lowercased, and ADDED to the corresponding
-// built-in set (elevatedKeywords / elevatedActionKeywords /
-// elevationEventTypes). Nothing is ever removed — the only reachable mutation
-// is set-insertion, so the committee's view can only grow.
+// set (elevatedKeywords / elevatedActionKeywords / elevationEventTypes).
+// Nothing is ever removed — the only reachable mutation is set-insertion, so
+// the committee's view can only grow.
 //
-// A zero-value Tuning applies zero mutations (detection stays byte-identical).
-// Empty/whitespace-only entries are ignored. ApplyTuning mutates package-level
-// state; the CLI calls it once at startup, before any Detect run.
+// PUBLICATION MODEL (K7 tuning isolation): ApplyTuning does NOT mutate the live
+// snapshot in place. It CLONES the currently-published snapshot, widens the
+// clone, and atomically SWAPS it in as the new active snapshot. Because Detect
+// loads a snapshot once and reads only its frozen maps, and ApplyTuning never
+// writes a map that any Detect is reading, there is no concurrent-map access —
+// the isolation holds even if a stray goroutine calls ApplyTuning while a scan
+// is running. Applying repeatedly is cumulative (each clone starts from the
+// current published snapshot).
+//
+// A zero-value Tuning publishes a clone equal to the current snapshot (detection
+// stays byte-identical). Empty/whitespace-only entries are ignored. The CLI
+// calls it once at startup, before any Detect run.
 func ApplyTuning(t Tuning) {
+	next := loadPrivEscalationTuning().clone()
 	for _, kw := range t.PrivEscalation.ExtraElevatedKeywords {
 		if v := strings.ToLower(strings.TrimSpace(kw)); v != "" {
-			elevatedKeywords[v] = true
+			next.elevatedKeywords[v] = true
 		}
 	}
 	for _, kw := range t.PrivEscalation.ExtraElevatedActionKeywords {
 		if v := strings.ToLower(strings.TrimSpace(kw)); v != "" {
-			elevatedActionKeywords = append(elevatedActionKeywords, v)
+			next.elevatedActionKeywords = append(next.elevatedActionKeywords, v)
 		}
 	}
 	for _, et := range t.PrivEscalation.ExtraElevationEventTypes {
 		if v := strings.ToLower(strings.TrimSpace(et)); v != "" {
-			elevationEventTypes[v] = true
+			next.elevationEventTypes[v] = true
 		}
 	}
+	activePrivEscalationTuning.Store(next)
 }

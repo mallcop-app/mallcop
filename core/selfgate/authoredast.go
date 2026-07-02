@@ -66,6 +66,18 @@ const (
 	// RuleShapeParse — the authored package could not be read/parsed. Fail
 	// closed.
 	RuleShapeParse = "parse-error"
+	// RuleShapeFrameworkRef — a reference to the imported core/detect package
+	// OTHER than the single detect.Register(T{}) in init(). Most dangerously a
+	// call to a framework MUTATOR (detect.ApplyTuning, which widens shared
+	// priv-escalation package state), but ANY other core/detect member is
+	// forbidden: an authored detector's only sanctioned framework touch is
+	// self-registration.
+	RuleShapeFrameworkRef = "framework-reference"
+	// RuleShapeUnboundedLoop — a provably non-terminating construct in authored
+	// code: a condition-less `for { ... }` with no break/return/goto/panic exit,
+	// or an empty `select {}`. Either hangs the scan until the L4 per-detector
+	// deadline fires and LEAKS a goroutine.
+	RuleShapeUnboundedLoop = "unbounded-loop"
 )
 
 // frameworkRegistryOrigin is the origin string recorded for a Name seeded from
@@ -225,6 +237,7 @@ func shapeCheckPackage(dir string) (name string, violations []Violation, err err
 		violations = append(violations, checkFileAssignments(p, f)...)
 		violations = append(violations, checkParamWrites(p, f)...)
 		violations = append(violations, checkPackageInitializers(p, f)...)
+		violations = append(violations, checkUnboundedLoops(p, f)...)
 	}
 
 	if len(files) == 0 {
@@ -232,6 +245,10 @@ func shapeCheckPackage(dir string) (name string, violations []Violation, err err
 		// register, nothing to police.
 		return "", violations, nil
 	}
+
+	// The ONLY sanctioned core/detect reference is the single Register in init();
+	// any other detect.* (esp. the ApplyTuning knob mutator) is a violation.
+	violations = append(violations, checkDetectReferences(filePaths, files)...)
 
 	// Exactly-one-init + single detect.Register(T{}) call, and Name() literal.
 	regType, initViolations := checkRegistration(filePaths, files)
@@ -704,6 +721,153 @@ func addFieldNames(fl *ast.FieldList, set map[string]bool) {
 	}
 }
 
+// detectImportAliases returns the set of local names any file binds to an import
+// of .../core/detect (the bare "detect" name, or an explicit import alias). It is
+// the shared "which identifier names the framework package" set used by both the
+// registration check and the framework-reference gate. Collecting across all
+// files over-approximates per-file aliasing, which is sound for a fail-closed
+// gate — it can only widen what counts as a framework reference.
+func detectImportAliases(files []*ast.File) map[string]bool {
+	aliases := map[string]bool{}
+	for _, f := range files {
+		for _, imp := range f.Imports {
+			p := strings.Trim(imp.Path.Value, `"`)
+			if p == "core/detect" || strings.HasSuffix(p, "/core/detect") {
+				alias := "detect"
+				if imp.Name != nil {
+					alias = imp.Name.Name
+				}
+				aliases[alias] = true
+			}
+		}
+	}
+	return aliases
+}
+
+// checkDetectReferences enforces that the ONLY reference to the imported
+// core/detect package anywhere in an authored detector is the single
+// detect.Register(T{}) call inside init(). Every other core/detect selector is a
+// RuleShapeFrameworkRef violation — most importantly detect.ApplyTuning, the
+// exported knob MUTATOR that widens shared priv-escalation package state, but
+// also detect.Detect, detect.Detectors, or any other member.
+//
+// WHY (the write-side of the tuning race): an authored detector is a pure
+// additive leaf — it registers itself in init() and computes inside Detect over
+// its (per-detector cloned, read-only) events/baseline. It has no legitimate
+// reason to reach back into the framework package. A "pure additive leaf" that
+// calls ApplyTuning could mutate shared detection state, and a LEAKED authored
+// goroutine (the documented detectorTimeout tradeoff) that holds a reference to
+// a framework mutator could race a concurrent scan. Forbidding every non-Register
+// detect.* reference closes that at MERGE: linked authored code can never NAME a
+// framework mutator, so the leaked-goroutine tradeoff is safe — a stuck authored
+// goroutine can touch nothing but its own clones.
+func checkDetectReferences(paths []string, files []*ast.File) []Violation {
+	aliases := detectImportAliases(files)
+	if len(aliases) == 0 {
+		return nil
+	}
+	var violations []Violation
+	for i, f := range files {
+		path := paths[i]
+		for _, decl := range f.Decls {
+			fn, isFn := decl.(*ast.FuncDecl)
+			inInit := isFn && fn.Recv == nil && fn.Name.Name == "init"
+			ast.Inspect(decl, func(n ast.Node) bool {
+				sel, ok := n.(*ast.SelectorExpr)
+				if !ok {
+					return true
+				}
+				id, ok := sel.X.(*ast.Ident)
+				if !ok || !aliases[id.Name] {
+					return true
+				}
+				// The single sanctioned reference: detect.Register inside init().
+				// (checkRegistration independently proves init() is EXACTLY that one
+				// call, so allowing Register here cannot admit a second use.)
+				if inInit && sel.Sel.Name == "Register" {
+					return true
+				}
+				violations = append(violations, Violation{
+					File:   path,
+					Rule:   RuleShapeFrameworkRef,
+					Detail: fmt.Sprintf("reference to %s.%s — an authored detector's ONLY sanctioned core/detect use is the single %s.Register(T{}) in init(); reaching any other framework member (especially the %s.ApplyTuning knob mutator) lets authored code touch shared, mutable detection state and reopens the tuning race", id.Name, sel.Sel.Name, id.Name, id.Name),
+				})
+				return true
+			})
+		}
+	}
+	return violations
+}
+
+// checkUnboundedLoops rejects the two constructs that provably never terminate
+// and would therefore hang an authored Detect until the L4 per-detector deadline
+// fires — LEAKING the goroutine (the documented detectorTimeout tradeoff): a
+// condition-less `for { ... }` whose body contains NO exit statement at all
+// (break, return, goto, or panic), and an empty `select {}` (zero comm clauses
+// block forever). A pure detector loops over a bounded input (range) or a real
+// condition and returns.
+//
+// The check is SOUND: it flags only loops that provably cannot exit, so a
+// legitimate `for i := 0; i < n; i++`, `for cond {}`, or any loop with a
+// reachable break/return is left alone. It may MISS some infinite loops (e.g. a
+// `for {}` whose only "exit" is an inner loop's break), which is acceptable —
+// the runtime L4 deadline still quarantines those; this gate closes the blatant
+// DoS shapes before merge.
+func checkUnboundedLoops(path string, f *ast.File) []Violation {
+	var violations []Violation
+	ast.Inspect(f, func(n ast.Node) bool {
+		switch s := n.(type) {
+		case *ast.ForStmt:
+			if s.Cond == nil && !bodyHasExit(s.Body) {
+				violations = append(violations, Violation{
+					File:   path,
+					Rule:   RuleShapeUnboundedLoop,
+					Detail: "condition-less for-loop with no break/return/goto/panic — an authored detector may not spin forever; it hangs the scan until the per-detector deadline fires and LEAKS a goroutine",
+				})
+			}
+		case *ast.SelectStmt:
+			if s.Body == nil || len(s.Body.List) == 0 {
+				violations = append(violations, Violation{
+					File:   path,
+					Rule:   RuleShapeUnboundedLoop,
+					Detail: "empty select{} blocks forever — an authored detector may not block; it hangs the scan and LEAKS a goroutine",
+				})
+			}
+		}
+		return true
+	})
+	return violations
+}
+
+// bodyHasExit reports whether a block contains any statement that could
+// terminate an enclosing condition-less for-loop: a break or goto BranchStmt, a
+// return, or a panic() call, anywhere within it (including nested blocks). It is
+// used ONLY to avoid flagging a `for {}` that has a reachable exit, so the
+// over-approximation is sound for checkUnboundedLoops — finding any exit
+// statement suppresses the flag, so the check never false-positives.
+func bodyHasExit(body *ast.BlockStmt) bool {
+	if body == nil {
+		return false
+	}
+	found := false
+	ast.Inspect(body, func(n ast.Node) bool {
+		switch s := n.(type) {
+		case *ast.BranchStmt:
+			if s.Tok == token.BREAK || s.Tok == token.GOTO {
+				found = true
+			}
+		case *ast.ReturnStmt:
+			found = true
+		case *ast.CallExpr:
+			if id, ok := s.Fun.(*ast.Ident); ok && id.Name == "panic" {
+				found = true
+			}
+		}
+		return !found
+	})
+	return found
+}
+
 // checkRegistration enforces that the package has EXACTLY ONE init() function
 // whose body is a single ExprStmt calling <pkg>.Register(T{}) or
 // <pkg>.Register(&T{}), where <pkg> is an imported package whose path ends in
@@ -713,18 +877,8 @@ func checkRegistration(paths []string, files []*ast.File) (regType string, viola
 	var inits []*ast.FuncDecl
 	var initFiles []string
 	// detectAliases: local names bound to an import of .../core/detect.
-	detectAliases := map[string]bool{}
+	detectAliases := detectImportAliases(files)
 	for i, f := range files {
-		for _, imp := range f.Imports {
-			p := strings.Trim(imp.Path.Value, `"`)
-			if p == "core/detect" || strings.HasSuffix(p, "/core/detect") {
-				alias := "detect"
-				if imp.Name != nil {
-					alias = imp.Name.Name
-				}
-				detectAliases[alias] = true
-			}
-		}
 		for _, decl := range f.Decls {
 			fn, ok := decl.(*ast.FuncDecl)
 			if !ok || fn.Recv != nil || fn.Name.Name != "init" {
