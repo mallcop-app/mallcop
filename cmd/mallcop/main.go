@@ -6,6 +6,7 @@
 //	mallcop detect      [--baseline <path>] [--tuning <yaml>]   < events.jsonl   > findings.jsonl
 //	mallcop exam-detect [--json] [--tuning <yaml>]
 //	mallcop validate-proposal --base <ref> [--head <ref>] [--guard-only] [--allow-no-coverage-gain] [--json]
+//	mallcop collect     --store <dir> [--fidelity <json>] [--json]
 //	mallcop init        [--dir <path>]
 //	mallcop status      --store <dir>
 //	mallcop config
@@ -48,6 +49,8 @@ func main() {
 		err = runExamDetect(args)
 	case "validate-proposal":
 		err = runValidateProposal(args)
+	case "collect":
+		err = runCollect(args)
 	case "init":
 		err = runInit(args)
 	case "status":
@@ -122,6 +125,17 @@ Commands:
                  base vs head exam reports must show no regression, at least
                  one closed detection gap, and no undeclared new firings.
                  Run from inside the repo being validated. Exit 1 = rejected.
+
+  collect  Mine a scan's store for coverage gaps (the self-extension feedstock)
+    --store     Path to the git-repo store written by 'mallcop scan' (required)
+    --fidelity  Optional JSON array of eval.DetectFidelityRow (an exam-detect
+                fidelity dump's 'rows') — enables the detect_miss gap kind the
+                store cannot produce on its own. Absent, only the store-pure
+                gap kinds (override_fp, dissent) are surfaced.
+    --json      Emit the versioned envelope {schema_version, mapping_gaps,
+                gap_candidates} — the stable process boundary the mallcop-pro
+                proposer consumes. Offline, deterministic, no inference key.
+                Human-readable summary otherwise. Exit 2 = failure.
 
   init    Scaffold a findings store + sample events and print runnable next steps
     --dir      Directory to initialize (default: current directory)
