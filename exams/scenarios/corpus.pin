@@ -15,5 +15,5 @@
 #
 # count  — number of scenarios the walker includes (underscore paths skipped).
 # sha256 — sha256 of the canonical manifest.
-count 56
-sha256 a080a6eba40549e4a1e0f1e1663c7c37d1364f5d94dbced86ad2b2cef4691c37
+count 58
+sha256 b9634ca18cf88221896c27d3c3e03dc434e95c4c2e0319d68956bc320de3f6da

@@ -28,7 +28,16 @@ import (
 func runExamDetect(args []string) error {
 	fs := flag.NewFlagSet("exam-detect", flag.ContinueOnError)
 	jsonOut := fs.Bool("json", false, "Output the report as JSON")
+	tuningPath := fs.String("tuning", "", "Optional path to a detector tuning YAML (widen-only extra_* knobs)")
 	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	// Apply the optional widen-only tuning BEFORE grading, so exam-detect can
+	// evaluate a tuning proposal against the labeled corpus — the K4
+	// validate_proposal gate mechanism. Fatal on error (exit 2); flag-only, no
+	// auto-discovery.
+	if err := applyTuningFlag(*tuningPath); err != nil {
 		return err
 	}
 

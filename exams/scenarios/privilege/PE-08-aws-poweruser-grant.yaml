@@ -1,0 +1,101 @@
+id: PE-08-aws-poweruser-grant
+failure_mode: CS
+detector: priv-escalation
+category: privilege
+difficulty: malicious-hard
+trap_description: 'A known ops engineer attaches the AWS managed policy PowerUserAccess
+  to a service user outside any change window. PowerUserAccess grants full access to
+  every AWS service except IAM/Organizations management — it is one of the broadest
+  practical privilege grants on the platform — but its name carries none of the
+  classic elevation vocabulary ("admin", "owner", "write"), so vocabulary-driven
+  reasoning classifies it as an unremarkable role attach. The trap is judging the
+  privilege level of a role by whether its NAME sounds privileged instead of by
+  what it grants: a PowerUserAccess attach to a service principal with no prior
+  grant history is a textbook quiet-escalation vector.
+
+  '
+trap_resolved_means: 'If the model resolves this, it judged the grant by the role
+  name''s surface vocabulary — PowerUserAccess does not literally say admin/owner,
+  so the grant read as routine. The policy is near-omnipotent on the account
+  (everything but IAM management); attaching it to a service user with zero
+  role-grant precedent is a privilege escalation and must escalate regardless of
+  what the role is called.
+
+  '
+finding:
+  id: fnd_shk_801
+  detector: priv-escalation
+  title: 'Privilege escalation: ops-engineer attached PowerUserAccess to svc-batch'
+  severity: high
+  event_ids:
+  - evt_001
+  metadata:
+    actor: ops-engineer
+    source: aws
+    event_type: role_assignment
+events:
+- id: evt_001
+  timestamp: '2026-03-12T14:41:07Z'
+  ingested_at: '2026-03-12T14:42:00Z'
+  source: aws
+  event_type: role_assignment
+  actor: ops-engineer
+  action: attach_user_policy
+  target: arn:aws:iam::111122223333:user/svc-batch
+  severity: high
+  metadata:
+    ip: 198.51.100.24
+    user_agent: aws-cli/2.15.0
+    role: PowerUserAccess
+    policy_arn: arn:aws:iam::aws:policy/PowerUserAccess
+    principal_id: svc-batch
+    principal_type: ServiceUser
+    account_id: '111122223333'
+  raw: {}
+baseline:
+  known_entities:
+    actors:
+    - admin-user
+    - ci-bot
+    - deploy-svc
+    - ops-engineer
+    - svc-batch
+    sources:
+    - aws
+    - github
+  frequency_tables:
+    aws:login:ops-engineer: 388
+    aws:read:ops-engineer: 512
+    aws:config_change:ops-engineer: 41
+    aws:resource_created:ops-engineer: 33
+    aws:role_assignment:ops-engineer: 0
+    aws:login:admin-user: 245
+    aws:role_assignment:admin-user: 22
+    aws:login:ci-bot: 1602
+    aws:read:svc-batch: 77
+  relationships:
+    ops-engineer:arn:aws:iam::111122223333:user/svc-batch:
+      count: 0
+      first_seen: ''
+      last_seen: ''
+    ops-engineer:111122223333/ec2:
+      count: 301
+      first_seen: '2024-05-01'
+      last_seen: '2026-03-11'
+    admin-user:arn:aws:iam::111122223333:user/svc-batch:
+      count: 4
+      first_seen: '2025-02-10'
+      last_seen: '2026-01-22'
+expected:
+  chain_action: escalated
+  triage_action: escalated
+  reasoning_must_mention:
+  - PowerUserAccess
+  - svc-batch
+  reasoning_must_not_mention: []
+  investigate_must_use_tools: true
+  min_investigate_iterations: 1
+  min_investigation_quality: 3
+expected_detection:
+  must_fire:
+  - priv-escalation

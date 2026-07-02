@@ -33,7 +33,11 @@ import (
 func runDetect(args []string) error {
 	fs := flag.NewFlagSet("detect", flag.ContinueOnError)
 	baselinePath := fs.String("baseline", "", "Optional path to a baseline JSON file (no inference key required)")
+	tuningPath := fs.String("tuning", "", "Optional path to a detector tuning YAML (widen-only extra_* knobs)")
 	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if err := applyTuningFlag(*tuningPath); err != nil {
 		return err
 	}
 
@@ -67,6 +71,26 @@ func runDetect(args []string) error {
 		// Signal "findings present" without printing it as an error.
 		return errFindings
 	}
+	return nil
+}
+
+// applyTuningFlag loads and applies the widen-only detector tuning named by the
+// --tuning flag. FLAG-ONLY: an empty path is a no-op — there is deliberately NO
+// auto-discovery of a default tuning file (auto-discovery is a deferred Baron
+// decision). A load error is returned as a fatal error (exit 2 in main): a
+// corrupt or typo'd tuning file must never silently degrade detection.
+//
+// The tuning schema is add-only by construction (core/detect/tuning.go):
+// applying it can only WIDEN what the detectors see, never narrow it.
+func applyTuningFlag(path string) error {
+	if path == "" {
+		return nil
+	}
+	t, err := detect.LoadTuningFile(path)
+	if err != nil {
+		return fmt.Errorf("loading tuning %s: %w", path, err)
+	}
+	detect.ApplyTuning(t)
 	return nil
 }
 

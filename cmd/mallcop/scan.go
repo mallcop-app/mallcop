@@ -83,6 +83,7 @@ func runScan(args []string) error {
 	asJSON := fs.Bool("json", false, "Output the summary as JSON")
 	connector := fs.String("connector", "file", `Connector: "file" (default, reads --events) or "github"`)
 	githubOrg := fs.String("github-org", "", "GitHub org to scan (required when --connector github)")
+	tuningPath := fs.String("tuning", "", "Optional path to a detector tuning YAML (widen-only extra_* knobs)")
 
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -90,6 +91,12 @@ func runScan(args []string) error {
 
 	if *storePath == "" {
 		return fmt.Errorf("scan: --store is required (the git-repo path where findings/resolutions are written)")
+	}
+
+	// (0) Apply the optional widen-only detector tuning BEFORE any detection
+	// runs. Fatal on error (exit 2); no auto-discovery when the flag is unset.
+	if err := applyTuningFlag(*tuningPath); err != nil {
+		return fmt.Errorf("scan: %w", err)
 	}
 
 	// (1) Resolve the inference client: the {BaseURL, Key} pivot. The flag wins;

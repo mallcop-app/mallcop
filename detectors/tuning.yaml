@@ -1,0 +1,26 @@
+# detectors/tuning.yaml — data-externalized detector tuning knobs.
+#
+# CONTRACT (consensus-not-rules invariant): tuning may only WIDEN what the
+# detection committee sees. The schema is ADD-ONLY BY CONSTRUCTION — the only
+# fields that exist are additive extra_* lists, interpreted by the human-written
+# loader core/detect/tuning.go (strict decode: any unknown key is a LOUD load
+# error). There is no syntax to remove, replace, disable, or override a built-in
+# keyword, action keyword, or event type: narrowing is inexpressible in this
+# file. Do not add non-additive fields here; do not add override mechanisms to
+# the loader.
+#
+# Application is FLAG-ONLY: `mallcop scan|detect|exam-detect --tuning <path>`.
+# There is no auto-discovery of this file (deferred operator decision). Values
+# are lowercased and ADDED to the priv-escalation detector's built-in sets.
+#
+# Entries (the FN-close ledger — one line per closed false negative):
+#   - poweruser: closes PE-08-aws-poweruser-grant. AWS managed policy
+#     PowerUserAccess grants full access to everything except IAM/Organizations
+#     management, but its name carries no built-in elevation keyword
+#     (admin/owner/write/...), so priv-escalation missed the grant. Verified by
+#     the exam-detect regression in core/detect/tuning_exam_regression_test.go:
+#     PE-08 is RED without this entry, GREEN with it, and every must_not_fire
+#     label (incl. the PE-09 ReadOnlyAccess benign twin) still passes.
+priv_escalation:
+  extra_elevated_keywords:
+    - poweruser
