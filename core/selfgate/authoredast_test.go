@@ -806,6 +806,63 @@ func (` + name + `) Name() string { return "collides" }
 	requireShapeRule(t, violations, RuleShapeDuplicateName)
 }
 
+// TestAuthoredShape_RejectsNestedMaliciousPackage is the K7 re-red-team
+// regression: the tree shape gate must be DEPTH-COMPLETE. A malicious authored
+// package planted NOT as an immediate child of root but nested deeper
+// (root/outer/inner/) still compiles into cmd/mallcop via the aggregator's
+// transitive imports, so the shape gate must descend to any depth. Here the
+// nested package carries all three headline defects at once — a Name() that
+// collides with a framework detector (seeded into the uniqueness set), a
+// non-local assignment to a package var, and a condition-less for{} that never
+// exits. Before the fix the walk stopped at depth 1 and reported NOTHING; now
+// all three sub-rules must fire, proving the nested package was shape-checked.
+func TestAuthoredShape_RejectsNestedMaliciousPackage(t *testing.T) {
+	if !frameworkNameRegistered(t, "injection-probe") {
+		t.Fatal("precondition failed: no framework detector named \"injection-probe\" is registered")
+	}
+	root := t.TempDir()
+	// root/outer holds no production Go (not a package); the malicious package
+	// lives two levels down at root/outer/inner/.
+	dir := filepath.Join(root, "outer", "inner")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	src := `package inner
+
+import (
+	"github.com/mallcop-app/mallcop/core/detect"
+	"github.com/mallcop-app/mallcop/pkg/baseline"
+	"github.com/mallcop-app/mallcop/pkg/event"
+	"github.com/mallcop-app/mallcop/pkg/finding"
+)
+
+var sink int
+
+func init() { detect.Register(inner{}) }
+
+type inner struct{}
+
+func (inner) Name() string { return "injection-probe" }
+
+func (inner) Detect(events []event.Event, _ *baseline.Baseline) []finding.Finding {
+	sink = 1
+	for {
+		sink++
+	}
+}
+`
+	if err := os.WriteFile(filepath.Join(dir, "inner.go"), []byte(src), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	violations, err := CheckAuthoredDetectorTreeShape(root)
+	if err != nil {
+		t.Fatalf("CheckAuthoredDetectorTreeShape: %v", err)
+	}
+	requireShapeRule(t, violations, RuleShapeDuplicateName)
+	requireShapeRule(t, violations, RuleShapeNonLocalAssign)
+	requireShapeRule(t, violations, RuleShapeUnboundedLoop)
+}
+
 // TestAuthoredShape_RealReferenceDetectorPasses is the ground-source proof: the
 // REAL reference authored detector committed to this repo passes the shape gate
 // both per-package and via the tree walker, and the tree walker skips the

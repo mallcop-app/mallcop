@@ -313,7 +313,13 @@ func Guard(repoRoot, baseRef, headRef string) ([]GuardFinding, error) {
 			// The OWN-PACKAGE authored-detector code lane. rel is the path
 			// beneath core/detect/authored/.
 			rel := strings.TrimPrefix(c.path, authoredPrefix)
-			if !strings.Contains(rel, "/") {
+			// The sanctioned own-package lane is EXACTLY one path segment before
+			// the filename: rel of the form "<name>/<file>.go" (one slash). This
+			// mirrors the registry's isAuthoredDetectorImportPath one-segment rule
+			// AND the shape gate's documented one-level design — the guard-allowed
+			// change surface and the shape-checked surface must not diverge.
+			switch strings.Count(rel, "/") {
+			case 0:
 				// A .go file sitting DIRECTLY in the aggregator package (only
 				// registry.go is allowed there, handled above) — not a detector
 				// package. Freeze it.
@@ -322,7 +328,23 @@ func Guard(repoRoot, baseRef, headRef string) ([]GuardFinding, error) {
 					Rule:   RuleCodeFrozen,
 					Detail: fmt.Sprintf("%s of a .go file directly in the authored aggregator package: only registry.go and per-detector own-package subdirectories are allowed under core/detect/authored/", statusWord(c.status)),
 				})
-				break
+				continue
+			case 1:
+				// rel is <name>/<file>.go — an own-package authored detector,
+				// handled below.
+			default:
+				// rel is <name>/<sub>/.../<file>.go — a NESTED authored package.
+				// It compiles into cmd/mallcop through the aggregator's transitive
+				// import graph yet lies OUTSIDE the one-level own-package lane the
+				// shape gate and import allow-list are designed around. Freeze it:
+				// the guard's allowed surface must never exceed what the downstream
+				// gates shape-check.
+				findings = append(findings, GuardFinding{
+					Path:   c.path,
+					Rule:   RuleCodeFrozen,
+					Detail: fmt.Sprintf("%s of a .go file nested below core/detect/authored/<name>/: authored detectors are single-level own packages (core/detect/authored/<name>/<file>.go); deeper packages are not a sanctioned lane", statusWord(c.status)),
+				})
+				continue
 			}
 			// rel is <name>/<file>.go — an own-package authored detector. A NEW
 			// file is the sanctioned additive lane (gated downstream by the

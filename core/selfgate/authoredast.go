@@ -28,6 +28,7 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/mallcop-app/mallcop/core/detect"
@@ -107,14 +108,19 @@ func CheckAuthoredDetectorShape(dir string) ([]Violation, error) {
 }
 
 // CheckAuthoredDetectorTreeShape runs CheckAuthoredDetectorShape over every
-// immediate subdirectory of root (each is one authored detector's own package)
-// and additionally enforces that no two authored detectors register the same
-// Name. Files sitting directly in root (e.g. the aggregator registry.go) are
-// NOT detector packages and are skipped — they are gated by the guard's
-// append-only registry rule, not this shape gate. An error is returned only if
-// root cannot be read.
+// authored detector package found ANYWHERE under root — not just root's
+// immediate children, but every descendant directory at any depth that carries
+// production Go (K7 re-red-team HOLE: a nested package such as
+// core/detect/authored/<name>/evil/ compiles into the same binary via the
+// aggregator's transitive import graph yet was NOT shape-checked when the walk
+// stopped at depth 1, so a colliding Name + sibling mutation + unbounded loop
+// could slip past). It additionally enforces that no two authored detectors —
+// at any depth — register the same Name. Files sitting DIRECTLY in root (e.g.
+// the aggregator registry.go) are NOT a detector package and are skipped — they
+// are gated by the guard's append-only registry rule, not this shape gate. An
+// error is returned only if root cannot be walked.
 func CheckAuthoredDetectorTreeShape(root string) ([]Violation, error) {
-	entries, err := os.ReadDir(root)
+	pkgDirs, err := authoredPackageDirs(root)
 	if err != nil {
 		return nil, err
 	}
@@ -132,16 +138,12 @@ func CheckAuthoredDetectorTreeShape(root string) ([]Violation, error) {
 	// registry: this gate also runs inside cmd/mallcop, which links the authored
 	// aggregator, so a live-registry seed would re-discover an already-merged
 	// authored detector that is ALSO on disk in the head tree and flag it as
-	// colliding with itself. Authored-vs-authored collisions are caught by the
-	// tree walk's own accumulating dedup below.
+	// colliding with itself. Authored-vs-authored collisions (at any depth) are
+	// caught by the tree walk's own accumulating dedup below.
 	for _, name := range detect.FrameworkDetectorNames() {
 		nameFirstSeen[name] = frameworkRegistryOrigin
 	}
-	for _, e := range entries {
-		if !e.IsDir() {
-			continue
-		}
-		pkgDir := filepath.Join(root, e.Name())
+	for _, pkgDir := range pkgDirs {
 		name, vs, cerr := shapeCheckPackage(pkgDir)
 		if cerr != nil {
 			return nil, cerr
@@ -163,26 +165,64 @@ func CheckAuthoredDetectorTreeShape(root string) ([]Violation, error) {
 	return violations, nil
 }
 
+// authoredPackageDirs walks root and returns every descendant directory
+// (root itself EXCLUDED) that contains at least one production .go file, in a
+// deterministic, lexically-sorted order. Each such directory is its own Go
+// package (Go has no nested packages within a directory), so this is exactly
+// the set of authored detector packages the shape gate and the name collector
+// must cover — at whatever depth the author placed them. The error return is
+// for filesystem-walk I/O only.
+func authoredPackageDirs(root string) ([]string, error) {
+	seen := map[string]bool{}
+	err := filepath.WalkDir(root, func(p string, d os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if d.IsDir() || !isProductionGoFile(d.Name()) {
+			return nil
+		}
+		pkgDir := filepath.Dir(p)
+		// Skip production Go sitting directly in root (the aggregator
+		// registry.go): it is not a detector package.
+		if pkgDir == root {
+			return nil
+		}
+		seen[pkgDir] = true
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	// A subdirectory can be visited between two source files of the same package
+	// dir, so the same pkgDir can recur non-adjacently — dedupe via the set and
+	// return a deterministic, lexically-sorted slice.
+	dirs := make([]string, 0, len(seen))
+	for d := range seen {
+		dirs = append(dirs, d)
+	}
+	sort.Strings(dirs)
+	return dirs, nil
+}
+
 // collectAuthoredDetectorNames returns the set of registered detector Names
-// declared by the authored-detector packages directly under root (each immediate
-// subdirectory is one own-package detector). Names are extracted the same way the
-// shape gate does — the single compile-time string-literal Name() — so a package
-// whose Name cannot be statically determined contributes nothing. It is used to
-// compute which authored detectors a PROPOSAL adds (head names minus base names),
-// which the mandatory benign-twin check keys on. The error return is for root I/O
-// only; a missing root (fs.ErrNotExist) is the caller's signal that no authored
-// tree exists at that ref.
+// declared by the authored-detector packages found ANYWHERE under root — every
+// descendant package at any depth, matching CheckAuthoredDetectorTreeShape's
+// recursion so the mandatory benign-twin floor (which keys on head-minus-base
+// names) covers nested detectors, not only depth-1 ones. Names are extracted the
+// same way the shape gate does — the single compile-time string-literal Name() —
+// so a package whose Name cannot be statically determined contributes nothing.
+// It is used to compute which authored detectors a PROPOSAL adds (head names
+// minus base names), which the mandatory benign-twin check keys on. The error
+// return is for root I/O only; a missing root (fs.ErrNotExist) is the caller's
+// signal that no authored tree exists at that ref.
 func collectAuthoredDetectorNames(root string) (map[string]bool, error) {
-	entries, err := os.ReadDir(root)
+	pkgDirs, err := authoredPackageDirs(root)
 	if err != nil {
 		return nil, err
 	}
 	names := map[string]bool{}
-	for _, e := range entries {
-		if !e.IsDir() {
-			continue
-		}
-		name, _, cerr := shapeCheckPackage(filepath.Join(root, e.Name()))
+	for _, pkgDir := range pkgDirs {
+		name, _, cerr := shapeCheckPackage(pkgDir)
 		if cerr != nil {
 			return nil, cerr
 		}

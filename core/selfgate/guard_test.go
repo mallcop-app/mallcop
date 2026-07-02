@@ -558,6 +558,23 @@ func TestGuard_AuthoredDetectorLane(t *testing.T) {
 		head := f.commit("proposal: modify a merged authored detector")
 		requireRejected(t, f.guard(base, head), RuleDetectCodeFrozen, "core/detect/authored/synthmarker/synthmarker.go")
 	})
+
+	// K7 re-red-team: a NESTED authored .go file (deeper than one path segment,
+	// e.g. core/detect/authored/<name>/<sub>/file.go) compiles into cmd/mallcop
+	// through the aggregator's transitive import graph, yet lies outside the
+	// one-level own-package lane the shape gate and import allow-list are built
+	// around. The guard's allowed surface must never exceed the shape-checked
+	// surface, so a deeper authored .go file is FROZEN (RuleCodeFrozen) even when
+	// added — it is not a sanctioned additive lane.
+	t.Run("A of a deeper NESTED authored .go file is REJECTED", func(t *testing.T) {
+		f := newFixture(t)
+		f.copyReal("core/detect/injection_probe.go")
+		base := f.commit("base")
+		f.write("core/detect/authored/newsig/inner/inner.go",
+			"package inner\n\n// nested below <name>/ — outside the one-level own-package lane\n")
+		head := f.commit("proposal: nested authored package")
+		requireRejected(t, f.guard(base, head), RuleCodeFrozen, "core/detect/authored/newsig/inner/inner.go")
+	})
 }
 
 // The authored-detector registration aggregator (core/detect/authored/registry.go)

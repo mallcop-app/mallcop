@@ -39,6 +39,7 @@
 package selfgate
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -47,6 +48,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/mallcop-app/mallcop/core/lint"
 )
@@ -410,6 +412,13 @@ type examReport struct {
 	} `json:"totals"`
 }
 
+// examExecWallClock bounds a single tree's exam-detect exec (stage 3). It is
+// generous — the exam is an offline pass over a small corpus and finishes in
+// seconds — but finite: it exists so a hang in an authored detector cannot stall
+// the gate indefinitely. It is a var (not const) ONLY so tests can shorten it;
+// production never mutates it.
+var examExecWallClock = 3 * time.Minute
+
 // runTreeExam builds tree's OWN mallcop binary and execs its exam-detect over
 // tree's OWN corpus (MALLCOP_REPO_ROOT pins the root; --tuning is passed iff
 // the tree carries detectors/tuning.yaml). Exit 0 (all green) and exit 1
@@ -430,9 +439,16 @@ func runTreeExam(tree string) (examReport, string, error) {
 	if _, err := os.Stat(tuning); err == nil {
 		args = append(args, "--tuning", tuning)
 	}
-	stdout, stderr, code, err = runTool(tree, []string{"MALLCOP_REPO_ROOT=" + tree}, bin, args...)
+	// Defense-in-depth behind the L3 shape gate: an authored detector that slips
+	// an unbounded loop or blocking call past the AST check would otherwise let
+	// stage-3 "pass" by running forever/long instead of crashing. Wall-clock-box
+	// the exam-detect exec — a timeout kills it and (for the head tree) surfaces
+	// as a RuleExamExecution fail-closed rejection upstream.
+	ctx, cancel := context.WithTimeout(context.Background(), examExecWallClock)
+	defer cancel()
+	stdout, stderr, code, err = runToolCtx(ctx, tree, []string{"MALLCOP_REPO_ROOT=" + tree}, bin, args...)
 	if err != nil {
-		return examReport{}, "", fmt.Errorf("exec %s: %w", bin, err)
+		return examReport{}, truncate(stderr, 1500), fmt.Errorf("exec %s: %w", bin, err)
 	}
 	if code != 0 && code != 1 {
 		// exit 1 = labeled gaps present (a report was still produced);
@@ -684,15 +700,31 @@ func removeWorktree(repoRoot, dir string) {
 // extraEnv (later entries win), capturing stdout/stderr separately. The error
 // return is for SPAWN failures only; a started process that exits non-zero
 // reports through code. GOWORK=off keeps a stray workspace file above the
-// scratch dir from leaking into tree builds.
+// scratch dir from leaking into tree builds. It runs with no wall-clock bound —
+// use runToolCtx for a subprocess that must be time-boxed.
 func runTool(dir string, extraEnv []string, name string, args ...string) (stdout, stderr string, code int, err error) {
-	cmd := exec.Command(name, args...)
+	return runToolCtx(context.Background(), dir, extraEnv, name, args...)
+}
+
+// runToolCtx is runTool bounded by ctx: if ctx's deadline fires, the process
+// (and its children) are killed and the call returns a NON-nil error wrapping
+// context.DeadlineExceeded with code -1 — a hang is surfaced as a hard failure,
+// never mistaken for a clean exit. Spawn failures likewise return err with code
+// -1; a started process that exits non-zero reports through code with a nil err.
+func runToolCtx(ctx context.Context, dir string, extraEnv []string, name string, args ...string) (stdout, stderr string, code int, err error) {
+	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Dir = dir
 	cmd.Env = append(append(os.Environ(), "GOWORK=off"), extraEnv...)
 	var outBuf, errBuf strings.Builder
 	cmd.Stdout, cmd.Stderr = &outBuf, &errBuf
 	runErr := cmd.Run()
 	if runErr != nil {
+		// A wall-clock timeout is a HANG, not a spawn error nor a clean exit.
+		// Surface it explicitly so the stage-3 caller fails the proposal closed.
+		if ctxErr := ctx.Err(); errors.Is(ctxErr, context.DeadlineExceeded) {
+			return outBuf.String(), errBuf.String(), -1,
+				fmt.Errorf("subprocess %q exceeded its wall-clock timeout: %w", name, ctxErr)
+		}
 		var exitErr *exec.ExitError
 		if errors.As(runErr, &exitErr) {
 			return outBuf.String(), errBuf.String(), exitErr.ExitCode(), nil
