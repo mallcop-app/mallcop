@@ -166,6 +166,14 @@ type synthPayload struct {
 	// unmarshaled; it makes a corrupt payload visible in the finding record
 	// instead of silently misclassifying the event.
 	ParseError string `json:"parse_error,omitempty"`
+	// UnmappedAction carries the RAW source action string whenever this event
+	// fell all the way through to the "github_other" default bucket (i.e. no
+	// classifier and no learned overlay mapped it). It is the uniform mapping-gap
+	// tag the offline UNMAPPED-ACTION collector (core/collect.UnmappedActions)
+	// mines to propose closing coverage gaps — event.Event has no Metadata field,
+	// so the flat payload is the tag carrier. Empty (omitted) for every mapped
+	// event, so it never touches a classified event's record.
+	UnmappedAction string `json:"unmapped_action,omitempty"`
 }
 
 // normalizeEvent normalizes one GitHub Event object (events feed) to event.Event.
@@ -220,6 +228,12 @@ func normalizeEvent(raw json.RawMessage, org string, ov *overlay.Overlay) (event
 		Org:          orgOr(ge.Org.Login, org),
 		Raw:          raw,
 	}
+	// Mapping-gap tag: only when the event stayed in the default bucket AFTER the
+	// overlay had its chance (base-wins means a real classification is never the
+	// default here). rawAction for the events feed is the GitHub event "type".
+	if normType == defaultEventTy {
+		sp.UnmappedAction = ge.Type
+	}
 	if parseErr != nil {
 		sp.ParseError = parseErr.Error()
 	}
@@ -271,6 +285,11 @@ func normalizeAuditEntry(raw json.RawMessage, org string, ov *overlay.Overlay) (
 		Repo:         ae.Repo,
 		Org:          orgOr(ae.Org, org),
 		Raw:          raw,
+	}
+	// Mapping-gap tag: only when the audit action stayed in the default bucket
+	// AFTER the overlay had its chance. rawAction for the audit log is ae.Action.
+	if normType == defaultEventTy {
+		sp.UnmappedAction = ae.Action
 	}
 	payload, _ := json.Marshal(sp)
 
