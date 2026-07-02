@@ -59,6 +59,13 @@ const GateSchemaVersion = 1
 // TierFree identifies the $0 gate tier this package implements.
 const TierFree = "free"
 
+// authoredDetectorRel is the repo-relative root of the AUTHORED detector tree,
+// the own-package location the self-extension loop writes new detectors into
+// (K7 L1: core/detect/authored/<name>/). Both the K2a import allow-list and the
+// K7 L3 shape AST gate police exactly this tree, and the invariant guard opens
+// its additive lane here — so they must all name the same root.
+const authoredDetectorRel = "core/detect/authored"
+
 // Stage names, in run order.
 const (
 	StageGuard      = "guard"
@@ -274,7 +281,7 @@ func structuralStage(headTree string) ([]GuardFinding, string, error) {
 		return nil, "", fmt.Errorf("selfgate: head tree module path: %w", err)
 	}
 	allowlistNote := "authored-detector import allow-list clean"
-	violations, err := lint.CheckAuthoredDetectorTree(headTree, modulePath, "detectors")
+	violations, err := lint.CheckAuthoredDetectorTree(headTree, modulePath, authoredDetectorRel)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
 		// No authored tree at head — trivially green.
@@ -283,7 +290,7 @@ func structuralStage(headTree string) ([]GuardFinding, string, error) {
 		// An authored tree that cannot be verified (e.g. an unparseable
 		// authored file) is a proposal defect — fail closed.
 		findings = append(findings, GuardFinding{
-			Path:   "detectors",
+			Path:   authoredDetectorRel,
 			Rule:   RuleStructuralAllowlist,
 			Detail: fmt.Sprintf("authored detector tree cannot be verified (%v) — fail closed", err),
 		})
@@ -301,11 +308,53 @@ func structuralStage(headTree string) ([]GuardFinding, string, error) {
 		}
 	}
 
+	// K7 L3 additive-shape AST gate over the same authored tree the allow-list
+	// polices. Where the allow-list constrains what authored code may LINK,
+	// this constrains its SHAPE (pure, self-registering leaf; no build tags,
+	// cgo, compiler directives, non-local writes, non-literal Names, or
+	// duplicate Names). An unverifiable tree fails closed.
+	shapeNote := "authored-detector shape gate clean"
+	authoredRoot := filepath.Join(headTree, filepath.FromSlash(authoredDetectorRel))
+	shapeViolations, serr := CheckAuthoredDetectorTreeShape(authoredRoot)
+	switch {
+	case errors.Is(serr, fs.ErrNotExist):
+		shapeNote = "no authored detector tree (shape gate trivially clean)"
+	case serr != nil:
+		findings = append(findings, GuardFinding{
+			Path:   authoredDetectorRel,
+			Rule:   RuleAuthoredShape,
+			Detail: fmt.Sprintf("authored detector tree cannot be shape-verified (%v) — fail closed", serr),
+		})
+		shapeNote = "authored-detector shape gate unverifiable"
+	default:
+		for _, v := range shapeViolations {
+			findings = append(findings, GuardFinding{
+				Path:   repoRelativeHead(headTree, v.File),
+				Rule:   RuleAuthoredShape,
+				Detail: v.Rule + ": " + v.Detail,
+			})
+		}
+		if len(shapeViolations) > 0 {
+			shapeNote = fmt.Sprintf("%d authored-detector shape violation(s)", len(shapeViolations))
+		}
+	}
+
 	buildNote := "`go build ./...` OK in head tree"
 	if !buildOK {
 		buildNote = "`go build ./...` FAILED in head tree"
 	}
-	return findings, buildNote + "; " + allowlistNote, nil
+	return findings, buildNote + "; " + allowlistNote + "; " + shapeNote, nil
+}
+
+// repoRelativeHead makes a shape-violation file path (which is absolute, rooted
+// in the head worktree) repo-relative and slash-separated, so GateResult
+// findings carry stable paths the mallcop-pro consumer can render.
+func repoRelativeHead(headTree, file string) string {
+	rel, err := filepath.Rel(headTree, file)
+	if err != nil {
+		return filepath.ToSlash(file)
+	}
+	return filepath.ToSlash(rel)
 }
 
 // ---- stage 3: exam-detect ------------------------------------------------------
