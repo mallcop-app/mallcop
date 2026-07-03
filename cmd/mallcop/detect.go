@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/mallcop-app/mallcop/core/config"
 	"github.com/mallcop-app/mallcop/core/detect"
 	"github.com/mallcop-app/mallcop/core/eval"
 	"github.com/mallcop-app/mallcop/pkg/baseline"
@@ -16,8 +17,10 @@ import (
 )
 
 // envDeclRules optionally names a declarative rules YAML (detectors/rules.yaml
-// shape). The --rules flag wins over it; both absent => auto-discovery from the
-// resolved repo root, mirroring the tuning/operator-decisions loaders.
+// shape). Precedence for the decl rules file is: the --rules flag wins, then
+// $MALLCOP_DECL_RULES, then — when a mallcop.yaml is discovered — the config's
+// learning.dir/rules.yaml, and finally (only when NO config is present) the
+// legacy repo-root/detectors/rules.yaml auto-discovery. See resolveDeclRulesPath.
 const envDeclRules = "MALLCOP_DECL_RULES"
 
 // runDetect implements `mallcop detect`: read events JSONL on stdin, run the
@@ -39,9 +42,9 @@ const envDeclRules = "MALLCOP_DECL_RULES"
 //	2  Failure (e.g. unreadable baseline)
 func runDetect(args []string) error {
 	fs := flag.NewFlagSet("detect", flag.ContinueOnError)
-	baselinePath := fs.String("baseline", "", "Optional path to a baseline JSON file (no inference key required)")
-	tuningPath := fs.String("tuning", "", "Optional path to a detector tuning YAML (widen-only extra_* knobs)")
-	rulesPath := fs.String("rules", "", "Optional declarative detector rules YAML (overrides $"+envDeclRules+"; else auto-discovered at <repo>/detectors/rules.yaml)")
+	baselinePath := fs.String("baseline", "", "Optional path to a baseline JSON file (flag wins; else config store.baseline)")
+	tuningPath := fs.String("tuning", "", "Optional path to a detector tuning YAML (flag wins; else config learning.dir/tuning.yaml)")
+	rulesPath := fs.String("rules", "", "Optional declarative detector rules YAML (flag wins; else $"+envDeclRules+"; else config learning.dir/rules.yaml)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -52,11 +55,15 @@ func runDetect(args []string) error {
 		return err
 	}
 
+	blPath, err := resolveBaselinePath(*baselinePath)
+	if err != nil {
+		return err
+	}
 	var bl *baseline.Baseline
-	if *baselinePath != "" {
-		loaded, err := baseline.Load(*baselinePath)
+	if blPath != "" {
+		loaded, err := baseline.Load(blPath)
 		if err != nil {
-			return fmt.Errorf("loading baseline %s: %w", *baselinePath, err)
+			return fmt.Errorf("loading baseline %s: %w", blPath, err)
 		}
 		bl = loaded
 	} else {
@@ -85,15 +92,25 @@ func runDetect(args []string) error {
 	return nil
 }
 
-// applyTuningFlag loads and applies the widen-only detector tuning named by the
-// --tuning flag. FLAG-ONLY: an empty path is a no-op — there is deliberately NO
-// auto-discovery of a default tuning file (auto-discovery is a deferred Baron
-// decision). A load error is returned as a fatal error (exit 2 in main): a
-// corrupt or typo'd tuning file must never silently degrade detection.
+// applyTuningFlag loads and applies the widen-only detector tuning, resolving
+// the file with the §C.1 precedence: the --tuning flag wins; else, when a
+// mallcop.yaml is discovered, the config's learning.dir/tuning.yaml; else a
+// no-op. The DEFERRED auto-discovery decision is now resolved by explicit
+// config declaration (learning.dir) rather than a repo-root guess: with NO
+// config present, tuning stays flag-only exactly as before, so existing
+// flag-only usage and e2e are unaffected. A config-resolved tuning file that
+// does not exist is a silent no-op (LoadTuningFile treats os.ErrNotExist as
+// zero tuning); an explicit --tuning that fails to load is FATAL (exit 2), and
+// so is a corrupt discovered mallcop.yaml — a typo must never silently degrade
+// detection.
 //
 // The tuning schema is add-only by construction (core/detect/tuning.go):
 // applying it can only WIDEN what the detectors see, never narrow it.
-func applyTuningFlag(path string) error {
+func applyTuningFlag(flagPath string) error {
+	path, err := resolveTuningPath(flagPath)
+	if err != nil {
+		return err
+	}
 	if path == "" {
 		return nil
 	}
@@ -105,17 +122,82 @@ func applyTuningFlag(path string) error {
 	return nil
 }
 
-// resolveDeclRulesPath resolves the declarative rules file: the explicit path
-// (--rules flag) wins, then $MALLCOP_DECL_RULES, then auto-discovery at
-// <root>/detectors/rules.yaml when a repo root is known. An empty root with no
-// explicit path/env yields "" (no rules) — auto-discovery is best-effort, never
-// fatal, exactly like the tuning flag is a no-op when unset.
+// resolveTuningPath applies the tuning precedence flag > config > default(none):
+// the --tuning flag wins; else the config learning.dir/tuning.yaml when a
+// mallcop.yaml is discovered; else "" (flag-only, no auto-discovery). A corrupt
+// discovered config is a loud error.
+func resolveTuningPath(flagPath string) (string, error) {
+	if flagPath != "" {
+		return flagPath, nil
+	}
+	cfg, cfgPath, err := config.LoadEffective("")
+	if err != nil {
+		return "", fmt.Errorf("loading config: %w", err)
+	}
+	if cfgPath == "" {
+		return "", nil
+	}
+	return learningFile(cfg, cfgPath, "tuning.yaml"), nil
+}
+
+// learningFile joins the config-resolved learning.dir with a well-known
+// loop-owned basename (tuning.yaml / rules.yaml). A relative learning.dir is
+// resolved against the directory the config was discovered in (the deployment
+// root); an absolute learning.dir is used verbatim. cfgPath must be non-empty.
+func learningFile(cfg config.Config, cfgPath, name string) string {
+	dir := cfg.Learning.Dir
+	if dir == "" {
+		dir = "detectors"
+	}
+	if !filepath.IsAbs(dir) {
+		dir = filepath.Join(filepath.Dir(cfgPath), dir)
+	}
+	return filepath.Join(dir, name)
+}
+
+// resolveBaselinePath applies the baseline precedence flag > config > default:
+// the --baseline flag wins; else the config store.baseline (resolved against the
+// config's directory when relative) when a mallcop.yaml is discovered; else ""
+// (an empty baseline — today's flag-only behavior when no config is present). A
+// corrupt discovered config is a loud error.
+func resolveBaselinePath(flagPath string) (string, error) {
+	if flagPath != "" {
+		return flagPath, nil
+	}
+	cfg, cfgPath, err := config.LoadEffective("")
+	if err != nil {
+		return "", fmt.Errorf("loading config: %w", err)
+	}
+	if cfgPath == "" || cfg.Store.Baseline == "" {
+		return "", nil
+	}
+	b := cfg.Store.Baseline
+	if !filepath.IsAbs(b) {
+		b = filepath.Join(filepath.Dir(cfgPath), b)
+	}
+	return b, nil
+}
+
+// resolveDeclRulesPath resolves the declarative rules file with the §C.1
+// precedence: the --rules flag wins, then $MALLCOP_DECL_RULES, then — when a
+// mallcop.yaml is discovered — the config's learning.dir/rules.yaml, and finally
+// (only when NO config is present) the legacy <root>/detectors/rules.yaml
+// auto-discovery. The config path REPLACES the repo-root guess, which is wrong
+// outside a repo (e.g. a customer working dir): an explicit learning.dir is
+// correct anywhere. An empty root with no explicit path/env/config yields "" (no
+// rules) — resolution is best-effort, never fatal, exactly like the tuning flag
+// is a no-op when unset. A corrupt discovered config falls through to the legacy
+// root guess rather than aborting here; a real corrupt-config failure is
+// surfaced loudly by the tuning resolver, which runs first.
 func resolveDeclRulesPath(explicit, root string) string {
 	if explicit != "" {
 		return explicit
 	}
 	if env := os.Getenv(envDeclRules); env != "" {
 		return env
+	}
+	if cfg, cfgPath, err := config.LoadEffective(""); err == nil && cfgPath != "" {
+		return learningFile(cfg, cfgPath, "rules.yaml")
 	}
 	if root == "" {
 		return ""
