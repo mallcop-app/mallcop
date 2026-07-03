@@ -28,7 +28,7 @@ func TestInitGeneratesRunnableConfig(t *testing.T) {
 	if len(cfg.Connectors) != 1 || cfg.Connectors[0].Kind != "file" || cfg.Connectors[0].Path != "./events.jsonl" {
 		t.Fatalf("default connector wrong: %+v", cfg.Connectors)
 	}
-	if cfg.Learning.Dir != "detectors" || cfg.Learning.Autonomy != "off" {
+	if cfg.Learning.Dir != "detectors" || cfg.Learning.Autonomy != config.AutonomyNon {
 		t.Fatalf("learning defaults wrong: %+v", cfg.Learning)
 	}
 	if cfg.Budgets.SelfextSpendCapUSD != 25 {
@@ -63,7 +63,7 @@ func TestInitPro(t *testing.T) {
 		t.Fatalf("--pro key_env = %q, want MALLCOP_API_KEY", cfg.Inference.KeyEnv)
 	}
 	// Non-inference blocks stay at OSS defaults.
-	if cfg.Learning.Autonomy != "off" || cfg.Sovereignty.Tier != "open" {
+	if cfg.Learning.Autonomy != config.AutonomyNon || cfg.Sovereignty.Tier != "open" {
 		t.Fatalf("--pro changed a non-inference block: learning=%+v sovereignty=%+v", cfg.Learning, cfg.Sovereignty)
 	}
 }

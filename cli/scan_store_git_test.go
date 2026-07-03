@@ -50,7 +50,7 @@ detectors:
     disable: []
 learning:
   dir: detectors
-  autonomy: off
+  autonomy: non
   enforce_pin: false
 sovereignty:
   tier: open

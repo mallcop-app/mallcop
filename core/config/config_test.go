@@ -396,3 +396,47 @@ func TestWriteConfigRoundTrip(t *testing.T) {
 		t.Fatalf("donut inference not preserved: got=%+v want=%+v", got.Inference, cfg.Inference)
 	}
 }
+
+// TestAutonomyVocabularyPinnedAcrossRepoBoundary is a CONTRACT test (rd
+// mallcoppro-315): mallcop-pro cannot import this package (module boundary —
+// see internal/selfext/autonomy.go's package doc in mallcop-pro), so it keeps
+// its OWN pinned copy of this exact three-value set as
+// internal/selfext/autonomy.Dial's three untyped-constant literals ("non",
+// "semi", "fully") — see mallcop-pro's
+// internal/selfext/autonomy/autonomy_test.go:
+// TestAutonomyVocabularyPinnedAcrossRepoBoundary (same name, other repo). The
+// two vocabularies are two independent spellings with NO shared code; this
+// test is the tripwire on THIS side — if a value is ever added, renamed, or
+// removed here without a matching edit on the mallcop-pro side, this test
+// still passes (it only checks internal consistency), but the mallcop-pro
+// contract test's literal set will now disagree with what a human reading
+// both files expects, and code review across the two failing/passing pairs is
+// how the drift is caught. Keep the accepted set literal (not a loop over
+// package internals) so an addition/removal is a visible one-line diff here.
+func TestAutonomyVocabularyPinnedAcrossRepoBoundary(t *testing.T) {
+	want := map[string]bool{"non": true, "semi": true, "fully": true}
+
+	got := map[string]bool{AutonomyNon: true, AutonomySemi: true, AutonomyFully: true}
+	if len(got) != len(want) {
+		t.Fatalf("AutonomyNon/AutonomySemi/AutonomyFully constants collapsed to %d distinct values, want 3", len(got))
+	}
+	for v := range want {
+		if !got[v] {
+			t.Fatalf("expected constant %q missing from {AutonomyNon=%q, AutonomySemi=%q, AutonomyFully=%q}", v, AutonomyNon, AutonomySemi, AutonomyFully)
+		}
+	}
+
+	// The full space of one-character-off / retired spellings a config author
+	// might type must all be rejected by IsValidAutonomy — pinning the set to
+	// EXACTLY these three, not "these three plus whatever else validates".
+	for _, bad := range []string{"off", "on", "auto", "NON", "Non", "semi ", " semi", "fully!", "", "non,semi,fully"} {
+		if IsValidAutonomy(bad) {
+			t.Fatalf("IsValidAutonomy(%q) = true, want false (accepted set is EXACTLY {non, semi, fully})", bad)
+		}
+	}
+	for v := range want {
+		if !IsValidAutonomy(v) {
+			t.Fatalf("IsValidAutonomy(%q) = false, want true (it is one of the pinned three)", v)
+		}
+	}
+}
