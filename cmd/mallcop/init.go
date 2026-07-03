@@ -95,7 +95,7 @@ func runInit(args []string) error {
 	fmt.Printf("  1. Run the scan (reads mallcop.yaml — no flags needed):\n")
 	fmt.Printf("       mallcop scan\n")
 	fmt.Printf("  2. Add a source: edit mallcop.yaml -> connectors:\n")
-	fmt.Printf("     (a github org, a cloud source like aws/azure, or a decl spec)\n")
+	fmt.Printf("     (a github org, or a cloud source like aws/azure)\n")
 	if *pro {
 		fmt.Printf("  3. Managed LLM resolution is on (donut rail). Set your key:\n")
 		fmt.Printf("       export MALLCOP_API_KEY=mallcop-sk-...\n")

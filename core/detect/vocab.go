@@ -12,11 +12,9 @@ import "strings"
 // inline-comparison detectors compare ev.Type against directly.
 //
 // It is the single validation authority consumed by the self-extension DATA
-// lanes: the K5 declarative connector engine validates every ActionMap target
-// against it, the learned-mapping overlay validates every mapped target against
-// it, and the K6 rule loader validates every rule EventTypes[] against it. A
-// target outside this set is rejected fail-loud — a connector spec or learned
-// mapping can only ever name a type some detector can already act on.
+// lane: the learned-mapping overlay validates every mapped target against it. A
+// target outside this set is rejected fail-loud — a learned mapping can only
+// ever name a type some detector can already act on.
 //
 // COUPLING (vocab_test.go, invariant 11): a mechanical go/ast scan re-derives
 // this set from the detector source — every gate-map key and every `ev.Type ==`
@@ -99,10 +97,10 @@ func KnownEventTypes() map[string]bool {
 // lowercase literal (e.g. unusual_login.go `ev.Type != "login"`, git_oops.go
 // `ev.Type != "push"`), so a validated-but-non-canonical target like "PUSH" or
 // " login " would pass IsKnownEventType (which normalizes the QUERY) yet be
-// EMITTED verbatim and silently never fire. The K5 ActionMap path and the
-// learned-mapping overlay therefore canonicalize the target through THIS function
-// before emitting/storing it, so a target that validates as known is emitted in
-// the exact spelling the typed detectors gate on.
+// EMITTED verbatim and silently never fire. The learned-mapping overlay
+// therefore canonicalizes the target through THIS function before
+// emitting/storing it, so a target that validates as known is emitted in the
+// exact spelling the typed detectors gate on.
 func CanonicalEventType(s string) string {
 	return strings.ToLower(strings.TrimSpace(s))
 }
@@ -110,8 +108,8 @@ func CanonicalEventType(s string) string {
 // IsKnownEventType reports whether s names an event type some built-in detector
 // gates on. It normalizes the query through CanonicalEventType; every
 // KnownEventTypes member is itself already canonical, so normalizing the query is
-// sufficient. This is the fail-loud membership check the K5/K6 loaders use to
-// reject an unknown target.
+// sufficient. This is the fail-loud membership check the learned-mapping overlay
+// uses to reject an unknown target.
 func IsKnownEventType(s string) bool {
 	return KnownEventTypes()[CanonicalEventType(s)]
 }

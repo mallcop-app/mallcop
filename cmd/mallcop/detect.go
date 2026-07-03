@@ -11,17 +11,9 @@ import (
 
 	"github.com/mallcop-app/mallcop/core/config"
 	"github.com/mallcop-app/mallcop/core/detect"
-	"github.com/mallcop-app/mallcop/core/eval"
 	"github.com/mallcop-app/mallcop/pkg/baseline"
 	"github.com/mallcop-app/mallcop/pkg/event"
 )
-
-// envDeclRules optionally names a declarative rules YAML (detectors/rules.yaml
-// shape). Precedence for the decl rules file is: the --rules flag wins, then
-// $MALLCOP_DECL_RULES, then — when a mallcop.yaml is discovered — the config's
-// learning.dir/rules.yaml, and finally (only when NO config is present) the
-// legacy repo-root/detectors/rules.yaml auto-discovery. See resolveDeclRulesPath.
-const envDeclRules = "MALLCOP_DECL_RULES"
 
 // runDetect implements `mallcop detect`: read events JSONL on stdin, run the
 // offline core/detect pipeline (all 17 detectors), and write findings JSONL to
@@ -44,14 +36,10 @@ func runDetect(args []string) error {
 	fs := flag.NewFlagSet("detect", flag.ContinueOnError)
 	baselinePath := fs.String("baseline", "", "Optional path to a baseline JSON file (flag wins; else config store.baseline)")
 	tuningPath := fs.String("tuning", "", "Optional path to a detector tuning YAML (flag wins; else config learning.dir/tuning.yaml)")
-	rulesPath := fs.String("rules", "", "Optional declarative detector rules YAML (flag wins; else $"+envDeclRules+"; else config learning.dir/rules.yaml)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if err := applyTuningFlag(*tuningPath); err != nil {
-		return err
-	}
-	if err := loadDeclRulesAutodiscover(*rulesPath); err != nil {
 		return err
 	}
 
@@ -176,58 +164,6 @@ func resolveBaselinePath(flagPath string) (string, error) {
 		b = filepath.Join(filepath.Dir(cfgPath), b)
 	}
 	return b, nil
-}
-
-// resolveDeclRulesPath resolves the declarative rules file with the §C.1
-// precedence: the --rules flag wins, then $MALLCOP_DECL_RULES, then — when a
-// mallcop.yaml is discovered — the config's learning.dir/rules.yaml, and finally
-// (only when NO config is present) the legacy <root>/detectors/rules.yaml
-// auto-discovery. The config path REPLACES the repo-root guess, which is wrong
-// outside a repo (e.g. a customer working dir): an explicit learning.dir is
-// correct anywhere. An empty root with no explicit path/env/config yields "" (no
-// rules) — resolution is best-effort, never fatal, exactly like the tuning flag
-// is a no-op when unset. A corrupt discovered config falls through to the legacy
-// root guess rather than aborting here; a real corrupt-config failure is
-// surfaced loudly by the tuning resolver, which runs first.
-func resolveDeclRulesPath(explicit, root string) string {
-	if explicit != "" {
-		return explicit
-	}
-	if env := os.Getenv(envDeclRules); env != "" {
-		return env
-	}
-	if cfg, cfgPath, err := config.LoadEffective(""); err == nil && cfgPath != "" {
-		return learningFile(cfg, cfgPath, "rules.yaml")
-	}
-	if root == "" {
-		return ""
-	}
-	return filepath.Join(root, "detectors", "rules.yaml")
-}
-
-// loadDeclRulesAt loads and REGISTERS the declarative detector rules at path,
-// one detector per rule (Name "decl:<name>"). An empty path is a no-op. An
-// absent file is a no-op (LoadRules treats os.ErrNotExist as "no rules"); a
-// present-but-invalid corpus (unknown field, bad enum, unknown event type,
-// uncompilable regex, framework-name collision, sha256 mismatch under
-// enforcement) is FATAL — a corrupt rules file must never silently degrade
-// detection. Registration is at explicit startup, never init().
-func loadDeclRulesAt(path string) error {
-	if path == "" {
-		return nil
-	}
-	if _, err := detect.LoadRules(path); err != nil {
-		return fmt.Errorf("loading decl rules %s: %w", path, err)
-	}
-	return nil
-}
-
-// loadDeclRulesAutodiscover resolves the repo root (best-effort — an
-// unresolvable root just means no auto-discovered rules) and loads the rules
-// file for the commands (scan, detect) that do not otherwise resolve a root.
-func loadDeclRulesAutodiscover(explicit string) error {
-	root, _ := eval.RepoRoot() // "" on failure => no auto-discovery
-	return loadDeclRulesAt(resolveDeclRulesPath(explicit, root))
 }
 
 // readEventsJSONL parses newline-delimited JSON events from r. Blank lines are

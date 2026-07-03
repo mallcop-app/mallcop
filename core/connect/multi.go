@@ -9,7 +9,7 @@ import (
 // MultiConnector fans one scan cycle out over several sub-connectors and
 // concatenates their events into a single batch. It is the seam that lets a
 // config-driven `mallcop scan` pull from every configured source (file, github,
-// decl, cloud, …) in ONE pass without the pipeline knowing more than one
+// cloud, …) in ONE pass without the pipeline knowing more than one
 // Connector exists.
 //
 // It carries NO source-specific logic — it only composes Connectors — so it
