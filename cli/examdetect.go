@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -29,6 +30,7 @@ func runExamDetect(args []string) error {
 	fs := flag.NewFlagSet("exam-detect", flag.ContinueOnError)
 	jsonOut := fs.Bool("json", false, "Output the report as JSON")
 	tuningPath := fs.String("tuning", "", "Optional path to a detector tuning YAML (widen-only extra_* knobs)")
+	sidecarSrc := fs.String("sidecar-src", "", "Optional Go package directory to build to a wasip1 .wasm module and grade IN ADDITION to any configured sidecars — the CUSTOMER-TREE exam mode (mallcoppro-cc3e): the detector need not live in this repo's own tree at all, only be a valid Go package implementing core/detect.Detector via pkg/detectorhost")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -47,6 +49,21 @@ func runExamDetect(args []string) error {
 	// own config resolution above.
 	if err := loadSidecarDetectorsFromConfig(""); err != nil {
 		return err
+	}
+
+	// --sidecar-src: build and register an AD HOC wasm sidecar from source,
+	// same host, same real wazero path — see buildAndRegisterSourceSidecar. The
+	// scratch dir is removed when the command returns; the sidecar only needs
+	// to survive this one grading pass.
+	if *sidecarSrc != "" {
+		scratch, err := os.MkdirTemp("", "mallcop-sidecar-src-")
+		if err != nil {
+			return fmt.Errorf("exam-detect: --sidecar-src scratch dir: %w", err)
+		}
+		defer os.RemoveAll(scratch)
+		if err := buildAndRegisterSourceSidecar(context.Background(), *sidecarSrc, scratch); err != nil {
+			return fmt.Errorf("exam-detect: --sidecar-src %s: %w", *sidecarSrc, err)
+		}
 	}
 
 	root, err := eval.RepoRoot()

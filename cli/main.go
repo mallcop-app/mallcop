@@ -112,10 +112,16 @@ Commands:
                Reads events JSONL from stdin, writes findings JSONL to stdout.
 
   exam-detect  Grade the offline detect layer against the labeled exam corpus
-    --json     Output the report as JSON
-    --tuning   Optional detector tuning YAML (widen-only extra_* knobs) —
-               grades the corpus WITH the tuning applied, so a tuning
-               proposal can be evaluated before it is committed.
+    --json        Output the report as JSON
+    --tuning      Optional detector tuning YAML (widen-only extra_* knobs) —
+                  grades the corpus WITH the tuning applied, so a tuning
+                  proposal can be evaluated before it is committed.
+    --sidecar-src Optional Go package directory built to a wasip1 .wasm module
+                  and graded through the real detecthost host IN ADDITION to
+                  any configured sidecars — the CUSTOMER-TREE exam mode: the
+                  detector need not live in this repo's own tree, only be a
+                  valid package implementing core/detect.Detector via
+                  pkg/detectorhost.
                Runs core/detect over every exam scenario labeled with an
                expected_detection block (must_fire / must_not_fire detector
                families) and reports per-scenario pass/fail. Offline and

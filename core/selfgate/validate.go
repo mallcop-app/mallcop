@@ -26,6 +26,15 @@
 //     where declaredTargets are the must_fire families of rows newly
 //     labeled / newly passing in this proposal.
 //
+// CUSTOMER-TREE EXAM MODE (mallcoppro-cc3e): ValidateProposal above grades an
+// authored detector that lives IN this repo's own core/detect/authored/ tree,
+// compiled straight into the tree's own cmd/mallcop binary. RunCustomerTreeExam
+// (customerexam.go) is the sibling entry point for grading a detector that does
+// NOT — a customer's own detector source, anywhere on disk, built to a wasip1
+// .wasm module and graded through the exact same subprocess/wazero path a real
+// deployment uses. See customerexam.go's doc comment for the ground-truth
+// invariant this preserves.
+//
 // $0 BY CONSTRUCTION: nothing on this path constructs an inference client or
 // talks to the network — the free tier is git + the Go toolchain + the repo's
 // own OFFLINE exam binary (exam-detect is LLM-free by design). This package
@@ -432,6 +441,28 @@ var examExecWallClock = 3 * time.Minute
 // (gaps present) both yield a report; anything else is an error, with detail
 // carrying the subprocess output for the caller's finding/error message.
 func runTreeExam(tree string) (examReport, string, error) {
+	return runTreeExamWithSidecarSrc(tree, "")
+}
+
+// runTreeExamWithSidecarSrc is runTreeExam, optionally grading an AD HOC
+// detector built from sidecarSrcDir IN ADDITION to whatever the tree builds
+// in-process — the CUSTOMER-TREE exam mode (mallcoppro-cc3e; see
+// RunCustomerTreeExam). sidecarSrcDir == "" reproduces runTreeExam's exact
+// prior behavior byte-for-byte (the flag is simply omitted from argv), which
+// is what keeps the existing in-tree stage-3 lane unchanged.
+//
+// GROUND-TRUTH INVARIANT: this package never imports core/eval or detecthost
+// (see the package doc and TestSelfgateImportsNoInferenceOrCommittee) — the
+// $0 purity constraint on selfgate. Grading a wasm sidecar therefore ALWAYS
+// happens on the far side of this same subprocess/JSON seam runTreeExam
+// already uses for the in-tree lane: `mallcop exam-detect --sidecar-src <dir>
+// --json` builds sidecarSrcDir to a wasip1 .wasm module and loads it through
+// the REAL detecthost host (cli/sidecars.go's
+// buildAndRegisterSourceSidecar) before grading — never links the detector's
+// Go source into the tree's own binary. selfgate cannot even construct an
+// in-process shortcut for this: it has no way to reach core/detect's registry
+// or detecthost directly.
+func runTreeExamWithSidecarSrc(tree, sidecarSrcDir string) (examReport, string, error) {
 	bin := filepath.Join(tree, "mallcop")
 	stdout, stderr, code, err := runTool(tree, nil, "go", "build", "-o", bin, "./cmd/mallcop")
 	if err != nil {
@@ -445,6 +476,9 @@ func runTreeExam(tree string) (examReport, string, error) {
 	tuning := filepath.Join(tree, "detectors", "tuning.yaml")
 	if _, err := os.Stat(tuning); err == nil {
 		args = append(args, "--tuning", tuning)
+	}
+	if sidecarSrcDir != "" {
+		args = append(args, "--sidecar-src", sidecarSrcDir)
 	}
 	// Defense-in-depth behind the L3 shape gate: an authored detector that slips
 	// an unbounded loop or blocking call past the AST check would otherwise let
