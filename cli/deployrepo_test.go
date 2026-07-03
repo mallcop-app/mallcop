@@ -61,17 +61,40 @@ func TestScaffoldDeployAssetsWritesAllExpectedFiles(t *testing.T) {
 	if !strings.Contains(w, `MALLCOP_VERSION: "v0.7.0"`) {
 		t.Fatalf("scan.yml does not pin MALLCOP_VERSION to v0.7.0:\n%s", w)
 	}
-	if !strings.Contains(w, "releases/download/${MALLCOP_VERSION}/mallcop-linux-amd64.tar.gz") {
+	if !strings.Contains(w, "releases/download/${MALLCOP_VERSION}/mallcop-${MALLCOP_ASSET}.tar.gz") {
 		t.Fatalf("scan.yml does not install the pinned release binary from GitHub Releases:\n%s", w)
+	}
+	// The asset name must be resolved from the runner's actual OS/arch, never
+	// hardcoded to a single platform -- the release publishes linux-amd64,
+	// linux-arm64, AND darwin-arm64 (see the release-assets test below).
+	if !strings.Contains(w, "RUNNER_OS") || !strings.Contains(w, "RUNNER_ARCH") {
+		t.Fatalf("scan.yml does not resolve the release asset from RUNNER_OS/RUNNER_ARCH:\n%s", w)
+	}
+	for _, want := range []string{"linux-amd64", "linux-arm64", "darwin-arm64"} {
+		if !strings.Contains(w, want) {
+			t.Fatalf("scan.yml platform-detection step is missing the %q asset mapping:\n%s", want, w)
+		}
 	}
 	if !strings.Contains(w, "GOOS=wasip1 GOARCH=wasm go build") {
 		t.Fatalf("scan.yml does not build sidecars to wasip1/wasm:\n%s", w)
+	}
+	if !strings.Contains(w, "GOFLAGS: -mod=mod") {
+		t.Fatalf("scan.yml sidecar build step does not set GOFLAGS=-mod=mod (see cli/sidecars.go buildAndRegisterSourceSidecar for why a customer's detectors/ build needs it):\n%s", w)
 	}
 	if strings.Contains(w, "go build -o mallcop") || strings.Contains(w, "go build ./cmd/mallcop") {
 		t.Fatalf("scan.yml must never rebuild the whole mallcop binary from customer code:\n%s", w)
 	}
 	if !strings.Contains(w, "mallcop scan") {
 		t.Fatalf("scan.yml does not run 'mallcop scan':\n%s", w)
+	}
+	// The workflow must be BOTH schedulable (real "scheduled scan") AND
+	// manually triggerable (workflow_dispatch -- how this item's live proof
+	// runs it deterministically instead of waiting on a cron tick).
+	if !strings.Contains(w, "schedule:") || !strings.Contains(w, "cron:") {
+		t.Fatalf("scan.yml is missing a cron schedule trigger:\n%s", w)
+	}
+	if !strings.Contains(w, "workflow_dispatch:") {
+		t.Fatalf("scan.yml is missing a workflow_dispatch trigger:\n%s", w)
 	}
 	if !strings.Contains(w, "mallcop-findings") {
 		t.Fatalf("scan.yml does not reference the findings-persistence branch:\n%s", w)
