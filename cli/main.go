@@ -69,7 +69,11 @@ func Main() {
 	case "status":
 		err = runStatus(args)
 	case "config":
-		err = runConfig(args)
+		if len(args) > 0 && args[0] == "set" {
+			err = runConfigSet(args[1:])
+		} else {
+			err = runConfig(args)
+		}
 	case "feedback":
 		err = runFeedback(args)
 	default:
@@ -163,6 +167,14 @@ Commands:
     --store    Path to the git-repo store written by 'mallcop scan' (required)
 
   config  Print the effective scan config merged from a discovered mallcop.yaml + the environment
+  config set connector --kind=file|github|cloud --id=<id> [--path=][--org=][--source=][--binary=][--since=][--args=a,b][--env=NAME1,NAME2]
+                Add a connector to mallcop.yaml (strict-validated, atomic write).
+                Rejects a duplicate id, an unknown kind, or an inline secret in --env.
+                THE SHARED PRIMITIVE any driver of this change (this command, a
+                chat surface) must call — see core/config.AddConnector.
+  config set autonomy <non|semi|fully>
+                Set learning.autonomy in mallcop.yaml (strict enum, atomic write).
+                THE SHARED PRIMITIVE — see core/config.SetAutonomy.
 
   feedback  Record an operator decision on a finding; the next scan honors it
     <finding_id> approve|dismiss   approve = activity known-good; dismiss = not actionable
