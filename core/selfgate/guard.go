@@ -145,6 +145,12 @@ const (
 // lookup_rules.go and its expectedOperatorRulesSHA256 pin), the grader
 // (core/eval — out of the agent's reach, rd 71c), inference, the stable event/
 // finding/baseline contracts, every binary entrypoint, and CI.
+//
+// mallcoppro-519 moved the runX command logic out of cmd/mallcop into the
+// importable cli/ package. cli/ is deliberately NOT enumerated here: it does
+// not need to be — the RuleCodeFrozen default-deny floor below (Go source
+// outside the additive core/detect/ detector lane) already freezes every
+// existing cli/*.go file and rejects any new one, independent of this list.
 var protectedPrefixes = []string{
 	"core/agent/",
 	"core/pipeline/",

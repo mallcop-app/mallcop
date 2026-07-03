@@ -1,4 +1,4 @@
-package main
+package cli
 
 import (
 	"encoding/json"
@@ -8,16 +8,16 @@ import (
 )
 
 // repoRootForExamTest resolves the repo root from this test file's location
-// (cmd/mallcop/ is two levels below the root). Inside `go test` os.Executable
-// lands in a temp build dir, so the RepoRoot walk finds no marker; the test
-// pins MALLCOP_REPO_ROOT (the documented production fallback) instead.
+// (cli/ is one level below the root). Inside `go test` os.Executable lands in
+// a temp build dir, so the RepoRoot walk finds no marker; the test pins
+// MALLCOP_REPO_ROOT (the documented production fallback) instead.
 func repoRootForExamTest(t *testing.T) string {
 	t.Helper()
 	_, thisFile, _, ok := runtime.Caller(0)
 	if !ok {
 		t.Fatal("runtime.Caller failed")
 	}
-	root, err := filepath.Abs(filepath.Join(filepath.Dir(thisFile), "..", ".."))
+	root, err := filepath.Abs(filepath.Join(filepath.Dir(thisFile), ".."))
 	if err != nil {
 		t.Fatalf("abs repo root: %v", err)
 	}
