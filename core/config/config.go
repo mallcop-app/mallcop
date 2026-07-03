@@ -131,10 +131,47 @@ type Builtin struct {
 // Learning points at the LOOP-OWNED overlay dir (store-repo-relative). It stays
 // the default `detectors/` so the guard's widen dispatch (gated on the
 // detectors/ prefix) fires byte-for-byte unchanged.
+//
+// Autonomy is the self-extension AUTONOMY DIAL (rd mallcoppro-315): the
+// operator-owned blast-radius setting mallcop-pro's selfext router + engine
+// read to decide whether a gate-GREEN change auto-applies or waits for a
+// human. Exactly one of AutonomyNon / AutonomySemi / AutonomyFully — see
+// IsValidAutonomy. Any other value is a loud config load error (STRICT, same
+// discipline as the rest of this package): a typo must never silently fall
+// back to the fail-safe default and be mistaken for an explicit choice.
+//
+//	non   - propose-only. EVERY change (data overlay write AND authored code)
+//	        waits for a human to approve. The default — mallcop ships fail-safe.
+//	semi  - DATA changes (learned mappings / tuning overlays) auto-apply on a
+//	        gate-GREEN clean widen; CODE changes (authored detectors/
+//	        connectors) still always wait for a human.
+//	fully - DATA and CODE both auto-apply on a gate-GREEN clean widen.
+//
+// Contribute-back to the shared OSS pool is NEVER auto-merged regardless of
+// this dial (a hard line, not operator-overridable — rd mallcoppro-13c/49f):
+// the router's OSS-PR artifact is always a human/maintainer-reviewed
+// deliverable, at every autonomy setting.
 type Learning struct {
 	Dir        string `yaml:"dir"`
 	Autonomy   string `yaml:"autonomy"`
 	EnforcePin bool   `yaml:"enforce_pin"`
+}
+
+// The three self-extension autonomy dial positions (Learning.Autonomy).
+const (
+	AutonomyNon   = "non"
+	AutonomySemi  = "semi"
+	AutonomyFully = "fully"
+)
+
+// IsValidAutonomy reports whether s is one of the three dial positions.
+func IsValidAutonomy(s string) bool {
+	switch s {
+	case AutonomyNon, AutonomySemi, AutonomyFully:
+		return true
+	default:
+		return false
+	}
 }
 
 // Sovereignty carries the deployment tier and the opt-in OSS contribute-back flag.
@@ -173,7 +210,7 @@ func Defaults() Config {
 			Builtin:  Builtin{Enabled: true, Disable: []string{}},
 			Sidecars: Sidecars{Dir: "./detectors/bin"},
 		},
-		Learning:    Learning{Dir: "detectors", Autonomy: "off", EnforcePin: false},
+		Learning:    Learning{Dir: "detectors", Autonomy: AutonomyNon, EnforcePin: false},
 		Sovereignty: Sovereignty{Tier: "open", ContributeBack: false},
 		Budgets:     Budgets{MaxFindings: 25, ScanTimeout: "10m", SelfextSpendCapUSD: 25},
 	}
@@ -284,6 +321,9 @@ func looksLikeSecret(s string) bool {
 func validate(cfg Config) error {
 	if looksLikeSecret(cfg.Inference.KeyEnv) {
 		return fmt.Errorf("inference.key_env must be an env-var NAME (e.g. MALLCOP_API_KEY), not an inline secret value — got %q, which looks like a literal key", cfg.Inference.KeyEnv)
+	}
+	if !IsValidAutonomy(cfg.Learning.Autonomy) {
+		return fmt.Errorf("learning.autonomy must be one of %q, %q, %q — got %q", AutonomyNon, AutonomySemi, AutonomyFully, cfg.Learning.Autonomy)
 	}
 	for _, c := range cfg.Connectors {
 		for _, e := range c.Env {
