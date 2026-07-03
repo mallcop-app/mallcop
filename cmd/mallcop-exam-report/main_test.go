@@ -34,8 +34,15 @@ func newIsolatedCampfire(t *testing.T, cfBin string) (string, string) {
 		t.Fatalf("cf init: %v\n%s", err, out)
 	}
 
-	// Create campfire; use --json to get structured output with campfire_id
-	createCmd := exec.Command(cfBin, "create", "--description", "test-exam-"+t.Name(), "--json")
+	// Create campfire; use --json to get structured output with campfire_id.
+	// --no-config suppresses cf's "Wrote <path>/.cf/config.toml" preamble line
+	// that cf prints (to stdout, ahead of the JSON) the first time it would
+	// write a project-root beacon file — without it, a cold checkout with no
+	// prior .cf state fails JSON parsing on that human-readable line, while a
+	// warmed checkout (config.toml already present) silently passes. Tests
+	// pass an explicit campfireID everywhere, so the project-root beacon file
+	// cf would otherwise write is never consulted anyway.
+	createCmd := exec.Command(cfBin, "create", "--description", "test-exam-"+t.Name(), "--json", "--no-config")
 	createCmd.Env = append(os.Environ(), "CF_HOME="+cfHome)
 	out, err := createCmd.Output()
 	if err != nil {

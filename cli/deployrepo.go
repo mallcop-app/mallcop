@@ -296,13 +296,35 @@ jobs:
       - name: Checkout deployment repo
         uses: actions/checkout@v4
 
-      - name: Install pinned mallcop release binary
+      - name: Determine pinned-release asset for this runner
+        # Maps the Actions-provided RUNNER_OS/RUNNER_ARCH to the exact asset
+        # name mallcop's release workflow publishes (see mallcop-app/mallcop's
+        # releases: mallcop-linux-amd64.tar.gz, mallcop-linux-arm64.tar.gz,
+        # mallcop-darwin-arm64.tar.gz). Never hardcodes a single arch, so this
+        # workflow keeps working if the customer ever moves scan.yml's
+        # runs-on to an arm64 or macOS runner.
+        id: platform
         run: |
           set -euo pipefail
-          curl -fsSLO "https://github.com/mallcop-app/mallcop/releases/download/${MALLCOP_VERSION}/mallcop-linux-amd64.tar.gz"
-          curl -fsSLO "https://github.com/mallcop-app/mallcop/releases/download/${MALLCOP_VERSION}/mallcop-linux-amd64.tar.gz.sha256"
-          sha256sum -c "mallcop-linux-amd64.tar.gz.sha256"
-          tar -xzf mallcop-linux-amd64.tar.gz
+          case "${RUNNER_OS}-${RUNNER_ARCH}" in
+            Linux-X64) echo "asset=linux-amd64" >> "$GITHUB_OUTPUT" ;;
+            Linux-ARM64) echo "asset=linux-arm64" >> "$GITHUB_OUTPUT" ;;
+            macOS-ARM64) echo "asset=darwin-arm64" >> "$GITHUB_OUTPUT" ;;
+            *)
+              echo "no published mallcop release asset for ${RUNNER_OS}-${RUNNER_ARCH}" >&2
+              exit 1
+              ;;
+          esac
+
+      - name: Install pinned mallcop release binary
+        env:
+          MALLCOP_ASSET: ${{ steps.platform.outputs.asset }}
+        run: |
+          set -euo pipefail
+          curl -fsSLO "https://github.com/mallcop-app/mallcop/releases/download/${MALLCOP_VERSION}/mallcop-${MALLCOP_ASSET}.tar.gz"
+          curl -fsSLO "https://github.com/mallcop-app/mallcop/releases/download/${MALLCOP_VERSION}/mallcop-${MALLCOP_ASSET}.tar.gz.sha256"
+          sha256sum -c "mallcop-${MALLCOP_ASSET}.tar.gz.sha256"
+          tar -xzf "mallcop-${MALLCOP_ASSET}.tar.gz"
           echo "$PWD/bin" >> "$GITHUB_PATH"
 
       - name: Set up Go (sidecar builds only -- never the core binary)
@@ -311,6 +333,16 @@ jobs:
           go-version: '1.24'
 
       - name: Build wasip1 sidecar detectors
+        # GOFLAGS=-mod=mod mirrors cli/sidecars.go's
+        # buildAndRegisterSourceSidecar: this repo's go.mod pins
+        # github.com/mallcop-app/mallcop (D1 THIN-EMBED) but a customer
+        # editing detectors/ may not have re-run 'go mod tidy' after adding an
+        # import -- -mod=mod lets 'go build' complete the go.sum itself
+        # (from the module cache or GOPROXY) instead of hard-failing with
+        # "missing go.sum entry", exactly like a customer's own 'go build'
+        # would need to.
+        env:
+          GOFLAGS: -mod=mod
         run: |
           set -euo pipefail
           mkdir -p detectors/bin
