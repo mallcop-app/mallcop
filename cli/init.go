@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"os"
@@ -33,6 +34,9 @@ func runInit(args []string) error {
 	fs := flag.NewFlagSet("init", flag.ContinueOnError)
 	dir := fs.String("dir", ".", "Directory to initialize")
 	pro := fs.Bool("pro", false, "Generate a config on the managed donut inference rail (api.mallcop.app) instead of offline")
+	createRepo := fs.String("create-repo", "", "owner/name -- also scaffold deployment-repo assets (go.mod, detectors/, connectors/, .github/workflows/) and create+push a real GitHub repo (see deployrepo.go)")
+	mallcopVersion := fs.String("mallcop-version", "", "mallcop release tag to pin the deployment repo's go.mod + scheduled Action to (default: query the latest GitHub release)")
+	githubTokenEnv := fs.String("github-token-env", "MALLCOP_GITHUB_TOKEN", "Env var holding a GitHub token with repo-create scope, used with --create-repo")
 
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -89,6 +93,41 @@ func runInit(args []string) error {
 			return fmt.Errorf("writing sample events: %w", err)
 		}
 		fmt.Printf("mallcop init: created %s (sample events)\n", eventsFile)
+	}
+
+	// --create-repo: turn the local scaffold above into a customer
+	// DEPLOYMENT repo -- add the deploy-only assets (go.mod pin, detectors/,
+	// connectors/, the scheduled-scan workflow) then create+push a real
+	// GitHub repo, so the customer never compiles mallcop locally (see
+	// cli/deployrepo.go for the full design).
+	if *createRepo != "" {
+		ctx := context.Background()
+
+		version := *mallcopVersion
+		if version == "" {
+			var err error
+			version, err = latestMallcopRelease(ctx, nil)
+			if err != nil {
+				return fmt.Errorf("--create-repo: resolving --mallcop-version: %w", err)
+			}
+		}
+
+		owner, name, ok := splitOwnerRepo(*createRepo)
+		if !ok {
+			return fmt.Errorf("--create-repo wants \"owner/name\", got %q", *createRepo)
+		}
+		moduleName := "github.com/" + owner + "/" + name
+
+		if err := scaffoldDeployAssets(absDir, moduleName, version); err != nil {
+			return err
+		}
+		fmt.Printf("mallcop init: scaffolded deployment-repo assets (go.mod pin %s, detectors/, connectors/, .github/workflows/scan.yml)\n", version)
+
+		result, err := createAndPushDeployRepo(ctx, absDir, *createRepo, envGitHubToken{envVar: *githubTokenEnv})
+		if err != nil {
+			return fmt.Errorf("--create-repo: %w", err)
+		}
+		fmt.Printf("mallcop init: created and pushed %s\n", result.HTMLURL)
 	}
 
 	fmt.Printf("\nNext steps:\n")
