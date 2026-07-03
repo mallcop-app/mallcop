@@ -250,6 +250,12 @@ func (s *Store) Append(kind Kind, record any) (sha string, err error) {
 // one commit, every loser retries against the new HEAD. The result is a linear,
 // deterministic, commit-ordered log with NO lost write and NO duplicate, proven
 // by TestRebaseRetryUnderTrueRace.
+//
+// Steps 1-5 above deliberately never touch the repo's REAL index/work tree —
+// only the CAS winner's per-attempt temp index. Once the CAS lands, the
+// winner reconciles the real index/work tree to HEAD (syncWorkTree) so the
+// repo never sits, even transiently, in the drifted state where an ordinary
+// `git status` sees every stream file as staged-deleted (mallcoppro-4fe).
 func (s *Store) commitAppend(kind Kind, line []byte) (string, error) {
 	const maxRetries = 128
 	var lastErr error
@@ -318,9 +324,65 @@ func (s *Store) commitAppend(kind Kind, line []byte) (string, error) {
 			lastErr = err // expected under contention — rebase and retry
 			continue
 		}
+		// The commit that just landed was built entirely against the
+		// PER-ATTEMPT temp index above (buildTree) — the repo's REAL index
+		// (.git/index) was never touched. Left alone, it silently drifts out
+		// of sync with HEAD forever: the real index still reflects whatever
+		// it held when the repo was `git init`'d (nothing, for a fresh repo),
+		// while HEAD's tree gains a stream file on every Append. Reconcile it
+		// now, as an integral part of this write, so the repo is NEVER left
+		// in the drifted state between commits (see syncWorkTree).
+		if err := s.syncWorkTree(); err != nil {
+			return "", err
+		}
 		return commitSHA, nil
 	}
 	return "", fmt.Errorf("store: commit %s gave up after %d rebase retries: %w", kind, maxRetries, lastErr)
+}
+
+// syncWorkTree reconciles the repo's REAL index and work tree to CURRENT HEAD
+// (re-resolved here, never the sha the caller just produced) after a
+// successful commit. It is the fix for mallcoppro-4fe: commitAppend and
+// WriteSnapshot build every commit through a per-attempt TEMPORARY index
+// (GIT_INDEX_FILE) so concurrent writers racing the CAS never contend on the
+// repo's shared index/lock — but that means a successful append NEVER updates
+// the real .git/index. Left unreconciled, the real index permanently reflects
+// whatever it held at `git init` time (empty, for every repo this CLI
+// creates) while HEAD's tree accumulates the stream files. Any git command
+// that DOES look at the real index (`git status`, or a customer's
+// `git add -A && git commit`) then sees every stream file as staged-DELETED
+// (index lacks the path, HEAD has it) and physically missing (the work tree
+// was never written either) — and a follow-on commit in that state COMMITS
+// the deletion, replacing real history with git's empty tree.
+//
+// `git read-tree --reset -u HEAD` atomically replaces the real index AND the
+// work-tree contents with HEAD's tree in one step: it is idempotent and
+// monotonic (re-resolving HEAD instead of taking a specific sha means a
+// slower concurrent writer's sync can never regress a faster one's — whatever
+// order concurrent syncs land in, each converges the repo to whatever HEAD
+// currently holds, never backward). It does not disturb untracked paths
+// outside HEAD's tree (e.g. a cloud connector's .mallcop/cursors/* cursor
+// files), because those were never part of any index to begin with.
+//
+// Contention on the real index lock (a second writer's sync running at the
+// same instant) is expected only under true multi-process/goroutine
+// concurrency against the SAME store — never in the single-writer path
+// `mallcop scan` uses — so it is retried with the same backoff as the CAS
+// loop rather than failing outright.
+func (s *Store) syncWorkTree() error {
+	const maxRetries = 32
+	var lastErr error
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		if attempt > 0 {
+			backoff(attempt)
+		}
+		if _, err := s.git("read-tree", "--reset", "-u", "HEAD"); err != nil {
+			lastErr = err
+			continue
+		}
+		return nil
+	}
+	return fmt.Errorf("store: sync work tree gave up after %d retries: %w", maxRetries, lastErr)
 }
 
 // WriteSnapshot commits a full-content JSON document named `name` at the repo
@@ -381,6 +443,13 @@ func (s *Store) WriteSnapshot(name string, records any) (string, error) {
 		if _, err := s.git(casArgs...); err != nil {
 			lastErr = err
 			continue
+		}
+		// See syncWorkTree's doc comment (called identically from
+		// commitAppend) — this commit's tree, like every commitAppend
+		// commit, was built against a temp index only; reconcile the real
+		// index/work tree to it now, not later.
+		if err := s.syncWorkTree(); err != nil {
+			return "", err
 		}
 		return commitSHA, nil
 	}
