@@ -414,22 +414,43 @@ func nonLocalWrites(path string, node ast.Node, locals map[string]bool) []Violat
 
 // checkParamWrites flags any write whose target is a COMPOUND lvalue — a field
 // selector, index, pointer deref, or the address-of one — rooted at a function
-// PARAMETER or RECEIVER. This is the K7 HOLE 1b shape gate: detect.Detect threads
-// ONE events slice and ONE *baseline.Baseline through every registered detector,
-// so an authored Detect that writes THROUGH its arguments (events[i].Payload =
-// nil, (&events[i]).Actor = "", bl.KnownActors = nil, *bl = baseline.Baseline{})
-// mutates the SHARED input and silences every later security detector. An
-// authored detector must treat its args as READ-ONLY.
+// PARAMETER or RECEIVER (or a simple LOCAL ALIAS of one, see below). This is the
+// K7 HOLE 1b shape gate: detect.Detect threads ONE events slice and ONE
+// *baseline.Baseline through every registered detector, so an authored Detect
+// that writes THROUGH its arguments (events[i].Payload = nil, (&events[i]).Actor
+// = "", bl.KnownActors = nil, *bl = baseline.Baseline{}) mutates the SHARED input
+// and silences every later security detector. An authored detector must treat
+// its args as READ-ONLY.
 //
-// Only writes THROUGH a parameter are flagged, not a bare rebinding of the
-// parameter identifier itself (events = someLocal): reassigning the local
+// Only writes THROUGH a parameter (or alias) are flagged, not a bare rebinding of
+// the parameter identifier itself (events = someLocal): reassigning the local
 // parameter variable does not touch the caller's backing data. Writes through a
-// LOCAL variable (a slice/map the detector allocated itself) are likewise fine —
-// the root there is a `:=`/var-declared local, never a parameter.
+// LOCAL variable that was NOT derived from a parameter (a slice/map the detector
+// allocated itself) are likewise fine.
+//
+// Two K7 re-red-team gaps this closes (both already neutralized at RUNTIME by
+// detect.Detect's per-detector deep clone of events+baseline — this is
+// defense-in-depth in the STATIC gate, not the only backstop):
+//
+//  1. alias-then-mutate: `local := bl; local.KnownUsers = nil` (or
+//     `local := events; local[0].Payload = nil`) aliases a parameter into a
+//     plain `:=`-declared local and then writes through THAT identifier. A
+//     write-target check keyed only on collectParamAndReceiverNames misses it
+//     because "local" is never itself a parameter or receiver name.
+//     paramDerivedIdents below tracks which locals are aliases of a
+//     parameter (including transitively — `a := bl; b := a`) and folds them
+//     into the same root set checkParamWrites tests writes against.
+//  2. delete(bl.KnownUsers, k) / clear(bl.KnownUsers): the Go builtins delete
+//     and clear mutate their first argument through a plain function CALL, not
+//     an AssignStmt/IncDecStmt/address-of — collectAssignmentTargets only walks
+//     those three write shapes, so a builtin mutator call was invisible to this
+//     gate entirely. checkParamBuiltinMutations below flags any delete(x, ...)
+//     or clear(x) whose first argument roots at a parameter or a
+//     parameter-derived alias.
 //
 // The walk descends into nested func literals (ast.Inspect), so a write through
-// an outer parameter captured by a closure is caught too; the param set is the
-// union of every enclosing FuncDecl/FuncLit receiver+parameter, an
+// an outer parameter (or alias) captured by a closure is caught too; the param
+// set is the union of every enclosing FuncDecl/FuncLit receiver+parameter, an
 // over-approximation that is sound (it can only flag more, never fewer, writes
 // through argument-derived state).
 func checkParamWrites(path string, f *ast.File) []Violation {
@@ -443,22 +464,123 @@ func checkParamWrites(path string, f *ast.File) []Violation {
 		if len(params) == 0 {
 			continue
 		}
+		derived := paramDerivedIdents(fn.Body, params)
 		for _, tgt := range collectAssignmentTargets(fn.Body) {
 			if !isCompoundLValue(tgt.expr) {
-				continue // a bare-ident rebind of a param is not a write THROUGH it
+				continue // a bare-ident rebind of a param/alias is not a write THROUGH it
 			}
 			root := rootIdent(tgt.expr)
-			if root == nil || !params[root.Name] {
+			if root == nil || !derived[root.Name] {
 				continue
 			}
 			violations = append(violations, Violation{
 				File:   path,
 				Rule:   RuleShapeNonLocalAssign,
-				Detail: fmt.Sprintf("write through parameter %q — an authored detector must treat its events/baseline arguments as READ-ONLY; mutating them (through an index, field, or deref) corrupts the shared input and silences every later detector", root.Name),
+				Detail: paramWriteDetail(root.Name, params),
+			})
+		}
+		for _, call := range paramBuiltinMutationCalls(fn.Body, derived) {
+			violations = append(violations, Violation{
+				File:   path,
+				Rule:   RuleShapeNonLocalAssign,
+				Detail: fmt.Sprintf("%s(%s, ...) — an authored detector must treat its events/baseline arguments as READ-ONLY; the delete/clear builtins mutate their first argument through a plain call, not an assignment, but the effect is the same shared-input corruption that silences every later detector", call.name, call.rootName),
 			})
 		}
 	}
 	return violations
+}
+
+// paramWriteDetail renders the write-through-parameter violation detail,
+// distinguishing a direct parameter/receiver name from a local alias of one so
+// the diagnostic still points at the real hazard when the write goes through an
+// intermediate identifier (`local := bl; local.KnownUsers = nil`).
+func paramWriteDetail(name string, directParams map[string]bool) string {
+	if directParams[name] {
+		return fmt.Sprintf("write through parameter %q — an authored detector must treat its events/baseline arguments as READ-ONLY; mutating them (through an index, field, or deref) corrupts the shared input and silences every later detector", name)
+	}
+	return fmt.Sprintf("write through %q, a local alias of a parameter — aliasing an events/baseline argument into a local (`%s := events` / `%s := bl`) and writing through the alias mutates the SAME shared backing array/map as the parameter and silences every later detector", name, name, name)
+}
+
+// paramDerivedIdents returns params UNIONED with every local identifier that is
+// a simple alias of a parameter (or of a prior alias): a `:=` DEFINE whose
+// right-hand side is a single expression rooted (via rootIdent) at an
+// already-known parameter-derived identifier. `local := bl`, `local := events`,
+// and the transitive `a := bl; b := a` are all covered. This intentionally does
+// NOT try to prove `local` is used read-only afterward — any local alias of a
+// parameter is treated as parameter-derived for the rest of the function, which
+// is sound (over-approximating "derived from a parameter" can only flag more
+// writes, never miss a real one) and matches the fail-closed posture of the rest
+// of this gate. The fixed-point loop (bounded, since each pass can only grow the
+// set and the set is bounded by the number of identifiers in the function) picks
+// up chains of aliases regardless of source order.
+func paramDerivedIdents(body *ast.BlockStmt, params map[string]bool) map[string]bool {
+	derived := make(map[string]bool, len(params))
+	for name := range params {
+		derived[name] = true
+	}
+	for {
+		grew := false
+		ast.Inspect(body, func(n ast.Node) bool {
+			as, ok := n.(*ast.AssignStmt)
+			if !ok || as.Tok != token.DEFINE || len(as.Lhs) != len(as.Rhs) {
+				return true
+			}
+			for i, lhs := range as.Lhs {
+				id, ok := lhs.(*ast.Ident)
+				if !ok || id.Name == "_" || derived[id.Name] {
+					continue
+				}
+				root := rootIdent(as.Rhs[i])
+				if root != nil && derived[root.Name] {
+					derived[id.Name] = true
+					grew = true
+				}
+			}
+			return true
+		})
+		if !grew {
+			break
+		}
+	}
+	return derived
+}
+
+// paramBuiltinMutation is one delete(x, k) or clear(x) call flagged by
+// paramBuiltinMutationCalls, carrying the builtin name and the root identifier
+// its first argument resolves to (for the violation detail).
+type paramBuiltinMutation struct {
+	name     string // "delete" or "clear"
+	rootName string
+}
+
+// paramBuiltinMutationCalls scans body for calls to the Go builtins delete and
+// clear whose first argument is a write target rooted (via rootIdent) at a
+// parameter or parameter-derived local in derived. Both builtins mutate their
+// first argument in place through a plain CallExpr — not an
+// AssignStmt/IncDecStmt/address-of — so collectAssignmentTargets never sees
+// them; this is the dedicated builtin-mutator half of the write-through-param
+// defence. delete(m, k) removes a map entry; clear(m) empties a map or zeroes a
+// slice. Either one, called on bl.KnownUsers / events / an alias of them,
+// corrupts the shared input just as a direct field/index write would.
+func paramBuiltinMutationCalls(body *ast.BlockStmt, derived map[string]bool) []paramBuiltinMutation {
+	var found []paramBuiltinMutation
+	ast.Inspect(body, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		id, ok := call.Fun.(*ast.Ident)
+		if !ok || (id.Name != "delete" && id.Name != "clear") || len(call.Args) == 0 {
+			return true
+		}
+		root := rootIdent(call.Args[0])
+		if root == nil || !derived[root.Name] {
+			return true
+		}
+		found = append(found, paramBuiltinMutation{name: id.Name, rootName: root.Name})
+		return true
+	})
+	return found
 }
 
 // collectParamAndReceiverNames gathers the receiver, parameter, AND every nested

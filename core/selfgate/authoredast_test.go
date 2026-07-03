@@ -447,6 +447,134 @@ func (blwriter) Detect(events []event.Event, bl *baseline.Baseline) []finding.Fi
 `,
 		},
 		{
+			// K7 L3 re-hardening (a): delete(bl.KnownUsers, k) mutates the shared
+			// baseline map through a plain builtin CALL, not an AssignStmt/
+			// IncDecStmt/address-of, so collectAssignmentTargets never saw it.
+			// paramBuiltinMutationCalls closes this: deleting an entry from a
+			// map reached off a Detect parameter is the same shared-input
+			// corruption as `bl.KnownUsers = nil`.
+			name:    "delete() on the baseline parameter's map",
+			dirName: "deleter",
+			rule:    RuleShapeNonLocalAssign,
+			src: `package deleter
+
+import (
+	"github.com/mallcop-app/mallcop/core/detect"
+	"github.com/mallcop-app/mallcop/pkg/baseline"
+	"github.com/mallcop-app/mallcop/pkg/event"
+	"github.com/mallcop-app/mallcop/pkg/finding"
+)
+
+func init() { detect.Register(deleter{}) }
+
+type deleter struct{}
+
+func (deleter) Name() string { return "deleter-detector" }
+
+func (deleter) Detect(events []event.Event, bl *baseline.Baseline) []finding.Finding {
+	for _, ev := range events {
+		delete(bl.KnownUsers, ev.Actor)
+	}
+	return nil
+}
+`,
+		},
+		{
+			// K7 L3 re-hardening (b): alias-then-mutate. `local := bl` aliases the
+			// baseline parameter into a plain `:=`-declared local; a write through
+			// "local" is a write through "bl" (the SAME pointer, same backing map)
+			// but a target-check keyed only on the parameter/receiver name set
+			// missed it because "local" is never itself a parameter. This is the
+			// clear()-builtin variant of the alias hole: clear(local.KnownUsers)
+			// empties the shared map through the alias.
+			name:    "alias-then-clear() through a local alias of the baseline parameter",
+			dirName: "aliasclear",
+			rule:    RuleShapeNonLocalAssign,
+			src: `package aliasclear
+
+import (
+	"github.com/mallcop-app/mallcop/core/detect"
+	"github.com/mallcop-app/mallcop/pkg/baseline"
+	"github.com/mallcop-app/mallcop/pkg/event"
+	"github.com/mallcop-app/mallcop/pkg/finding"
+)
+
+func init() { detect.Register(aliasclear{}) }
+
+type aliasclear struct{}
+
+func (aliasclear) Name() string { return "aliasclear-detector" }
+
+func (aliasclear) Detect(_ []event.Event, bl *baseline.Baseline) []finding.Finding {
+	local := bl
+	clear(local.KnownUsers)
+	return nil
+}
+`,
+		},
+		{
+			// K7 L3 re-hardening (c): alias-then-mutate via a direct field/index
+			// write (not a builtin call) — `local := events` aliases the events
+			// parameter's backing array into a local, then `local[0].Payload = nil`
+			// writes through it, silencing every later detector exactly like
+			// `events[0].Payload = nil` would.
+			name:    "alias-then-write through a local alias of the events parameter",
+			dirName: "aliaswrite",
+			rule:    RuleShapeNonLocalAssign,
+			src: `package aliaswrite
+
+import (
+	"github.com/mallcop-app/mallcop/core/detect"
+	"github.com/mallcop-app/mallcop/pkg/baseline"
+	"github.com/mallcop-app/mallcop/pkg/event"
+	"github.com/mallcop-app/mallcop/pkg/finding"
+)
+
+func init() { detect.Register(aliaswrite{}) }
+
+type aliaswrite struct{}
+
+func (aliaswrite) Name() string { return "aliaswrite-detector" }
+
+func (aliaswrite) Detect(events []event.Event, _ *baseline.Baseline) []finding.Finding {
+	local := events
+	local[0].Payload = nil
+	return nil
+}
+`,
+		},
+		{
+			// K7 L3 re-hardening (d): a transitive alias chain (`a := bl; b := a`)
+			// still resolves to the parameter before the mutation, proving the
+			// fixed-point loop in paramDerivedIdents (not just a single-hop check)
+			// catches `delete` reached through two levels of aliasing.
+			name:    "transitive alias chain then delete()",
+			dirName: "chaindelete",
+			rule:    RuleShapeNonLocalAssign,
+			src: `package chaindelete
+
+import (
+	"github.com/mallcop-app/mallcop/core/detect"
+	"github.com/mallcop-app/mallcop/pkg/baseline"
+	"github.com/mallcop-app/mallcop/pkg/event"
+	"github.com/mallcop-app/mallcop/pkg/finding"
+)
+
+func init() { detect.Register(chaindelete{}) }
+
+type chaindelete struct{}
+
+func (chaindelete) Name() string { return "chaindelete-detector" }
+
+func (chaindelete) Detect(_ []event.Event, bl *baseline.Baseline) []finding.Finding {
+	a := bl
+	b := a
+	delete(b.KnownUsers, "evicted")
+	return nil
+}
+`,
+		},
+		{
 			// Fix #1: the write side of the tuning race. An authored Detect that
 			// calls detect.ApplyTuning could widen shared priv-escalation package
 			// state; a leaked authored goroutine holding that reference could race a
@@ -668,6 +796,75 @@ func (localwrite) Detect(events []event.Event, _ *baseline.Baseline) []finding.F
 }
 `
 	dir := writeShapePkg(t, "localwrite", src)
+	violations, err := CheckAuthoredDetectorShape(dir)
+	if err != nil {
+		t.Fatalf("CheckAuthoredDetectorShape: %v", err)
+	}
+	requireNoShapeViolations(t, violations)
+}
+
+// TestAuthoredShape_BenignDeleteAndAliasEquivalentsPass is the benign-twin of
+// the K7 L3 re-hardening REJECT cases above ("delete() on the baseline
+// parameter's map", "alias-then-clear()/write through a local alias", "transitive
+// alias chain then delete()"): the SAME shapes — delete()/clear() calls, a
+// `local := x` alias, a transitive alias chain, a write through the alias — but
+// rooted at data the detector itself owns (a LOCAL map, or an alias OF a local),
+// never at a parameter. paramDerivedIdents must not over-approximate "derived
+// from a parameter" to mean "any `:=` alias whatsoever"; only chains that
+// actually root at a parameter/receiver are parameter-derived. This also proves
+// merely ALIASING a parameter for READ access (never writing through the alias)
+// stays clean — only a write/delete/clear THROUGH the alias is a violation.
+func TestAuthoredShape_BenignDeleteAndAliasEquivalentsPass(t *testing.T) {
+	const src = `package benigndelete
+
+import (
+	"github.com/mallcop-app/mallcop/core/detect"
+	"github.com/mallcop-app/mallcop/pkg/baseline"
+	"github.com/mallcop-app/mallcop/pkg/event"
+	"github.com/mallcop-app/mallcop/pkg/finding"
+)
+
+func init() { detect.Register(benigndelete{}) }
+
+type benigndelete struct{}
+
+func (benigndelete) Name() string { return "benigndelete-detector" }
+
+func (benigndelete) Detect(events []event.Event, bl *baseline.Baseline) []finding.Finding {
+	// delete()/clear() on a LOCAL map (not derived from any parameter): benign.
+	seen := map[string]bool{}
+	for _, ev := range events {
+		seen[ev.Actor] = true
+	}
+	delete(seen, "noise")
+	clear(seen)
+
+	// A local := local alias (never touches a parameter), written through: benign.
+	local := seen
+	local["ok"] = true
+
+	// A transitive alias chain rooted at a LOCAL, then delete(): benign — "a" and
+	// "b" both trace back to "seen", never to "bl" or "events".
+	a := seen
+	b := a
+	delete(b, "also-noise")
+
+	// Aliasing the baseline PARAMETER for READ-ONLY access, never writing or
+	// deleting through the alias: benign — only a write/delete/clear through the
+	// alias is forbidden, not the alias itself.
+	blAlias := bl
+	_ = blAlias.KnownUsers["reader-only"]
+
+	var out []finding.Finding
+	for _, ev := range events {
+		if seen[ev.Actor] {
+			out = append(out, finding.Finding{ID: ev.ID})
+		}
+	}
+	return out
+}
+`
+	dir := writeShapePkg(t, "benigndelete", src)
 	violations, err := CheckAuthoredDetectorShape(dir)
 	if err != nil {
 		t.Fatalf("CheckAuthoredDetectorShape: %v", err)
