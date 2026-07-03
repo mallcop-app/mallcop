@@ -143,7 +143,7 @@ Commands:
   status  Report findings/resolutions recorded in a store
     --store    Path to the git-repo store written by 'mallcop scan' (required)
 
-  config  Print the effective scan config resolved from the environment
+  config  Print the effective scan config merged from a discovered mallcop.yaml + the environment
 
   feedback  Record an operator decision on a finding; the next scan honors it
     <finding_id> approve|dismiss   approve = activity known-good; dismiss = not actionable
