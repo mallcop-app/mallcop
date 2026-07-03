@@ -274,3 +274,69 @@ func TestLoadEffectiveDiscoversAndLoads(t *testing.T) {
 		t.Fatalf("effective config wrong: %+v", cfg.Inference)
 	}
 }
+
+// TestMarshalRoundTrip proves the config `mallcop init` generates is a valid
+// config: Marshal(Defaults()) written to disk and re-Load'd equals Defaults()
+// with no strict-decode error. This is the doc-test seed for §14 — the marketing
+// mallcop.yaml is made byte-identical to init's generated default.
+func TestMarshalRoundTrip(t *testing.T) {
+	want := Defaults()
+	data, err := Marshal(want)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if !strings.Contains(string(data), "# mallcop.yaml") {
+		t.Fatalf("Marshal output missing header comment:\n%s", data)
+	}
+
+	dir := t.TempDir()
+	p := filepath.Join(dir, ConfigFileName)
+	if err := os.WriteFile(p, data, 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	got, err := Load(p)
+	if err != nil {
+		t.Fatalf("Load of marshaled default failed (should round-trip): %v", err)
+	}
+	// Compare the load-bearing scalars. A full reflect.DeepEqual would trip on
+	// yaml.v3's nil-vs-empty-slice quirk (a nil []string marshals to `[]` and
+	// decodes back to an empty non-nil slice) — a distinction with no runtime
+	// meaning here. Assert the values instead.
+	if got.Version != want.Version ||
+		got.Inference != want.Inference ||
+		got.Store != want.Store ||
+		got.Learning != want.Learning ||
+		got.Sovereignty != want.Sovereignty ||
+		got.Budgets != want.Budgets ||
+		got.Detectors.Builtin.Enabled != want.Detectors.Builtin.Enabled {
+		t.Fatalf("round-trip mismatch:\n got=%+v\nwant=%+v", got, want)
+	}
+	if len(got.Connectors) != 1 || got.Connectors[0].Kind != "file" ||
+		got.Connectors[0].ID != "local-events" || got.Connectors[0].Path != "./events.jsonl" {
+		t.Fatalf("round-trip connector mismatch: %+v", got.Connectors)
+	}
+}
+
+// TestWriteConfigRoundTrip proves the WriteConfig helper writes a file Load
+// accepts, and that a --pro-style donut inference flip survives the round-trip.
+func TestWriteConfigRoundTrip(t *testing.T) {
+	cfg := Defaults()
+	cfg.Inference = Inference{
+		Mode:     "donut",
+		Endpoint: "https://api.mallcop.app",
+		KeyEnv:   "MALLCOP_API_KEY",
+		Model:    "mallcop-default",
+	}
+	dir := t.TempDir()
+	p := filepath.Join(dir, ConfigFileName)
+	if err := WriteConfig(p, cfg); err != nil {
+		t.Fatalf("WriteConfig: %v", err)
+	}
+	got, err := Load(p)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got.Inference != cfg.Inference {
+		t.Fatalf("donut inference not preserved: got=%+v want=%+v", got.Inference, cfg.Inference)
+	}
+}
