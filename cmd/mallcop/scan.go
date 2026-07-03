@@ -9,11 +9,14 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/mallcop-app/mallcop/connect/decl"
+	connexec "github.com/mallcop-app/mallcop/connect/exec"
 	"github.com/mallcop-app/mallcop/connect/github"
 	"github.com/mallcop-app/mallcop/connect/overlay"
 	"github.com/mallcop-app/mallcop/core/agent"
+	"github.com/mallcop-app/mallcop/core/config"
 	"github.com/mallcop-app/mallcop/core/connect"
 	"github.com/mallcop-app/mallcop/core/inference"
 	"github.com/mallcop-app/mallcop/core/pipeline"
@@ -94,106 +97,184 @@ func runScan(args []string) error {
 	tuningPath := fs.String("tuning", "", "Optional path to a detector tuning YAML (widen-only extra_* knobs)")
 	rulesPath := fs.String("rules", "", "Optional declarative detector rules YAML (overrides $"+envDeclRules+"; else auto-discovered at <repo>/detectors/rules.yaml)")
 	maxFindings := fs.Int("max-findings", 0, "Volume circuit-breaker ceiling: a scan producing MORE findings than this force-escalates a critical meta-finding to a human (0 = default 25)")
+	configPath := fs.String("config", "", "Path to mallcop.yaml (overrides discovery/$"+config.EnvConfigPath+"); absent config => today's flag-only behavior")
 
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 
-	if *storePath == "" {
+	// Record which flags were EXPLICITLY set so config-vs-legacy precedence can
+	// tell an explicit `--connector file` from the flag's default value.
+	setFlags := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { setFlags[f.Name] = true })
+
+	// (cfg) Load the effective config. An ABSENT config (no --config, no
+	// $MALLCOP_CONFIG, no discovered mallcop.yaml) resolves cfgPath == "" and
+	// haveConfig == false — in which case EVERY resolution below falls back to
+	// today's EXACT flag/env behavior, so existing scripts and e2e are unaffected.
+	// A present config supplies defaults with the design §C.1 precedence
+	// flag > env > config > built-in default.
+	cfg, cfgPath, err := config.LoadEffective(*configPath)
+	if err != nil {
+		return fmt.Errorf("scan: %w", err)
+	}
+	haveConfig := cfgPath != ""
+
+	// Store path: flag --store wins, else config store.path. When config is
+	// absent, --store stays REQUIRED exactly as before.
+	resolvedStore := *storePath
+	if resolvedStore == "" && haveConfig {
+		resolvedStore = cfg.Store.Path
+	}
+	if resolvedStore == "" {
 		return fmt.Errorf("scan: --store is required (the git-repo path where findings/resolutions are written)")
+	}
+
+	// learnDir is the store-repo-relative loop-owned overlay dir (learning.dir,
+	// default detectors/). It supplies the default tuning/rules/learned-mappings
+	// paths when config is present, replacing the flag-only / repo-root
+	// auto-discovery of those files. Empty when config is absent (legacy path).
+	learnDir := ""
+	if haveConfig {
+		ld := cfg.Learning.Dir
+		if ld == "" {
+			ld = "detectors"
+		}
+		learnDir = filepath.Join(resolvedStore, ld)
 	}
 
 	// (0) Apply the optional widen-only detector tuning + register the
 	// declarative detector rules BEFORE any detection runs. Fatal on error
-	// (exit 2). Tuning is flag-only; rules auto-discover from the repo root.
-	if err := applyTuningFlag(*tuningPath); err != nil {
+	// (exit 2). Precedence: flag > env(rules only) > learning.dir/<file> (config
+	// present) > today's default (tuning: none; rules: repo-root auto-discovery).
+	tuning := *tuningPath
+	if tuning == "" && learnDir != "" {
+		tuning = filepath.Join(learnDir, "tuning.yaml") // LoadTuningFile tolerates absent
+	}
+	if err := applyTuningFlag(tuning); err != nil {
 		return fmt.Errorf("scan: %w", err)
 	}
-	if err := loadDeclRulesAutodiscover(*rulesPath); err != nil {
+	if haveConfig {
+		rules := config.Resolve(*rulesPath, os.Getenv(envDeclRules), filepath.Join(learnDir, "rules.yaml"))
+		if err := loadDeclRulesAt(rules); err != nil { // tolerates absent file
+			return fmt.Errorf("scan: %w", err)
+		}
+	} else if err := loadDeclRulesAutodiscover(*rulesPath); err != nil {
 		return fmt.Errorf("scan: %w", err)
 	}
 
-	// (1) Resolve the inference client: the {BaseURL, Key} pivot. The flag wins;
-	// otherwise the env var. An empty URL yields a nil client — the scan still
-	// runs and force-escalates everything (cascade fail-safe), never resolving.
-	url := *baseURL
-	if url == "" {
-		url = os.Getenv(envInferenceURL)
-	}
+	// (1) Resolve the inference client: the {BaseURL, Key} pivot. Precedence
+	// flag > env > config > default. An empty URL yields a nil client — the scan
+	// still runs and force-escalates everything (cascade fail-safe). offline mode
+	// carries an empty endpoint, so a donut/byoi config supplies one while an
+	// offline config leaves the client nil.
+	url := config.Resolve(*baseURL, os.Getenv(envInferenceURL), cfgStr(haveConfig, cfg.Inference.Endpoint))
 	var client agent.Client
 	if url != "" {
-		model := os.Getenv(envInferenceModel)
-		if model == "" {
-			model = "mallcop-default"
+		// Key: env $MALLCOP_API_KEY wins; else the env var NAMED by
+		// inference.key_env (config). model: env $MALLCOP_MODEL > config > default.
+		key := os.Getenv(envInferenceKey)
+		if key == "" && haveConfig && cfg.Inference.KeyEnv != "" {
+			key = os.Getenv(cfg.Inference.KeyEnv)
 		}
+		model := config.Resolve(os.Getenv(envInferenceModel), cfgStr(haveConfig, cfg.Inference.Model), "mallcop-default")
 		client = &inference.DirectClient{
 			BaseURL: url,
-			Key:     os.Getenv(envInferenceKey),
+			Key:     key,
 			Model:   model,
 		}
 	}
 
 	// (2) Open (initializing if necessary) the git store.
-	st, err := openOrInitStore(*storePath)
+	st, err := openOrInitStore(resolvedStore)
 	if err != nil {
 		return err
 	}
 
-	// (3) Load the optional baseline.
+	// (3) Load the optional baseline: flag --baseline wins, else config store.baseline.
+	resolvedBaseline := *baselinePath
+	if resolvedBaseline == "" && haveConfig {
+		resolvedBaseline = cfg.Store.Baseline
+	}
 	var bl *baseline.Baseline
-	if *baselinePath != "" {
-		bl, err = baseline.Load(*baselinePath)
+	if resolvedBaseline != "" {
+		bl, err = baseline.Load(resolvedBaseline)
 		if err != nil {
-			return fmt.Errorf("scan: load baseline %s: %w", *baselinePath, err)
+			return fmt.Errorf("scan: load baseline %s: %w", resolvedBaseline, err)
 		}
 	}
 
 	// (3.4) Resolve the optional learned-mapping overlay: the --learned-mappings
-	// flag wins, then $MALLCOP_LEARNED_MAPPINGS; both absent => nil (no overlay).
-	// A named-but-unreadable/invalid file is fatal (exit 2). Every mapped target
-	// is validated against detect.KnownEventTypes() inside LoadLearnedMappings.
+	// flag wins, then $MALLCOP_LEARNED_MAPPINGS, then (config present)
+	// learning.dir/learned_mappings.yaml IF it exists — LoadLearnedMappings is
+	// fail-loud on a NAMED-but-missing file, so the config-derived default is only
+	// used when present. Both/all absent => nil (no overlay). A named-but-invalid
+	// file is fatal (exit 2); every mapped target is validated inside
+	// LoadLearnedMappings against detect.KnownEventTypes().
 	ovPath := *learnedMappings
 	if ovPath == "" {
 		ovPath = os.Getenv(envLearnedMappings)
+	}
+	if ovPath == "" && learnDir != "" {
+		if p := filepath.Join(learnDir, "learned_mappings.yaml"); fileExists(p) {
+			ovPath = p
+		}
 	}
 	ov, err := overlay.LoadLearnedMappings(ovPath)
 	if err != nil {
 		return fmt.Errorf("scan: %w", err)
 	}
 
-	// (3.5) Build the connector. "file" (default) is byte-identical to the prior
-	// behavior; "github" builds the portable GitHub connector from env creds;
-	// "decl" interprets a declarative connector spec. The overlay (when set) is
-	// attached to the github and decl connectors (github-first).
+	// (3.5) Build the connector(s). When config declares connectors and no legacy
+	// connector-selection flag is present, fan every configured source in via
+	// buildConnectors → connect.Multi (file+github+decl+cloud in ONE pass). The
+	// legacy single-connector flags (--connector/--github-org/--connector-spec)
+	// still select a single connector — as an OVERRIDE when set, and as the ONLY
+	// path when config is absent, preserving today's exact behavior.
+	legacyConnFlag := setFlags["connector"] || setFlags["github-org"] || setFlags["connector-spec"]
 	var conn connect.Connector
-	switch *connector {
-	case "file":
-		conn = connect.FromPath(*eventsPath)
-	case "github":
-		if *githubOrg == "" {
-			return fmt.Errorf("scan: --github-org is required with --connector github")
+	if haveConfig && len(cfg.Connectors) > 0 && !legacyConnFlag {
+		conn, err = buildConnectors(cfg, resolvedStore, ov)
+		if err != nil {
+			return fmt.Errorf("scan: %w", err)
 		}
-		gc, gerr := github.NewFromEnv(*githubOrg)
-		if gerr != nil {
-			return fmt.Errorf("scan: github connector: %w", gerr)
+	} else {
+		switch *connector {
+		case "file":
+			conn = connect.FromPath(*eventsPath)
+		case "github":
+			if *githubOrg == "" {
+				return fmt.Errorf("scan: --github-org is required with --connector github")
+			}
+			gc, gerr := github.NewFromEnv(*githubOrg)
+			if gerr != nil {
+				return fmt.Errorf("scan: github connector: %w", gerr)
+			}
+			gc.SetOverlay(ov)
+			conn = gc
+		case "decl":
+			if *connectorSpec == "" {
+				return fmt.Errorf("scan: --connector-spec is required with --connector decl")
+			}
+			spec, serr := decl.LoadSpecFile(*connectorSpec)
+			if serr != nil {
+				return fmt.Errorf("scan: %w", serr)
+			}
+			dc, derr := decl.NewFromSpec(spec, ov)
+			if derr != nil {
+				return fmt.Errorf("scan: %w", derr)
+			}
+			conn = dc
+		default:
+			return fmt.Errorf("scan: unknown --connector %q", *connector)
 		}
-		gc.SetOverlay(ov)
-		conn = gc
-	case "decl":
-		if *connectorSpec == "" {
-			return fmt.Errorf("scan: --connector-spec is required with --connector decl")
-		}
-		spec, serr := decl.LoadSpecFile(*connectorSpec)
-		if serr != nil {
-			return fmt.Errorf("scan: %w", serr)
-		}
-		dc, derr := decl.NewFromSpec(spec, ov)
-		if derr != nil {
-			return fmt.Errorf("scan: %w", derr)
-		}
-		conn = dc
-	default:
-		return fmt.Errorf("scan: unknown --connector %q", *connector)
+	}
+
+	// (3.9) Volume circuit-breaker ceiling: flag --max-findings wins, else config
+	// budgets.max_findings; 0 lets the pipeline apply its default (25).
+	resolvedMax := *maxFindings
+	if resolvedMax == 0 && haveConfig {
+		resolvedMax = cfg.Budgets.MaxFindings
 	}
 
 	// (4) Run the pipeline.
@@ -205,8 +286,8 @@ func runScan(args []string) error {
 		Baseline:  bl,
 		Workers:   *workers,
 		// Volume circuit-breaker ceiling. 0 lets the pipeline apply its default
-		// (25, from src/mallcop/budget.py); a positive flag overrides it.
-		Budget: agent.BudgetConfig{MaxFindingsForActors: *maxFindings},
+		// (25, from src/mallcop/budget.py); a positive value overrides it.
+		Budget: agent.BudgetConfig{MaxFindingsForActors: resolvedMax},
 		// Consensus ON by default (safety-first): on every RESOLVE, the gate
 		// re-runs the cascade DefaultConsensusRuns more times and any-escalate-wins.
 		// Validated to cut missed attacks 9→2 on the eval corpus under the
@@ -266,6 +347,97 @@ func runScan(args []string) error {
 		return errFindings
 	}
 	return nil
+}
+
+// buildConnectors is the config → connector composition root (design §C.4). It
+// turns each cfg.Connectors entry into a live connect.Connector and wraps them
+// in a MultiConnector so `mallcop scan` pulls EVERY configured source in one
+// pass. Kind dispatch mirrors the legacy single-connector switch:
+//
+//   - file:   connect.FromPath(path) — the credential-free default.
+//   - github: github.NewFromEnv(org) + the learned-mapping overlay (github-first).
+//   - decl:   decl.LoadSpecFile → decl.NewFromSpec + the overlay (SSRF-guarded).
+//   - cloud:  connexec.New — forks the sibling binary mallcop-connector-<source>
+//     at the process boundary, persisting an incremental cursor under
+//     <store>/.mallcop/cursors/<id> and honoring budgets.scan_timeout.
+//
+// Any unknown kind, or a github/decl/cloud construction failure, is a LOUD error
+// (never a silently dropped source): the scan halts, never under-reports.
+func buildConnectors(cfg config.Config, storePath string, ov *overlay.Overlay) (connect.Connector, error) {
+	timeout := scanTimeout(cfg)
+	var subs []connect.Connector
+	for _, c := range cfg.Connectors {
+		switch c.Kind {
+		case "file":
+			subs = append(subs, connect.FromPath(c.Path))
+		case "github":
+			gc, err := github.NewFromEnv(c.Org)
+			if err != nil {
+				return nil, fmt.Errorf("connector %q (github): %w", c.ID, err)
+			}
+			gc.SetOverlay(ov)
+			subs = append(subs, gc)
+		case "decl":
+			spec, err := decl.LoadSpecFile(c.Spec)
+			if err != nil {
+				return nil, fmt.Errorf("connector %q (decl): %w", c.ID, err)
+			}
+			dc, err := decl.NewFromSpec(spec, ov)
+			if err != nil {
+				return nil, fmt.Errorf("connector %q (decl): %w", c.ID, err)
+			}
+			subs = append(subs, dc)
+		case "cloud":
+			subs = append(subs, connexec.New(connexec.Spec{
+				ID:         c.ID,
+				Binary:     c.Binary,
+				Source:     c.Source,
+				Args:       c.Args,
+				Since:      c.Since,
+				CursorFile: cursorPath(storePath, c.ID),
+				Env:        c.Env,
+				Timeout:    timeout,
+			}))
+		default:
+			return nil, fmt.Errorf("unknown connector kind %q (connector %q)", c.Kind, c.ID)
+		}
+	}
+	return connect.Multi(subs...), nil
+}
+
+// scanTimeout parses budgets.scan_timeout into a duration bounding each cloud
+// sibling process. An empty/unparseable value yields 0 (no per-connector
+// deadline beyond the caller's context) — a best-effort budget, never fatal.
+func scanTimeout(cfg config.Config) time.Duration {
+	d, err := time.ParseDuration(cfg.Budgets.ScanTimeout)
+	if err != nil {
+		return 0
+	}
+	return d
+}
+
+// cursorPath is where a kind:cloud connector persists its incremental cursor:
+// <store>/.mallcop/cursors/<id>, so the cursor travels with the git-backed store
+// and the next scan pulls only new events.
+func cursorPath(storePath, id string) string {
+	return filepath.Join(storePath, ".mallcop", "cursors", id)
+}
+
+// cfgStr returns s only when a config was actually loaded; otherwise "". It gates
+// config-supplied string values so the ABSENT-config path contributes nothing
+// (Config.Defaults() is non-empty, so an absent config must not leak defaults
+// into the flag>env>config>default resolution).
+func cfgStr(haveConfig bool, s string) string {
+	if haveConfig {
+		return s
+	}
+	return ""
+}
+
+// fileExists reports whether path names an existing regular (non-dir) file.
+func fileExists(path string) bool {
+	fi, err := os.Stat(path)
+	return err == nil && !fi.IsDir()
 }
 
 // openOrInitStore opens the git-backed store at path, running `git init` (and a
