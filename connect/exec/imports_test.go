@@ -10,7 +10,7 @@ import (
 )
 
 // bannedImportSubstrings mirrors the core import-lint banned families (core/lint,
-// core/connect, connect/github, connect/decl). The exec connector lives OUTSIDE
+// core/connect, connect/github). The exec connector lives OUTSIDE
 // core/ — os/exec is legitimate and load-bearing here (the process boundary is
 // the whole point) — but it must NEVER pull in a vendor LLM SDK, a cloud SDK, or
 // an agent-orchestration / coordination framework. The cloud SDK stays in the

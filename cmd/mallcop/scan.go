@@ -11,7 +11,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/mallcop-app/mallcop/connect/decl"
 	connexec "github.com/mallcop-app/mallcop/connect/exec"
 	"github.com/mallcop-app/mallcop/connect/github"
 	"github.com/mallcop-app/mallcop/connect/overlay"
@@ -90,12 +89,10 @@ func runScan(args []string) error {
 	baseURL := fs.String("base-url", "", "Inference endpoint base URL (overrides $"+envInferenceURL+")")
 	workers := fs.Int("workers", 0, "Bounded resolve-pool size (0 = pipeline default)")
 	asJSON := fs.Bool("json", false, "Output the summary as JSON")
-	connector := fs.String("connector", "file", `Connector: "file" (default, reads --events), "github", or "decl"`)
+	connector := fs.String("connector", "file", `Connector: "file" (default, reads --events) or "github"`)
 	githubOrg := fs.String("github-org", "", "GitHub org to scan (required when --connector github)")
-	connectorSpec := fs.String("connector-spec", "", "Path to a declarative connector spec YAML (required when --connector decl)")
 	learnedMappings := fs.String("learned-mappings", "", "Optional learned-mappings YAML overlay (overrides $"+envLearnedMappings+")")
 	tuningPath := fs.String("tuning", "", "Optional path to a detector tuning YAML (widen-only extra_* knobs)")
-	rulesPath := fs.String("rules", "", "Optional declarative detector rules YAML (overrides $"+envDeclRules+"; else auto-discovered at <repo>/detectors/rules.yaml)")
 	maxFindings := fs.Int("max-findings", 0, "Volume circuit-breaker ceiling: a scan producing MORE findings than this force-escalates a critical meta-finding to a human (0 = default 25)")
 	configPath := fs.String("config", "", "Path to mallcop.yaml (overrides discovery/$"+config.EnvConfigPath+"); absent config => today's flag-only behavior")
 
@@ -143,23 +140,14 @@ func runScan(args []string) error {
 		learnDir = filepath.Join(resolvedStore, ld)
 	}
 
-	// (0) Apply the optional widen-only detector tuning + register the
-	// declarative detector rules BEFORE any detection runs. Fatal on error
-	// (exit 2). Precedence: flag > env(rules only) > learning.dir/<file> (config
-	// present) > today's default (tuning: none; rules: repo-root auto-discovery).
+	// (0) Apply the optional widen-only detector tuning BEFORE any detection
+	// runs. Fatal on error (exit 2). Precedence: flag > learning.dir/tuning.yaml
+	// (config present) > today's default (none).
 	tuning := *tuningPath
 	if tuning == "" && learnDir != "" {
 		tuning = filepath.Join(learnDir, "tuning.yaml") // LoadTuningFile tolerates absent
 	}
 	if err := applyTuningFlag(tuning); err != nil {
-		return fmt.Errorf("scan: %w", err)
-	}
-	if haveConfig {
-		rules := config.Resolve(*rulesPath, os.Getenv(envDeclRules), filepath.Join(learnDir, "rules.yaml"))
-		if err := loadDeclRulesAt(rules); err != nil { // tolerates absent file
-			return fmt.Errorf("scan: %w", err)
-		}
-	} else if err := loadDeclRulesAutodiscover(*rulesPath); err != nil {
 		return fmt.Errorf("scan: %w", err)
 	}
 
@@ -227,11 +215,11 @@ func runScan(args []string) error {
 
 	// (3.5) Build the connector(s). When config declares connectors and no legacy
 	// connector-selection flag is present, fan every configured source in via
-	// buildConnectors → connect.Multi (file+github+decl+cloud in ONE pass). The
-	// legacy single-connector flags (--connector/--github-org/--connector-spec)
-	// still select a single connector — as an OVERRIDE when set, and as the ONLY
-	// path when config is absent, preserving today's exact behavior.
-	legacyConnFlag := setFlags["connector"] || setFlags["github-org"] || setFlags["connector-spec"]
+	// buildConnectors → connect.Multi (file+github+cloud in ONE pass). The
+	// legacy single-connector flags (--connector/--github-org) still select a
+	// single connector — as an OVERRIDE when set, and as the ONLY path when
+	// config is absent, preserving today's exact behavior.
+	legacyConnFlag := setFlags["connector"] || setFlags["github-org"]
 	var conn connect.Connector
 	if haveConfig && len(cfg.Connectors) > 0 && !legacyConnFlag {
 		conn, err = buildConnectors(cfg, resolvedStore, ov)
@@ -252,19 +240,6 @@ func runScan(args []string) error {
 			}
 			gc.SetOverlay(ov)
 			conn = gc
-		case "decl":
-			if *connectorSpec == "" {
-				return fmt.Errorf("scan: --connector-spec is required with --connector decl")
-			}
-			spec, serr := decl.LoadSpecFile(*connectorSpec)
-			if serr != nil {
-				return fmt.Errorf("scan: %w", serr)
-			}
-			dc, derr := decl.NewFromSpec(spec, ov)
-			if derr != nil {
-				return fmt.Errorf("scan: %w", derr)
-			}
-			conn = dc
 		default:
 			return fmt.Errorf("scan: unknown --connector %q", *connector)
 		}
@@ -356,12 +331,11 @@ func runScan(args []string) error {
 //
 //   - file:   connect.FromPath(path) — the credential-free default.
 //   - github: github.NewFromEnv(org) + the learned-mapping overlay (github-first).
-//   - decl:   decl.LoadSpecFile → decl.NewFromSpec + the overlay (SSRF-guarded).
 //   - cloud:  connexec.New — forks the sibling binary mallcop-connector-<source>
 //     at the process boundary, persisting an incremental cursor under
 //     <store>/.mallcop/cursors/<id> and honoring budgets.scan_timeout.
 //
-// Any unknown kind, or a github/decl/cloud construction failure, is a LOUD error
+// Any unknown kind, or a github/cloud construction failure, is a LOUD error
 // (never a silently dropped source): the scan halts, never under-reports.
 func buildConnectors(cfg config.Config, storePath string, ov *overlay.Overlay) (connect.Connector, error) {
 	timeout := scanTimeout(cfg)
@@ -377,16 +351,6 @@ func buildConnectors(cfg config.Config, storePath string, ov *overlay.Overlay) (
 			}
 			gc.SetOverlay(ov)
 			subs = append(subs, gc)
-		case "decl":
-			spec, err := decl.LoadSpecFile(c.Spec)
-			if err != nil {
-				return nil, fmt.Errorf("connector %q (decl): %w", c.ID, err)
-			}
-			dc, err := decl.NewFromSpec(spec, ov)
-			if err != nil {
-				return nil, fmt.Errorf("connector %q (decl): %w", c.ID, err)
-			}
-			subs = append(subs, dc)
 		case "cloud":
 			subs = append(subs, connexec.New(connexec.Spec{
 				ID:         c.ID,

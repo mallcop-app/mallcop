@@ -8,9 +8,9 @@
 // package delivers the struct, the strict loader, and the precedence primitive).
 //
 // Purity: this package depends only on gopkg.in/yaml.v3 + stdlib. It lives in
-// core/ (YAML in core/ is already precedented — core/detect/tuning.go,
-// declarative.go) and does NOT trip the core/connect purity lint, which only
-// forbids inference/transport/vendor-SDK deps under core/connect.
+// core/ (YAML in core/ is already precedented — core/detect/tuning.go) and does
+// NOT trip the core/connect purity lint, which only forbids
+// inference/transport/vendor-SDK deps under core/connect.
 //
 // Trust posture: the loader is human-written product code — the same "agent
 // authors DATA, a frozen human-written loader interprets it" division of labor
@@ -19,10 +19,10 @@
 //
 //   - STRICT decode (yaml KnownFields(true)): any unknown/smuggled key is a LOUD
 //     load error, never a silent default — identical discipline to
-//     connect/decl/spec.go and core/detect/tuning.go.
+//     core/detect/tuning.go.
 //   - key_env / connector env are env-var NAMES, never inline secrets. A value
 //     that looks like a literal key (contains "sk-", e.g. a mallcop-sk-* token)
-//     is a loud load error — same rule as decl.Spec.CredentialRef.
+//     is a loud load error.
 package config
 
 import (
@@ -78,14 +78,13 @@ type Store struct {
 
 // Connector is one configured source. `mallcop scan` pulls from ALL of them in
 // one pass (the MultiConnector fan-in is a later item). Kind selects the loader
-// branch: file | github | cloud | decl.
+// branch: file | github | cloud.
 //
 //   - file:   Path is the events JSONL.
 //   - github: Org is the GitHub org (creds via env, github.NewFromEnv).
 //   - cloud:  Source maps to the sibling binary mallcop-connector-<source>;
 //     Args/Since/Env/Binary parameterize the exec (later item). Env lists
 //     env-var NAMES, never values.
-//   - decl:   Spec is the path to a declarative connector spec YAML.
 type Connector struct {
 	Kind   string   `yaml:"kind"`
 	ID     string   `yaml:"id"`
@@ -95,7 +94,6 @@ type Connector struct {
 	Args   []string `yaml:"args"`
 	Since  string   `yaml:"since"`
 	Env    []string `yaml:"env"`
-	Spec   string   `yaml:"spec"`
 	// Binary is an optional explicit override for the kind:cloud sibling path
 	// (design §A / Ruling #3); empty means the mallcop-connector-<source>
 	// convention on $PATH.

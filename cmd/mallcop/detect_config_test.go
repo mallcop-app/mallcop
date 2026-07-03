@@ -155,40 +155,6 @@ func TestResolveBaselinePath_Precedence(t *testing.T) {
 	}
 }
 
-// TestResolveDeclRulesPath_ConfigBeatsRoot proves the precedence flag >
-// $MALLCOP_DECL_RULES > config learning.dir/rules.yaml > legacy repo-root guess.
-// The config path REPLACES the repo-root auto-discovery, which is wrong outside
-// a repo; the legacy guess survives only when NO config is present.
-func TestResolveDeclRulesPath_ConfigBeatsRoot(t *testing.T) {
-	// Absent config → legacy <root>/detectors/rules.yaml (today's behavior).
-	t.Chdir(t.TempDir())
-	t.Setenv("MALLCOP_CONFIG", "")
-	t.Setenv("MALLCOP_DECL_RULES", "")
-	if got := resolveDeclRulesPath("", "/repo"); got != filepath.Join("/repo", "detectors", "rules.yaml") {
-		t.Fatalf("absent config: got %q, want the legacy repo-root guess", got)
-	}
-
-	// Config present → learning.dir/rules.yaml (the repo-root guess is ignored).
-	tmp := t.TempDir()
-	cfgPath := writeConfig(t, tmp, "version: 1\nlearning:\n  dir: ld\n")
-	t.Setenv("MALLCOP_CONFIG", cfgPath)
-	want := filepath.Join(tmp, "ld", "rules.yaml")
-	if got := resolveDeclRulesPath("", "/repo"); got != want {
-		t.Fatalf("config present: got %q want %q (config must beat the repo-root guess)", got, want)
-	}
-
-	// $MALLCOP_DECL_RULES beats config.
-	t.Setenv("MALLCOP_DECL_RULES", "/env/rules.yaml")
-	if got := resolveDeclRulesPath("", "/repo"); got != "/env/rules.yaml" {
-		t.Fatalf("env should beat config: got %q", got)
-	}
-
-	// The --rules flag beats everything.
-	if got := resolveDeclRulesPath("/flag/rules.yaml", "/repo"); got != "/flag/rules.yaml" {
-		t.Fatalf("flag should win: got %q", got)
-	}
-}
-
 // TestRunExamDetect_ConfigTuningClosesPE proves exam-detect GREEN on the PE-08
 // case using config-only tuning (no --tuning flag): a discovered mallcop.yaml
 // whose learning.dir points at the committed detectors/ applies the poweruser

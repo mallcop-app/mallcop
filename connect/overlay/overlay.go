@@ -6,8 +6,8 @@
 // connector code the agent authors.
 //
 // PLACEMENT: this package sits at top-level connect/ (OUTSIDE core/), like
-// connect/github and connect/decl, so it may import gopkg.in/yaml.v3 without
-// tripping core/lint's core/connect purity rule. It imports core/detect solely
+// connect/github, so it may import gopkg.in/yaml.v3 without tripping core/lint's
+// core/connect purity rule. It imports core/detect solely
 // for KnownEventTypes()/IsKnownEventType — the single validation authority every
 // mapped target is checked against.
 //

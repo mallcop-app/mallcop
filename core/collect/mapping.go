@@ -31,7 +31,7 @@ import (
 
 // defaultBucketSuffix is the suffix every connector appends to its source id for
 // the "no classifier matched" default event type — "github_other",
-// "<sourceID>_other" (decl). An event whose Type is exactly Source+suffix is,
+// "<sourceID>_other". An event whose Type is exactly Source+suffix is,
 // by construction, unmapped. Kept in one place so the collector's filter and the
 // connectors' emission stay coupled.
 const defaultBucketSuffix = "_other"
