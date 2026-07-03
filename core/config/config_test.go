@@ -113,7 +113,7 @@ detectors:
     disable: []
 learning:
   dir: detectors
-  autonomy: off
+  autonomy: semi
   enforce_pin: false
 sovereignty:
   tier: open
@@ -187,6 +187,62 @@ func TestLoadRejectsInlineSecretConnectorEnv(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "aws-prod") {
 		t.Fatalf("error should name the connector: %v", err)
+	}
+}
+
+// TestDefaultsAutonomyIsNon proves the safe-by-default dial position is "non"
+// (propose-only, human approves ALL changes) — the fail-safe an absent
+// mallcop.yaml (or an absent learning: section) resolves to. rd mallcoppro-315.
+func TestDefaultsAutonomyIsNon(t *testing.T) {
+	if got := Defaults().Learning.Autonomy; got != AutonomyNon {
+		t.Fatalf("Defaults().Learning.Autonomy = %q, want %q", got, AutonomyNon)
+	}
+	// An absent file resolves to Defaults() via Load, so the dial default is
+	// exercised on the real load path too, not just the struct literal.
+	cfg, err := Load("")
+	if err != nil {
+		t.Fatalf("Load(\"\"): %v", err)
+	}
+	if cfg.Learning.Autonomy != AutonomyNon {
+		t.Fatalf("Load(\"\").Learning.Autonomy = %q, want %q", cfg.Learning.Autonomy, AutonomyNon)
+	}
+}
+
+// TestLoadAcceptsEachAutonomyValue proves all three dial positions decode
+// cleanly (STRICT enum, not free text).
+func TestLoadAcceptsEachAutonomyValue(t *testing.T) {
+	for _, v := range []string{AutonomyNon, AutonomySemi, AutonomyFully} {
+		v := v
+		t.Run(v, func(t *testing.T) {
+			p := writeConfig(t, t.TempDir(), "learning:\n  autonomy: "+v+"\n")
+			cfg, err := Load(p)
+			if err != nil {
+				t.Fatalf("autonomy %q should load: %v", v, err)
+			}
+			if cfg.Learning.Autonomy != v {
+				t.Fatalf("Learning.Autonomy = %q, want %q", cfg.Learning.Autonomy, v)
+			}
+		})
+	}
+}
+
+// TestLoadRejectsInvalidAutonomy proves an unrecognized dial value (including
+// the RETIRED "off"/"on" spelling) is a loud config error, never a silent
+// fallback to the fail-safe default — a typo must not be mistaken for an
+// explicit, reviewed choice of "non".
+func TestLoadRejectsInvalidAutonomy(t *testing.T) {
+	for _, v := range []string{"off", "on", "auto", "NON", ""} {
+		v := v
+		t.Run("bad_"+v, func(t *testing.T) {
+			p := writeConfig(t, t.TempDir(), "learning:\n  autonomy: \""+v+"\"\n")
+			_, err := Load(p)
+			if err == nil {
+				t.Fatalf("autonomy %q must be a loud load error", v)
+			}
+			if !strings.Contains(err.Error(), "learning.autonomy") {
+				t.Fatalf("error should name learning.autonomy: %v", err)
+			}
+		})
 	}
 }
 
