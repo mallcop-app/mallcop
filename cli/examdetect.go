@@ -41,6 +41,14 @@ func runExamDetect(args []string) error {
 		return err
 	}
 
+	// Wire any configured WASM detector sidecars before grading runs core/detect
+	// over the corpus (see loadSidecarDetectorsFromConfig / cli/sidecars.go).
+	// `exam-detect` has no --config flag of its own, matching applyTuningFlag's
+	// own config resolution above.
+	if err := loadSidecarDetectorsFromConfig(""); err != nil {
+		return err
+	}
+
 	root, err := eval.RepoRoot()
 	if err != nil {
 		return fmt.Errorf("resolving repo root: %w", err)

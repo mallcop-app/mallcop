@@ -71,6 +71,7 @@ func runConfig(args []string) error {
 	}
 
 	fmt.Printf("  Builtin detectors:    enabled=%t disabled=%v\n", cfg.Detectors.Builtin.Enabled, cfg.Detectors.Builtin.Disable)
+	fmt.Printf("  Sidecar detectors:    dir=%s\n", cfg.Detectors.Sidecars.Dir)
 	fmt.Printf("  Learning dir:         %s (autonomy=%s, enforce_pin=%t)\n", cfg.Learning.Dir, cfg.Learning.Autonomy, cfg.Learning.EnforcePin)
 	fmt.Printf("  Sovereignty:          tier=%s contribute_back=%t\n", cfg.Sovereignty.Tier, cfg.Sovereignty.ContributeBack)
 	fmt.Printf("  Budgets:              max_findings=%d scan_timeout=%s selfext_spend_cap_usd=%.0f\n",

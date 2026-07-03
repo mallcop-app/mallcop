@@ -117,6 +117,17 @@ func runScan(args []string) error {
 	}
 	haveConfig := cfgPath != ""
 
+	// (-1) Wire any configured WASM detector sidecars BEFORE anything runs
+	// detect.Detect: detectors.sidecars.dir (default ./detectors/bin) is
+	// globbed for *.wasm modules, each wrapped via detecthost and registered
+	// through detect.Register, so a sidecar's findings appear identically to
+	// a built-in detector for the rest of this scan. An absent dir is the
+	// OOTB default (zero sidecars, no error); a present-but-broken sidecar is
+	// a loud failure.
+	if err := loadSidecarDetectors(cfg, cfgPath); err != nil {
+		return fmt.Errorf("scan: %w", err)
+	}
+
 	// Store path: flag --store wins, else config store.path. When config is
 	// absent, --store stays REQUIRED exactly as before.
 	resolvedStore := *storePath

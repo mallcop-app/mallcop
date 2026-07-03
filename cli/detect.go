@@ -43,6 +43,15 @@ func runDetect(args []string) error {
 		return err
 	}
 
+	// Wire any configured WASM detector sidecars before detection runs (see
+	// loadSidecarDetectorsFromConfig / cli/sidecars.go). `detect` has no
+	// --config flag of its own, so this resolves the effective config the
+	// same way applyTuningFlag/resolveBaselinePath already do (walk-up
+	// discovery / $MALLCOP_CONFIG, else built-in defaults).
+	if err := loadSidecarDetectorsFromConfig(""); err != nil {
+		return err
+	}
+
 	blPath, err := resolveBaselinePath(*baselinePath)
 	if err != nil {
 		return err

@@ -100,9 +100,24 @@ type Connector struct {
 	Binary string `yaml:"binary"`
 }
 
-// Detectors gates the built-in framework detectors.
+// Detectors gates the built-in framework detectors and configures WASM
+// sidecar detector discovery.
 type Detectors struct {
-	Builtin Builtin `yaml:"builtin"`
+	Builtin  Builtin  `yaml:"builtin"`
+	Sidecars Sidecars `yaml:"sidecars"`
+}
+
+// Sidecars configures discovery of wasip1 WASM detector sidecar modules (see
+// package detecthost). Dir is scanned for *.wasm files at command setup for
+// scan/detect/exam-detect; each is wrapped via detecthost and registered
+// through the same detect.Register seam a built-in detector uses. A relative
+// Dir is resolved against the directory the config was discovered in (the
+// deployment root), matching Learning.Dir/Store.Baseline's convention; when no
+// config file is present it resolves against the current working directory. A
+// dir that does not exist on disk yields zero sidecars and no error — the
+// OOTB default (no config, no ./detectors/bin present) is unaffected.
+type Sidecars struct {
+	Dir string `yaml:"dir"`
 }
 
 // Builtin turns the 17 framework detectors on and optionally narrows the result
@@ -154,7 +169,10 @@ func Defaults() Config {
 		Connectors: []Connector{
 			{Kind: "file", ID: "local-events", Path: "./events.jsonl"},
 		},
-		Detectors:   Detectors{Builtin: Builtin{Enabled: true, Disable: []string{}}},
+		Detectors: Detectors{
+			Builtin:  Builtin{Enabled: true, Disable: []string{}},
+			Sidecars: Sidecars{Dir: "./detectors/bin"},
+		},
 		Learning:    Learning{Dir: "detectors", Autonomy: "off", EnforcePin: false},
 		Sovereignty: Sovereignty{Tier: "open", ContributeBack: false},
 		Budgets:     Budgets{MaxFindings: 25, ScanTimeout: "10m", SelfextSpendCapUSD: 25},
