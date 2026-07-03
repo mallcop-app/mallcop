@@ -126,6 +126,15 @@ func registerSidecar(d *detecthost.Detector) (err error) {
 // compilation cache only — this is a one-shot build, not a long-lived
 // deployment, so no on-disk cache directory is wired), and registers it
 // exactly like a discovered sidecar.
+//
+// GOFLAGS=-mod=mod: a customer module's go.mod legitimately may not carry a
+// complete go.sum yet (it depends on this repo's module via a local `replace`,
+// which itself pulls in transitive deps like gopkg.in/yaml.v3 the customer
+// never directly imports and has no reason to have already `go mod tidy`'d
+// for) — -mod=mod lets `go build` compute the missing sum entries itself
+// (from the local module cache when already populated, else the configured
+// GOPROXY) instead of hard-failing with "missing go.sum entry". This mirrors
+// what a customer running `go build` themselves would need anyway.
 func buildAndRegisterSourceSidecar(ctx context.Context, srcDir, scratchDir string) error {
 	info, err := os.Stat(srcDir)
 	if err != nil || !info.IsDir() {
@@ -140,7 +149,7 @@ func buildAndRegisterSourceSidecar(ctx context.Context, srcDir, scratchDir strin
 
 	cmd := exec.CommandContext(ctx, "go", "build", "-o", out, ".")
 	cmd.Dir = srcDir
-	cmd.Env = append(os.Environ(), "GOOS=wasip1", "GOARCH=wasm")
+	cmd.Env = append(os.Environ(), "GOOS=wasip1", "GOARCH=wasm", "GOFLAGS=-mod=mod")
 	if outBytes, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("go build (GOOS=wasip1 GOARCH=wasm) %s: %v\n%s", srcDir, err, outBytes)
 	}
