@@ -273,6 +273,33 @@ func Guard(repoRoot, baseRef, headRef string) ([]GuardFinding, error) {
 
 		case strings.HasPrefix(c.path, detectorsPrefix):
 			switch {
+			case strings.HasSuffix(c.path, ".go"):
+				// mallcoppro-72d (the 7ee7 live-leg probe HOLE): a .go path
+				// under detectors/ is NOT tuning DATA -- it is customer-tree
+				// wasm-sidecar detector CODE (cli/deployrepo.go scaffolds
+				// detectors/<name>/main.go, built GOOS=wasip1 GOARCH=wasm and
+				// loaded by detecthost). Before this arm existed, EVERY status
+				// (A/M/D) of a .go path here fell through the A/M/D switch
+				// below untouched -- an Add matched none of its arms and
+				// PASSED UNCHECKED, contradicting the package doc's claim
+				// (line ~19) that any non-authored .go Add is default-denied.
+				// detectors/ has no sanctioned Go code lane of its own: the
+				// ONLY additive authored-detector lane this guard recognizes
+				// is the own-package tree core/detect/authored/<name>/, whose
+				// shape is init()+detect.Register -- structurally
+				// incompatible with a wasip1 sidecar's `package main` +
+				// detectorhost.Run(T{}) shape, so the K7 L3 AST shape gate
+				// cannot be reused here (it would hard-reject every
+				// legitimate sidecar for having zero init()s). Rather than
+				// either silently pass (the hole) or force a mismatched
+				// check that always fails legitimate code, this fails closed
+				// exactly like the GO SOURCE DEFAULT-DENY floor below: ANY
+				// A/M/D of a .go file under detectors/ requires human review.
+				findings = append(findings, GuardFinding{
+					Path:   c.path,
+					Rule:   RuleCodeFrozen,
+					Detail: fmt.Sprintf("%s of a .go file under detectors/: detectors/ has no sanctioned Go code lane (the only additive authored-detector lane is core/detect/authored/<name>/, whose init()+detect.Register shape does not fit a wasip1-sidecar main.go); Go source here requires human review", statusWord(c.status)),
+				})
 			case c.status == 'D':
 				findings = append(findings, GuardFinding{
 					Path:   c.path,
@@ -303,8 +330,10 @@ func Guard(repoRoot, baseRef, headRef string) ([]GuardFinding, error) {
 					findings = append(findings, checkWidenOnlyYAML(c.path, base, head)...)
 				}
 			}
-			// 'A' passes: a brand-new data file widens by definition at this
-			// layer (its loader strictly rejects non-additive fields).
+			// 'A' of a non-.go path passes: a brand-new data file widens by
+			// definition at this layer (its loader strictly rejects
+			// non-additive fields). 'A' of a .go path is handled by the
+			// dedicated arm above, NOT here.
 
 		case c.path == authoredRegistryPath:
 			// The authored-detector registration aggregator. Bootstrapped once
