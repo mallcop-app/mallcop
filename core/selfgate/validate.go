@@ -56,11 +56,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/mallcop-app/mallcop/core/lint"
+	"github.com/mallcop-app/mallcop/internal/exam"
 )
 
 // GateSchemaVersion is the GateResult wire-format version. Bump it on any
@@ -140,7 +142,11 @@ const (
 	// detector that fires on its own benign twin — the false-positive floor,
 	// same substance as RuleExamMissingBenignTwin but for a detector graded in
 	// isolation against a fixed reference corpus rather than diffed against a
-	// sibling base report).
+	// sibling base report). ALSO fires (mallcoppro-f95 round 2) when a
+	// detector's own must_fire + must_not_fire pair both pass individually but
+	// the benign twin is not a MEASURED MINIMAL MUTATION of the must-fire
+	// scenario (checkMinimalMutationCoverage) — see that function's doc for the
+	// veracity-reproduced bypass this closes.
 	RuleCustomerExamFail = "customer-tree-exam-fail"
 	// RuleCustomerExamVacuous — CUSTOMER-TREE MODE ONLY: RunCustomerTreeExam
 	// graded zero labeled scenarios from the reference tree's corpus — a
@@ -729,7 +735,11 @@ func customerTreeExamStage(examRepoTree, headTree string) ([]GuardFinding, strin
 		// closed here — this is what stops a novel-gap detector from passing
 		// on reference-corpus silence alone (it is never even shown its target
 		// event type by the reference corpus).
-		findings = append(findings, checkCustomerEfficacy(name, relPath, report.Rows)...)
+		efficacyFindings, effErr := checkCustomerEfficacy(name, relPath, report.Rows, extraScenariosDir)
+		if effErr != nil {
+			return nil, "", fmt.Errorf("selfgate: customer-tree efficacy check for %s: %w", relPath, effErr)
+		}
+		findings = append(findings, efficacyFindings...)
 
 		// REGRESSION (unchanged in substance): only REFERENCE-CORPUS rows
 		// (Extra == false) are diffed against the baseline — the detector's
@@ -1171,7 +1181,7 @@ func customerDeclaredFamilies(rows []CustomerExamRow) []string {
 // arm. All findings use RuleCustomerExamFail (the single customer-tree
 // rejection rule; RuleCustomerExamVacuous stays reserved for the whole-corpus
 // backstop).
-func checkCustomerEfficacy(name, relPath string, rows []CustomerExamRow) []GuardFinding {
+func checkCustomerEfficacy(name, relPath string, rows []CustomerExamRow, extraScenariosDir string) ([]GuardFinding, error) {
 	declared := customerDeclaredFamilies(rows)
 	if len(declared) == 0 {
 		return []GuardFinding{{
@@ -1180,24 +1190,44 @@ func checkCustomerEfficacy(name, relPath string, rows []CustomerExamRow) []Guard
 			Detail: fmt.Sprintf(
 				"detector %q ships zero efficacy scenarios — expected %s/%s/*.yaml with at least one must_fire scenario proving it fires on its target and a benign-twin must_not_fire scenario proving it stays silent on a look-alike; a detector graded ONLY against the reference corpus proves nothing about a novel gap it targets, fail closed",
 				name, relPath, customerScenariosSubdir),
-		}}
+		}}, nil
 	}
 
 	firesPassing := map[string]bool{}
 	twinPassing := map[string]bool{}
+	// extraFireIDs / extraTwinIDs collect, PER FAMILY, the scenario IDs of the
+	// detector's OWN (Extra == true) PASSING must_fire / must_not_fire rows —
+	// exactly the candidate pairs checkMinimalMutationCoverage below diffs.
+	// Reference-corpus rows (Extra == false) never enter these maps: see that
+	// function's doc for why the minimal-mutation check is scoped to the
+	// detector's own scenario pair, not the reference corpus.
+	extraFireIDs := map[string][]string{}
+	extraTwinIDs := map[string][]string{}
 	for _, r := range rows {
 		if !r.Pass {
 			continue
 		}
 		for _, fam := range r.MustFire {
-			firesPassing[normalizeFamily(fam)] = true
+			f := normalizeFamily(fam)
+			firesPassing[f] = true
+			if r.Extra {
+				extraFireIDs[f] = append(extraFireIDs[f], r.ScenarioID)
+			}
 		}
 		for _, fam := range r.MustNotFire {
-			twinPassing[normalizeFamily(fam)] = true
+			f := normalizeFamily(fam)
+			twinPassing[f] = true
+			if r.Extra {
+				extraTwinIDs[f] = append(extraTwinIDs[f], r.ScenarioID)
+			}
 		}
 	}
 
 	var findings []GuardFinding
+	// scenarios is loaded lazily (at most once) from extraScenariosDir — most
+	// proposals declare one family, and many families that DO have reference-
+	// corpus coverage on both arms never need it at all (see the skip below).
+	var scenarios map[string]*exam.Scenario
 	for _, fam := range declared {
 		if !firesPassing[fam] {
 			findings = append(findings, GuardFinding{
@@ -1216,9 +1246,283 @@ func checkCustomerEfficacy(name, relPath string, rows []CustomerExamRow) []Guard
 					"detector %q family %q: no passing must_not_fire benign-twin scenario proves it stays silent on a look-alike — missing benign twin, or the twin fires (the false-positive floor)",
 					name, fam),
 			})
+			continue // no twin at all for this family — nothing to diff below
+		}
+
+		// MEASURED MINIMAL MUTATION (mallcoppro-f95 round 2, veracity-reproduced
+		// bypass): a passing must_fire row AND a passing must_not_fire row is
+		// NOT enough on its own — see checkMinimalMutationCoverage's doc for the
+		// reproduced attack this closes (a detector that fires on every event
+		// except one hand-picked, structurally-unrelated event_type ships a
+		// compliant must-fire + twin pair and passed under the OLD check).
+		// Scoped to families whose proof for BOTH arms is entirely the
+		// detector's OWN scenarios (Extra rows): a family already proven via
+		// the reference corpus needs no re-derivation here — that corpus is
+		// the gate's own trusted ground truth, not the untrusted proposal
+		// content this check exists to police.
+		if len(extraFireIDs[fam]) == 0 || len(extraTwinIDs[fam]) == 0 {
+			continue
+		}
+		if scenarios == nil {
+			loaded, lerr := loadCustomerScenarioFiles(extraScenariosDir)
+			if lerr != nil {
+				return nil, fmt.Errorf("loading %s's own scenarios (%s) for the minimal-mutation check: %w", relPath, extraScenariosDir, lerr)
+			}
+			scenarios = loaded
+		}
+		if f := checkMinimalMutationCoverage(name, relPath, fam, extraFireIDs[fam], extraTwinIDs[fam], scenarios); f != nil {
+			findings = append(findings, *f)
 		}
 	}
-	return findings
+	return findings, nil
+}
+
+// loadCustomerScenarioFiles parses every scenario YAML under dir (a customer
+// detector's own co-located scenarios/ directory) into a map keyed by the
+// scenario's own `id:` field — the SAME key CustomerExamRow.ScenarioID
+// carries for these rows, since both are derived from the identical file set
+// RunCustomerTreeExamExtra's --extra-scenarios-dir union already graded
+// through the real .wasm pass. CustomerExamRow itself carries no event data
+// (see customerexam.go's wire shape); this is the only way
+// checkMinimalMutationCoverage can recover the raw event sequence a passing
+// row's verdict was computed over. A parse failure here is OPERATIONAL, never
+// silently skipped: the same directory just built and graded successfully
+// through RunCustomerTreeExamExtra, so a YAML this loader rejects means
+// something is wrong with the gate's own re-read, not the proposal.
+func loadCustomerScenarioFiles(dir string) (map[string]*exam.Scenario, error) {
+	out := map[string]*exam.Scenario{}
+	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if d.IsDir() {
+			if path != dir && strings.HasPrefix(d.Name(), "_") {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		if strings.HasPrefix(d.Name(), "_") {
+			return nil
+		}
+		if !strings.HasSuffix(d.Name(), ".yaml") && !strings.HasSuffix(d.Name(), ".yml") {
+			return nil
+		}
+		sc, lerr := exam.Load(path)
+		if lerr != nil {
+			return fmt.Errorf("parsing %s: %w", path, lerr)
+		}
+		out[sc.ID] = sc
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// maxDiscriminatingFields bounds how many event fields a benign-twin scenario
+// may differ on from its must-fire sibling and still count as a MEASURED
+// MINIMAL MUTATION rather than an arbitrary carve-out.
+//
+// Derived from the reference corpus's OWN benign-twin convention
+// (exams/scenarios/privilege/PE-08-aws-poweruser-grant.yaml and
+// PE-09-aws-readonly-grant-benign.yaml — PE-09's own trap_description names
+// itself "the benign twin of PE-08"): the discriminating event in that pair
+// shares event_type (role_assignment) and source (aws) and differs ONLY in
+// the SUBSTANTIVE payload that actually separates escalation from routine —
+// there, the policy attached (metadata.role / metadata.policy_arn:
+// PowerUserAccess vs ReadOnlyAccess, plus the principal fields that go with
+// it). It never differs in event TYPE itself. A customer-tree twin that
+// instead differs in event type (or actor, source, or event count) is not
+// narrowing on a substantive value at all — it is pointing at a
+// structurally different event and calling it a "near miss", which is
+// exactly the reproduced attack shape: a detector that fires on every event
+// except one hand-picked, structurally-unrelated event_type. Forcing the
+// twin to share the must-fire event's type/actor/source means that same
+// "if type == X, stay silent" logic which let the twin pass would ALSO
+// silence the must-fire event itself (same type) — so the must-fire arm
+// fails instead, and the detector is forced into genuine discrimination on
+// the bounded, substantive difference.
+//
+// 3 is small enough that a twin differing across essentially its entire
+// metadata block is still rejected (that is a different narrative wearing a
+// twin's clothes, not a bounded discrimination) while comfortably covering a
+// real near-miss that changes one semantic value (e.g. a policy ARN) plus
+// one or two correlated fields that legitimately change WITH it (e.g. a
+// severity or action string derived from that same underlying value, as
+// PE-08/PE-09's own action/severity fields do alongside the policy).
+//
+// This bound applies ONLY to the customer's own minimal single/few-event
+// scenario pair (detectors/<name>/scenarios/*.yaml) — the reference corpus's
+// own richer, multi-event scenarios (like PE-09's two-event onboarding
+// sequence) are a DIFFERENT, unconstrained authoring convention this check
+// does not police; see checkMinimalMutationCoverage's doc for the scope
+// boundary.
+const maxDiscriminatingFields = 3
+
+// checkMinimalMutationCoverage reports whether AT LEAST ONE (must-fire,
+// benign-twin) scenario ID pair drawn from fireIDs × twinIDs is a MEASURED
+// MINIMAL MUTATION of each other (minimalMutationPairOK) — proof that the
+// detector's discrimination is genuine, not an arbitrary carve-out. Returns
+// nil (no finding) the moment one qualifying pair is found; a detector may
+// ship extra, broader scenarios beyond the required minimal pair without
+// penalty. Returns a RuleCustomerExamFail finding, listing every attempted
+// pair and why it failed, only if NONE of the passing pairs qualify.
+//
+// THE REPRODUCED BYPASS this closes (opus veracity, independently
+// reproduced): checkCustomerEfficacy previously verified only that a family
+// had SOME passing must_fire row and SOME passing must_not_fire row — never
+// that the benign twin was a minimal mutation of the must-fire scenario. A
+// detector for a novel family (zero reference-corpus rows, so the regression
+// arm is an empty backstop) that fires on every event EXCEPT its own
+// hand-picked twin event_type shipped a compliant must-fire + twin pair and
+// PASSED. minimalMutationPairOK's structural-identity requirement
+// (event_type/actor/source must match, see maxDiscriminatingFields's doc)
+// closes this: the twin can no longer be "some other event the detector
+// happens to ignore" — it must share the must-fire event's type/actor/source
+// and differ only on a bounded, non-zero set of substantive fields.
+func checkMinimalMutationCoverage(name, relPath, fam string, fireIDs, twinIDs []string, scenarios map[string]*exam.Scenario) *GuardFinding {
+	var attemptDetails []string
+	foundAny := false
+	for _, fireID := range fireIDs {
+		fireScenario := scenarios[fireID]
+		if fireScenario == nil {
+			continue
+		}
+		for _, twinID := range twinIDs {
+			twinScenario := scenarios[twinID]
+			if twinScenario == nil {
+				continue
+			}
+			foundAny = true
+			ok, reason := minimalMutationPairOK(fireScenario, twinScenario)
+			if ok {
+				return nil
+			}
+			attemptDetails = append(attemptDetails, fmt.Sprintf("%s vs %s: %s", fireID, twinID, reason))
+		}
+	}
+	if !foundAny {
+		// Every declared must_fire/must_not_fire ID for this family came from
+		// files this loader could not locate under the detector's own
+		// scenarios directory — should not happen (the same directory just
+		// graded successfully through the real exam-detect pass) — fail
+		// closed rather than silently accept an unverifiable pair.
+		return &GuardFinding{
+			Path: relPath,
+			Rule: RuleCustomerExamFail,
+			Detail: fmt.Sprintf(
+				"detector %q family %q: could not locate its own must_fire/must_not_fire scenario files under %s to verify the benign twin is a measured minimal mutation of the must-fire scenario — fail closed",
+				name, fam, customerScenariosSubdir),
+		}
+	}
+	return &GuardFinding{
+		Path: relPath,
+		Rule: RuleCustomerExamFail,
+		Detail: fmt.Sprintf(
+			"detector %q family %q: no passing must_fire/must_not_fire pair proves the benign twin is a MEASURED MINIMAL MUTATION of the must-fire scenario (same event count and order, matching event_type/actor/source, a bounded 1..%d discriminating field difference on action/target/severity/metadata) — a twin that is byte-identical, that differs in event type/count/actor/source, or that differs too broadly is an arbitrary carve-out, not a genuine near-miss (%s)",
+			name, fam, maxDiscriminatingFields, strings.Join(attemptDetails, "; ")),
+	}
+}
+
+// minimalMutationPairOK reports whether twin's Events are a MEASURED MINIMAL
+// MUTATION of fire's Events: same count and order, matching structural
+// identity per event (event_type/actor/source — see maxDiscriminatingFields's
+// doc for why), and a bounded, NON-ZERO total count of discriminating field
+// differences (action/target/severity/metadata) across the whole sequence.
+// reason is empty iff ok is true.
+func minimalMutationPairOK(fire, twin *exam.Scenario) (ok bool, reason string) {
+	if len(fire.Events) != len(twin.Events) {
+		return false, fmt.Sprintf(
+			"event count differs (must-fire has %d, twin has %d) — a twin must mirror the must-fire scenario's event sequence, not add or drop events",
+			len(fire.Events), len(twin.Events))
+	}
+	if len(fire.Events) == 0 {
+		return false, "must-fire scenario has zero events — nothing to mutate"
+	}
+	total := 0
+	for i := range fire.Events {
+		if r := structuralIdentityMismatch(fire.Events[i], twin.Events[i], i); r != "" {
+			return false, r
+		}
+		total += eventDiscriminatingDiff(fire.Events[i], twin.Events[i])
+	}
+	if total == 0 {
+		return false, "twin is byte-identical to the must-fire scenario on every discriminating field (action/target/severity/metadata) — zero discrimination proves nothing"
+	}
+	if total > maxDiscriminatingFields {
+		return false, fmt.Sprintf(
+			"twin differs from the must-fire scenario on %d discriminating field(s), exceeding the bound of %d — too broad a difference to be a genuine near-miss",
+			total, maxDiscriminatingFields)
+	}
+	return true, ""
+}
+
+// structuralIdentityMismatch returns a non-empty reason if fire and twin (at
+// event position idx) do not share the SAME structural identity — event_type,
+// actor, and source. See maxDiscriminatingFields's doc for why these three
+// fields must match rather than count as bounded discriminators: allowing any
+// of them to differ reopens the exact reproduced bypass (a twin that is
+// simply a different, hand-picked event the detector special-cases around,
+// rather than a substantive near-miss of the SAME event).
+func structuralIdentityMismatch(fire, twin exam.Event, idx int) string {
+	switch {
+	case fire.EventType != twin.EventType:
+		return fmt.Sprintf(
+			"event[%d]: event_type differs (%q vs %q) — the twin targets a different event type entirely, an arbitrary carve-out rather than a near-miss of the SAME event type",
+			idx, fire.EventType, twin.EventType)
+	case fire.Actor != twin.Actor:
+		return fmt.Sprintf(
+			"event[%d]: actor differs (%q vs %q) — structural identity (event_type/actor/source) must match; only a bounded number of payload/value fields may discriminate",
+			idx, fire.Actor, twin.Actor)
+	case fire.Source != twin.Source:
+		return fmt.Sprintf(
+			"event[%d]: source differs (%q vs %q) — structural identity (event_type/actor/source) must match; only a bounded number of payload/value fields may discriminate",
+			idx, fire.Source, twin.Source)
+	}
+	return ""
+}
+
+// eventDiscriminatingDiff counts the DISCRIMINATING field differences between
+// two events already known to share structural identity (event_type/actor/
+// source — the caller checks that first). id, timestamp, and ingested_at are
+// EXEMPT: they always differ between two scenario files (an event id must be
+// unique; a twin is authored at a different, later timestamp) and carry no
+// information about whether the detector genuinely discriminates on the
+// attack's substance. action, target, severity, and each metadata key ARE
+// counted; raw is intentionally ignored (a free-form escape hatch scenario
+// authors are not required to keep parallel).
+func eventDiscriminatingDiff(fire, twin exam.Event) int {
+	n := 0
+	if fire.Action != twin.Action {
+		n++
+	}
+	if fire.Target != twin.Target {
+		n++
+	}
+	if fire.Severity != twin.Severity {
+		n++
+	}
+	n += metadataDiffCount(fire.Metadata, twin.Metadata)
+	return n
+}
+
+// metadataDiffCount counts keys that differ (by value) or are present in one
+// metadata map but absent from the other — each such key is one
+// discriminating field.
+func metadataDiffCount(a, b exam.EventMetadata) int {
+	n := 0
+	for k, av := range a {
+		if bv, ok := b[k]; !ok || !reflect.DeepEqual(av, bv) {
+			n++
+		}
+	}
+	for k := range b {
+		if _, ok := a[k]; !ok {
+			n++
+		}
+	}
+	return n
 }
 
 // ---- subprocess plumbing -------------------------------------------------------
