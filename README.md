@@ -299,7 +299,11 @@ Additional connectors ship as **standalone binaries** in the sibling repo
 wired into `mallcop.yaml` as `kind: cloud`, or piped directly:
 
 ```bash
-mallcop-connector-aws-cloudtrail --region us-east-1 \
+# install the AWS connector and name it per mallcop's exec convention
+go install github.com/mallcop-app/mallcop-connectors/cmd/aws@latest
+mv "$(go env GOPATH)/bin/aws" "$(go env GOPATH)/bin/mallcop-connector-aws"
+
+mallcop-connector-aws --since 2026-07-01T00:00:00Z \
   | mallcop scan --events - --store store
 ```
 
