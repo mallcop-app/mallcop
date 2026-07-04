@@ -211,6 +211,7 @@ func CheckSidecarDetectorShape(paths []string, sources [][]byte) []Violation {
 		}
 		violations = append(violations, checkSidecarFileDirectives(p, f)...)
 		violations = append(violations, checkSidecarImportsC(p, f)...)
+		violations = append(violations, checkSidecarDotImports(p, f)...)
 		violations = append(violations, checkSidecarInitFuncs(p, f)...)
 		violations = append(violations, checkSidecarPackageInitializers(p, f)...)
 		violations = append(violations, checkSidecarUnboundedLoops(p, f)...)
@@ -292,6 +293,25 @@ func checkSidecarImportsC(path string, f *ast.File) []Violation {
 			violations = append(violations, Violation{
 				File: path, Rule: RuleSidecarCgo,
 				Detail: `import "C" (cgo) is forbidden in a sidecar detector`,
+			})
+		}
+	}
+	return violations
+}
+
+// checkSidecarDotImports rejects dot imports of ANY package. A dot import of
+// an allowlisted package (import . "os") passes the path allowlist but renders
+// its symbols as bare identifiers — os.ReadFile becomes ReadFile — which the
+// SelectorExpr-based os/detectorhost confinement never inspects. There is no
+// legitimate reason for a sidecar to dot-import anything, so the ban is total
+// rather than per-package.
+func checkSidecarDotImports(path string, f *ast.File) []Violation {
+	var violations []Violation
+	for _, imp := range f.Imports {
+		if imp.Name != nil && imp.Name.Name == "." {
+			violations = append(violations, Violation{
+				File: path, Rule: RuleSidecarImport,
+				Detail: "dot import of " + imp.Path.Value + " is forbidden in a sidecar detector: it hides the package's symbols from the confinement checks (os.Exit-only, detectorhost.Run-only)",
 			})
 		}
 	}

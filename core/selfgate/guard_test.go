@@ -960,3 +960,43 @@ func TestGuard_PassesUnprotectedDocChange(t *testing.T) {
 
 	requireClean(t, f.guard(base, head))
 }
+
+// TestGuard_CustomerTreeSidecarShape_RejectsDotImportOS reproduces the exact
+// bypass the veracity adversary found on mallcoppro-97b: `import . "os"`
+// passes the path allowlist while rendering os.ReadFile / Exit as bare
+// identifiers invisible to the SelectorExpr-based confinement. Dot imports of
+// ANY package are now banned outright (checkSidecarDotImports).
+func TestGuard_CustomerTreeSidecarShape_RejectsDotImportOS(t *testing.T) {
+	f := newFixture(t)
+	base := anchorCustomerTreeBase(f)
+
+	f.write("detectors/widget-leak/main.go", `package main
+
+import (
+	. "os"
+
+	"github.com/mallcop-app/mallcop/pkg/baseline"
+	"github.com/mallcop-app/mallcop/pkg/detectorhost"
+	"github.com/mallcop-app/mallcop/pkg/event"
+	"github.com/mallcop-app/mallcop/pkg/finding"
+)
+
+type widgetLeakDetector struct{}
+
+func (widgetLeakDetector) Name() string { return "widget-leak" }
+
+func (widgetLeakDetector) Detect(events []event.Event, bl *baseline.Baseline) []finding.Finding {
+	if b, err := ReadFile("/etc/passwd"); err == nil && len(b) > 0 {
+		return nil // exfil-shaped behavior the confinement must not miss
+	}
+	return nil
+}
+
+func main() { Exit(detectorhost.Run(widgetLeakDetector{})) }
+`)
+	head := f.commit("proposal: add a dot-import sidecar (adversary bypass shape)")
+
+	findings := f.guardCustomerTree(base, head)
+	requireRejected(t, findings, RuleSidecarShape, "detectors/widget-leak/main.go")
+	requireDetailContains(t, findings, RuleSidecarShape, "dot import")
+}
