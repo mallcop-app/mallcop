@@ -93,6 +93,15 @@ const (
 	// RuleStructuralAllowlist — an authored-detector import allow-list
 	// violation (or an unverifiable authored tree — fail closed).
 	RuleStructuralAllowlist = "structural-import-allowlist"
+	// RuleStructuralVet — `go vet ./...` failed in the head tree. `go build
+	// ./...` alone SKIPS _test.go files; a sidecar's authored main_test.go can
+	// fail to even compile (an unused import, a struct-value call written as a
+	// function call, ...) and still sail through structuralStage undetected
+	// (mallcoppro-f95, round 5's non-compiling detectors/forcepushprotected
+	// branch/main_test.go). `go vet` compiles every _test.go in the tree as
+	// part of its analysis, so a non-compiling test file fails HERE, closed —
+	// before the customer detector's quality is ever graded.
+	RuleStructuralVet = "structural-vet"
 	// RuleExamExecution — the head tree's own exam-detect run failed
 	// operationally (e.g. the proposal drifted the corpus off its pin).
 	RuleExamExecution = "exam-detect-execution"
@@ -412,6 +421,39 @@ func structuralStage(headTree string, customerTreeMode bool) ([]GuardFinding, st
 		})
 	}
 
+	// `go vet ./...` — DEFENSE-IN-DEPTH beside `go build ./...` above:
+	// `go build` never compiles _test.go files, so a sidecar's authored
+	// main_test.go that does not even COMPILE (mallcoppro-f95: round 5's
+	// forcepushprotectedbranch/main_test.go called a struct value as a
+	// function and carried an unused import) sails through the build check
+	// untouched. `go vet` DOES compile every _test.go in the tree as part of
+	// its own analysis pass, so a non-compiling test file fails here, fail
+	// closed, before the detector's efficacy is ever graded. Same GOFLAGS
+	// convention as the build above (customer-tree mode only).
+	//
+	// GUARD: `go vet ./...` (unlike `go build ./...`) exits 1 with "no
+	// packages to vet" on a tree with ZERO .go files anywhere (a bare
+	// THIN-EMBED scaffold before any detector is authored) — `go build`
+	// silently no-ops (exit 0) on the exact same tree. Skip the vet call
+	// entirely when the tree has no .go files at all, so an empty/no-op
+	// proposal is trivially clean under vet exactly as it already is under
+	// build, instead of failing on Go's own "nothing here" plumbing message.
+	vetOK := true
+	if treeHasGoFiles(headTree) {
+		vstdout, vstderr, vcode, verr := runTool(headTree, buildEnv, "go", "vet", "./...")
+		if verr != nil {
+			return nil, "", fmt.Errorf("selfgate: running `go vet` in the head tree: %w", verr)
+		}
+		if vcode != 0 {
+			vetOK = false
+			findings = append(findings, GuardFinding{
+				Path:   "./...",
+				Rule:   RuleStructuralVet,
+				Detail: fmt.Sprintf("`go vet ./...` failed in the head tree (exit %d): %s", vcode, truncate(vstderr+vstdout, 1500)),
+			})
+		}
+	}
+
 	// K2a authored-detector import allow-list over the head tree.
 	modulePath, err := lint.ModulePath(headTree)
 	if err != nil {
@@ -482,7 +524,11 @@ func structuralStage(headTree string, customerTreeMode bool) ([]GuardFinding, st
 	if !buildOK {
 		buildNote = "`go build ./...` FAILED in head tree"
 	}
-	return findings, buildNote + "; " + allowlistNote + "; " + shapeNote, nil
+	vetNote := "`go vet ./...` OK in head tree"
+	if !vetOK {
+		vetNote = "`go vet ./...` FAILED in head tree"
+	}
+	return findings, buildNote + "; " + vetNote + "; " + allowlistNote + "; " + shapeNote, nil
 }
 
 // repoRelativeHead makes a shape-violation file path (which is absolute, rooted
@@ -537,10 +583,63 @@ func discoverCustomerDetectorDirs(tree string) ([]string, error) {
 	return dirs, nil
 }
 
+// dirExists reports whether path exists and is a directory.
+func dirExists(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.IsDir()
+}
+
+// treeHasGoFiles reports whether tree contains at least one .go file at any
+// depth (skipping .git). Used to skip `go vet ./...` on a tree with nothing
+// to vet — Go's own "no packages to vet" plumbing message on such a tree is
+// not a detector defect (see structuralStage).
+func treeHasGoFiles(tree string) bool {
+	found := false
+	_ = filepath.WalkDir(tree, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() {
+			if d.Name() == ".git" {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		if strings.HasSuffix(d.Name(), ".go") {
+			found = true
+			return fs.SkipAll
+		}
+		return nil
+	})
+	return found
+}
+
+// customerScenariosSubdir is the co-located efficacy-scenarios directory
+// every customer-tree detector sidecar unit ships (mallcoppro-f95 RULING,
+// Approach A): detectors/<name>/{main.go, main_test.go, scenarios/*.yaml}.
+// Its absence is not an error — a detector that ships none simply declares
+// zero families (checkCustomerEfficacy fails it closed for that).
+const customerScenariosSubdir = "scenarios"
+
 // customerTreeExamStage is stage 3 under Options.ExamRepo: it grades every
-// detectors/<name>/ source directory found in headTree against examRepoTree's
-// OWN pinned corpus via RunCustomerTreeExam (customerexam.go) — the real
-// wasip1/wazero host path, never an in-process link.
+// detectors/<name>/ source directory found in headTree against the UNION of
+// (a) examRepoTree's OWN pinned reference corpus and (b) the detector's OWN
+// co-located detectors/<name>/scenarios/*.yaml efficacy scenarios (mallcoppro-
+// f95), via RunCustomerTreeExamExtra (customerexam.go) — the real
+// wasip1/wazero host path, never an in-process link. The detector's own
+// scenarios are UNPINNED (never touch examRepoTree's corpus.pin).
+//
+// EPHEMERAL SCRATCH COPY (mallcoppro-f95 ruling): examRepoTree is a
+// caller-supplied REAL reference tree, potentially the operator's own
+// long-lived checkout reused across many gate runs — not a disposable
+// worktree like headTree. Grading builds a `mallcop` binary straight into
+// whatever tree it's pointed at (runTreeExamWithSidecarSrc); pointing that at
+// examRepoTree directly would leave a stray binary in the operator's real
+// checkout on every run. This stage therefore makes an ephemeral, throwaway
+// COPY of examRepoTree first (scratchCopyExamRepo) and grades against the
+// copy exclusively — examRepoTree itself is only ever READ (to make the
+// copy), never built into, never written to, and its corpus.pin is never
+// touched.
 //
 // A REAL reference tree's corpus can legitimately carry PRE-EXISTING labeled
 // gaps (documented, accepted red rows unrelated to any customer proposal —
@@ -548,18 +647,29 @@ func discoverCustomerDetectorDirs(tree string) ([]string, error) {
 // itself has no base-tree diff (see its package doc), so grading the
 // candidate report in isolation would wrongly reject every customer detector
 // over gaps it didn't cause. This stage therefore diffs TWO exam runs of the
-// SAME examRepoTree: a BASELINE (runTreeExam, no sidecar — whatever the
-// reference tree already scores on its own) and the CANDIDATE (the customer
-// detector loaded via RunCustomerTreeExam). Only a scenario that PASSED at
-// baseline and FAILS at candidate is a regression THIS detector introduced —
-// including a detector that fires on its own benign twin (the classic
-// missing-benign-twin-protection defect: its own must-fire target's row
-// stays passing, but the benign-twin row the detector wrongly fires on
-// regresses from pass to fail). A pre-existing baseline failure is never
-// blamed on the candidate. This is a REAL rejection finding, never folded
-// into the operational-error path. The error return here is operational
-// only: a detector source that doesn't build, or the reference tree's own
-// corpus failing to resolve (either pass).
+// SAME scratch copy: a BASELINE (runTreeExam, no sidecar, no extra scenarios —
+// whatever the reference tree already scores on its own) and the CANDIDATE
+// (the customer detector + its own scenarios loaded via
+// RunCustomerTreeExamExtra). Only a REFERENCE-CORPUS scenario (row.Extra ==
+// false) that PASSED at baseline and FAILS at candidate is a regression THIS
+// detector introduced against the shared corpus — including a detector that
+// fires on some unrelated reference scenario it should stay silent on. A
+// pre-existing baseline failure is never blamed on the candidate.
+//
+// EFFICACY (the K1 hole this fix closes, mallcoppro-f95): a detector proven
+// ONLY against the reference corpus can pass vacuously for a NOVEL gap (an
+// event type with zero reference-corpus scenarios) without ever being shown
+// an event of its own target type. checkCustomerEfficacy generalizes the
+// in-tree lane's checkAuthoredBenignTwins into this lane: for every family
+// the detector's OWN scenarios declare as a must_fire target
+// (customerDeclaredFamilies, sourced from Extra==true rows only), the UNION
+// report must carry a PASSING must_fire row AND a PASSING must_not_fire
+// benign-twin row for it — zero declared families (no scenarios/ shipped, or
+// none labeled) fails closed trivially. This is a REAL rejection finding,
+// never folded into the operational-error path. The error return here is
+// operational only: a detector source that doesn't build, the scratch copy
+// failing to materialize, or the reference tree's own corpus failing to
+// resolve (either pass).
 func customerTreeExamStage(examRepoTree, headTree string) ([]GuardFinding, string, error) {
 	detectorDirs, err := discoverCustomerDetectorDirs(headTree)
 	if err != nil {
@@ -569,7 +679,13 @@ func customerTreeExamStage(examRepoTree, headTree string) ([]GuardFinding, strin
 		return nil, fmt.Sprintf("customer-tree exam mode: no detectors/<name>/main.go found under %s (nothing to grade)", headTree), nil
 	}
 
-	baselineReport, _, baseErr := runTreeExam(examRepoTree)
+	scratchExamRepo, cleanup, err := scratchCopyExamRepo(examRepoTree)
+	if err != nil {
+		return nil, "", err
+	}
+	defer cleanup()
+
+	baselineReport, _, baseErr := runTreeExam(scratchExamRepo)
 	if baseErr != nil {
 		// The reference tree is the caller-supplied ground truth: if it cannot
 		// even grade itself (no detector loaded), the gate has nothing to diff
@@ -587,7 +703,12 @@ func customerTreeExamStage(examRepoTree, headTree string) ([]GuardFinding, strin
 		name := filepath.Base(dir)
 		relPath := "detectors/" + name
 
-		report, err := RunCustomerTreeExam(examRepoTree, dir)
+		extraScenariosDir := ""
+		if candidate := filepath.Join(dir, customerScenariosSubdir); dirExists(candidate) {
+			extraScenariosDir = candidate
+		}
+
+		report, err := RunCustomerTreeExamExtra(scratchExamRepo, dir, extraScenariosDir)
 		if err != nil {
 			return nil, "", fmt.Errorf("selfgate: customer-tree exam for %s: %w", relPath, err)
 		}
@@ -602,8 +723,24 @@ func customerTreeExamStage(examRepoTree, headTree string) ([]GuardFinding, strin
 			continue
 		}
 
+		// EFFICACY (mallcoppro-f95): the detector's OWN scenarios must prove it
+		// fires on its declared target(s) and stays silent on a benign twin.
+		// Zero declared families (no scenarios/ shipped, or none labeled) fails
+		// closed here — this is what stops a novel-gap detector from passing
+		// on reference-corpus silence alone (it is never even shown its target
+		// event type by the reference corpus).
+		findings = append(findings, checkCustomerEfficacy(name, relPath, report.Rows)...)
+
+		// REGRESSION (unchanged in substance): only REFERENCE-CORPUS rows
+		// (Extra == false) are diffed against the baseline — the detector's
+		// OWN scenario rows are graded above by checkCustomerEfficacy instead,
+		// which gives them a more precise per-family verdict than a bare
+		// "regressed since it was never at baseline" message would.
 		regressions := 0
 		for _, row := range report.Rows {
+			if row.Extra {
+				continue
+			}
 			if row.Pass {
 				continue
 			}
@@ -624,7 +761,7 @@ func customerTreeExamStage(examRepoTree, headTree string) ([]GuardFinding, strin
 			name, report.Totals.Labeled, report.Totals.Passed, report.Totals.Failed, regressions))
 	}
 
-	evidence := fmt.Sprintf("customer-tree exam via reference tree %s — %s", examRepoTree, strings.Join(parts, "; "))
+	evidence := fmt.Sprintf("customer-tree exam via reference tree %s (graded against an ephemeral scratch copy) — %s", examRepoTree, strings.Join(parts, "; "))
 	return findings, evidence, nil
 }
 
@@ -640,6 +777,13 @@ type examRow struct {
 	MustNotFire []string `json:"must_not_fire"`
 	Emitted     []string `json:"emitted"`
 	Pass        bool     `json:"pass"`
+	// Extra mirrors core/eval.ExamDetectRow.Extra (mallcoppro-f95): true when
+	// this row came from an --extra-scenarios-dir union rather than the
+	// pinned reference corpus. Always false/omitted for the in-tree lane
+	// (which never passes an extra dir) — decoded here only so
+	// customerTreeExamStage can tell a customer detector's OWN efficacy
+	// scenarios apart from reference-corpus rows in the SAME report.
+	Extra bool `json:"extra,omitempty"`
 }
 
 type examReport struct {
@@ -687,6 +831,18 @@ func runTreeExam(tree string) (examReport, string, error) {
 // in-process shortcut for this: it has no way to reach core/detect's registry
 // or detecthost directly.
 func runTreeExamWithSidecarSrc(tree, sidecarSrcDir string) (examReport, string, error) {
+	return runTreeExamWithSidecarSrcAndScenarios(tree, sidecarSrcDir, "")
+}
+
+// runTreeExamWithSidecarSrcAndScenarios is runTreeExamWithSidecarSrc,
+// additionally passing --extra-scenarios-dir extraScenariosDir when non-empty
+// (mallcoppro-f95) — unions a customer detector's OWN co-located efficacy
+// scenarios into the SAME exam-detect run, UNPINNED (see
+// RunCustomerTreeExamExtra). extraScenariosDir == "" reproduces
+// runTreeExamWithSidecarSrc's exact prior behavior byte-for-byte (the flag is
+// simply omitted from argv), which is what keeps every existing caller
+// (runTreeExam, the in-tree lane, RunCustomerTreeExam) unchanged.
+func runTreeExamWithSidecarSrcAndScenarios(tree, sidecarSrcDir, extraScenariosDir string) (examReport, string, error) {
 	bin := filepath.Join(tree, "mallcop")
 	stdout, stderr, code, err := runTool(tree, nil, "go", "build", "-o", bin, "./cmd/mallcop")
 	if err != nil {
@@ -703,6 +859,9 @@ func runTreeExamWithSidecarSrc(tree, sidecarSrcDir string) (examReport, string, 
 	}
 	if sidecarSrcDir != "" {
 		args = append(args, "--sidecar-src", sidecarSrcDir)
+	}
+	if extraScenariosDir != "" {
+		args = append(args, "--extra-scenarios-dir", extraScenariosDir)
 	}
 	// Defense-in-depth behind the L3 shape gate: an authored detector that slips
 	// an unbounded loop or blocking call past the AST check would otherwise let
@@ -964,6 +1123,104 @@ func normalizeFamily(tok string) string {
 	return strings.ToLower(strings.TrimSpace(tok))
 }
 
+// customerDeclaredFamilies returns the sorted, de-duplicated set of detector
+// families a customer detector's OWN scenarios/*.yaml sidecar (rows marked
+// Extra) declares as a must_fire target — the customer-tree analogue of
+// addedAuthoredFamilies for the in-tree lane. There is no base/head package
+// diff in customer-tree mode (a single detector is graded in isolation, not
+// diffed against a sibling proposal); the detector's own must_fire
+// declarations under its own scenarios/ ARE the claim it must prove.
+// Reference-corpus rows (Extra == false) never contribute here — a detector
+// cannot borrow proof of its own novel-gap efficacy from scenarios it did not
+// ship.
+func customerDeclaredFamilies(rows []CustomerExamRow) []string {
+	set := map[string]bool{}
+	for _, r := range rows {
+		if !r.Extra {
+			continue
+		}
+		for _, fam := range r.MustFire {
+			set[normalizeFamily(fam)] = true
+		}
+	}
+	return sortedKeys(set)
+}
+
+// checkCustomerEfficacy is the customer-tree generalization of
+// checkAuthoredBenignTwins (mallcoppro-f95): for every family the detector's
+// OWN scenarios/*.yaml declares (customerDeclaredFamilies), the UNION report
+// (reference corpus + the detector's own scenarios, graded through the SAME
+// real .wasm run) must carry a PASSING must_fire row AND a PASSING
+// must_not_fire benign-twin row for it.
+//
+// Zero declared families — no scenarios/ subdirectory shipped at all, or one
+// that ships no labeled must_fire scenario — fails closed trivially: a
+// detector graded ONLY against the reference corpus proves nothing about a
+// novel gap it targets (the reference corpus, by definition, may have zero
+// scenarios of that event type). This is the K1 hole mallcoppro-f95 closes:
+// before this check, RuleCustomerExamVacuous only ever looked at the WHOLE
+// union's Totals.Labeled, which is never zero once a non-trivial reference
+// corpus is in play — a detector with zero of its own scenarios sailed
+// through untouched.
+//
+// firesPassing/twinPassing are computed over ALL rows (reference and extra)
+// so a family's proof can legitimately live in either — a family a detector
+// declares that HAPPENS to already have reference-corpus coverage is not
+// penalized for it — but a declared family with NO passing proof anywhere in
+// the union fails on both the must-fire and (independently) the benign-twin
+// arm. All findings use RuleCustomerExamFail (the single customer-tree
+// rejection rule; RuleCustomerExamVacuous stays reserved for the whole-corpus
+// backstop).
+func checkCustomerEfficacy(name, relPath string, rows []CustomerExamRow) []GuardFinding {
+	declared := customerDeclaredFamilies(rows)
+	if len(declared) == 0 {
+		return []GuardFinding{{
+			Path: relPath,
+			Rule: RuleCustomerExamFail,
+			Detail: fmt.Sprintf(
+				"detector %q ships zero efficacy scenarios — expected %s/%s/*.yaml with at least one must_fire scenario proving it fires on its target and a benign-twin must_not_fire scenario proving it stays silent on a look-alike; a detector graded ONLY against the reference corpus proves nothing about a novel gap it targets, fail closed",
+				name, relPath, customerScenariosSubdir),
+		}}
+	}
+
+	firesPassing := map[string]bool{}
+	twinPassing := map[string]bool{}
+	for _, r := range rows {
+		if !r.Pass {
+			continue
+		}
+		for _, fam := range r.MustFire {
+			firesPassing[normalizeFamily(fam)] = true
+		}
+		for _, fam := range r.MustNotFire {
+			twinPassing[normalizeFamily(fam)] = true
+		}
+	}
+
+	var findings []GuardFinding
+	for _, fam := range declared {
+		if !firesPassing[fam] {
+			findings = append(findings, GuardFinding{
+				Path: relPath,
+				Rule: RuleCustomerExamFail,
+				Detail: fmt.Sprintf(
+					"detector %q family %q: no passing must_fire scenario proves it fires on its target — the detector's own %s/%s/*.yaml must-fire scenario did not clear the real .wasm run",
+					name, fam, relPath, customerScenariosSubdir),
+			})
+		}
+		if !twinPassing[fam] {
+			findings = append(findings, GuardFinding{
+				Path: relPath,
+				Rule: RuleCustomerExamFail,
+				Detail: fmt.Sprintf(
+					"detector %q family %q: no passing must_not_fire benign-twin scenario proves it stays silent on a look-alike — missing benign twin, or the twin fires (the false-positive floor)",
+					name, fam),
+			})
+		}
+	}
+	return findings
+}
+
 // ---- subprocess plumbing -------------------------------------------------------
 
 // resolveCommit resolves ref to a full commit SHA in the repo at repoRoot.
@@ -991,6 +1248,74 @@ func removeWorktree(repoRoot, dir string) {
 	if _, err := runGit(repoRoot, "worktree", "remove", "--force", dir); err != nil {
 		_, _ = runGit(repoRoot, "worktree", "prune")
 	}
+}
+
+// scratchCopyExamRepo makes an EPHEMERAL, THROWAWAY copy of a caller-supplied
+// REAL reference tree (Options.ExamRepo) into a fresh temp dir, so grading a
+// customer detector against it can never mutate the operator's actual
+// checkout (mallcoppro-f95). Grading builds a `mallcop` binary straight into
+// whatever tree it's pointed at (runTreeExamWithSidecarSrc has always done
+// this in place — correct for the in-tree lane's OWN throwaway worktrees, but
+// wrong for a caller-supplied PERSISTENT reference tree reused across many
+// gate runs). The copy excludes .git (build/grading needs no VCS metadata,
+// and a real checkout's .git can be large) — everything else, including
+// exams/scenarios/corpus.pin, is byte-copied. Returns the copy's root and a
+// cleanup func that removes the whole scratch dir; cleanup is always safe to
+// call even if an error already occurred.
+func scratchCopyExamRepo(examRepoTree string) (copyDir string, cleanup func(), err error) {
+	scratch, err := os.MkdirTemp("", "mallcop-examrepo-")
+	if err != nil {
+		return "", func() {}, fmt.Errorf("selfgate: exam-repo scratch dir: %w", err)
+	}
+	cleanup = func() { _ = os.RemoveAll(scratch) }
+	dst := filepath.Join(scratch, "examrepo")
+	if cerr := copyTree(examRepoTree, dst); cerr != nil {
+		cleanup()
+		return "", func() {}, fmt.Errorf("selfgate: copying reference tree %s to an ephemeral scratch copy: %w", examRepoTree, cerr)
+	}
+	return dst, cleanup, nil
+}
+
+// copyTree recursively byte-copies src to dst (creating dst), skipping .git
+// directories at any depth. File permissions are preserved; symlinks are
+// recreated as symlinks (never followed) so the copy cannot escape src via a
+// malicious link target it did not itself resolve.
+func copyTree(src, dst string) error {
+	return filepath.WalkDir(src, func(path string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		rel, relErr := filepath.Rel(src, path)
+		if relErr != nil {
+			return relErr
+		}
+		if rel == "." {
+			return os.MkdirAll(dst, 0o755)
+		}
+		if d.IsDir() && d.Name() == ".git" {
+			return fs.SkipDir
+		}
+		target := filepath.Join(dst, rel)
+		info, ierr := d.Info()
+		if ierr != nil {
+			return ierr
+		}
+		if d.IsDir() {
+			return os.MkdirAll(target, info.Mode().Perm()|0o700)
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			linkTarget, lerr := os.Readlink(path)
+			if lerr != nil {
+				return lerr
+			}
+			return os.Symlink(linkTarget, target)
+		}
+		data, rerr := os.ReadFile(path)
+		if rerr != nil {
+			return rerr
+		}
+		return os.WriteFile(target, data, info.Mode().Perm())
+	})
 }
 
 // runTool executes a subprocess with Dir=dir and the parent environment plus

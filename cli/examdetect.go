@@ -31,6 +31,7 @@ func runExamDetect(args []string) error {
 	jsonOut := fs.Bool("json", false, "Output the report as JSON")
 	tuningPath := fs.String("tuning", "", "Optional path to a detector tuning YAML (widen-only extra_* knobs)")
 	sidecarSrc := fs.String("sidecar-src", "", "Optional Go package directory to build to a wasip1 .wasm module and grade IN ADDITION to any configured sidecars — the CUSTOMER-TREE exam mode (mallcoppro-cc3e): the detector need not live in this repo's own tree at all, only be a valid Go package implementing core/detect.Detector via pkg/detectorhost")
+	extraScenariosDir := fs.String("extra-scenarios-dir", "", "Optional directory of scenario YAML files to UNION into grading IN ADDITION to the pinned reference corpus (mallcoppro-f95) — e.g. a customer detector's OWN co-located detectors/<name>/scenarios/ efficacy scenarios. UNPINNED: never verified against corpus.pin, never counted in the reference corpus's own digest")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -71,7 +72,7 @@ func runExamDetect(args []string) error {
 		return fmt.Errorf("resolving repo root: %w", err)
 	}
 
-	report, err := eval.RunExamDetect(root)
+	report, err := eval.RunExamDetectExtra(root, *extraScenariosDir)
 	if err != nil {
 		return err
 	}

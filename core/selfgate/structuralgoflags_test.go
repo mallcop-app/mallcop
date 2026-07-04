@@ -65,6 +65,10 @@ replace github.com/mallcop-app/mallcop => ` + mallcopRoot + `
 	if err := os.WriteFile(filepath.Join(detDir, "main.go"), []byte(detectorSrc), 0o644); err != nil {
 		t.Fatalf("write detector main.go: %v", err)
 	}
+	// The sidecar unit's OWN efficacy scenarios (mallcoppro-f95 RULING) —
+	// see writeSidecarScenarios (customergate_test.go) for why this is
+	// mandatory now, not just a nicety.
+	writeSidecarScenarios(t, detDir)
 	head = commitAll(t, dir, "proposal: add widget-leak detector (first import of the framework surface)")
 	return dir, base, head
 }

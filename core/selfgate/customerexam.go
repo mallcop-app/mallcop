@@ -58,6 +58,10 @@ type CustomerExamRow struct {
 	// Pass is true when every must_fire family is present and every
 	// must_not_fire family is absent.
 	Pass bool `json:"pass"`
+	// Extra is true when this row came from the detector's OWN
+	// --extra-scenarios-dir union (mallcoppro-f95) rather than examRepoTree's
+	// pinned reference corpus. See RunCustomerTreeExamExtra.
+	Extra bool `json:"extra,omitempty"`
 }
 
 // CustomerExamTotals aggregates a CustomerExamReport run.
@@ -96,7 +100,28 @@ type CustomerExamReport struct {
 // labeled scenarios is a normal CustomerExamReport with Totals.Failed > 0, not
 // an error.
 func RunCustomerTreeExam(examRepoTree, detectorSrcDir string) (CustomerExamReport, error) {
-	report, detail, err := runTreeExamWithSidecarSrc(examRepoTree, detectorSrcDir)
+	return RunCustomerTreeExamExtra(examRepoTree, detectorSrcDir, "")
+}
+
+// RunCustomerTreeExamExtra is RunCustomerTreeExam, additionally UNIONING the
+// labeled scenarios found under extraScenariosDir into the grading pass
+// (mallcoppro-f95) — the detector's OWN co-located efficacy scenarios
+// (conventionally detectorSrcDir/scenarios/*.yaml), authored in the SAME
+// exam-detect YAML format the reference corpus uses. They are graded through
+// the IDENTICAL real wasip1 .wasm + detecthost host pass as the reference
+// corpus rows (see the package doc's ground-truth invariant) but are
+// UNPINNED: `mallcop exam-detect --extra-scenarios-dir` loads them straight
+// off disk, never touching examRepoTree's corpus.pin or its digest.
+// extraScenariosDir == "" reproduces RunCustomerTreeExam's exact prior
+// behavior.
+//
+// Rows in the returned report carry Extra=true when they came from
+// extraScenariosDir rather than examRepoTree's reference corpus — this is
+// what lets a caller (customerTreeExamStage) distinguish "this detector's own
+// proof of efficacy" from "regression against the reference tree's
+// pre-existing corpus" even though both are graded in one subprocess pass.
+func RunCustomerTreeExamExtra(examRepoTree, detectorSrcDir, extraScenariosDir string) (CustomerExamReport, error) {
+	report, detail, err := runTreeExamWithSidecarSrcAndScenarios(examRepoTree, detectorSrcDir, extraScenariosDir)
 	if err != nil {
 		if detail != "" {
 			return CustomerExamReport{}, fmt.Errorf("selfgate: customer-tree exam-detect (detector src %s): %w (%s)", detectorSrcDir, err, detail)
@@ -125,6 +150,7 @@ func toCustomerExamReport(r examReport) CustomerExamReport {
 			MustNotFire: append([]string{}, row.MustNotFire...),
 			Emitted:     append([]string{}, row.Emitted...),
 			Pass:        row.Pass,
+			Extra:       row.Extra,
 		})
 	}
 	return out

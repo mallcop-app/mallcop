@@ -25,6 +25,7 @@
 package eval
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/mallcop-app/mallcop/core/detect"
@@ -45,6 +46,15 @@ type ExamDetectRow struct {
 	// Pass is true when every must_fire family is present and every
 	// must_not_fire family is absent.
 	Pass bool `json:"pass"`
+	// Extra is true when this row came from an --extra-scenarios-dir UNION
+	// (mallcoppro-f95) rather than the pinned reference corpus — a customer
+	// detector's OWN co-located efficacy scenarios (detectors/<name>/scenarios/
+	// *.yaml), graded through the identical real .wasm/detecthost path but
+	// UNPINNED: they never touch corpus.pin and never count toward the
+	// reference corpus's own integrity digest. Omitted (false) for every
+	// ordinary reference-corpus row, so the wire shape is unchanged for every
+	// existing caller that never passes an extra dir.
+	Extra bool `json:"extra,omitempty"`
 }
 
 // ExamDetectTotals aggregates the run.
@@ -77,18 +87,42 @@ func normalizeFamilyToken(tok string) string {
 // core/detect.Detect output of every labeled scenario against its
 // expected_detection ground truth. Offline, deterministic, LLM-free — no
 // inference client is constructed anywhere on this path.
+//
+// This is RunExamDetectExtra(repoRoot, "") — byte-identical to the prior
+// behavior (no extra scenarios dir touched, no wire-shape change: Extra is
+// always its zero value and thus omitted from JSON).
 func RunExamDetect(repoRoot string) (ExamDetectReport, error) {
+	return RunExamDetectExtra(repoRoot, "")
+}
+
+// RunExamDetectExtra is RunExamDetect, additionally UNIONING the labeled
+// scenarios found under extraScenariosDir (mallcoppro-f95) into the grading
+// pass — a customer detector's OWN co-located efficacy scenarios
+// (detectors/<name>/scenarios/*.yaml), loaded via LoadExtraScenarios (NO pin
+// check, NEVER touching corpus.pin or the reference corpus's own digest).
+// extraScenariosDir == "" reproduces RunExamDetect's exact prior behavior.
+//
+// Every row this grades — reference or extra — runs through the IDENTICAL
+// core/detect.Detect call over the SAME scenario/baseline projections; the
+// only difference is provenance, carried on the row as Extra so callers (e.g.
+// core/selfgate's customer-tree stage) can tell a detector's OWN proof
+// scenarios apart from the reference corpus's.
+func RunExamDetectExtra(repoRoot, extraScenariosDir string) (ExamDetectReport, error) {
 	corpus, err := Load(repoRoot)
 	if err != nil {
 		return ExamDetectReport{}, err
 	}
+	extra, err := LoadExtraScenarios(extraScenariosDir)
+	if err != nil {
+		return ExamDetectReport{}, fmt.Errorf("loading extra scenarios dir %s: %w", extraScenariosDir, err)
+	}
 
 	var report ExamDetectReport
-	for _, ls := range corpus.Scenarios {
+	grade := func(ls LoadedScenario, isExtra bool) {
 		s := ls.Scenario
 		if s.ExpectedDetection == nil {
 			report.Totals.Unlabeled++
-			continue
+			return
 		}
 		report.Totals.Labeled++
 
@@ -126,7 +160,15 @@ func RunExamDetect(repoRoot string) (ExamDetectReport, error) {
 			MustNotFire: append([]string{}, s.ExpectedDetection.MustNotFire...),
 			Emitted:     emittedTokens,
 			Pass:        pass,
+			Extra:       isExtra,
 		})
+	}
+
+	for _, ls := range corpus.Scenarios {
+		grade(ls, false)
+	}
+	for _, ls := range extra {
+		grade(ls, true)
 	}
 	return report, nil
 }
