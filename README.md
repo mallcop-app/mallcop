@@ -44,9 +44,9 @@ mallcop init
 ```
 
 ```
-mallcop init: created mallcop.yaml (config — offline inference)
-mallcop init: created store/ (findings store)
-mallcop init: created events.jsonl (sample events)
+mallcop init: created <dir>/mallcop.yaml (config — offline inference)
+mallcop init: created <dir>/store/ (findings store)
+mallcop init: created <dir>/events.jsonl (sample events)
 
 Next steps:
   1. Run the scan (reads mallcop.yaml — no flags needed):
