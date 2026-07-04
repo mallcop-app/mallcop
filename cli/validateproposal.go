@@ -24,6 +24,17 @@ import (
 // selfgate.GateResult — the exact document the mallcop-pro metered tier
 // consumes across the process boundary.
 //
+// --exam-repo <path> (mallcoppro-97b) switches stage 3 into CUSTOMER-TREE
+// mode: instead of building the proposal tree's own (in-tree) cmd/mallcop
+// binary, it grades every detectors/<name>/ source directory found in the
+// proposal's head tree against the REFERENCE tree at <path> via
+// selfgate.RunCustomerTreeExam — the real wasip1/wazero host path. Use this
+// when the proposal tree is a customer-shaped THIN-EMBED repo (go.mod pins
+// mallcop; no cmd/mallcop of its own) rather than a full mallcop checkout.
+// Omitted, behavior is EXACTLY the prior in-tree lane; if the tree also lacks
+// cmd/mallcop in that case, the gate fails loudly naming this flag rather than
+// surfacing a raw `go build ./cmd/mallcop` error.
+//
 // Exit codes (mirror scan / detect / exam-detect):
 //
 //	0  proposal clean (every stage passed)
@@ -36,6 +47,8 @@ func runValidateProposal(args []string) error {
 	guardOnly := fs.Bool("guard-only", false, "Run only the static invariant guard stage")
 	allowNoCoverageGain := fs.Bool("allow-no-coverage-gain", false,
 		"Waive the coverage-+1 requirement (plumbing/no-op diffs); no-regression and no-new-firings are never waivable")
+	examRepo := fs.String("exam-repo", "",
+		"Path to a reference mallcop tree (has its own cmd/mallcop + pinned corpus). When set, stage 3 grades detectors/<name>/ in the head tree via RunCustomerTreeExam against this reference tree, for customer-shaped (THIN-EMBED, no cmd/mallcop) proposal trees")
 	jsonOut := fs.Bool("json", false, "Output the full GateResult as JSON")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -49,6 +62,7 @@ func runValidateProposal(args []string) error {
 	result, err := selfgate.ValidateProposal(".", *base, *head, selfgate.Options{
 		GuardOnly:           *guardOnly,
 		AllowNoCoverageGain: *allowNoCoverageGain,
+		ExamRepo:            *examRepo,
 	})
 	if err != nil {
 		return err

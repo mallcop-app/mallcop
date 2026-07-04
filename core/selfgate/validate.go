@@ -56,6 +56,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -124,6 +125,18 @@ const (
 	// true-negative (must_not_fire benign twin) before it merges. Fires only
 	// when the proposal adds an authored detector.
 	RuleExamMissingBenignTwin = "exam-detect-missing-benign-twin"
+	// RuleCustomerExamFail — CUSTOMER-TREE MODE ONLY (Options.ExamRepo set): a
+	// labeled scenario in the reference tree's corpus fails its must_fire /
+	// must_not_fire contract with this customer detector loaded (including a
+	// detector that fires on its own benign twin — the false-positive floor,
+	// same substance as RuleExamMissingBenignTwin but for a detector graded in
+	// isolation against a fixed reference corpus rather than diffed against a
+	// sibling base report).
+	RuleCustomerExamFail = "customer-tree-exam-fail"
+	// RuleCustomerExamVacuous — CUSTOMER-TREE MODE ONLY: RunCustomerTreeExam
+	// graded zero labeled scenarios from the reference tree's corpus — a
+	// vacuous grade proves nothing about the detector, fail closed.
+	RuleCustomerExamVacuous = "customer-tree-exam-vacuous"
 )
 
 // Options tunes a ValidateProposal run.
@@ -135,6 +148,23 @@ type Options struct {
 	// plumbing/no-op diffs that legitimately close no detection gap. The
 	// no-regression and no-new-firings requirements are NEVER waivable.
 	AllowNoCoverageGain bool
+	// ExamRepo, when set, is the path to a REFERENCE mallcop tree (one that
+	// has its own cmd/mallcop and its own pinned exams/scenarios corpus) used
+	// to grade a CUSTOMER-SHAPED proposal tree — one with no cmd/mallcop of
+	// its own (the THIN-EMBED shape: go.mod pins mallcop, detectors/<name>/
+	// carries the authored detector source). When set, stage 3 routes through
+	// RunCustomerTreeExam(ExamRepo, detectorDir) for every detectors/<name>/
+	// directory found in the head tree, INSTEAD OF building and execing the
+	// head tree's own (nonexistent) cmd/mallcop binary. Guard and structural
+	// (stages 1-2) are UNCHANGED by this option — they run identically either
+	// way. ExamRepo is a caller-supplied path (the engine/operator's own
+	// pinned mallcop checkout): it is NEVER derived from the untrusted
+	// proposal tree's own contents (core/selfgate is security-critical — see
+	// the package doc's $0-purity note; the reference tree is a trust
+	// boundary the CALLER owns, not something the proposal can point at
+	// itself). When ExamRepo == "" (the default), behavior is EXACTLY the
+	// prior in-tree lane, byte-for-byte — this option is purely additive.
+	ExamRepo string
 }
 
 // StageResult is one gate stage's outcome.
@@ -231,6 +261,33 @@ func ValidateProposal(repoRoot, baseRef, headRef string, opts Options) (GateResu
 	res.addStage(StageStructural, structEvidence, structFindings)
 	if !res.Passed {
 		return res, nil
+	}
+
+	// ---- stage 3: exam-detect ------------------------------------------------
+	// CUSTOMER-TREE MODE (mallcoppro-97b): a caller-supplied reference tree
+	// routes stage 3 through RunCustomerTreeExam instead of building the head
+	// tree's own (possibly nonexistent) cmd/mallcop binary. This is the ONLY
+	// place Options.ExamRepo affects the run — guard and structural above are
+	// identical in both modes.
+	if opts.ExamRepo != "" {
+		examFindings, examEvidence, err := customerTreeExamStage(opts.ExamRepo, headTree)
+		if err != nil {
+			return GateResult{}, err
+		}
+		res.addStage(StageExamDetect, examEvidence, examFindings)
+		return res, nil
+	}
+
+	// DEFAULT (in-tree) MODE: the head tree must build its own cmd/mallcop.
+	// Fail loudly and NAME THE FLAG when it can't, rather than surfacing the
+	// raw `go build ./cmd/mallcop: no such file or directory` failure a
+	// customer-shaped tree (no cmd/mallcop by design) would otherwise produce
+	// deep inside runTreeExam — this is the empirically-proven gap (rd 7ee7)
+	// this option closes.
+	if !hasCmdMallcop(headTree) {
+		return GateResult{}, fmt.Errorf(
+			"selfgate: head tree %.12s has no cmd/mallcop — this looks like a customer-shaped (THIN-EMBED) tree, not a full mallcop checkout; pass Options.ExamRepo (mallcop validate-proposal --exam-repo <reference-mallcop-tree>) to grade it via RunCustomerTreeExam instead",
+			headSHA)
 	}
 
 	// ---- stage 3: exam-detect diff (monotonic-widen contract) ---------------
@@ -402,6 +459,138 @@ func repoRelativeHead(headTree, file string) string {
 		return filepath.ToSlash(file)
 	}
 	return filepath.ToSlash(rel)
+}
+
+// ---- stage 3: exam-detect (customer-tree mode) -------------------------------
+
+// hasCmdMallcop reports whether tree has its own cmd/mallcop package
+// directory — the discriminator between a full mallcop checkout (the
+// in-tree lane builds `<tree>/mallcop` from it) and a customer-shaped
+// THIN-EMBED tree (go.mod pins mallcop; no cmd/mallcop of its own).
+func hasCmdMallcop(tree string) bool {
+	info, err := os.Stat(filepath.Join(tree, "cmd", "mallcop"))
+	return err == nil && info.IsDir()
+}
+
+// discoverCustomerDetectorDirs returns the sorted list of detectors/<name>/
+// directories under tree that carry a main.go — the THIN-EMBED shape
+// deployrepo.go scaffolds (see scanWorkflowTemplate's own `for d in
+// detectors/*/; do [ -f "${d}main.go" ] ...` discovery, mirrored here in Go).
+// A missing detectors/ dir is the empty set, not an error — a proposal that
+// touches nothing under detectors/ (e.g. a config-only change) is valid and
+// simply has nothing for customer-tree exam mode to grade.
+func discoverCustomerDetectorDirs(tree string) ([]string, error) {
+	root := filepath.Join(tree, "detectors")
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var dirs []string
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		candidate := filepath.Join(root, e.Name())
+		if _, err := os.Stat(filepath.Join(candidate, "main.go")); err == nil {
+			dirs = append(dirs, candidate)
+		}
+	}
+	sort.Strings(dirs)
+	return dirs, nil
+}
+
+// customerTreeExamStage is stage 3 under Options.ExamRepo: it grades every
+// detectors/<name>/ source directory found in headTree against examRepoTree's
+// OWN pinned corpus via RunCustomerTreeExam (customerexam.go) — the real
+// wasip1/wazero host path, never an in-process link.
+//
+// A REAL reference tree's corpus can legitimately carry PRE-EXISTING labeled
+// gaps (documented, accepted red rows unrelated to any customer proposal —
+// e.g. a known false-negative tracked as a backlog item); RunCustomerTreeExam
+// itself has no base-tree diff (see its package doc), so grading the
+// candidate report in isolation would wrongly reject every customer detector
+// over gaps it didn't cause. This stage therefore diffs TWO exam runs of the
+// SAME examRepoTree: a BASELINE (runTreeExam, no sidecar — whatever the
+// reference tree already scores on its own) and the CANDIDATE (the customer
+// detector loaded via RunCustomerTreeExam). Only a scenario that PASSED at
+// baseline and FAILS at candidate is a regression THIS detector introduced —
+// including a detector that fires on its own benign twin (the classic
+// missing-benign-twin-protection defect: its own must-fire target's row
+// stays passing, but the benign-twin row the detector wrongly fires on
+// regresses from pass to fail). A pre-existing baseline failure is never
+// blamed on the candidate. This is a REAL rejection finding, never folded
+// into the operational-error path. The error return here is operational
+// only: a detector source that doesn't build, or the reference tree's own
+// corpus failing to resolve (either pass).
+func customerTreeExamStage(examRepoTree, headTree string) ([]GuardFinding, string, error) {
+	detectorDirs, err := discoverCustomerDetectorDirs(headTree)
+	if err != nil {
+		return nil, "", fmt.Errorf("selfgate: discovering customer detector source under %s: %w", headTree, err)
+	}
+	if len(detectorDirs) == 0 {
+		return nil, fmt.Sprintf("customer-tree exam mode: no detectors/<name>/main.go found under %s (nothing to grade)", headTree), nil
+	}
+
+	baselineReport, _, baseErr := runTreeExam(examRepoTree)
+	if baseErr != nil {
+		// The reference tree is the caller-supplied ground truth: if it cannot
+		// even grade itself (no detector loaded), the gate has nothing to diff
+		// against — operational, not a property of the customer proposal.
+		return nil, "", fmt.Errorf("selfgate: reference tree %s baseline exam-detect (no customer detector loaded): %w", examRepoTree, baseErr)
+	}
+	baselinePass := make(map[string]bool, len(baselineReport.Rows))
+	for _, r := range baselineReport.Rows {
+		baselinePass[r.ScenarioID] = r.Pass
+	}
+
+	var findings []GuardFinding
+	var parts []string
+	for _, dir := range detectorDirs {
+		name := filepath.Base(dir)
+		relPath := "detectors/" + name
+
+		report, err := RunCustomerTreeExam(examRepoTree, dir)
+		if err != nil {
+			return nil, "", fmt.Errorf("selfgate: customer-tree exam for %s: %w", relPath, err)
+		}
+
+		if report.Totals.Labeled == 0 {
+			findings = append(findings, GuardFinding{
+				Path:   relPath,
+				Rule:   RuleCustomerExamVacuous,
+				Detail: fmt.Sprintf("customer-tree exam graded zero labeled scenarios against %s's corpus — fail closed (a vacuous grade proves nothing)", examRepoTree),
+			})
+			parts = append(parts, fmt.Sprintf("%s: 0 labeled (vacuous)", name))
+			continue
+		}
+
+		regressions := 0
+		for _, row := range report.Rows {
+			if row.Pass {
+				continue
+			}
+			if wasPassing, seenAtBaseline := baselinePass[row.ScenarioID]; seenAtBaseline && !wasPassing {
+				// Pre-existing gap in the reference tree's own corpus — not
+				// introduced by this detector, not this proposal's fault.
+				continue
+			}
+			regressions++
+			findings = append(findings, GuardFinding{
+				Path: relPath,
+				Rule: RuleCustomerExamFail,
+				Detail: fmt.Sprintf("scenario %q regresses from passing (without this detector) to failing (with it loaded) against %s's reference corpus (must_fire=%v must_not_fire=%v emitted=%v)",
+					row.ScenarioID, examRepoTree, row.MustFire, row.MustNotFire, row.Emitted),
+			})
+		}
+		parts = append(parts, fmt.Sprintf("%s: %d labeled (%d passed, %d failed, %d regression(s) vs. the reference tree's own baseline)",
+			name, report.Totals.Labeled, report.Totals.Passed, report.Totals.Failed, regressions))
+	}
+
+	evidence := fmt.Sprintf("customer-tree exam via reference tree %s — %s", examRepoTree, strings.Join(parts, "; "))
+	return findings, evidence, nil
 }
 
 // ---- stage 3: exam-detect ------------------------------------------------------

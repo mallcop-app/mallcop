@@ -182,6 +182,103 @@ func TestRunValidateProposal_FullFreeTierByDefault(t *testing.T) {
 	}
 }
 
+// gitWorktreeAdd materializes a detached worktree of root at sha into dir —
+// duplicated locally so the CLI test controls its own cleanup (mirrors
+// core/selfgate's unexported addWorktree/removeWorktree, not reachable from
+// this package).
+func gitWorktreeAdd(t *testing.T, root, dir, sha string) {
+	t.Helper()
+	gitProposal(t, root, "worktree", "add", "--detach", dir, sha)
+	t.Cleanup(func() {
+		_, _ = exec.Command("git", "-C", root, "worktree", "remove", "--force", dir).CombinedOutput()
+		_, _ = exec.Command("git", "-C", root, "worktree", "prune").CombinedOutput()
+	})
+}
+
+// TestRunValidateProposal_ExamRepoFlagRoutesCustomerTreeMode proves the
+// --exam-repo flag threads all the way from the CLI into
+// selfgate.Options.ExamRepo and actually changes which stage-3 lane runs: the
+// SAME customer-shaped (no cmd/mallcop) proposal tree that
+// TestRunValidateProposal_DefaultModeFailsLoudlyOnCustomerShapedTree_ExamRepo
+// below rejects in the default lane passes clean once --exam-repo names a
+// real reference tree (a detached worktree of the repo under test — it still
+// has cmd/mallcop and its own pinned corpus). The tree carries no
+// detectors/<name>/ of its own, so customer-tree mode has "nothing to grade"
+// — the discriminating signal is that this NO LONGER errors the way the
+// default-mode test (same tree, no flag) does.
+func TestRunValidateProposal_ExamRepoFlagRoutesCustomerTreeMode(t *testing.T) {
+	root := cliRepoUnderTest(t)
+	examTree := filepath.Join(t.TempDir(), "examtree")
+	headSHA := gitProposal(t, root, "rev-parse", "HEAD")
+	gitWorktreeAdd(t, root, examTree, headSHA)
+
+	dir := t.TempDir()
+	gitProposal(t, dir, "init", "-q")
+	writeProposalFile(t, dir, "go.mod", "module example.com/customer-fixture\n\ngo 1.25.0\n")
+	base := commitProposal(t, dir, "base")
+	writeProposalFile(t, dir, "README.md", "customer deployment repo\n")
+	head := commitProposal(t, dir, "docs-only proposal")
+
+	t.Chdir(dir)
+	out, err := withStdio(t, "", func() error {
+		return runValidateProposal([]string{"--base", base, "--head", head, "--exam-repo", examTree, "--json"})
+	})
+	if err != nil {
+		t.Fatalf("expected --exam-repo mode to pass (nothing to grade), got %v\n%s", err, out)
+	}
+	var result selfgate.GateResult
+	if jerr := json.Unmarshal([]byte(out), &result); jerr != nil {
+		t.Fatalf("JSON GateResult unparseable: %v\n%s", jerr, out)
+	}
+	if !result.Passed {
+		t.Fatalf("result.Passed = false under --exam-repo with nothing to grade:\n%s", out)
+	}
+	requireCLIStageNames(t, result, selfgate.StageGuard, selfgate.StageStructural, selfgate.StageExamDetect)
+	examStage := result.Stages[2]
+	if !strings.Contains(examStage.Evidence, "customer-tree exam mode") {
+		t.Fatalf("expected the exam-detect evidence to name customer-tree mode, got %q", examStage.Evidence)
+	}
+}
+
+// TestRunValidateProposal_DefaultModeFailsLoudlyOnCustomerShapedTree_ExamRepo
+// is the CLI-level counterpart to the core/selfgate proof of the same name:
+// the SAME customer-shaped tree WITHOUT --exam-repo fails loudly (exit 2,
+// not the findings sentinel) naming the flag, instead of surfacing a raw
+// `go build ./cmd/mallcop` failure.
+func TestRunValidateProposal_DefaultModeFailsLoudlyOnCustomerShapedTree_ExamRepo(t *testing.T) {
+	dir := t.TempDir()
+	gitProposal(t, dir, "init", "-q")
+	writeProposalFile(t, dir, "go.mod", "module example.com/customer-fixture\n\ngo 1.25.0\n")
+	base := commitProposal(t, dir, "base")
+	writeProposalFile(t, dir, "README.md", "customer deployment repo\n")
+	head := commitProposal(t, dir, "docs-only proposal")
+
+	t.Chdir(dir)
+	_, err := withStdio(t, "", func() error {
+		return runValidateProposal([]string{"--base", base, "--head", head, "--json"})
+	})
+	if err == nil || isFindingsError(err) {
+		t.Fatalf("expected a loud operational error (not the findings sentinel), got %v", err)
+	}
+	if !strings.Contains(err.Error(), "--exam-repo") && !strings.Contains(err.Error(), "ExamRepo") {
+		t.Fatalf("error must name the --exam-repo flag, got: %v", err)
+	}
+}
+
+// requireCLIStageNames is requireStageNames's CLI-package-local duplicate
+// (core/selfgate's version is unexported).
+func requireCLIStageNames(t *testing.T, res selfgate.GateResult, want ...string) {
+	t.Helper()
+	if len(res.Stages) != len(want) {
+		t.Fatalf("expected stages %v to have run, got %+v", want, res.Stages)
+	}
+	for i, name := range want {
+		if res.Stages[i].Name != name {
+			t.Fatalf("stage[%d] = %q, want %q (all: %+v)", i, res.Stages[i].Name, name, res.Stages)
+		}
+	}
+}
+
 // cliRepoUnderTest locates the real repository root by walking up from the
 // test's working directory to go.mod.
 func cliRepoUnderTest(t *testing.T) string {
