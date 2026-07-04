@@ -13,6 +13,15 @@ import (
 // store. It opens the git-backed store at --store and reports how many findings
 // and resolutions are durably recorded. There is no chart and no separate
 // run-state file — the store IS the state.
+//
+// Terminology: this prints "Decisions: N recorded" — the total count of
+// resolution records ever written to the store (every cascade verdict,
+// escalate included). That is deliberately a different word from `mallcop
+// scan`'s per-run "Resolved: N" summary line, which counts only the
+// non-escalate (auto-resolved-by-inference) subset of THIS scan's findings.
+// Reusing "Resolved" for both would read as the same measurement when it
+// isn't: a store can show "Decisions: 2 recorded" for a scan that itself
+// reported "Resolved: 0" (both findings escalated).
 func runStatus(args []string) error {
 	fs := flag.NewFlagSet("status", flag.ContinueOnError)
 	storePath := fs.String("store", "", "Path to the git-repo store to report on (required)")
@@ -47,7 +56,7 @@ func runStatus(args []string) error {
 	}
 
 	fmt.Printf("Findings:   %d recorded\n", len(findings))
-	fmt.Printf("Resolved:   %d recorded\n", len(resolutions))
+	fmt.Printf("Decisions:  %d recorded\n", len(resolutions))
 	fmt.Printf("State:      idle\n")
 	return nil
 }

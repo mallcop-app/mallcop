@@ -247,3 +247,33 @@ func TestReadResolutionsDir_Resolutions(t *testing.T) {
 		t.Errorf("unexpected finding_id %q", got[0].FindingID)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// usage()
+// ---------------------------------------------------------------------------
+
+// TestUsage_InitFlagsDocumented locks in the help-text fix: the top-level
+// `mallcop`/`mallcop --help` usage() text must document every real `init`
+// flag (--pro, --create-repo, --mallcop-version, --github-token-env), not
+// just --dir. Before this fix, usage() silently omitted the deployment-repo
+// flags a customer needs to find `mallcop init --create-repo`/`--pro`.
+func TestUsage_InitFlagsDocumented(t *testing.T) {
+	old := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	os.Stderr = w
+	usage()
+	w.Close()
+	os.Stderr = old
+	var buf bytes.Buffer
+	io.Copy(&buf, r)
+	out := buf.String()
+
+	for _, want := range []string{"--dir", "--pro", "--create-repo", "--mallcop-version", "--github-token-env"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("usage() init section missing flag %q; got:\n%s", want, out)
+		}
+	}
+}
