@@ -313,11 +313,26 @@ func TestValidateProposal_CustomerTreeExamRejectsDetectorMissingBenignTwinProof(
 // through the DEFAULT (Options.ExamRepo == "") lane fails with a LOUD,
 // actionable operational error naming --exam-repo — never the raw `go build
 // ./cmd/mallcop: no such file or directory` failure buried inside runTreeExam.
+//
+// mallcoppro-97b / mallcoppro-72d COLLISION (orchestrator ruling): DEFAULT
+// mode's guard stage is UNCHANGED by the introduction of customer-tree mode —
+// a .go Add under detectors/ is STILL the RuleCodeFrozen blanket deny (see
+// guard_test.go's TestGuard_RejectsNewGoFileAddedUnderDetectors, which this
+// ruling requires to keep passing UNMODIFIED). Diffing base..head where head
+// ADDS the detector (the ORIGINAL shape of this test, before 72d) would now be
+// rejected AT STAGE 1 for that reason and never reach the hasCmdMallcop check
+// this test exists to prove — that is a REAL rejection, not a bug, and
+// changing it would silently re-widen the exact hole 72d closed. To isolate
+// the invariant this test actually owns, diff base AGAINST ITSELF: a
+// legitimate zero-change proposal on the THIN-EMBED scaffold (go.mod/go.sum
+// only — no detector, no cmd/mallcop, nothing under detectors/ for the guard
+// to have an opinion about), the exact tree shape rd 7ee7 found the raw
+// buried error on.
 func TestValidateProposal_DefaultModeFailsLoudlyOnCustomerShapedTree(t *testing.T) {
 	clearInferenceEnv(t)
-	customerDir, base, head := buildCustomerShapedRepo(t, customerFixtureDetectorMainSrc)
+	customerDir, base, _ := buildCustomerShapedRepo(t, customerFixtureDetectorMainSrc)
 
-	_, err := ValidateProposal(customerDir, base, head, Options{})
+	_, err := ValidateProposal(customerDir, base, base, Options{})
 	if err == nil {
 		t.Fatal("expected a loud operational error for a customer-shaped tree in default mode, got nil")
 	}

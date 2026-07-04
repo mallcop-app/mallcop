@@ -68,6 +68,7 @@ import (
 	"os"
 	"os/exec"
 	"path"
+	"sort"
 	"strings"
 )
 
@@ -185,7 +186,20 @@ type change struct {
 // change and an error only for operational failures (git unavailable, refs
 // unresolvable). An unparseable or unrecognized proposal is a FINDING, not an
 // error: the guard fails closed.
-func Guard(repoRoot, baseRef, headRef string) ([]GuardFinding, error) {
+//
+// customerTreeMode (mallcoppro-97b, orchestrator ruling) switches the .go
+// arm under detectors/<name>/ from the RuleCodeFrozen blanket deny to the
+// sidecar-shape AST gate (sidecarshape.go). It is set by ValidateProposal as
+// opts.ExamRepo != "" — i.e. by the TRUSTED CALLER's own invocation (the
+// engine/operator passing --exam-repo / --customer-tree), NEVER inferred from
+// the proposal tree's own contents; an untrusted tree cannot opt itself into
+// the looser rules merely by looking customer-shaped. false reproduces the
+// prior (mallcoppro-72d) behavior byte-for-byte — the two 72d regression
+// tests (TestGuard_RejectsNewGoFileAddedUnderDetectors,
+// TestGuard_RejectsModifiedGoFileUnderDetectors) call Guard through the
+// fixture's f.guard() helper, which passes false and is unchanged by this
+// option.
+func Guard(repoRoot, baseRef, headRef string, customerTreeMode bool) ([]GuardFinding, error) {
 	changes, err := listChanges(repoRoot, baseRef, headRef)
 	if err != nil {
 		return nil, err
@@ -207,6 +221,30 @@ func Guard(repoRoot, baseRef, headRef string) ([]GuardFinding, error) {
 		} else {
 			scenarioMutations++
 		}
+	}
+
+	// CUSTOMER-TREE MODE pre-scan: collect every detectors/ subdirectory
+	// touched by a .go change in this diff. Shape-checking is a WHOLE-PACKAGE
+	// property (imports, the one func main(), no init() — ACROSS every file
+	// in the directory), so it cannot be judged file-by-file inside the
+	// per-change loop below; that loop SKIPS .go files under detectors/
+	// entirely when customerTreeMode is set (see the detectorsPrefix case),
+	// and the pass after the loop evaluates each touched directory exactly
+	// once against its HEAD state.
+	var sidecarDirs []string
+	if customerTreeMode {
+		seen := map[string]bool{}
+		for _, c := range changes {
+			if !strings.HasPrefix(c.path, detectorsPrefix) || !strings.HasSuffix(c.path, ".go") {
+				continue
+			}
+			dir := path.Dir(c.path)
+			if !seen[dir] {
+				seen[dir] = true
+				sidecarDirs = append(sidecarDirs, dir)
+			}
+		}
+		sort.Strings(sidecarDirs)
 	}
 
 	for _, c := range changes {
@@ -273,6 +311,14 @@ func Guard(repoRoot, baseRef, headRef string) ([]GuardFinding, error) {
 
 		case strings.HasPrefix(c.path, detectorsPrefix):
 			switch {
+			case strings.HasSuffix(c.path, ".go") && customerTreeMode:
+				// CUSTOMER-TREE MODE (mallcoppro-97b, orchestrator ruling): handled
+				// by the aggregated per-directory sidecarDirs pass AFTER this loop,
+				// not here -- a single changed file cannot be judged in isolation
+				// (the shape gate needs every file in the directory: the whole
+				// import surface, the one func main(), etc). This arm exists only
+				// to prevent the default-deny arm below from ALSO firing for the
+				// same path.
 			case strings.HasSuffix(c.path, ".go"):
 				// mallcoppro-72d (the 7ee7 live-leg probe HOLE): a .go path
 				// under detectors/ is NOT tuning DATA -- it is customer-tree
@@ -441,7 +487,116 @@ func Guard(repoRoot, baseRef, headRef string) ([]GuardFinding, error) {
 		// elsewhere.
 	}
 
+	// CUSTOMER-TREE MODE: shape-check every touched detectors/ directory
+	// collected in the pre-scan above, against its HEAD state. A directory
+	// with zero production .go files left at head (the whole detector was
+	// deleted, or every change was itself a delete leaving nothing) is
+	// SKIPPED, not rejected — deleting a detector is data-loss-free and
+	// human-reviewable at PR time (ORCHESTRATOR RULING mallcoppro-97b); a
+	// PARTIAL delete (some files removed, others remain) still re-derives and
+	// shape-checks the SURVIVING files, since removing one file of a
+	// multi-file package can itself break the shape (e.g. orphaning the
+	// detector impl from main()).
+	for _, dir := range sidecarDirs {
+		findings = append(findings, checkSidecarDetectorDir(repoRoot, headRef, dir)...)
+	}
+
 	return findings, nil
+}
+
+// checkSidecarDetectorDir shape-checks ONE detectors/<name>/ directory's
+// production .go files as they exist at headRef, converting each
+// sidecarshape.go Violation into a GuardFinding under the single dedicated
+// RuleSidecarShape rule id (the sub-rule is folded into Detail, mirroring
+// exactly how validate.go folds authoredast.go's shape Violations into
+// RuleAuthoredShape findings).
+func checkSidecarDetectorDir(repoRoot, headRef, dir string) []GuardFinding {
+	paths, err := listDirGoFiles(repoRoot, headRef, dir)
+	if err != nil {
+		return []GuardFinding{{
+			Path:   dir,
+			Rule:   RuleSidecarShape,
+			Detail: fmt.Sprintf("cannot list %s at %.12s (%v) — fail closed", dir, headRef, err),
+		}}
+	}
+	if len(paths) == 0 {
+		// Nothing left at head under this directory: the whole detector was
+		// removed. Allow (see the call site's comment).
+		return nil
+	}
+
+	sources := make([][]byte, len(paths))
+	for i, p := range paths {
+		blob, err := readBlob(repoRoot, headRef, p)
+		if err != nil {
+			return []GuardFinding{{
+				Path:   p,
+				Rule:   RuleSidecarShape,
+				Detail: fmt.Sprintf("cannot read %s at %.12s (%v) — fail closed", p, headRef, err),
+			}}
+		}
+		sources[i] = blob
+	}
+
+	violations := CheckSidecarDetectorShape(paths, sources)
+	findings := make([]GuardFinding, 0, len(violations))
+	for _, v := range violations {
+		findings = append(findings, GuardFinding{
+			Path:   v.File,
+			Rule:   RuleSidecarShape,
+			Detail: v.Rule + ": " + v.Detail,
+		})
+	}
+	return findings
+}
+
+// listDirGoFiles returns the sorted, repo-relative paths of every production
+// .go file (isProductionGoFile — no _test.go) directly under dir at ref,
+// via `git ls-tree` (NON-recursive: dir is a flat "one package dir per
+// detector" leaf per the sidecar shape contract — a nested subdirectory is
+// simply never discovered as part of THIS directory's package, and any .go
+// file a proposal adds under such a nested path is itself a SEPARATE change
+// matching detectorsPrefix, so it gets its OWN sidecarDirs entry and its OWN
+// shape check, which a real nested helper package fails on the package-clause
+// rule (it would have to be a non-`main` package to be importable, and this
+// gate demands `package main`) or on the import allow-list (a customer-module
+// import path for the nested package is not on it) — see sidecarshape.go's
+// file doc for the fuller nested-package threat-model note. A ref with no
+// such path returns an empty, non-error result (git ls-tree exits 0 with
+// empty output) — the "whole detector deleted" case the caller treats as
+// allow.
+func listDirGoFiles(repoRoot, ref, dir string) ([]string, error) {
+	out, err := runGit(repoRoot, "ls-tree", "--name-only", "-z", ref, "--", dir+"/")
+	if err != nil {
+		return nil, fmt.Errorf("git ls-tree %s %s: %w: %s", ref, dir, err, out)
+	}
+	// `git ls-tree --name-only <ref> -- <dir>/` (no -r) already prints each
+	// matching entry's path relative to the REPO ROOT (the normal
+	// `git ls-tree <tree-ish> <path>/` one-level-listing behavior), not
+	// relative to dir — do not re-prefix with dir.
+	var files []string
+	for _, name := range strings.Split(out, "\x00") {
+		if name == "" {
+			continue
+		}
+		if isProductionGoFile(name) {
+			files = append(files, name)
+		}
+	}
+	sort.Strings(files)
+	return files, nil
+}
+
+// readBlob reads ref's content of repo-relative path p via `git show
+// <ref>:<path>` — the single-ref half of readBlobs, used where only the head
+// state matters (shape-checking has no base/head diff; it is a HEAD-state
+// property).
+func readBlob(repoRoot, ref, p string) ([]byte, error) {
+	out, err := runGit(repoRoot, "show", ref+":"+p)
+	if err != nil {
+		return nil, fmt.Errorf("selfgate: git show %s:%s: %w: %s", ref, p, err, out)
+	}
+	return []byte(out), nil
 }
 
 // isProtected reports whether p is under a protected prefix or is a protected

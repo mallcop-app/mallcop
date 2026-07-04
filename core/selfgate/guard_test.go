@@ -91,10 +91,23 @@ func (f *fixture) commit(msg string) string {
 	return strings.TrimSpace(mustGit(f.t, f.dir, "rev-parse", "HEAD"))
 }
 
-// guard runs Guard over the fixture and fails the test on operational error.
+// guard runs Guard in DEFAULT mode (customerTreeMode=false — byte-for-byte the
+// prior mallcoppro-72d behavior) over the fixture and fails the test on
+// operational error.
 func (f *fixture) guard(base, head string) []GuardFinding {
 	f.t.Helper()
-	findings, err := Guard(f.dir, base, head)
+	findings, err := Guard(f.dir, base, head, false)
+	if err != nil {
+		f.t.Fatalf("Guard: %v", err)
+	}
+	return findings
+}
+
+// guardCustomerTree runs Guard in CUSTOMER-TREE mode (mallcoppro-97b) over the
+// fixture and fails the test on operational error.
+func (f *fixture) guardCustomerTree(base, head string) []GuardFinding {
+	f.t.Helper()
+	findings, err := Guard(f.dir, base, head, true)
 	if err != nil {
 		f.t.Fatalf("Guard: %v", err)
 	}
@@ -409,6 +422,189 @@ func TestGuard_RejectsModifiedGoFileUnderDetectors(t *testing.T) {
 	head := f.commit("proposal: modify an existing detectors/ go file")
 
 	requireRejected(t, f.guard(base, head), RuleCodeFrozen, "detectors/existing-detector/main.go")
+}
+
+// ---- CUSTOMER-TREE MODE: the sidecar-shape AST gate (mallcoppro-97b) --------
+//
+// The tests above prove DEFAULT mode is byte-for-byte unchanged (mallcoppro-72d
+// unmodified). These prove the SIBLING lane the orchestrator ruling adds:
+// customerTreeMode=true (f.guardCustomerTree) routes a .go Add under
+// detectors/<name>/ through the sidecar-shape gate (sidecarshape.go) instead
+// of the blanket RuleCodeFrozen deny — and that gate is at least as
+// restrictive in spirit as the in-tree K7 shape gate.
+
+// sidecarWellBehavedMainSrc is the baseline well-shaped sidecar detector every
+// ACCEPT test below starts from (same shape as customergate_test.go's
+// customerFixtureDetectorMainSrc, duplicated here so guard_test.go's proofs
+// don't depend on a fixture defined in a different test file).
+const sidecarWellBehavedMainSrc = `package main
+
+import (
+	"os"
+
+	"github.com/mallcop-app/mallcop/pkg/baseline"
+	"github.com/mallcop-app/mallcop/pkg/detectorhost"
+	"github.com/mallcop-app/mallcop/pkg/event"
+	"github.com/mallcop-app/mallcop/pkg/finding"
+)
+
+type widgetLeakDetector struct{}
+
+func (widgetLeakDetector) Name() string { return "widget-leak" }
+
+func (widgetLeakDetector) Detect(events []event.Event, _ *baseline.Baseline) []finding.Finding {
+	var out []finding.Finding
+	for _, ev := range events {
+		if ev.Type == "widget-secret-exposed" {
+			out = append(out, finding.Finding{ID: "finding-" + ev.ID, Source: "detector:widget-leak"})
+		}
+	}
+	return out
+}
+
+func main() { os.Exit(detectorhost.Run(widgetLeakDetector{})) }
+`
+
+// anchorCustomerTreeBase seeds a base commit with a real detectors/ tree
+// (mirroring the 72d tests' copyReal anchor) so every sidecar-shape test below
+// diffs a real "add a detector" proposal, not a from-nothing repo.
+func anchorCustomerTreeBase(f *fixture) string {
+	f.copyReal("detectors/tuning.yaml")
+	return f.commit("base")
+}
+
+// TestGuard_CustomerTreeSidecarShape_AcceptsWellBehavedDetector is the
+// control: a well-shaped sidecar detector (package main, one func main() whose
+// body is `os.Exit(detectorhost.Run(T{}))`, an allow-listed import surface)
+// passes CUSTOMER-TREE mode cleanly — and (sanity, mirroring
+// TestGuard_RejectsNewGoFileAddedUnderDetectors) is STILL rejected in DEFAULT
+// mode on the exact same content, proving the two modes are independent
+// knobs, not "customer mode is default mode plus exceptions."
+func TestGuard_CustomerTreeSidecarShape_AcceptsWellBehavedDetector(t *testing.T) {
+	f := newFixture(t)
+	base := anchorCustomerTreeBase(f)
+
+	f.write("detectors/widget-leak/main.go", sidecarWellBehavedMainSrc)
+	head := f.commit("proposal: add a well-shaped sidecar detector")
+
+	requireClean(t, f.guardCustomerTree(base, head))
+	requireRejected(t, f.guard(base, head), RuleCodeFrozen, "detectors/widget-leak/main.go")
+}
+
+// (a) An import outside the allow list (net/http) is rejected — the shape
+// gate's import allow-list bites even when everything else about the file
+// (package main, the one main()/detectorhost.Run shape) is otherwise correct.
+func TestGuard_CustomerTreeSidecarShape_RejectsDisallowedImport(t *testing.T) {
+	f := newFixture(t)
+	base := anchorCustomerTreeBase(f)
+
+	src := strings.Replace(sidecarWellBehavedMainSrc,
+		"\t\"github.com/mallcop-app/mallcop/pkg/baseline\"\n",
+		"\t\"net/http\"\n\n\t\"github.com/mallcop-app/mallcop/pkg/baseline\"\n",
+		1)
+	src = strings.Replace(src,
+		"type widgetLeakDetector struct{}\n",
+		"type widgetLeakDetector struct{}\n\nvar _ = http.MethodGet // pure reference; proves the import itself is what trips the gate\n",
+		1)
+	f.write("detectors/widget-leak/main.go", src)
+	head := f.commit("proposal: add a detector that imports net/http")
+
+	findings := f.guardCustomerTree(base, head)
+	requireRejected(t, findings, RuleSidecarShape, "detectors/widget-leak/main.go")
+	requireDetailContains(t, findings, RuleSidecarShape, "sidecar-import-not-allowed")
+	requireDetailContains(t, findings, RuleSidecarShape, "net/http")
+}
+
+// (b) main() not calling detectorhost.Run at all is rejected — a sidecar that
+// never hands itself to the host cannot be the real deployed artifact.
+func TestGuard_CustomerTreeSidecarShape_RejectsMissingDetectorhostRun(t *testing.T) {
+	f := newFixture(t)
+	base := anchorCustomerTreeBase(f)
+
+	f.write("detectors/widget-leak/main.go", "package main\n\nfunc main() { println(\"no detectorhost call here\") }\n")
+	head := f.commit("proposal: add a detector whose main() never calls detectorhost.Run")
+
+	findings := f.guardCustomerTree(base, head)
+	requireRejected(t, findings, RuleSidecarShape, "detectors/widget-leak/main.go")
+	requireDetailContains(t, findings, RuleSidecarShape, "sidecar-main-shape")
+}
+
+// (c) DECISION (orchestrator ruling asked to justify): an extra top-level
+// helper func is NOT a shape violation. The gate's SHAPE constraint is
+// main()'s body + the import surface + the os/detectorhost confinement —
+// deliberately NOT a func-count floor on the package, because the detector
+// implementation legitimately needs its own helper funcs (here: a classifier
+// used by Detect). A func-count restriction would be over-strict and would
+// reject ordinary, safe detector code for no security benefit: an uncalled or
+// helper func can only reach the same bounded import surface every other file
+// in the package is already held to (see checkSidecarImportAllowlist) and
+// cannot itself invoke os or detectorhost (see the confinement proof in
+// TestGuard_CustomerTreeSidecarShape_RejectsOSMisuseBeyondExit below) — so
+// there is no attack surface a bare func count would be closing.
+func TestGuard_CustomerTreeSidecarShape_ExtraHelperFuncAllowed(t *testing.T) {
+	f := newFixture(t)
+	base := anchorCustomerTreeBase(f)
+
+	src := strings.Replace(sidecarWellBehavedMainSrc,
+		"\t\"github.com/mallcop-app/mallcop/pkg/event\"\n",
+		"\t\"strings\"\n\n\t\"github.com/mallcop-app/mallcop/pkg/event\"\n",
+		1)
+	src = strings.Replace(src,
+		"if ev.Type == \"widget-secret-exposed\" {",
+		"if isWidgetSecretEvent(ev.Type) {",
+		1)
+	src = strings.Replace(src,
+		"func main() { os.Exit(detectorhost.Run(widgetLeakDetector{})) }\n",
+		"// isWidgetSecretEvent is an extra top-level helper func alongside the\n"+
+			"// detector methods and main() — proving the gate does not floor on func count.\n"+
+			"func isWidgetSecretEvent(t string) bool { return strings.HasPrefix(t, \"widget-secret-exposed\") }\n\n"+
+			"func main() { os.Exit(detectorhost.Run(widgetLeakDetector{})) }\n",
+		1)
+	f.write("detectors/widget-leak/main.go", src)
+	head := f.commit("proposal: add a detector with an extra top-level helper func")
+
+	requireClean(t, f.guardCustomerTree(base, head))
+}
+
+// (d) A second .go file in the same detector directory adding an init() with
+// side effects is rejected. init() runs before main()'s single verified
+// statement and is invisible to the main-shape check — banning it outright is
+// the only sound closure (an allow-listed "harmless" init is not distinguishable
+// from one with side effects by shape alone).
+func TestGuard_CustomerTreeSidecarShape_RejectsInitWithSideEffects(t *testing.T) {
+	f := newFixture(t)
+	base := anchorCustomerTreeBase(f)
+
+	f.write("detectors/widget-leak/main.go", sidecarWellBehavedMainSrc)
+	f.write("detectors/widget-leak/sideeffect.go", "package main\n\nimport \"fmt\"\n\nfunc init() {\n\tfmt.Println(\"side effect at package init, before main ever runs\")\n}\n")
+	head := f.commit("proposal: add a well-shaped detector plus a side-effecting init()")
+
+	findings := f.guardCustomerTree(base, head)
+	requireRejected(t, findings, RuleSidecarShape, "detectors/widget-leak/sideeffect.go")
+	requireDetailContains(t, findings, RuleSidecarShape, "sidecar-init-forbidden")
+}
+
+// BONUS (closes the "os is allow-listed so anything os.* goes" bypass a naive
+// reading of the import allow-list alone would miss): os is imported (needed
+// for the sanctioned os.Exit(...) wrapper) but ALSO used elsewhere in the same
+// file (inside Detect) — os.Getenv, reading environment state no detector has
+// any legitimate reason to touch. The os-confinement rule (checkSidecarMainAndOS)
+// must catch this even though "os" itself is on the allow list.
+func TestGuard_CustomerTreeSidecarShape_RejectsOSMisuseBeyondExit(t *testing.T) {
+	f := newFixture(t)
+	base := anchorCustomerTreeBase(f)
+
+	src := strings.Replace(sidecarWellBehavedMainSrc,
+		"\t\tif ev.Type == \"widget-secret-exposed\" {\n",
+		"\t\t_ = os.Getenv(\"WIDGET_LEAK_SECRET\") // illicit: os's only sanctioned use is the os.Exit wrapper in main()\n\t\tif ev.Type == \"widget-secret-exposed\" {\n",
+		1)
+	f.write("detectors/widget-leak/main.go", src)
+	head := f.commit("proposal: add a detector that misuses os beyond the Exit wrapper")
+
+	findings := f.guardCustomerTree(base, head)
+	requireRejected(t, findings, RuleSidecarShape, "detectors/widget-leak/main.go")
+	requireDetailContains(t, findings, RuleSidecarShape, "sidecar-main-shape")
+	requireDetailContains(t, findings, RuleSidecarShape, "os.Getenv")
 }
 
 // ---- ACCEPT proofs (the widens the loop is FOR) ------------------------------

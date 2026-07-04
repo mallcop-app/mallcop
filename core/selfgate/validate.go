@@ -229,7 +229,14 @@ func ValidateProposal(repoRoot, baseRef, headRef string, opts Options) (GateResu
 	res.BaseSHA, res.HeadSHA = baseSHA, headSHA
 
 	// ---- stage 1: the static invariant guard (K3) ---------------------------
-	guardFindings, err := Guard(repoRoot, baseSHA, headSHA)
+	// customerTreeMode is opts.ExamRepo != "" — the SAME trusted-caller signal
+	// stage 3 uses (see the Options.ExamRepo doc above), threaded here too
+	// (mallcoppro-97b orchestrator ruling) so a customer-shaped proposal's
+	// legitimate detectors/<name>/main.go sidecar Add routes through the
+	// sidecar-shape AST gate (sidecarshape.go) instead of the blanket
+	// RuleCodeFrozen deny. It is never derived from the head/base tree
+	// contents — only from this caller's own opts, exactly like ExamRepo.
+	guardFindings, err := Guard(repoRoot, baseSHA, headSHA, opts.ExamRepo != "")
 	if err != nil {
 		return GateResult{}, err
 	}
