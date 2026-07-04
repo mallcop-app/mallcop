@@ -261,7 +261,9 @@ func ValidateProposal(repoRoot, baseRef, headRef string, opts Options) (GateResu
 	defer removeWorktree(repoRoot, headTree)
 
 	// ---- stage 2: structural (head builds + import allow-list) --------------
-	structFindings, structEvidence, err := structuralStage(headTree)
+	// customerTreeMode reuses the SAME opts.ExamRepo != "" signal stage 3 uses
+	// (and stage 1's Guard call above) — never derived from tree contents.
+	structFindings, structEvidence, err := structuralStage(headTree, opts.ExamRepo != "")
 	if err != nil {
 		return GateResult{}, err
 	}
@@ -366,12 +368,38 @@ func ValidateProposal(repoRoot, baseRef, headRef string, opts Options) (GateResu
 // structuralStage builds the head tree and runs the authored-detector import
 // allow-list over it. Findings are proposal defects; the error return is
 // operational only.
-func structuralStage(headTree string) ([]GuardFinding, string, error) {
+//
+// customerTreeMode (mallcoppro-a08) mirrors the GOFLAGS=-mod=mod convention
+// buildAndRegisterSourceSidecar already uses for stage 3 (see the doc comment
+// on that function, cli/sidecars.go) and cli/deployrepo.go's generated
+// scan.yml CI applies for the same reason: a customer-shaped (THIN-EMBED)
+// tree's go.mod pins this module, but nothing may have imported the framework
+// packages (pkg/event, pkg/finding, pkg/baseline, pkg/detectorhost, ...)
+// before the authored sidecar under test did — go.sum can legitimately be
+// missing entries for them, and plain `go build` hard-fails on that
+// (`missing go.sum entry`) before this proposal's detector quality is ever
+// graded. -mod=mod lets `go build` compute the missing sums itself (from the
+// local module cache, else GOPROXY) instead of failing closed on a gap that
+// is not a property of the proposal.
+//
+// In the DEFAULT (in-tree) lane — validating mallcop's own repo, including
+// for contribute-back — go.sum is expected to already be complete, so this
+// stays OFF (strict -mod=readonly, the go default): -mod=mod there would
+// silently compute and mask real dependency drift (or a supply-chain
+// manipulation) in the OSS repo's own build, which is exactly the invariant
+// this stage exists to enforce. GOFLAGS is scoped to this one `go build`
+// invocation's env via runTool's extraEnv (a copy of os.Environ(), never the
+// process env) — it is never set process-wide and never applied in-tree.
+func structuralStage(headTree string, customerTreeMode bool) ([]GuardFinding, string, error) {
 	var findings []GuardFinding
 
 	// `go build ./...` — the proposal must compile as a whole tree.
+	var buildEnv []string
+	if customerTreeMode {
+		buildEnv = []string{"GOFLAGS=-mod=mod"}
+	}
 	buildOK := true
-	stdout, stderr, code, err := runTool(headTree, nil, "go", "build", "./...")
+	stdout, stderr, code, err := runTool(headTree, buildEnv, "go", "build", "./...")
 	if err != nil {
 		return nil, "", fmt.Errorf("selfgate: running `go build` in the head tree: %w", err)
 	}
