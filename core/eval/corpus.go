@@ -253,6 +253,35 @@ func parseCount(s string) (int, error) {
 	return n, nil
 }
 
+// LoadExtraScenarios scans dir (any directory — e.g. a customer detector's
+// own co-located detectors/<name>/scenarios/ sidecar, mallcoppro-f95) for
+// scenario YAML files using the SAME leading-underscore skip and exam.Load
+// parser scanCorpus applies to the pinned corpus, but performs NO pin
+// verification and contributes NOTHING to any corpus.pin digest or count —
+// this is the UNIONED, UNPINNED efficacy set RunExamDetectExtra grades
+// alongside the reference corpus. It is never part of the reference corpus
+// and never mutates it.
+//
+// dir == "" (no extra scenarios shipped) returns (nil, nil) — the caller's
+// union is then just the reference corpus, unchanged.
+func LoadExtraScenarios(dir string) ([]LoadedScenario, error) {
+	if dir == "" {
+		return nil, nil
+	}
+	fi, err := os.Stat(dir)
+	if err != nil {
+		return nil, fmt.Errorf("extra scenarios dir %s: %w", dir, err)
+	}
+	if !fi.IsDir() {
+		return nil, fmt.Errorf("extra scenarios dir %s: not a directory", dir)
+	}
+	c, err := scanCorpus(dir)
+	if err != nil {
+		return nil, err
+	}
+	return c.Scenarios, nil
+}
+
 // Load scans the corpus under repoRoot, then HARD-VERIFIES it against the
 // committed pin. This is the integrity interlock: a count OR sha mismatch returns
 // an error and NOTHING runs. Both halves of the gate are reported in the error so

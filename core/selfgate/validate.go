@@ -56,11 +56,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/mallcop-app/mallcop/core/lint"
+	"github.com/mallcop-app/mallcop/internal/exam"
 )
 
 // GateSchemaVersion is the GateResult wire-format version. Bump it on any
@@ -93,6 +95,15 @@ const (
 	// RuleStructuralAllowlist — an authored-detector import allow-list
 	// violation (or an unverifiable authored tree — fail closed).
 	RuleStructuralAllowlist = "structural-import-allowlist"
+	// RuleStructuralVet — `go vet ./...` failed in the head tree. `go build
+	// ./...` alone SKIPS _test.go files; a sidecar's authored main_test.go can
+	// fail to even compile (an unused import, a struct-value call written as a
+	// function call, ...) and still sail through structuralStage undetected
+	// (mallcoppro-f95, round 5's non-compiling detectors/forcepushprotected
+	// branch/main_test.go). `go vet` compiles every _test.go in the tree as
+	// part of its analysis, so a non-compiling test file fails HERE, closed —
+	// before the customer detector's quality is ever graded.
+	RuleStructuralVet = "structural-vet"
 	// RuleExamExecution — the head tree's own exam-detect run failed
 	// operationally (e.g. the proposal drifted the corpus off its pin).
 	RuleExamExecution = "exam-detect-execution"
@@ -131,7 +142,19 @@ const (
 	// detector that fires on its own benign twin — the false-positive floor,
 	// same substance as RuleExamMissingBenignTwin but for a detector graded in
 	// isolation against a fixed reference corpus rather than diffed against a
-	// sibling base report).
+	// sibling base report). ALSO fires (mallcoppro-f95 round 2) when a
+	// detector's own must_fire + must_not_fire pair both pass individually but
+	// the benign twin is not a MEASURED MINIMAL MUTATION of the must-fire
+	// scenario (checkMinimalMutationCoverage) — see that function's doc for the
+	// veracity-reproduced bypass this closes. ALSO fires (mallcoppro-f95 BOTH
+	// ruling, part A — checkCustomerHeldOutNewFirings) when the detector emits
+	// a family on a HELD-OUT reference-corpus scenario that scenario's own
+	// label does not declare and the reference tree's undoctored baseline never
+	// emits: the PRIMARY anti-gaming control, because the operator-supplied
+	// reference corpus is content the author never sees and cannot carve a
+	// sentinel exception into (see that function's doc for the metadata-marker
+	// attack round 2's own two-point efficacy check could not separate from a
+	// genuine narrow detector).
 	RuleCustomerExamFail = "customer-tree-exam-fail"
 	// RuleCustomerExamVacuous — CUSTOMER-TREE MODE ONLY: RunCustomerTreeExam
 	// graded zero labeled scenarios from the reference tree's corpus — a
@@ -192,6 +215,27 @@ type GateResult struct {
 	// NewFirings lists undeclared new emissions ("<scenario_id>: <family>")
 	// found by the no-new-firings check. Empty on a passing run.
 	NewFirings []string `json:"new_firings"`
+	// NovelGap is CUSTOMER-TREE MODE ONLY (Options.ExamRepo set; mallcoppro-f95
+	// BOTH ruling, part B): true when at least one family the customer
+	// detector's OWN scenarios declare (customerDeclaredFamilies) has ZERO
+	// labeled must_fire rows anywhere in the reference corpus. It means the
+	// held-out reference corpus (part A, checkCustomerHeldOutNewFirings) has NO
+	// independent ground truth for this family at all — it can prove the
+	// detector does not fire WRONGLY elsewhere, but it structurally cannot
+	// grade whether the detector's claimed detection is itself sound, because
+	// no operator-labeled example of the target ever occurs in it. A gate-GREEN
+	// result with NovelGap==true is not a weaker verdict — every stage still
+	// passed — but the CALLER (mallcop-pro's autonomy router/engine) MUST force
+	// a human review of it regardless of the autonomy dial, the same
+	// dial-independent hard line already applied to OSS contribute-back (see
+	// internal/selfext/autonomy's package doc on the mallcop-pro side). Always
+	// false/omitted for the in-tree lane and for a customer-tree run that adds
+	// no detector (nothing to have an opinion about).
+	NovelGap bool `json:"novel_gap,omitempty"`
+	// NovelGapFamilies lists the specific declared families driving NovelGap
+	// (sorted, de-duplicated) — informational detail for the reviewer/log line,
+	// never used to compute NovelGap by a caller (that's the bool above).
+	NovelGapFamilies []string `json:"novel_gap_families,omitempty"`
 }
 
 func (r *GateResult) addStage(name, evidence string, findings []GuardFinding) {
@@ -279,9 +323,13 @@ func ValidateProposal(repoRoot, baseRef, headRef string, opts Options) (GateResu
 	// place Options.ExamRepo affects the run — guard and structural above are
 	// identical in both modes.
 	if opts.ExamRepo != "" {
-		examFindings, examEvidence, err := customerTreeExamStage(opts.ExamRepo, headTree)
+		examFindings, examEvidence, novelGap, novelGapFamilies, err := customerTreeExamStage(opts.ExamRepo, headTree)
 		if err != nil {
 			return GateResult{}, err
+		}
+		res.NovelGap = novelGap
+		if len(novelGapFamilies) > 0 {
+			res.NovelGapFamilies = novelGapFamilies
 		}
 		res.addStage(StageExamDetect, examEvidence, examFindings)
 		return res, nil
@@ -412,6 +460,39 @@ func structuralStage(headTree string, customerTreeMode bool) ([]GuardFinding, st
 		})
 	}
 
+	// `go vet ./...` — DEFENSE-IN-DEPTH beside `go build ./...` above:
+	// `go build` never compiles _test.go files, so a sidecar's authored
+	// main_test.go that does not even COMPILE (mallcoppro-f95: round 5's
+	// forcepushprotectedbranch/main_test.go called a struct value as a
+	// function and carried an unused import) sails through the build check
+	// untouched. `go vet` DOES compile every _test.go in the tree as part of
+	// its own analysis pass, so a non-compiling test file fails here, fail
+	// closed, before the detector's efficacy is ever graded. Same GOFLAGS
+	// convention as the build above (customer-tree mode only).
+	//
+	// GUARD: `go vet ./...` (unlike `go build ./...`) exits 1 with "no
+	// packages to vet" on a tree with ZERO .go files anywhere (a bare
+	// THIN-EMBED scaffold before any detector is authored) — `go build`
+	// silently no-ops (exit 0) on the exact same tree. Skip the vet call
+	// entirely when the tree has no .go files at all, so an empty/no-op
+	// proposal is trivially clean under vet exactly as it already is under
+	// build, instead of failing on Go's own "nothing here" plumbing message.
+	vetOK := true
+	if treeHasGoFiles(headTree) {
+		vstdout, vstderr, vcode, verr := runTool(headTree, buildEnv, "go", "vet", "./...")
+		if verr != nil {
+			return nil, "", fmt.Errorf("selfgate: running `go vet` in the head tree: %w", verr)
+		}
+		if vcode != 0 {
+			vetOK = false
+			findings = append(findings, GuardFinding{
+				Path:   "./...",
+				Rule:   RuleStructuralVet,
+				Detail: fmt.Sprintf("`go vet ./...` failed in the head tree (exit %d): %s", vcode, truncate(vstderr+vstdout, 1500)),
+			})
+		}
+	}
+
 	// K2a authored-detector import allow-list over the head tree.
 	modulePath, err := lint.ModulePath(headTree)
 	if err != nil {
@@ -482,7 +563,11 @@ func structuralStage(headTree string, customerTreeMode bool) ([]GuardFinding, st
 	if !buildOK {
 		buildNote = "`go build ./...` FAILED in head tree"
 	}
-	return findings, buildNote + "; " + allowlistNote + "; " + shapeNote, nil
+	vetNote := "`go vet ./...` OK in head tree"
+	if !vetOK {
+		vetNote = "`go vet ./...` FAILED in head tree"
+	}
+	return findings, buildNote + "; " + vetNote + "; " + allowlistNote + "; " + shapeNote, nil
 }
 
 // repoRelativeHead makes a shape-violation file path (which is absolute, rooted
@@ -537,10 +622,63 @@ func discoverCustomerDetectorDirs(tree string) ([]string, error) {
 	return dirs, nil
 }
 
+// dirExists reports whether path exists and is a directory.
+func dirExists(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.IsDir()
+}
+
+// treeHasGoFiles reports whether tree contains at least one .go file at any
+// depth (skipping .git). Used to skip `go vet ./...` on a tree with nothing
+// to vet — Go's own "no packages to vet" plumbing message on such a tree is
+// not a detector defect (see structuralStage).
+func treeHasGoFiles(tree string) bool {
+	found := false
+	_ = filepath.WalkDir(tree, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() {
+			if d.Name() == ".git" {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		if strings.HasSuffix(d.Name(), ".go") {
+			found = true
+			return fs.SkipAll
+		}
+		return nil
+	})
+	return found
+}
+
+// customerScenariosSubdir is the co-located efficacy-scenarios directory
+// every customer-tree detector sidecar unit ships (mallcoppro-f95 RULING,
+// Approach A): detectors/<name>/{main.go, main_test.go, scenarios/*.yaml}.
+// Its absence is not an error — a detector that ships none simply declares
+// zero families (checkCustomerEfficacy fails it closed for that).
+const customerScenariosSubdir = "scenarios"
+
 // customerTreeExamStage is stage 3 under Options.ExamRepo: it grades every
-// detectors/<name>/ source directory found in headTree against examRepoTree's
-// OWN pinned corpus via RunCustomerTreeExam (customerexam.go) — the real
-// wasip1/wazero host path, never an in-process link.
+// detectors/<name>/ source directory found in headTree against the UNION of
+// (a) examRepoTree's OWN pinned reference corpus and (b) the detector's OWN
+// co-located detectors/<name>/scenarios/*.yaml efficacy scenarios (mallcoppro-
+// f95), via RunCustomerTreeExamExtra (customerexam.go) — the real
+// wasip1/wazero host path, never an in-process link. The detector's own
+// scenarios are UNPINNED (never touch examRepoTree's corpus.pin).
+//
+// EPHEMERAL SCRATCH COPY (mallcoppro-f95 ruling): examRepoTree is a
+// caller-supplied REAL reference tree, potentially the operator's own
+// long-lived checkout reused across many gate runs — not a disposable
+// worktree like headTree. Grading builds a `mallcop` binary straight into
+// whatever tree it's pointed at (runTreeExamWithSidecarSrc); pointing that at
+// examRepoTree directly would leave a stray binary in the operator's real
+// checkout on every run. This stage therefore makes an ephemeral, throwaway
+// COPY of examRepoTree first (scratchCopyExamRepo) and grades against the
+// copy exclusively — examRepoTree itself is only ever READ (to make the
+// copy), never built into, never written to, and its corpus.pin is never
+// touched.
 //
 // A REAL reference tree's corpus can legitimately carry PRE-EXISTING labeled
 // gaps (documented, accepted red rows unrelated to any customer proposal —
@@ -548,48 +686,115 @@ func discoverCustomerDetectorDirs(tree string) ([]string, error) {
 // itself has no base-tree diff (see its package doc), so grading the
 // candidate report in isolation would wrongly reject every customer detector
 // over gaps it didn't cause. This stage therefore diffs TWO exam runs of the
-// SAME examRepoTree: a BASELINE (runTreeExam, no sidecar — whatever the
-// reference tree already scores on its own) and the CANDIDATE (the customer
-// detector loaded via RunCustomerTreeExam). Only a scenario that PASSED at
-// baseline and FAILS at candidate is a regression THIS detector introduced —
-// including a detector that fires on its own benign twin (the classic
-// missing-benign-twin-protection defect: its own must-fire target's row
-// stays passing, but the benign-twin row the detector wrongly fires on
-// regresses from pass to fail). A pre-existing baseline failure is never
-// blamed on the candidate. This is a REAL rejection finding, never folded
-// into the operational-error path. The error return here is operational
-// only: a detector source that doesn't build, or the reference tree's own
+// SAME scratch copy: a BASELINE (runTreeExam, no sidecar, no extra scenarios —
+// whatever the reference tree already scores on its own) and the CANDIDATE
+// (the customer detector + its own scenarios loaded via
+// RunCustomerTreeExamExtra). Only a REFERENCE-CORPUS scenario (row.Extra ==
+// false) that PASSED at baseline and FAILS at candidate is a regression THIS
+// detector introduced against the shared corpus — including a detector that
+// fires on some unrelated reference scenario it should stay silent on. A
+// pre-existing baseline failure is never blamed on the candidate.
+//
+// EFFICACY (the K1 hole this fix closes, mallcoppro-f95): a detector proven
+// ONLY against the reference corpus can pass vacuously for a NOVEL gap (an
+// event type with zero reference-corpus scenarios) without ever being shown
+// an event of its own target type. checkCustomerEfficacy generalizes the
+// in-tree lane's checkAuthoredBenignTwins into this lane: for every family
+// the detector's OWN scenarios declare as a must_fire target
+// (customerDeclaredFamilies, sourced from Extra==true rows only), the UNION
+// report must carry a PASSING must_fire row AND a PASSING must_not_fire
+// benign-twin row for it — zero declared families (no scenarios/ shipped, or
+// none labeled) fails closed trivially. This is a REAL rejection finding,
+// never folded into the operational-error path.
+//
+// HELD-OUT-CORPUS CONTROL (mallcoppro-f95 BOTH ruling, part A — the PRIMARY
+// anti-gaming defense; checkCustomerHeldOutNewFirings): EFFICACY above and
+// checkMinimalMutationCoverage are BOTH two-point, author-authored checks — a
+// detector's own must-fire scenario and its own benign twin, both files the
+// same attacker who wrote detectorSrcDir also wrote. Round 2's veracity
+// review found this cannot be closed by any diff bound over the AUTHOR'S OWN
+// pair: a fire-on-everything-except-one-hand-picked-metadata-marker detector
+// ships a fully compliant, STRUCTURALLY-VALID minimal-mutation must-fire+twin
+// pair (same event_type/actor/source, differing only in one attacker-invented
+// metadata key) and clears both checks, because the attacker chooses the
+// twin. The reference corpus, by contrast, is OPERATOR-SUPPLIED content the
+// author never sees and cannot carve a matching exception into. This is why
+// held-out-corpus grading is the primary control and the two author-authored
+// checks above are demoted to SECONDARY discrimination proofs (still real:
+// they catch a detector that does not even fire on its own claimed target, or
+// whose own twin already fails).
+//
+// NOVEL GAP (mallcoppro-f95 BOTH ruling, part B): checkCustomerHeldOutNewFirings
+// only has signal for a family the reference corpus can actually exercise. A
+// detector whose declared family has literally zero labeled must_fire rows
+// anywhere in the reference corpus can still, in principle, be a fire-
+// -on-everything detector scoped to an event_type the reference corpus simply
+// never carries any example of at all — the held-out check would see zero
+// emissions either way and could not distinguish that from a genuinely narrow,
+// well-behaved detector. novelGap (returned here, threaded onto
+// GateResult.NovelGap by the caller) surfaces that structural blind spot
+// instead of silently passing through it: it is the caller's job (mallcop-pro's
+// autonomy router/engine) to force a human review whenever it is true,
+// regardless of the autonomy dial — see GateResult.NovelGap's doc.
+//
+// The error return here is operational only: a detector source that doesn't
+// build, the scratch copy failing to materialize, or the reference tree's own
 // corpus failing to resolve (either pass).
-func customerTreeExamStage(examRepoTree, headTree string) ([]GuardFinding, string, error) {
+func customerTreeExamStage(examRepoTree, headTree string) (findings []GuardFinding, evidence string, novelGap bool, novelGapFamilies []string, err error) {
 	detectorDirs, err := discoverCustomerDetectorDirs(headTree)
 	if err != nil {
-		return nil, "", fmt.Errorf("selfgate: discovering customer detector source under %s: %w", headTree, err)
+		return nil, "", false, nil, fmt.Errorf("selfgate: discovering customer detector source under %s: %w", headTree, err)
 	}
 	if len(detectorDirs) == 0 {
-		return nil, fmt.Sprintf("customer-tree exam mode: no detectors/<name>/main.go found under %s (nothing to grade)", headTree), nil
+		return nil, fmt.Sprintf("customer-tree exam mode: no detectors/<name>/main.go found under %s (nothing to grade)", headTree), false, nil, nil
 	}
 
-	baselineReport, _, baseErr := runTreeExam(examRepoTree)
+	scratchExamRepo, cleanup, err := scratchCopyExamRepo(examRepoTree)
+	if err != nil {
+		return nil, "", false, nil, err
+	}
+	defer cleanup()
+
+	baselineReport, _, baseErr := runTreeExam(scratchExamRepo)
 	if baseErr != nil {
 		// The reference tree is the caller-supplied ground truth: if it cannot
 		// even grade itself (no detector loaded), the gate has nothing to diff
 		// against — operational, not a property of the customer proposal.
-		return nil, "", fmt.Errorf("selfgate: reference tree %s baseline exam-detect (no customer detector loaded): %w", examRepoTree, baseErr)
+		return nil, "", false, nil, fmt.Errorf("selfgate: reference tree %s baseline exam-detect (no customer detector loaded): %w", examRepoTree, baseErr)
 	}
 	baselinePass := make(map[string]bool, len(baselineReport.Rows))
 	for _, r := range baselineReport.Rows {
 		baselinePass[r.ScenarioID] = r.Pass
 	}
 
-	var findings []GuardFinding
+	// referenceMustFire is every family ANY reference-corpus scenario labels as
+	// a must_fire target, regardless of pass/fail — the ground truth
+	// checkCustomerHeldOutNewFirings excuses emissions against (a scenario's
+	// OWN label) and NovelGap tests a declared family's ABSENCE from (see both
+	// docs above). Computed once from the baseline (detector-free) report — the
+	// labels themselves are intrinsic to the corpus, never to which detector is
+	// loaded — and shared across every detector dir this stage grades.
+	referenceMustFire := map[string]bool{}
+	for _, r := range baselineReport.Rows {
+		for _, fam := range r.MustFire {
+			referenceMustFire[normalizeFamily(fam)] = true
+		}
+	}
+
+	novelGapSet := map[string]bool{}
 	var parts []string
 	for _, dir := range detectorDirs {
 		name := filepath.Base(dir)
 		relPath := "detectors/" + name
 
-		report, err := RunCustomerTreeExam(examRepoTree, dir)
-		if err != nil {
-			return nil, "", fmt.Errorf("selfgate: customer-tree exam for %s: %w", relPath, err)
+		extraScenariosDir := ""
+		if candidate := filepath.Join(dir, customerScenariosSubdir); dirExists(candidate) {
+			extraScenariosDir = candidate
+		}
+
+		report, rerr := RunCustomerTreeExamExtra(scratchExamRepo, dir, extraScenariosDir)
+		if rerr != nil {
+			return nil, "", false, nil, fmt.Errorf("selfgate: customer-tree exam for %s: %w", relPath, rerr)
 		}
 
 		if report.Totals.Labeled == 0 {
@@ -602,8 +807,44 @@ func customerTreeExamStage(examRepoTree, headTree string) ([]GuardFinding, strin
 			continue
 		}
 
+		// EFFICACY (mallcoppro-f95, SECONDARY discrimination proof): the
+		// detector's OWN scenarios must prove it fires on its declared
+		// target(s) and stays silent on a benign twin. Zero declared families
+		// (no scenarios/ shipped, or none labeled) fails closed here.
+		efficacyFindings, effErr := checkCustomerEfficacy(name, relPath, report.Rows, extraScenariosDir)
+		if effErr != nil {
+			return nil, "", false, nil, fmt.Errorf("selfgate: customer-tree efficacy check for %s: %w", relPath, effErr)
+		}
+		findings = append(findings, efficacyFindings...)
+
+		// HELD-OUT-CORPUS NEW-FIRING CONTROL (mallcoppro-f95 BOTH ruling, part
+		// A — PRIMARY anti-gaming defense): see the function doc above for why
+		// this is the control that actually defeats the sentinel-metadata
+		// attack the author-authored efficacy/minimal-mutation checks cannot.
+		findings = append(findings, checkCustomerHeldOutNewFirings(name, relPath, baselineReport.Rows, report.Rows)...)
+
+		// NOVEL GAP (mallcoppro-f95 BOTH ruling, part B): a family this
+		// detector declares (via its OWN scenarios) that has ZERO labeled
+		// must_fire rows anywhere in the reference corpus — the held-out
+		// control above has no independent signal for it. Recorded regardless
+		// of this detector's pass/fail so the caller always gets an accurate
+		// signal for a GREEN result.
+		for _, fam := range customerDeclaredFamilies(report.Rows) {
+			if !referenceMustFire[fam] {
+				novelGapSet[fam] = true
+			}
+		}
+
+		// REGRESSION (unchanged in substance): only REFERENCE-CORPUS rows
+		// (Extra == false) are diffed against the baseline — the detector's
+		// OWN scenario rows are graded above by checkCustomerEfficacy instead,
+		// which gives them a more precise per-family verdict than a bare
+		// "regressed since it was never at baseline" message would.
 		regressions := 0
 		for _, row := range report.Rows {
+			if row.Extra {
+				continue
+			}
 			if row.Pass {
 				continue
 			}
@@ -624,8 +865,98 @@ func customerTreeExamStage(examRepoTree, headTree string) ([]GuardFinding, strin
 			name, report.Totals.Labeled, report.Totals.Passed, report.Totals.Failed, regressions))
 	}
 
-	evidence := fmt.Sprintf("customer-tree exam via reference tree %s — %s", examRepoTree, strings.Join(parts, "; "))
-	return findings, evidence, nil
+	novelGapFamilies = sortedKeys(novelGapSet)
+	novelGap = len(novelGapFamilies) > 0
+
+	evidence = fmt.Sprintf("customer-tree exam via reference tree %s (graded against an ephemeral scratch copy) — %s", examRepoTree, strings.Join(parts, "; "))
+	if novelGap {
+		evidence += fmt.Sprintf("; NOVEL GAP (zero reference-corpus must_fire coverage) for declared famil(y/ies): %v — human review required regardless of autonomy dial", novelGapFamilies)
+	}
+	return findings, evidence, novelGap, novelGapFamilies, nil
+}
+
+// checkCustomerHeldOutNewFirings is the PRIMARY anti-gaming control
+// (mallcoppro-f95 BOTH ruling, part A): for every REFERENCE-CORPUS scenario
+// (row.Extra == false) the candidate report carries, any detector family
+// emitted there is an undeclared new firing UNLESS (a) that exact scenario's
+// OWN label already declares the family as a must_fire target, or (b) the
+// reference tree's detector-free baseline already emitted that family there
+// (some other, already-trusted detector in the reference tree owns it, not
+// this proposal). Fail closed otherwise.
+//
+// This is the SAME "no new firings" substance diffExamReports enforces for
+// the in-tree lane (part (c) there — see its doc), specialized to the
+// customer-tree shape: baseline stands in for "base" (it never loads the
+// candidate detector at all, so ANY family the detector introduces is
+// necessarily absent from it) and candidate's reference-corpus rows stand in
+// for "head". UNLIKE diffExamReports, there is deliberately NO cross-scenario
+// "declared elsewhere" excusal — the only thing that can excuse an emission
+// here is the SAME scenario's own pre-existing label, a label the proposal's
+// author never wrote and cannot retroactively carve an exception into. The
+// detector's OWN scenarios (row.Extra == true) are never inputs to this
+// excusal either (declared is read from candidate's own MustFire on the
+// SAME reference-corpus row, not from any Extra row) — see customerTreeExamStage's
+// doc for why an author-controlled declaration must never be able to buy an
+// excusal from the operator-controlled corpus.
+//
+// THE ATTACK THIS CLOSES (opus veracity, round 2 unresolved): a detector that
+// fires on every event except one attacker-chosen metadata marker ships a
+// fully compliant, STRUCTURALLY-VALID (event_type/actor/source-matching)
+// must-fire + benign-twin pair — checkCustomerEfficacy and
+// checkMinimalMutationCoverage both pass it, because both grade only the
+// attacker's own two scenarios. Run against the reference corpus, that same
+// detector fires on nearly every unrelated benign scenario there (none of
+// them carry the attacker's marker) — an avalanche of undeclared new firings
+// this function catches, because the attacker cannot author the reference
+// corpus's own scenarios or their labels.
+//
+// A real, narrow detector (target event type genuinely absent from the
+// reference corpus) emits nothing on reference-corpus rows and passes this
+// check trivially — it is NovelGap (see customerTreeExamStage), not a new-
+// firing rejection, that flags it for human review.
+func checkCustomerHeldOutNewFirings(name, relPath string, baseline []examRow, candidate []CustomerExamRow) []GuardFinding {
+	baselineEmitted := make(map[string]map[string]bool, len(baseline))
+	for _, b := range baseline {
+		set := make(map[string]bool, len(b.Emitted))
+		for _, e := range b.Emitted {
+			set[normalizeFamily(e)] = true
+		}
+		baselineEmitted[b.ScenarioID] = set
+	}
+
+	var findings []GuardFinding
+	for _, c := range candidate {
+		if c.Extra {
+			// The detector's OWN scenarios are graded by checkCustomerEfficacy
+			// / checkMinimalMutationCoverage instead — this function polices
+			// ONLY the operator-supplied, author-blind held-out corpus.
+			continue
+		}
+		declared := make(map[string]bool, len(c.MustFire))
+		for _, m := range c.MustFire {
+			declared[normalizeFamily(m)] = true
+		}
+		base := baselineEmitted[c.ScenarioID]
+		seen := map[string]bool{}
+		for _, e := range c.Emitted {
+			fam := normalizeFamily(e)
+			if fam == "" || seen[fam] {
+				continue
+			}
+			seen[fam] = true
+			if base[fam] || declared[fam] {
+				continue
+			}
+			findings = append(findings, GuardFinding{
+				Path: relPath,
+				Rule: RuleCustomerExamFail,
+				Detail: fmt.Sprintf(
+					"held-out reference-corpus scenario %q: detector %q fires family %q, which that scenario's own label does not declare (must_fire=%v must_not_fire=%v) and the reference tree's own detector-free baseline never emits there — undeclared new firing against the operator's held-out corpus (emitted=%v)",
+					c.ScenarioID, name, fam, c.MustFire, c.MustNotFire, c.Emitted),
+			})
+		}
+	}
+	return findings
 }
 
 // ---- stage 3: exam-detect ------------------------------------------------------
@@ -640,6 +971,13 @@ type examRow struct {
 	MustNotFire []string `json:"must_not_fire"`
 	Emitted     []string `json:"emitted"`
 	Pass        bool     `json:"pass"`
+	// Extra mirrors core/eval.ExamDetectRow.Extra (mallcoppro-f95): true when
+	// this row came from an --extra-scenarios-dir union rather than the
+	// pinned reference corpus. Always false/omitted for the in-tree lane
+	// (which never passes an extra dir) — decoded here only so
+	// customerTreeExamStage can tell a customer detector's OWN efficacy
+	// scenarios apart from reference-corpus rows in the SAME report.
+	Extra bool `json:"extra,omitempty"`
 }
 
 type examReport struct {
@@ -687,6 +1025,18 @@ func runTreeExam(tree string) (examReport, string, error) {
 // in-process shortcut for this: it has no way to reach core/detect's registry
 // or detecthost directly.
 func runTreeExamWithSidecarSrc(tree, sidecarSrcDir string) (examReport, string, error) {
+	return runTreeExamWithSidecarSrcAndScenarios(tree, sidecarSrcDir, "")
+}
+
+// runTreeExamWithSidecarSrcAndScenarios is runTreeExamWithSidecarSrc,
+// additionally passing --extra-scenarios-dir extraScenariosDir when non-empty
+// (mallcoppro-f95) — unions a customer detector's OWN co-located efficacy
+// scenarios into the SAME exam-detect run, UNPINNED (see
+// RunCustomerTreeExamExtra). extraScenariosDir == "" reproduces
+// runTreeExamWithSidecarSrc's exact prior behavior byte-for-byte (the flag is
+// simply omitted from argv), which is what keeps every existing caller
+// (runTreeExam, the in-tree lane, RunCustomerTreeExam) unchanged.
+func runTreeExamWithSidecarSrcAndScenarios(tree, sidecarSrcDir, extraScenariosDir string) (examReport, string, error) {
 	bin := filepath.Join(tree, "mallcop")
 	stdout, stderr, code, err := runTool(tree, nil, "go", "build", "-o", bin, "./cmd/mallcop")
 	if err != nil {
@@ -703,6 +1053,9 @@ func runTreeExamWithSidecarSrc(tree, sidecarSrcDir string) (examReport, string, 
 	}
 	if sidecarSrcDir != "" {
 		args = append(args, "--sidecar-src", sidecarSrcDir)
+	}
+	if extraScenariosDir != "" {
+		args = append(args, "--extra-scenarios-dir", extraScenariosDir)
 	}
 	// Defense-in-depth behind the L3 shape gate: an authored detector that slips
 	// an unbounded loop or blocking call past the AST check would otherwise let
@@ -964,6 +1317,398 @@ func normalizeFamily(tok string) string {
 	return strings.ToLower(strings.TrimSpace(tok))
 }
 
+// customerDeclaredFamilies returns the sorted, de-duplicated set of detector
+// families a customer detector's OWN scenarios/*.yaml sidecar (rows marked
+// Extra) declares as a must_fire target — the customer-tree analogue of
+// addedAuthoredFamilies for the in-tree lane. There is no base/head package
+// diff in customer-tree mode (a single detector is graded in isolation, not
+// diffed against a sibling proposal); the detector's own must_fire
+// declarations under its own scenarios/ ARE the claim it must prove.
+// Reference-corpus rows (Extra == false) never contribute here — a detector
+// cannot borrow proof of its own novel-gap efficacy from scenarios it did not
+// ship.
+func customerDeclaredFamilies(rows []CustomerExamRow) []string {
+	set := map[string]bool{}
+	for _, r := range rows {
+		if !r.Extra {
+			continue
+		}
+		for _, fam := range r.MustFire {
+			set[normalizeFamily(fam)] = true
+		}
+	}
+	return sortedKeys(set)
+}
+
+// checkCustomerEfficacy is the customer-tree generalization of
+// checkAuthoredBenignTwins (mallcoppro-f95): for every family the detector's
+// OWN scenarios/*.yaml declares (customerDeclaredFamilies), the UNION report
+// (reference corpus + the detector's own scenarios, graded through the SAME
+// real .wasm run) must carry a PASSING must_fire row AND a PASSING
+// must_not_fire benign-twin row for it.
+//
+// Zero declared families — no scenarios/ subdirectory shipped at all, or one
+// that ships no labeled must_fire scenario — fails closed trivially: a
+// detector graded ONLY against the reference corpus proves nothing about a
+// novel gap it targets (the reference corpus, by definition, may have zero
+// scenarios of that event type). This is the K1 hole mallcoppro-f95 closes:
+// before this check, RuleCustomerExamVacuous only ever looked at the WHOLE
+// union's Totals.Labeled, which is never zero once a non-trivial reference
+// corpus is in play — a detector with zero of its own scenarios sailed
+// through untouched.
+//
+// firesPassing/twinPassing are computed over ALL rows (reference and extra)
+// so a family's proof can legitimately live in either — a family a detector
+// declares that HAPPENS to already have reference-corpus coverage is not
+// penalized for it — but a declared family with NO passing proof anywhere in
+// the union fails on both the must-fire and (independently) the benign-twin
+// arm. All findings use RuleCustomerExamFail (the single customer-tree
+// rejection rule; RuleCustomerExamVacuous stays reserved for the whole-corpus
+// backstop).
+func checkCustomerEfficacy(name, relPath string, rows []CustomerExamRow, extraScenariosDir string) ([]GuardFinding, error) {
+	declared := customerDeclaredFamilies(rows)
+	if len(declared) == 0 {
+		return []GuardFinding{{
+			Path: relPath,
+			Rule: RuleCustomerExamFail,
+			Detail: fmt.Sprintf(
+				"detector %q ships zero efficacy scenarios — expected %s/%s/*.yaml with at least one must_fire scenario proving it fires on its target and a benign-twin must_not_fire scenario proving it stays silent on a look-alike; a detector graded ONLY against the reference corpus proves nothing about a novel gap it targets, fail closed",
+				name, relPath, customerScenariosSubdir),
+		}}, nil
+	}
+
+	firesPassing := map[string]bool{}
+	twinPassing := map[string]bool{}
+	// extraFireIDs / extraTwinIDs collect, PER FAMILY, the scenario IDs of the
+	// detector's OWN (Extra == true) PASSING must_fire / must_not_fire rows —
+	// exactly the candidate pairs checkMinimalMutationCoverage below diffs.
+	// Reference-corpus rows (Extra == false) never enter these maps: see that
+	// function's doc for why the minimal-mutation check is scoped to the
+	// detector's own scenario pair, not the reference corpus.
+	extraFireIDs := map[string][]string{}
+	extraTwinIDs := map[string][]string{}
+	for _, r := range rows {
+		if !r.Pass {
+			continue
+		}
+		for _, fam := range r.MustFire {
+			f := normalizeFamily(fam)
+			firesPassing[f] = true
+			if r.Extra {
+				extraFireIDs[f] = append(extraFireIDs[f], r.ScenarioID)
+			}
+		}
+		for _, fam := range r.MustNotFire {
+			f := normalizeFamily(fam)
+			twinPassing[f] = true
+			if r.Extra {
+				extraTwinIDs[f] = append(extraTwinIDs[f], r.ScenarioID)
+			}
+		}
+	}
+
+	var findings []GuardFinding
+	// scenarios is loaded lazily (at most once) from extraScenariosDir — most
+	// proposals declare one family, and many families that DO have reference-
+	// corpus coverage on both arms never need it at all (see the skip below).
+	var scenarios map[string]*exam.Scenario
+	for _, fam := range declared {
+		if !firesPassing[fam] {
+			findings = append(findings, GuardFinding{
+				Path: relPath,
+				Rule: RuleCustomerExamFail,
+				Detail: fmt.Sprintf(
+					"detector %q family %q: no passing must_fire scenario proves it fires on its target — the detector's own %s/%s/*.yaml must-fire scenario did not clear the real .wasm run",
+					name, fam, relPath, customerScenariosSubdir),
+			})
+		}
+		if !twinPassing[fam] {
+			findings = append(findings, GuardFinding{
+				Path: relPath,
+				Rule: RuleCustomerExamFail,
+				Detail: fmt.Sprintf(
+					"detector %q family %q: no passing must_not_fire benign-twin scenario proves it stays silent on a look-alike — missing benign twin, or the twin fires (the false-positive floor)",
+					name, fam),
+			})
+			continue // no twin at all for this family — nothing to diff below
+		}
+
+		// MEASURED MINIMAL MUTATION (mallcoppro-f95 round 2, veracity-reproduced
+		// bypass): a passing must_fire row AND a passing must_not_fire row is
+		// NOT enough on its own — see checkMinimalMutationCoverage's doc for the
+		// reproduced attack this closes (a detector that fires on every event
+		// except one hand-picked, structurally-unrelated event_type ships a
+		// compliant must-fire + twin pair and passed under the OLD check).
+		// Scoped to families whose proof for BOTH arms is entirely the
+		// detector's OWN scenarios (Extra rows): a family already proven via
+		// the reference corpus needs no re-derivation here — that corpus is
+		// the gate's own trusted ground truth, not the untrusted proposal
+		// content this check exists to police.
+		if len(extraFireIDs[fam]) == 0 || len(extraTwinIDs[fam]) == 0 {
+			continue
+		}
+		if scenarios == nil {
+			loaded, lerr := loadCustomerScenarioFiles(extraScenariosDir)
+			if lerr != nil {
+				return nil, fmt.Errorf("loading %s's own scenarios (%s) for the minimal-mutation check: %w", relPath, extraScenariosDir, lerr)
+			}
+			scenarios = loaded
+		}
+		if f := checkMinimalMutationCoverage(name, relPath, fam, extraFireIDs[fam], extraTwinIDs[fam], scenarios); f != nil {
+			findings = append(findings, *f)
+		}
+	}
+	return findings, nil
+}
+
+// loadCustomerScenarioFiles parses every scenario YAML under dir (a customer
+// detector's own co-located scenarios/ directory) into a map keyed by the
+// scenario's own `id:` field — the SAME key CustomerExamRow.ScenarioID
+// carries for these rows, since both are derived from the identical file set
+// RunCustomerTreeExamExtra's --extra-scenarios-dir union already graded
+// through the real .wasm pass. CustomerExamRow itself carries no event data
+// (see customerexam.go's wire shape); this is the only way
+// checkMinimalMutationCoverage can recover the raw event sequence a passing
+// row's verdict was computed over. A parse failure here is OPERATIONAL, never
+// silently skipped: the same directory just built and graded successfully
+// through RunCustomerTreeExamExtra, so a YAML this loader rejects means
+// something is wrong with the gate's own re-read, not the proposal.
+func loadCustomerScenarioFiles(dir string) (map[string]*exam.Scenario, error) {
+	out := map[string]*exam.Scenario{}
+	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if d.IsDir() {
+			if path != dir && strings.HasPrefix(d.Name(), "_") {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		if strings.HasPrefix(d.Name(), "_") {
+			return nil
+		}
+		if !strings.HasSuffix(d.Name(), ".yaml") && !strings.HasSuffix(d.Name(), ".yml") {
+			return nil
+		}
+		sc, lerr := exam.Load(path)
+		if lerr != nil {
+			return fmt.Errorf("parsing %s: %w", path, lerr)
+		}
+		out[sc.ID] = sc
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// maxDiscriminatingFields bounds how many event fields a benign-twin scenario
+// may differ on from its must-fire sibling and still count as a MEASURED
+// MINIMAL MUTATION rather than an arbitrary carve-out.
+//
+// Derived from the reference corpus's OWN benign-twin convention
+// (exams/scenarios/privilege/PE-08-aws-poweruser-grant.yaml and
+// PE-09-aws-readonly-grant-benign.yaml — PE-09's own trap_description names
+// itself "the benign twin of PE-08"): the discriminating event in that pair
+// shares event_type (role_assignment) and source (aws) and differs ONLY in
+// the SUBSTANTIVE payload that actually separates escalation from routine —
+// there, the policy attached (metadata.role / metadata.policy_arn:
+// PowerUserAccess vs ReadOnlyAccess, plus the principal fields that go with
+// it). It never differs in event TYPE itself. A customer-tree twin that
+// instead differs in event type (or actor, source, or event count) is not
+// narrowing on a substantive value at all — it is pointing at a
+// structurally different event and calling it a "near miss", which is
+// exactly the reproduced attack shape: a detector that fires on every event
+// except one hand-picked, structurally-unrelated event_type. Forcing the
+// twin to share the must-fire event's type/actor/source means that same
+// "if type == X, stay silent" logic which let the twin pass would ALSO
+// silence the must-fire event itself (same type) — so the must-fire arm
+// fails instead, and the detector is forced into genuine discrimination on
+// the bounded, substantive difference.
+//
+// 3 is small enough that a twin differing across essentially its entire
+// metadata block is still rejected (that is a different narrative wearing a
+// twin's clothes, not a bounded discrimination) while comfortably covering a
+// real near-miss that changes one semantic value (e.g. a policy ARN) plus
+// one or two correlated fields that legitimately change WITH it (e.g. a
+// severity or action string derived from that same underlying value, as
+// PE-08/PE-09's own action/severity fields do alongside the policy).
+//
+// This bound applies ONLY to the customer's own minimal single/few-event
+// scenario pair (detectors/<name>/scenarios/*.yaml) — the reference corpus's
+// own richer, multi-event scenarios (like PE-09's two-event onboarding
+// sequence) are a DIFFERENT, unconstrained authoring convention this check
+// does not police; see checkMinimalMutationCoverage's doc for the scope
+// boundary.
+const maxDiscriminatingFields = 3
+
+// checkMinimalMutationCoverage reports whether AT LEAST ONE (must-fire,
+// benign-twin) scenario ID pair drawn from fireIDs × twinIDs is a MEASURED
+// MINIMAL MUTATION of each other (minimalMutationPairOK) — proof that the
+// detector's discrimination is genuine, not an arbitrary carve-out. Returns
+// nil (no finding) the moment one qualifying pair is found; a detector may
+// ship extra, broader scenarios beyond the required minimal pair without
+// penalty. Returns a RuleCustomerExamFail finding, listing every attempted
+// pair and why it failed, only if NONE of the passing pairs qualify.
+//
+// THE REPRODUCED BYPASS this closes (opus veracity, independently
+// reproduced): checkCustomerEfficacy previously verified only that a family
+// had SOME passing must_fire row and SOME passing must_not_fire row — never
+// that the benign twin was a minimal mutation of the must-fire scenario. A
+// detector for a novel family (zero reference-corpus rows, so the regression
+// arm is an empty backstop) that fires on every event EXCEPT its own
+// hand-picked twin event_type shipped a compliant must-fire + twin pair and
+// PASSED. minimalMutationPairOK's structural-identity requirement
+// (event_type/actor/source must match, see maxDiscriminatingFields's doc)
+// closes this: the twin can no longer be "some other event the detector
+// happens to ignore" — it must share the must-fire event's type/actor/source
+// and differ only on a bounded, non-zero set of substantive fields.
+func checkMinimalMutationCoverage(name, relPath, fam string, fireIDs, twinIDs []string, scenarios map[string]*exam.Scenario) *GuardFinding {
+	var attemptDetails []string
+	foundAny := false
+	for _, fireID := range fireIDs {
+		fireScenario := scenarios[fireID]
+		if fireScenario == nil {
+			continue
+		}
+		for _, twinID := range twinIDs {
+			twinScenario := scenarios[twinID]
+			if twinScenario == nil {
+				continue
+			}
+			foundAny = true
+			ok, reason := minimalMutationPairOK(fireScenario, twinScenario)
+			if ok {
+				return nil
+			}
+			attemptDetails = append(attemptDetails, fmt.Sprintf("%s vs %s: %s", fireID, twinID, reason))
+		}
+	}
+	if !foundAny {
+		// Every declared must_fire/must_not_fire ID for this family came from
+		// files this loader could not locate under the detector's own
+		// scenarios directory — should not happen (the same directory just
+		// graded successfully through the real exam-detect pass) — fail
+		// closed rather than silently accept an unverifiable pair.
+		return &GuardFinding{
+			Path: relPath,
+			Rule: RuleCustomerExamFail,
+			Detail: fmt.Sprintf(
+				"detector %q family %q: could not locate its own must_fire/must_not_fire scenario files under %s to verify the benign twin is a measured minimal mutation of the must-fire scenario — fail closed",
+				name, fam, customerScenariosSubdir),
+		}
+	}
+	return &GuardFinding{
+		Path: relPath,
+		Rule: RuleCustomerExamFail,
+		Detail: fmt.Sprintf(
+			"detector %q family %q: no passing must_fire/must_not_fire pair proves the benign twin is a MEASURED MINIMAL MUTATION of the must-fire scenario (same event count and order, matching event_type/actor/source, a bounded 1..%d discriminating field difference on action/target/severity/metadata) — a twin that is byte-identical, that differs in event type/count/actor/source, or that differs too broadly is an arbitrary carve-out, not a genuine near-miss (%s)",
+			name, fam, maxDiscriminatingFields, strings.Join(attemptDetails, "; ")),
+	}
+}
+
+// minimalMutationPairOK reports whether twin's Events are a MEASURED MINIMAL
+// MUTATION of fire's Events: same count and order, matching structural
+// identity per event (event_type/actor/source — see maxDiscriminatingFields's
+// doc for why), and a bounded, NON-ZERO total count of discriminating field
+// differences (action/target/severity/metadata) across the whole sequence.
+// reason is empty iff ok is true.
+func minimalMutationPairOK(fire, twin *exam.Scenario) (ok bool, reason string) {
+	if len(fire.Events) != len(twin.Events) {
+		return false, fmt.Sprintf(
+			"event count differs (must-fire has %d, twin has %d) — a twin must mirror the must-fire scenario's event sequence, not add or drop events",
+			len(fire.Events), len(twin.Events))
+	}
+	if len(fire.Events) == 0 {
+		return false, "must-fire scenario has zero events — nothing to mutate"
+	}
+	total := 0
+	for i := range fire.Events {
+		if r := structuralIdentityMismatch(fire.Events[i], twin.Events[i], i); r != "" {
+			return false, r
+		}
+		total += eventDiscriminatingDiff(fire.Events[i], twin.Events[i])
+	}
+	if total == 0 {
+		return false, "twin is byte-identical to the must-fire scenario on every discriminating field (action/target/severity/metadata) — zero discrimination proves nothing"
+	}
+	if total > maxDiscriminatingFields {
+		return false, fmt.Sprintf(
+			"twin differs from the must-fire scenario on %d discriminating field(s), exceeding the bound of %d — too broad a difference to be a genuine near-miss",
+			total, maxDiscriminatingFields)
+	}
+	return true, ""
+}
+
+// structuralIdentityMismatch returns a non-empty reason if fire and twin (at
+// event position idx) do not share the SAME structural identity — event_type,
+// actor, and source. See maxDiscriminatingFields's doc for why these three
+// fields must match rather than count as bounded discriminators: allowing any
+// of them to differ reopens the exact reproduced bypass (a twin that is
+// simply a different, hand-picked event the detector special-cases around,
+// rather than a substantive near-miss of the SAME event).
+func structuralIdentityMismatch(fire, twin exam.Event, idx int) string {
+	switch {
+	case fire.EventType != twin.EventType:
+		return fmt.Sprintf(
+			"event[%d]: event_type differs (%q vs %q) — the twin targets a different event type entirely, an arbitrary carve-out rather than a near-miss of the SAME event type",
+			idx, fire.EventType, twin.EventType)
+	case fire.Actor != twin.Actor:
+		return fmt.Sprintf(
+			"event[%d]: actor differs (%q vs %q) — structural identity (event_type/actor/source) must match; only a bounded number of payload/value fields may discriminate",
+			idx, fire.Actor, twin.Actor)
+	case fire.Source != twin.Source:
+		return fmt.Sprintf(
+			"event[%d]: source differs (%q vs %q) — structural identity (event_type/actor/source) must match; only a bounded number of payload/value fields may discriminate",
+			idx, fire.Source, twin.Source)
+	}
+	return ""
+}
+
+// eventDiscriminatingDiff counts the DISCRIMINATING field differences between
+// two events already known to share structural identity (event_type/actor/
+// source — the caller checks that first). id, timestamp, and ingested_at are
+// EXEMPT: they always differ between two scenario files (an event id must be
+// unique; a twin is authored at a different, later timestamp) and carry no
+// information about whether the detector genuinely discriminates on the
+// attack's substance. action, target, severity, and each metadata key ARE
+// counted; raw is intentionally ignored (a free-form escape hatch scenario
+// authors are not required to keep parallel).
+func eventDiscriminatingDiff(fire, twin exam.Event) int {
+	n := 0
+	if fire.Action != twin.Action {
+		n++
+	}
+	if fire.Target != twin.Target {
+		n++
+	}
+	if fire.Severity != twin.Severity {
+		n++
+	}
+	n += metadataDiffCount(fire.Metadata, twin.Metadata)
+	return n
+}
+
+// metadataDiffCount counts keys that differ (by value) or are present in one
+// metadata map but absent from the other — each such key is one
+// discriminating field.
+func metadataDiffCount(a, b exam.EventMetadata) int {
+	n := 0
+	for k, av := range a {
+		if bv, ok := b[k]; !ok || !reflect.DeepEqual(av, bv) {
+			n++
+		}
+	}
+	for k := range b {
+		if _, ok := a[k]; !ok {
+			n++
+		}
+	}
+	return n
+}
+
 // ---- subprocess plumbing -------------------------------------------------------
 
 // resolveCommit resolves ref to a full commit SHA in the repo at repoRoot.
@@ -991,6 +1736,74 @@ func removeWorktree(repoRoot, dir string) {
 	if _, err := runGit(repoRoot, "worktree", "remove", "--force", dir); err != nil {
 		_, _ = runGit(repoRoot, "worktree", "prune")
 	}
+}
+
+// scratchCopyExamRepo makes an EPHEMERAL, THROWAWAY copy of a caller-supplied
+// REAL reference tree (Options.ExamRepo) into a fresh temp dir, so grading a
+// customer detector against it can never mutate the operator's actual
+// checkout (mallcoppro-f95). Grading builds a `mallcop` binary straight into
+// whatever tree it's pointed at (runTreeExamWithSidecarSrc has always done
+// this in place — correct for the in-tree lane's OWN throwaway worktrees, but
+// wrong for a caller-supplied PERSISTENT reference tree reused across many
+// gate runs). The copy excludes .git (build/grading needs no VCS metadata,
+// and a real checkout's .git can be large) — everything else, including
+// exams/scenarios/corpus.pin, is byte-copied. Returns the copy's root and a
+// cleanup func that removes the whole scratch dir; cleanup is always safe to
+// call even if an error already occurred.
+func scratchCopyExamRepo(examRepoTree string) (copyDir string, cleanup func(), err error) {
+	scratch, err := os.MkdirTemp("", "mallcop-examrepo-")
+	if err != nil {
+		return "", func() {}, fmt.Errorf("selfgate: exam-repo scratch dir: %w", err)
+	}
+	cleanup = func() { _ = os.RemoveAll(scratch) }
+	dst := filepath.Join(scratch, "examrepo")
+	if cerr := copyTree(examRepoTree, dst); cerr != nil {
+		cleanup()
+		return "", func() {}, fmt.Errorf("selfgate: copying reference tree %s to an ephemeral scratch copy: %w", examRepoTree, cerr)
+	}
+	return dst, cleanup, nil
+}
+
+// copyTree recursively byte-copies src to dst (creating dst), skipping .git
+// directories at any depth. File permissions are preserved; symlinks are
+// recreated as symlinks (never followed) so the copy cannot escape src via a
+// malicious link target it did not itself resolve.
+func copyTree(src, dst string) error {
+	return filepath.WalkDir(src, func(path string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		rel, relErr := filepath.Rel(src, path)
+		if relErr != nil {
+			return relErr
+		}
+		if rel == "." {
+			return os.MkdirAll(dst, 0o755)
+		}
+		if d.IsDir() && d.Name() == ".git" {
+			return fs.SkipDir
+		}
+		target := filepath.Join(dst, rel)
+		info, ierr := d.Info()
+		if ierr != nil {
+			return ierr
+		}
+		if d.IsDir() {
+			return os.MkdirAll(target, info.Mode().Perm()|0o700)
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			linkTarget, lerr := os.Readlink(path)
+			if lerr != nil {
+				return lerr
+			}
+			return os.Symlink(linkTarget, target)
+		}
+		data, rerr := os.ReadFile(path)
+		if rerr != nil {
+			return rerr
+		}
+		return os.WriteFile(target, data, info.Mode().Perm())
+	})
 }
 
 // runTool executes a subprocess with Dir=dir and the parent environment plus

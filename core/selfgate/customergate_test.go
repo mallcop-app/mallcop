@@ -70,14 +70,21 @@ expected_detection:
   - custfixture-leak
 `
 
-// customerFixtureDetectorMainSrc is the WELL-BEHAVED customer detector: it
-// fires ONLY on "widget-secret-exposed" events, correctly staying silent on
-// the benign "widget-secret-rotated" twin. Structurally a
+// customerFixtureDetectorMainSrc is the WELL-BEHAVED customer detector. It
+// fires on TWO independent shapes of "widget secret exposed": (a) the
+// reference tree's own CUSTFIX-01 scenario below, keyed purely on event_type
+// ("widget-secret-exposed", never present on the benign CUSTFIX-02 twin), and
+// (b) the detector's OWN co-located SIDECAR-WIDGETLEAK scenarios (mallcoppro-
+// f95 round 2), which now share ONE event_type ("widget-secret-event")
+// between must-fire and benign-twin — see customFixtureSidecarMustFireScenario
+// / ...BenignTwinScenario's doc for why — and are discriminated by the
+// action payload field instead (expose vs rotate). Structurally a
 // core/detect.Detector (Name + Detect) via pkg/detectorhost, never importing
 // core/detect itself — the customer-tree shape.
 const customerFixtureDetectorMainSrc = `package main
 
 import (
+	"encoding/json"
 	"os"
 
 	"github.com/mallcop-app/mallcop/pkg/baseline"
@@ -93,16 +100,32 @@ func (widgetLeakDetector) Name() string { return "` + customFixtureFamily + `" }
 func (widgetLeakDetector) Detect(events []event.Event, _ *baseline.Baseline) []finding.Finding {
 	var out []finding.Finding
 	for _, ev := range events {
-		if ev.Type == "widget-secret-exposed" {
-			out = append(out, finding.Finding{
-				ID:     "finding-" + ev.ID + "-custfixtureleak",
-				Source: "detector:` + customFixtureFamily + `",
-				Type:   "` + customFixtureFamily + `",
-				Actor:  ev.Actor,
-			})
+		if !isWidgetSecretExposure(ev) {
+			continue
 		}
+		out = append(out, finding.Finding{
+			ID:     "finding-" + ev.ID + "-custfixtureleak",
+			Source: "detector:` + customFixtureFamily + `",
+			Type:   "` + customFixtureFamily + `",
+			Actor:  ev.Actor,
+		})
 	}
 	return out
+}
+
+func isWidgetSecretExposure(ev event.Event) bool {
+	switch ev.Type {
+	case "widget-secret-exposed":
+		return true
+	case "widget-secret-event":
+		var payload struct {
+			Action string ` + "`json:\"action\"`" + `
+		}
+		_ = json.Unmarshal(ev.Payload, &payload)
+		return payload.Action == "expose"
+	default:
+		return false
+	}
 }
 
 func main() { os.Exit(detectorhost.Run(widgetLeakDetector{})) }
@@ -145,6 +168,81 @@ func (overbroadWidgetLeakDetector) Detect(events []event.Event, _ *baseline.Base
 
 func main() { os.Exit(detectorhost.Run(overbroadWidgetLeakDetector{})) }
 `
+
+// customFixtureSidecarMustFireScenario / customFixtureSidecarBenignTwinScenario
+// are the DETECTOR'S OWN co-located efficacy scenarios (mallcoppro-f95 RULING,
+// Approach A): detectors/<name>/scenarios/*.yaml, in the SAME exam-detect YAML
+// format as the reference corpus, but UNPINNED (never touching examTree's
+// corpus.pin). Distinct SIDECAR- scenario IDs (vs. the reference tree's
+// CUSTFIX- fixtures above) so ScenarioID never collides across the UNION a
+// customer-tree exam grades.
+//
+// The benign twin is a MEASURED MINIMAL MUTATION of the must-fire scenario:
+// SAME event_type/actor/source (structural identity — see
+// maxDiscriminatingFields's doc in validate.go), differing ONLY in the
+// `+"`action`"+` payload field (expose vs rotate) — the actual PE-08/PE-09
+// near-miss pattern (exams/scenarios/privilege PE-08 vs PE-09: same
+// event_type/source, discriminated by the substantive policy payload, never
+// by event_type itself). An EARLIER version of this fixture pair differed
+// only in event_type (widget-secret-exposed vs widget-secret-rotated) and
+// wrongly called that "the PE-08/PE-09 pattern" — mallcoppro-f95 round 2's
+// veracity fix proved that shape is actually INDISTINGUISHABLE from the
+// reproduced bypass attack (a detector that fires on everything except one
+// hand-picked, structurally-unrelated event_type), so
+// checkMinimalMutationCoverage now rejects it; this fixture was updated to
+// the genuinely-safe shape alongside that fix.
+const customFixtureSidecarMustFireScenario = `id: SIDECAR-WIDGETLEAK-01-must-fire
+finding:
+  id: fnd_sidecar_wl_01
+  detector: custfixture-leak
+  title: 'sidecar fixture: widget secret exposed'
+  severity: high
+events:
+- id: evt_sidecar_wl_01
+  timestamp: '2026-07-01T00:10:00Z'
+  source: customer-app
+  event_type: widget-secret-event
+  actor: cust-actor
+  action: expose
+expected_detection:
+  must_fire:
+  - custfixture-leak
+`
+
+const customFixtureSidecarBenignTwinScenario = `id: SIDECAR-WIDGETLEAK-02-benign-twin
+finding:
+  id: fnd_sidecar_wl_02
+  detector: custfixture-leak
+  title: 'sidecar fixture: widget secret rotated (measured minimal mutation: same event_type/actor/source, action differs)'
+  severity: warn
+events:
+- id: evt_sidecar_wl_02
+  timestamp: '2026-07-01T00:15:00Z'
+  source: customer-app
+  event_type: widget-secret-event
+  actor: cust-actor
+  action: rotate
+expected_detection:
+  must_not_fire:
+  - custfixture-leak
+`
+
+// writeSidecarScenarios writes the detector's OWN co-located scenarios/
+// pair (must-fire + benign twin) under detDir — the sidecar unit shape
+// mallcoppro-f95 requires: detectors/<name>/{main.go, scenarios/*.yaml}.
+func writeSidecarScenarios(t *testing.T, detDir string) {
+	t.Helper()
+	scenDir := filepath.Join(detDir, "scenarios")
+	if err := os.MkdirAll(scenDir, 0o755); err != nil {
+		t.Fatalf("mkdir sidecar scenarios dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(scenDir, "must-fire.yaml"), []byte(customFixtureSidecarMustFireScenario), 0o644); err != nil {
+		t.Fatalf("write sidecar must-fire scenario: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(scenDir, "benign-twin.yaml"), []byte(customFixtureSidecarBenignTwinScenario), 0o644); err != nil {
+		t.Fatalf("write sidecar benign-twin scenario: %v", err)
+	}
+}
 
 // buildReferenceExamTree materializes a detached worktree of the repo under
 // test (a REAL mallcop tree: cmd/mallcop, exams/scenarios, corpus.pin) and
@@ -242,6 +340,12 @@ replace github.com/mallcop-app/mallcop => %s
 	if err := os.WriteFile(filepath.Join(detDir, "main.go"), []byte(detectorSrc), 0o644); err != nil {
 		t.Fatalf("write detector main.go: %v", err)
 	}
+	// The sidecar unit's OWN efficacy scenarios (mallcoppro-f95 RULING): every
+	// customer-tree detector must ship detectors/<name>/scenarios/*.yaml
+	// proving it fires on its target and stays silent on a benign twin, or
+	// checkCustomerEfficacy fails it closed regardless of what the reference
+	// corpus says.
+	writeSidecarScenarios(t, detDir)
 	head = commitAll(t, dir, "proposal: add widget-leak detector")
 	return dir, base, head
 }
