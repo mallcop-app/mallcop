@@ -356,6 +356,61 @@ func TestGuard_RejectsUnrecognizedTuningStructure(t *testing.T) {
 	requireRejected(t, f.guard(base, head), RuleDetectorDataWidenOnly, "detectors/tuning.yaml")
 }
 
+// mallcoppro-72d (the 7ee7 live-leg probe HOLE): a brand-new .go file ADDED
+// under detectors/ must NOT sail through unchecked. Before the fix, the
+// detectorsPrefix case's inner switch had no arm for a .go path at all — an
+// 'A' status matched none of its cases (D / M-non-YAML / M) and fell straight
+// through to the "'A' passes" comment, so this exact proposal shape (a
+// customer-tree wasm-sidecar detector add, e.g.
+// detectors/authored-force-push-guard/main.go) passed stage-1 with ZERO
+// findings. It must now be rejected (RuleCodeFrozen): detectors/ has no
+// sanctioned Go code lane, and the authored-lane AST shape gate cannot
+// evaluate a `package main` + detectorhost.Run(T{}) sidecar shape anyway.
+func TestGuard_RejectsNewGoFileAddedUnderDetectors(t *testing.T) {
+	f := newFixture(t)
+	f.copyReal("detectors/tuning.yaml") // anchor a real detectors/ tree at base
+	base := f.commit("base")
+
+	f.write("detectors/authored-force-push-guard/main.go", `package main
+
+import (
+	"os"
+
+	"github.com/mallcop-app/mallcop/pkg/detectorhost"
+)
+
+// evilDetector is arbitrary Go content standing in for whatever the 7ee7
+// live-leg probe smuggled — the guard must reject this on SHAPE (any Go
+// source under detectors/), not on content inspection.
+type evilDetector struct{}
+
+func (evilDetector) Name() string { return "authored-force-push-guard" }
+
+func main() {
+	os.Exit(detectorhost.Run(evilDetector{}))
+}
+`)
+	head := f.commit("proposal: add a new detector under detectors/")
+
+	requireRejected(t, f.guard(base, head), RuleCodeFrozen, "detectors/authored-force-push-guard/main.go")
+}
+
+// A Modify of an existing .go file under detectors/ is ALSO rejected via the
+// dedicated .go arm (RuleCodeFrozen), not the pre-existing
+// RuleDetectorDataWidenOnly "modification of anything else" arm — proving the
+// new .go-suffix case is checked BEFORE (and instead of) the non-YAML-modify
+// case for Go paths specifically.
+func TestGuard_RejectsModifiedGoFileUnderDetectors(t *testing.T) {
+	f := newFixture(t)
+	f.write("detectors/existing-detector/main.go", "package main\n\nfunc main() {}\n")
+	base := f.commit("base")
+
+	f.write("detectors/existing-detector/main.go", "package main\n\nfunc main() { println(\"tampered\") }\n")
+	head := f.commit("proposal: modify an existing detectors/ go file")
+
+	requireRejected(t, f.guard(base, head), RuleCodeFrozen, "detectors/existing-detector/main.go")
+}
+
 // ---- ACCEPT proofs (the widens the loop is FOR) ------------------------------
 
 // (h) The exact K2b-shaped change passes: a new extra_elevated_keywords entry

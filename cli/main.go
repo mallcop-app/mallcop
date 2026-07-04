@@ -13,14 +13,17 @@
 //
 // Usage:
 //
-//	mallcop scan        --store <dir> [--events <file> | --connector github --github-org <org>] [--tuning <yaml>] [--json]
+//	mallcop scan        [--config <mallcop.yaml>] | --store <dir> [--events <file> | --connector github --github-org <org>] [--tuning <yaml>] [--json]
 //	mallcop detect      [--baseline <path>] [--tuning <yaml>]   < events.jsonl   > findings.jsonl
 //	mallcop exam-detect [--json] [--tuning <yaml>]
 //	mallcop validate-proposal --base <ref> [--head <ref>] [--guard-only] [--allow-no-coverage-gain] [--json]
 //	mallcop collect     --store <dir> [--fidelity <json>] [--json]
-//	mallcop init        [--dir <path>]
+//	mallcop init        [--dir <path>] [--pro] [--create-repo owner/name] [--mallcop-version <tag>] [--github-token-env <VAR>]
 //	mallcop status      --store <dir>
 //	mallcop config
+//	mallcop config set connector --kind=file|github|cloud --id=<id> [...]
+//	mallcop config set autonomy <non|semi|fully>
+//	mallcop feedback    <finding_id> approve|dismiss --store <dir> [--reason <text>] [--by <name>]
 package cli
 
 import (
@@ -97,7 +100,12 @@ func usage() {
 
 Commands:
   scan    Run a one-shot agentic security scan (connect -> detect -> cascade -> store)
-    --store      Path to the git-repo store for findings/resolutions (required)
+    --config     Path to mallcop.yaml (overrides discovery/$MALLCOP_CONFIG). The
+                 zero-flag path: run 'mallcop init' then bare 'mallcop scan' —
+                 store/connector/inference all resolve from the discovered
+                 mallcop.yaml. Absent config => today's flag-only behavior.
+    --store      Path to the git-repo store for findings/resolutions (required
+                 only when no config resolves a store path)
     --events     Events JSONL source (file path, or "-" for stdin; default: "-")
     --connector  "file" (default, reads --events) or "github"
     --github-org GitHub org to scan (required when --connector github)
@@ -160,8 +168,18 @@ Commands:
                 proposer consumes. Offline, deterministic, no inference key.
                 Human-readable summary otherwise. Exit 2 = failure.
 
-  init    Scaffold a findings store + sample events and print runnable next steps
-    --dir      Directory to initialize (default: current directory)
+  init    Scaffold mallcop.yaml + a findings store + sample events, print next steps
+    --dir               Directory to initialize (default: current directory)
+    --pro               Generate mallcop.yaml on the managed donut inference rail
+                        (api.mallcop.app) instead of the offline fail-safe default
+    --create-repo       owner/name -- also scaffold deployment-repo assets (go.mod
+                        pin, detectors/, connectors/, .github/workflows/scan.yml)
+                        and create+push a real customer deployment repo to GitHub
+                        (see cli/deployrepo.go)
+    --mallcop-version   Release tag to pin the deployment repo's go.mod + scheduled
+                        Action to (default: query the latest GitHub release)
+    --github-token-env  Env var holding a GitHub token with repo-create scope,
+                        used with --create-repo (default: MALLCOP_GITHUB_TOKEN)
 
   status  Report findings/resolutions recorded in a store
     --store    Path to the git-repo store written by 'mallcop scan' (required)

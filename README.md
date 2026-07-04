@@ -6,9 +6,9 @@ mallcop is a Go-native security monitoring CLI. It ingests your cloud and SaaS
 audit events, runs 17 deterministic detectors that look for real-world attack
 patterns, then drives each finding through an LLM-backed investigation cascade
 (triage → investigate → deep panel → committee consensus) before paging a human.
-Findings and resolutions are written to a git-native store, so every decision is
-durable, replayable, and auditable. The rules corpus is embedded in the binary —
-mallcop is a single standalone executable.
+Findings and decisions are written to a git-native store, so every verdict is
+durable, replayable, and auditable. mallcop reads one file — `mallcop.yaml` —
+and needs zero flags for the common path.
 
 ## Install
 
@@ -19,8 +19,7 @@ curl -fsSL https://mallcop.app/install.sh | sh
 ```
 
 Downloads the prebuilt binary for your platform, verifies its checksum, and
-installs it to `/usr/local/bin` or `~/.local/bin` (no sudo). It's a single
-static binary with the detection rules baked in — no runtime, no config file.
+installs it to `/usr/local/bin` or `~/.local/bin` (no sudo).
 
 **Go toolchain:**
 
@@ -38,57 +37,216 @@ Download the archive for your platform, extract, and place `mallcop` on your `PA
 
 **1. Install mallcop** (see above).
 
-**2. Scaffold a store and sample events:**
+**2. Initialize:**
 
 ```bash
 mallcop init
 ```
 
-`init` creates a `store/` directory (the git-backed findings store) and a sample
-`events.jsonl`, then prints the exact next-step commands below.
+```
+mallcop init: created mallcop.yaml (config — offline inference)
+mallcop init: created store/ (findings store)
+mallcop init: created events.jsonl (sample events)
 
-**3. Run a scan over the sample events:**
-
-```bash
-mallcop scan --events events.jsonl --store store
+Next steps:
+  1. Run the scan (reads mallcop.yaml — no flags needed):
+       mallcop scan
+  2. Add a source: edit mallcop.yaml -> connectors:
+     (a github org, or a cloud source like aws/azure)
+  3. For managed LLM resolution (offline is the fail-safe default):
+       mallcop init --pro  &&  export MALLCOP_API_KEY=mallcop-sk-...
 ```
 
-That's it — no config file. `scan` reads the events, runs the detectors, drives
-findings through the cascade, and commits findings + resolutions into `store/`.
-With no inference endpoint configured, every finding force-escalates (the
-documented fail-safe), so the command works end to end with zero credentials.
+`init` writes the one file mallcop reads (`mallcop.yaml`), a git-backed
+`store/` for findings + decisions, and a sample `events.jsonl` so the next
+step runs with zero credentials. Re-running `init` is a no-op — it never
+overwrites a file that already exists.
 
-**4. (Optional) Enable LLM-driven resolution.** Point mallcop at an inference
-endpoint via the `MALLCOP_INFERENCE_URL` / `MALLCOP_API_KEY` pivot — a vendor URL
-+ key for BYOK, or the Forge URL + a `mallcop-sk-*` tenant key for the metered
-managed path:
+**3. Run the scan — no flags:**
 
 ```bash
-export MALLCOP_INFERENCE_URL=https://api.mallcop.app
+mallcop scan
+```
+
+```
+Scan complete
+  Events scanned:     1
+  Findings detected:  2
+  Escalated:          2
+  Resolved:           0
+```
+
+`scan` discovers `mallcop.yaml`, reads its `connectors:`/`store:`/`inference:`
+settings, runs the detector fleet, drives each finding through the cascade,
+and commits findings + decisions into `store/`. With no inference endpoint
+configured (the OSS default), every finding force-escalates — the documented
+fail-safe — so the sample scan above runs end to end with zero credentials.
+Exit code `1` means findings were detected, not that the scan failed.
+
+(The old flag-only invocation — `mallcop scan --events events.jsonl --store
+store` — still works and takes precedence over the config for any flag you
+pass explicitly. Flags exist for scripting; `mallcop.yaml` is the primary path.)
+
+**4. Add a source.** Edit `mallcop.yaml`'s `connectors:` list directly, or use
+the config primitive:
+
+```bash
+mallcop config set connector --kind=github --id=my-org --org=my-org
+```
+
+**5. (Optional) Enable managed LLM resolution.** `mallcop init --pro` points
+`mallcop.yaml` at the donut rail (Forge-managed inference); set your key and
+re-scan:
+
+```bash
+mallcop init --pro
 export MALLCOP_API_KEY=mallcop-sk-...
-mallcop scan --events events.jsonl --store store
+mallcop scan
 ```
 
-**5. Inspect what was recorded:**
+BYOK/BYOI (your own vendor URL + key) works the same way — set
+`inference.endpoint`/`inference.key_env` in `mallcop.yaml` (`inference.mode`
+is a label, e.g. `byoi`; `endpoint`+`key_env` are what the scan actually
+resolves), or the `MALLCOP_INFERENCE_URL`/`MALLCOP_API_KEY` env pair, which
+always wins over the config.
+
+**6. Inspect what was recorded:**
 
 ```bash
 mallcop status --store store
 ```
 
+```
+Store:      store
+Findings:   2 recorded
+Decisions:  2 recorded
+State:      idle
+```
+
+`status`'s "Decisions" is every resolution ever recorded in the store
+(escalations included) — not the same number as `scan`'s per-run "Resolved"
+line above, which counts only that run's non-escalate (auto-resolved)
+findings. A store can show decisions recorded even when its last scan
+resolved none of them itself — both got escalated to a human instead.
+
+## Deploy as a repo (scheduled, unattended scanning)
+
+`mallcop init --create-repo owner/name` turns the local scaffold above into a
+**customer-owned deployment repo**, pushed to a real GitHub repo, that scans
+on a schedule without you running anything locally:
+
+```bash
+export MALLCOP_GITHUB_TOKEN=$(gh auth token)   # or your own --github-token-env
+mallcop init --create-repo my-org/my-mallcop --pro
+```
+
+What gets scaffolded, on top of `mallcop.yaml`/`store/`/`events.jsonl`:
+
+- **`go.mod`** pinning `github.com/mallcop-app/mallcop` at a specific release
+  tag (`--mallcop-version`, default: latest) — a THIN-EMBED dependency pin,
+  never a fork or vendored copy.
+- **`detectors/`** — write your own detector here as a Go package
+  (`package main`, one subdirectory per detector); the scheduled Action builds
+  each one to a `wasip1`/`wasm` module under `detectors/bin/`, and `mallcop
+  scan` loads it exactly like a built-in framework detector via
+  `detectors.sidecars.dir`. See `detectors/README.md` (scaffolded into the
+  repo) and `examples/sidecar-detector` in this repo for a worked example.
+- **`connectors/`** — write your own connector as a standalone Go binary
+  (same shape as the shipped sibling connectors below) and point
+  `mallcop.yaml`'s `connectors:` at it with `kind: cloud`. See
+  `connectors/README.md` (scaffolded into the repo).
+- **`.github/workflows/scan.yml`** — runs on a schedule: installs the pinned
+  **prebuilt** `mallcop` release binary (never rebuilds the core binary from
+  repo content), builds any `detectors/*` to `.wasm`, runs `mallcop scan`, and
+  pushes the resulting `store/` history back to this same repo on a dedicated
+  `mallcop-findings` branch (kept off `main` by `.gitignore`) so findings
+  persist across ephemeral runner instances.
+
+The core binary is always the pinned prebuilt release; only your own
+`detectors/*` ever compile from repo content, and only to `wasip1/wasm`. You
+never need a local Go toolchain to run the deployment — only to author a new
+detector or connector for it.
+
+## The autonomy dial
+
+`learning.autonomy` in `mallcop.yaml` controls how much of mallcop's own
+self-extension loop applies automatically, versus waiting for you:
+
+```bash
+mallcop config set autonomy semi   # non | semi | fully
+```
+
+| Setting | DATA changes (tuning/mapping widen) | CODE changes (authored detectors/connectors) |
+|---|---|---|
+| `non` (default) | wait for human approval | wait for human approval |
+| `semi` | auto-apply on a gate-GREEN clean widen | wait for human approval |
+| `fully` | auto-apply on a gate-GREEN clean widen | auto-apply on a gate-GREEN clean widen |
+
+Every proposal — data or code — still has to pass the same gate first (see
+below); the dial only decides what happens to a result that already passed.
+**Contribute-back to the shared OSS pool is never auto-merged at any
+setting** — an opt-in PR to the upstream `mallcop` repo always waits for
+human/maintainer review, regardless of where the dial is set.
+
+## Code-first: authored detectors and connectors
+
+New detection/connection surface is **AI-written Go code**, gated, never a
+declarative spec interpreted by a generic loader. Both proposal shapes — a
+new detector or a data widen (tuning/mapping) — go through the same
+`validate-proposal` gate before anything lands:
+
+```
+(1) guard        — static invariant guard: protected paths (the committee,
+                    consensus logic) are untouchable; YAML data may only
+                    WIDEN what's seen, never narrow or add a suppress rule
+(2) structural    — the change builds; authored code passes the import
+                    allow-list (no net/file/exec in a detector)
+(3) exam-detect   — base vs. head labeled-exam comparison: no regression,
+                    at least one closed detection gap, no undeclared new
+                    firings on the benign corpus
+```
+
+Run it yourself against any diff:
+
+```bash
+mallcop validate-proposal --base <ref> --head <ref> --json
+```
+
+A rejected result never touches the committee or the consensus vote — mallcop
+only ever widens what the detection committee sees; it can never learn to
+suppress or auto-approve a real attack pattern.
+
+## Chat-driven reconfiguration
+
+Every `mallcop config set ...` primitive (`connector`, `autonomy`) is the
+same mutation surface a chat interface drives in the hosted product
+(mallcop-pro): "watch our Linear activity" or "turn on auto-apply for data
+changes" resolves to a **propose → approve → apply** step that calls the
+identical `core/config` mutation this CLI calls directly. There is no
+separate code path for chat versus the command line.
+
 ## Commands
 
 | Command | Purpose |
 |---------|---------|
-| `mallcop scan` | Full agentic scan: connect → detect → cascade → store. Requires `--store`. |
+| `mallcop scan` | Full agentic scan: connect → detect → cascade → store. Reads `mallcop.yaml` when present; `--store`/`--events`/etc. override or substitute for it. |
 | `mallcop detect` | Offline detection only. Reads events JSONL on stdin, writes findings JSONL on stdout. No inference key. |
-| `mallcop init` | Scaffold a findings store + sample events and print runnable next steps. |
-| `mallcop status` | Report findings/resolutions recorded in a store. Requires `--store`. |
-| `mallcop config` | Print the effective scan config resolved from the environment. |
+| `mallcop init` | Scaffold `mallcop.yaml` + a findings store + sample events; `--create-repo` also scaffolds and pushes a deployment repo. |
+| `mallcop status` | Report findings/decisions recorded in a store. Requires `--store`. |
+| `mallcop config` | Print the effective scan config resolved from `mallcop.yaml` + the environment. |
+| `mallcop config set` | Mutate `mallcop.yaml` (`connector`, `autonomy`) via a strict, atomic-write primitive. |
+| `mallcop feedback` | Record an operator decision (`approve`/`dismiss`) on a finding so future scans honor it. |
+| `mallcop validate-proposal` | Run the free-tier self-extension gate over a proposal diff (guard + structural + exam-detect). |
+| `mallcop collect` | Mine a scan's store for coverage gaps — the self-extension feedstock. |
+| `mallcop exam-detect` | Grade the offline detect layer against the labeled exam corpus. |
 
 ### `mallcop scan`
 
 ```bash
-# File connector (default): scan a local events JSONL file
+# Zero-flag (reads mallcop.yaml from the current dir or an ancestor)
+mallcop scan
+
+# File connector, explicit flags (no config needed)
 mallcop scan --events events.jsonl --store store
 
 # GitHub connector (built into the core binary): scan a GitHub org's audit log
@@ -98,9 +256,12 @@ export GITHUB_INSTALLATION_ID=...
 mallcop scan --connector github --github-org my-org --store store
 ```
 
-Flags: `--store` (required), `--events` (file path or `-` for stdin),
-`--connector` (`file` | `github`), `--github-org`, `--baseline`, `--workers`,
-`--json`, `--base-url`.
+Flags: `--config` (explicit `mallcop.yaml` path), `--store`, `--events`
+(file path or `-` for stdin), `--connector` (`file` | `github`),
+`--github-org`, `--baseline`, `--tuning`, `--learned-mappings`,
+`--max-findings`, `--workers`, `--json`, `--base-url`. Precedence is
+flag > env > `mallcop.yaml` > built-in default; an absent config leaves
+today's flag-only behavior unchanged.
 
 Exit codes: `0` no findings, `1` findings present, `2` scan failure.
 
@@ -108,33 +269,41 @@ Exit codes: `0` no findings, `1` findings present, `2` scan failure.
 
 ```
 mallcop scan
-  → connector        — fetch/ingest audit events (file or github)
-  → detectors        — 17 deterministic attack-pattern detectors
+  → connector        — fetch/ingest audit events (file, github, or a
+                        standalone cloud-connector binary)
+  → detectors        — 17 built-in deterministic detectors + any
+                        configured wasip1/wasm sidecar detectors
   → cascade          — triage → investigate → deep panel → committee consensus
-  → git store        — durable, replayable findings + resolutions
+  → git store        — durable, replayable findings + decisions
 ```
 
 The cascade resolves each finding through escalating tiers and ends in a
-committee **consensus** vote: on every RESOLVE, the gate re-runs the cascade and
-**any-escalate-wins** — a safety-first, asymmetric policy because a missed attack
-(false negative) is catastrophic while an over-escalation merely pages a human.
-The operator rules corpus is embedded in the binary, so the scan is fully
-standalone — no external rules files to ship or keep in sync.
+committee **consensus** vote: on every RESOLVE, the gate re-runs the cascade
+and **any-escalate-wins** — a safety-first, asymmetric policy because a
+missed attack (false negative) is catastrophic while an over-escalation
+merely pages a human. The 17 built-in detectors are embedded in the binary;
+authored detectors extend that fleet as sidecars (above) without ever
+touching the committee/consensus code the guard protects.
 
 ## Connectors
 
 The core binary ships two **built-in** connectors:
 
-- **file** (default) — reads normalized event JSONL from `--events`.
+- **file** (default) — reads normalized event JSONL from `--events` or
+  `mallcop.yaml`'s `connectors:` (`kind: file`).
 - **github** — pulls a GitHub org's audit log directly, using
   `GITHUB_APP_ID` / `GITHUB_APP_PRIVATE_KEY` / `GITHUB_INSTALLATION_ID`.
 
 Additional connectors ship as **standalone binaries** in the sibling repo
-[mallcop-app/mallcop-connectors](https://github.com/mallcop-app/mallcop-connectors).
-Each emits event JSONL that you pipe into `mallcop scan --events -`:
+[mallcop-app/mallcop-connectors](https://github.com/mallcop-app/mallcop-connectors),
+wired into `mallcop.yaml` as `kind: cloud`, or piped directly:
 
 ```bash
-mallcop-connector-aws-cloudtrail --region us-east-1 \
+# install the AWS connector and name it per mallcop's exec convention
+go install github.com/mallcop-app/mallcop-connectors/cmd/aws@latest
+mv "$(go env GOPATH)/bin/aws" "$(go env GOPATH)/bin/mallcop-connector-aws"
+
+mallcop-connector-aws --since 2026-07-01T00:00:00Z \
   | mallcop scan --events - --store store
 ```
 
@@ -142,6 +311,11 @@ Currently shipped standalone connectors: AWS CloudTrail, Azure Activity Log,
 GCP Cloud Logging, GitHub Audit Log, M365 Management Activity, Okta System Log.
 
 **Not yet ported:** `container_logs`, `supabase`, `vercel`.
+
+Your own connector for a source not listed above is a standalone Go binary
+you author (same shape as the shipped ones — see the "Deploy as a repo"
+section) and wire in via `kind: cloud`; there is no declarative
+connector-spec format — a connector is always real code.
 
 ## Detectors
 

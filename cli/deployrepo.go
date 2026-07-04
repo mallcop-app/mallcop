@@ -253,11 +253,27 @@ only to wasip1/wasm.
 
 const connectorsReadmeContent = `# connectors/
 
-Placeholder for customer-authored connector configuration/content. The
-in-product declarative-connector engine that drives this directory is a
-separate work item; for now this directory exists so the deployment repo's
-layout is stable and 'mallcop.yaml' can point 'connectors:' entries at
-whatever you add here as that engine lands.
+Author a new connector here as a standalone Go binary (AI-written code, same
+shape as the shipped sibling connectors in
+github.com/mallcop-app/mallcop-connectors) — never a declarative spec file.
+There is no data->engine loader for connectors: a connector is a real program
+that reads its source's audit log and emits normalized event JSONL on stdout.
+
+Wire it into a scan via a 'kind: cloud' entry in '../mallcop.yaml':
+
+    connectors:
+      - kind: cloud
+        id: my-source
+        source: my-source
+        binary: ./connectors/bin/mallcop-connector-my-source
+        env: [MY_SOURCE_TOKEN]
+
+'mallcop scan' forks 'binary' (or 'mallcop-connector-<source>' on $PATH when
+binary is empty) as a subprocess and reads its stdout as event JSONL — the
+same convention the shipped standalone connectors (AWS CloudTrail, Azure
+Activity Log, GCP Cloud Logging, GitHub Audit Log, M365, Okta) already use.
+Build it into 'connectors/bin/' however you like (a Go program, 'go build');
+this repo's scaffolded CI does not compile it for you.
 `
 
 // scanWorkflowTemplate is the scheduled-scan Action SKELETON (mallcoppro-f3b
