@@ -311,6 +311,40 @@ func Guard(repoRoot, baseRef, headRef string, customerTreeMode bool) ([]GuardFin
 
 		case strings.HasPrefix(c.path, detectorsPrefix):
 			switch {
+			case strings.HasSuffix(c.path, ".go") && customerTreeMode && !isProductionGoFile(c.path):
+				// mallcoppro-443 (CRITICAL, security): a _test.go under
+				// detectors/<name>/ is NOT a production sidecar file, so
+				// isProductionGoFile excludes it from listDirGoFiles, which means
+				// the aggregated sidecarDirs pass below NEVER shape-checks it —
+				// before this arm existed, a _test.go here fell into the sibling
+				// "case .HasSuffix(...).go) && customerTreeMode" no-op arm and
+				// escaped the guard ENTIRELY: no RuleCodeFrozen deny (that's the
+				// default-mode floor, bypassed by customerTreeMode), no shape
+				// check (that's production-file-only). A committed
+				// detectors/evil/evil_test.go containing `import "os/exec"`, an
+				// init(), and a TestPwn body then sailed through `go vet ./...`
+				// in structuralStage (which type-checks _test.go files) with the
+				// gate reporting ZERO findings, and at autonomy=fully the next
+				// `go test ./...` RUNS that init()/TestPwn body with full host
+				// privilege — arbitrary RCE. There is no legitimate committed
+				// _test.go in the customer sidecar lane: a sidecar proves
+				// efficacy through its scenarios/*.yaml exam corpus, run through
+				// customerexam.go's RunCustomerTreeExam, never through a
+				// committed Go test file. So ANY _test.go under detectors/ is
+				// denied here via the same RuleCodeFrozen human-review floor the
+				// non-test .go arm below uses — a per-PATH check (not
+				// per-directory), so a nested detectors/<name>/<sub>/x_test.go
+				// is caught identically to a top-level one; the pre-scan below
+				// still shape-checks any SURVIVING production files in the same
+				// directory, so a mixed change (main.go + evil_test.go) is
+				// rejected via both this finding and (if main.go itself is
+				// non-conformant) the shape gate's findings.
+				findings = append(findings, GuardFinding{
+					Path:   c.path,
+					Rule:   RuleCodeFrozen,
+					Detail: fmt.Sprintf("%s of a _test.go file under detectors/: the customer sidecar lane has no committed-Go-test lane (efficacy is proven via scenarios/*.yaml, run through RunCustomerTreeExam, not a committed _test.go); a _test.go here would compile via `go vet ./...` and RUN via `go test ./...` at autonomy=fully with full host privilege — fails closed like any other Go source outside the additive lane", statusWord(c.status)),
+				})
+
 			case strings.HasSuffix(c.path, ".go") && customerTreeMode:
 				// CUSTOMER-TREE MODE (mallcoppro-97b, orchestrator ruling): handled
 				// by the aggregated per-directory sidecarDirs pass AFTER this loop,

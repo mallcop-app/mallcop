@@ -607,6 +607,132 @@ func TestGuard_CustomerTreeSidecarShape_RejectsOSMisuseBeyondExit(t *testing.T) 
 	requireDetailContains(t, findings, RuleSidecarShape, "os.Getenv")
 }
 
+// ---- mallcoppro-443 (CRITICAL, security): _test.go escapes the customer-tree
+// sidecar guard entirely -----------------------------------------------------
+//
+// CONFIRMED HOLE (pre-fix): customerTreeMode's per-change loop routed EVERY
+// .go path under detectors/ (including _test.go) into a no-op arm deferring
+// to the aggregated sidecarDirs pass, but that pass's checkSidecarDetectorDir
+// -> listDirGoFiles -> isProductionGoFile EXCLUDES _test.go by design (it
+// shape-checks only the production sidecar package). A committed
+// detectors/<name>/evil_test.go was therefore NEVER shape-checked and NEVER
+// denied — Guard(customerTreeMode=true) returned ZERO findings for a
+// detectors/ directory containing a valid main.go plus an evil_test.go
+// importing os/exec, declaring init(), and a TestPwn body. `go vet ./...` in
+// structuralStage then type-checks (and effectively compiles) that file, the
+// gate goes green, and at autonomy=fully the next `go test ./...` RUNS
+// init()/TestPwn with full host privilege — RCE. Reverting the guard.go fix
+// (git stash the new customerTreeMode-&&-!isProductionGoFile arm) makes
+// TestGuard_CustomerTreeMode_DeniesEvilTestGoUnderDetectors and its nested
+// variant fail (zero findings), proving these are true regression proofs, not
+// tautologies.
+
+// evilTestGoSrc is the EXPLOIT fixture: a plain Go test file (not shape-gated
+// production sidecar code by name) that imports os/exec, runs arbitrary shell
+// commands from init() (i.e., at `go test`/`go vet` PACKAGE-LOAD TIME, not
+// merely if TestPwn is selected to run), and additionally defines a TestPwn
+// so a `go test -run TestPwn` invocation would also execute it explicitly.
+const evilTestGoSrc = `package main
+
+import (
+	"os/exec"
+	"testing"
+)
+
+func init() {
+	// Runs at package-init time for ANY go command that loads this package
+	// (go vet ./..., go test ./...) — the exact RCE-at-package-load hazard
+	// the sidecar shape gate's "no init()" rule (RuleSidecarInit) exists to
+	// close for production files; this proves it must ALSO close for
+	// _test.go, which the shape gate never even sees pre-fix.
+	_ = exec.Command("id").Run()
+}
+
+func TestPwn(t *testing.T) {
+	_ = exec.Command("id").Run()
+}
+`
+
+// TestGuard_CustomerTreeMode_DeniesEvilTestGoUnderDetectors is THE exploit
+// proof: a well-behaved main.go (identical to the ACCEPT control above) plus
+// evil_test.go. Pre-fix this fixture round-tripped through
+// f.guardCustomerTree with ZERO findings (confirmed empirically before
+// writing this fix). Post-fix it MUST be denied.
+func TestGuard_CustomerTreeMode_DeniesEvilTestGoUnderDetectors(t *testing.T) {
+	f := newFixture(t)
+	base := anchorCustomerTreeBase(f)
+
+	f.write("detectors/widget-leak/main.go", sidecarWellBehavedMainSrc)
+	f.write("detectors/widget-leak/evil_test.go", evilTestGoSrc)
+	head := f.commit("proposal: add a well-shaped detector plus a malicious _test.go sidecar")
+
+	findings := f.guardCustomerTree(base, head)
+	requireRejected(t, findings, RuleCodeFrozen, "detectors/widget-leak/evil_test.go")
+}
+
+// TestGuard_CustomerTreeMode_LegitSidecarWithScenariosStillPasses is the
+// control proving the fix does not overreach: a well-behaved sidecar plus its
+// LEGITIMATE co-located efficacy corpus (detectors/<name>/scenarios/*.yaml —
+// the RunCustomerTreeExamExtra convention, customerexam.go's documented
+// "detectorSrcDir/scenarios/*.yaml" lane) and NO _test.go anywhere still
+// passes customer-tree mode cleanly. scenarios/*.yaml is not a .go path at
+// all, so it never enters the new denial arm or the sidecarDirs pre-scan.
+func TestGuard_CustomerTreeMode_LegitSidecarWithScenariosStillPasses(t *testing.T) {
+	f := newFixture(t)
+	base := anchorCustomerTreeBase(f)
+
+	f.write("detectors/widget-leak/main.go", sidecarWellBehavedMainSrc)
+	f.write("detectors/widget-leak/scenarios/widget-leak-01.yaml", "id: WL-01-widget-secret-exposed\n"+
+		"finding:\n  id: fnd_wl_01\n  detector: widget-leak\n  title: 'widget secret exposed'\n  severity: high\n"+
+		"events:\n- id: evt_wl_01\n  timestamp: '2026-07-01T00:00:00Z'\n  source: customer-app\n  event_type: widget-secret-exposed\n  actor: cust-actor\n"+
+		"expected_detection:\n  must_fire:\n  - widget-leak\n")
+	head := f.commit("proposal: add a well-shaped detector plus its own co-located scenario corpus")
+
+	requireClean(t, f.guardCustomerTree(base, head))
+}
+
+// TestGuard_CustomerTreeMode_DeniesNestedEvilTestGoUnderDetectors is the
+// VARIANT proof: the malicious _test.go sits in a NESTED subdirectory
+// (detectors/widget-leak/sub/x_test.go) rather than directly under
+// detectors/<name>/. The fix is a PER-PATH check (isProductionGoFile on
+// c.path itself), not a per-directory one, so it must catch this identically
+// — proving the fix does not accidentally scope itself to only the top-level
+// sidecarDirs shape (which, per listDirGoFiles's non-recursive git ls-tree,
+// never even discovers a nested subdirectory as part of the parent
+// detector's package).
+func TestGuard_CustomerTreeMode_DeniesNestedEvilTestGoUnderDetectors(t *testing.T) {
+	f := newFixture(t)
+	base := anchorCustomerTreeBase(f)
+
+	f.write("detectors/widget-leak/main.go", sidecarWellBehavedMainSrc)
+	f.write("detectors/widget-leak/sub/x_test.go", evilTestGoSrc)
+	head := f.commit("proposal: add a well-shaped detector plus a nested malicious _test.go")
+
+	findings := f.guardCustomerTree(base, head)
+	requireRejected(t, findings, RuleCodeFrozen, "detectors/widget-leak/sub/x_test.go")
+}
+
+// TestGuard_DefaultMode_TestGoUnderDetectorsUnchanged proves the fix is
+// SCOPED to customerTreeMode: in DEFAULT mode (customerTreeMode=false, the
+// mode every non-engine caller uses), a _test.go under detectors/ was ALREADY
+// denied via the pre-existing GO SOURCE DEFAULT-DENY catch-all (RuleCodeFrozen
+// — any .go path under detectors/ falls to the same floor as
+// TestGuard_RejectsNewGoFileAddedUnderDetectors proves for main.go) and
+// remains denied via that SAME catch-all after this fix — the new arm's guard
+// clause requires customerTreeMode, so default mode never reaches it and the
+// in-tree lane stays byte-for-byte unchanged, per this file's own top-of-
+// section invariant.
+func TestGuard_DefaultMode_TestGoUnderDetectorsUnchanged(t *testing.T) {
+	f := newFixture(t)
+	f.copyReal("detectors/tuning.yaml") // anchor a real detectors/ tree at base
+	base := f.commit("base")
+
+	f.write("detectors/widget-leak/evil_test.go", evilTestGoSrc)
+	head := f.commit("proposal: add a malicious _test.go under detectors/ in default mode")
+
+	requireRejected(t, f.guard(base, head), RuleCodeFrozen, "detectors/widget-leak/evil_test.go")
+}
+
 // ---- ACCEPT proofs (the widens the loop is FOR) ------------------------------
 
 // (h) The exact K2b-shaped change passes: a new extra_elevated_keywords entry

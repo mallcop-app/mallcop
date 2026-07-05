@@ -427,9 +427,26 @@ replace github.com/mallcop-app/mallcop => ` + mallcopRoot + `
 
 // TestValidateProposal_CustomerTreeModeRejectsNonCompilingSidecarTest is
 // mandatory test (f): a sidecar whose main_test.go does not compile must
-// fail CLOSED at the structural stage (RuleStructuralVet), never reaching
-// exam-detect — proving `go build ./...` alone (which silently skips
-// _test.go) is not enough, and `go vet ./...` closes the gap.
+// fail CLOSED. Historically (pre mallcoppro-443) this was proven at the
+// STRUCTURAL stage (RuleStructuralVet) — `go build ./...` alone (which
+// silently skips _test.go) was not enough, and `go vet ./...` closed the
+// gap at stage 2, one stage LATE. mallcoppro-443 (CRITICAL security fix)
+// found that lateness was itself a hole: guard's customer-tree .go arm was
+// deferring EVERY _test.go, compiling or not, to a sidecarDirs shape-check
+// pass that (by design) only shape-checks PRODUCTION .go files
+// (isProductionGoFile excludes _test.go) — so a _test.go that DID compile
+// (a malicious one, not this fixture's non-compiling one) sailed through
+// guard AND structural with zero findings. The fix denies ANY _test.go
+// under detectors/ at GUARD (stage 1, RuleCodeFrozen), before structural
+// ever runs — a strictly EARLIER and STRONGER floor that also catches this
+// fixture's non-compiling main_test.go, so the full end-to-end assertions
+// below now expect a stage-1 (guard) rejection and short-circuit, not a
+// stage-2 (structural) one. The direct low-level mechanism proof (go build
+// skips _test.go, go vet does not; structuralStage on its own still
+// surfaces RuleStructuralVet as defense-in-depth if ever invoked past guard)
+// is retained unchanged below — it documents a still-true fact about the Go
+// toolchain, it just no longer describes the path THIS fixture takes
+// through ValidateProposal in customer-tree mode.
 func TestValidateProposal_CustomerTreeModeRejectsNonCompilingSidecarTest(t *testing.T) {
 	clearInferenceEnv(t)
 	customerDir, base, head := buildCustomerShapedRepoNonCompilingTest(t)
@@ -441,7 +458,10 @@ func TestValidateProposal_CustomerTreeModeRejectsNonCompilingSidecarTest(t *test
 	t.Cleanup(func() { removeWorktree(customerDir, headTree) })
 
 	// Direct mechanism proof: `go build ./...` passes (it skips _test.go);
-	// `go vet ./...` fails (it compiles _test.go).
+	// `go vet ./...` fails (it compiles _test.go). Still true; no longer the
+	// path ValidateProposal takes for THIS fixture (see doc above), but
+	// structuralStage would still catch it here as defense-in-depth if ever
+	// reached (e.g. a caller invoking it directly, bypassing Guard).
 	buildStdout, buildStderr, buildCode, err := runTool(headTree, []string{"GOFLAGS=-mod=mod"}, "go", "build", "./...")
 	if err != nil {
 		t.Fatalf("go build: %v", err)
@@ -456,9 +476,6 @@ func TestValidateProposal_CustomerTreeModeRejectsNonCompilingSidecarTest(t *test
 	if vetCode == 0 {
 		t.Fatalf("expected `go vet ./...` to FAIL on the non-compiling main_test.go, got exit 0: %s%s", vetStdout, vetStderr)
 	}
-
-	// Full gate proof: structuralStage surfaces RuleStructuralVet, and the
-	// gate short-circuits there (never reaching exam-detect).
 	structFindings, structEvidence, serr := structuralStage(headTree, true)
 	if serr != nil {
 		t.Fatalf("structuralStage: operational error: %v", serr)
@@ -468,6 +485,8 @@ func TestValidateProposal_CustomerTreeModeRejectsNonCompilingSidecarTest(t *test
 			RuleStructuralVet, structFindings, structEvidence)
 	}
 
+	// Full gate proof (mallcoppro-443): ValidateProposal now rejects at
+	// GUARD (stage 1) and short-circuits — structural never runs.
 	res, verr := ValidateProposal(customerDir, base, head, Options{ExamRepo: repoUnderTest(t)})
 	if verr != nil {
 		t.Fatalf("ValidateProposal: %v", verr)
@@ -475,8 +494,8 @@ func TestValidateProposal_CustomerTreeModeRejectsNonCompilingSidecarTest(t *test
 	if res.Passed {
 		t.Fatalf("gate must REJECT a non-compiling sidecar main_test.go, got %+v", res)
 	}
-	requireStageNames(t, res, StageGuard, StageStructural)
-	if !hasFinding(res.Stages[1].Findings, RuleStructuralVet) {
-		t.Fatalf("expected the structural stage's findings to include %s, got %+v", RuleStructuralVet, res.Stages[1])
+	requireStageNames(t, res, StageGuard)
+	if !hasFinding(res.Stages[0].Findings, RuleCodeFrozen) {
+		t.Fatalf("expected the guard stage's findings to include %s (mallcoppro-443: _test.go under detectors/ is denied at guard, before structural ever runs), got %+v", RuleCodeFrozen, res.Stages[0])
 	}
 }
