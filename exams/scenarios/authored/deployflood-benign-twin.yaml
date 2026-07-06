@@ -1,0 +1,40 @@
+id: authored-deploy-flood-benign-twin
+detector: authored-deploy-flood
+category: authored
+difficulty: authored-easy
+finding:
+  id: fnd_authored_deployflood_benign_001
+  detector: authored-deploy-flood
+  title: 'benign look-alike does not fire'
+  severity: info
+  event_ids:
+    - evt_deployflood_001
+  metadata:
+    actor: example-actor
+    source: github
+    event_type: github.push
+events:
+  - id: evt_deployflood_001
+    timestamp: '2026-03-10T11:22:00Z'
+    ingested_at: '2026-03-10T11:23:00Z'
+    source: github
+    event_type: github.push
+    actor: example-actor
+    action: push
+    target: org/repo
+    severity: info
+    metadata: {}
+    raw: {}
+baseline:
+  known_entities:
+    actors:
+      - example-actor
+    sources:
+      - github
+  frequency_tables: {}
+expected:
+  chain_action: resolve
+expected_detection:
+  must_fire: []
+  must_not_fire:
+    - authored-deploy-flood

@@ -23,4 +23,5 @@ import (
 	// Authored detectors register in their own package's init(); each is linked
 	// by a blank import below.
 	_ "github.com/mallcop-app/mallcop/core/detect/authored/synthmarker"
+	_ "github.com/mallcop-app/mallcop/core/detect/authored/deployflood"
 )
