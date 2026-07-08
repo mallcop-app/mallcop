@@ -60,6 +60,9 @@ Available tools:
   - search_findings  search the detector-finding stream
   - check_baseline   look up what the baseline knows about an actor/entity
   - lookup_rules     look up operator-authored decision rules for a finding family
+  - github_actor     live GitHub lookup for a login: real profile, account type, and
+                     recent public activity — including whether the login is
+                     GitHub's reserved 'ghost' deleted-account tombstone
 
 Call a tool whenever you need to look something up. Never fabricate an event
 ID, actor, timestamp, or finding — only state facts a tool actually returned.
@@ -405,6 +408,22 @@ func ToolDefs() []agent.Tool {
 				"required": []string{"finding_id", "finding_family"},
 			},
 		},
+		{
+			Name: "github_actor",
+			Description: "Live lookup of a GitHub login: real public profile (account type, name, bio, " +
+				"public repo/follower counts, created_at) plus recent public activity. Reports when the " +
+				"login is GitHub's reserved `ghost` deleted-account tombstone (commits from deleted " +
+				"accounts are reattributed to github.com/ghost -- it is a real, live placeholder profile, " +
+				"not a hallucinated actor) and flags other accounts that look deactivated. A 404 means " +
+				"the login does not currently exist -- never invent a reason without calling this tool.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"login": map[string]any{"type": "string", "description": "The GitHub username to look up. Required."},
+				},
+				"required": []string{"login"},
+			},
+		},
 	}
 }
 
@@ -451,6 +470,21 @@ func ExecuteTool(opts Options, name string, input any) (any, error) {
 			return nil, fmt.Errorf("decode lookup_rules input: %w", err)
 		}
 		return tools.LookupRules(opts.RepoRoot, in)
+
+	case "github_actor":
+		var in tools.GithubActorInput
+		if err := json.Unmarshal(raw, &in); err != nil {
+			return nil, fmt.Errorf("decode github_actor input: %w", err)
+		}
+		// github_actor is the one tool in this dispatch table that makes a
+		// live network call (core/investigate itself is banned from
+		// importing net/http directly — see imports_test.go — so the HTTP
+		// client lives entirely inside tools.GithubActor). ExecuteTool has
+		// no ctx parameter today (every other tool is a synchronous,
+		// ctx-free store/baseline read); GithubActor manages its own
+		// request timeout internally rather than widening this dispatch
+		// table's signature for one tool.
+		return tools.GithubActor(context.Background(), in)
 
 	default:
 		return nil, fmt.Errorf("unknown tool %q", name)
