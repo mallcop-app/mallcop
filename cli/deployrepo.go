@@ -399,7 +399,7 @@ jobs:
         run: |
           set -euo pipefail
           rm -rf store
-          git clone --quiet --branch "{{FINDINGS_BRANCH}}" --single-branch \
+          git clone --quiet --depth 1 --branch "{{FINDINGS_BRANCH}}" --single-branch \
             "https://x-access-token:${TOKEN}@github.com/${REPO}.git" store \
             || mkdir -p store
         env:
@@ -487,16 +487,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout deployment repo
-        # fetch-depth 0: the runner git-pulls/pushes the '{{CHAT_BRANCH}}'
-        # mailbox branch (a sibling of whatever ref triggered this dispatch),
-        # so the checkout needs full history/refs to check it out or create
-        # it. actions/checkout@v4's persisted credential for this repo's
-        # 'origin' remote already authorizes that fetch/push -- unlike the
-        # NESTED store/ checkout below (a separate git repository object),
-        # no manual x-access-token URL is needed for the chat branch.
+        # fetch-depth 1 (shallow): a FULL-history checkout (fetch-depth 0)
+        # HANGS on real deploy repos whose store branches carry a large,
+        # ever-growing events.jsonl in history (mallcoppro-5b7). The runner
+        # does NOT need full history here: GitMailbox.OpenGitMailbox does its
+        # own explicit git fetch of the {{CHAT_BRANCH}} branch before checking
+        # out / creating the mailbox branch, and actions/checkout@v4's
+        # persisted 'origin' credential authorizes that fetch/push.
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          fetch-depth: 1
 
       - name: Determine pinned-release asset for this runner
         # Maps the Actions-provided RUNNER_OS/RUNNER_ARCH to the exact asset
@@ -535,7 +535,7 @@ jobs:
         run: |
           set -euo pipefail
           rm -rf store
-          git clone --quiet --branch "{{FINDINGS_BRANCH}}" --single-branch \
+          git clone --quiet --depth 1 --branch "{{FINDINGS_BRANCH}}" --single-branch \
             "https://x-access-token:${TOKEN}@github.com/${REPO}.git" store \
             || mkdir -p store
         env:

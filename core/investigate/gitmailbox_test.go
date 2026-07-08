@@ -499,3 +499,22 @@ func equalStringSets(a, b []string) bool {
 	}
 	return true
 }
+
+// TestRunGitIn_TimesOutInsteadOfHanging is the regression test for mallcoppro-d2d:
+// a stalled git network op must NOT hang the serve job forever. With a tiny
+// gitOpTimeout, a real git invocation is killed and surfaced as a timeout error
+// rather than blocking indefinitely.
+func TestRunGitIn_TimesOutInsteadOfHanging(t *testing.T) {
+	dir := t.TempDir()
+	orig := gitOpTimeout
+	gitOpTimeout = time.Nanosecond
+	defer func() { gitOpTimeout = orig }()
+
+	_, err := runGitIn(dir, "version")
+	if err == nil {
+		t.Fatal("expected runGitIn to error under a 1ns timeout, got nil (a real git op would hang forever without the bound)")
+	}
+	if !strings.Contains(err.Error(), "timed out") {
+		t.Fatalf("expected a timeout error mentioning the bound, got: %v", err)
+	}
+}
