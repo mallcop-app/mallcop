@@ -19,6 +19,7 @@
 //	mallcop validate-proposal --base <ref> [--head <ref>] [--guard-only] [--allow-no-coverage-gain] [--json]
 //	mallcop collect     --store <dir> [--fidelity <json>] [--json]
 //	mallcop init        [--dir <path>] [--pro] [--create-repo owner/name] [--mallcop-version <tag>] [--github-token-env <VAR>]
+//	mallcop migrate     [--dir <path>] [--mallcop-version <tag>] [--config-only] [--dry-run]
 //	mallcop status      --store <dir>
 //	mallcop config
 //	mallcop config set connector --kind=file|github|cloud --id=<id> [...]
@@ -70,6 +71,8 @@ func Main() {
 		err = runCollect(args)
 	case "init":
 		err = runInit(args)
+	case "migrate":
+		err = runMigrate(args)
 	case "status":
 		err = runStatus(args)
 	case "config":
@@ -183,6 +186,17 @@ Commands:
                         Action to (default: query the latest GitHub release)
     --github-token-env  Env var holding a GitHub token with repo-create scope,
                         used with --create-repo (default: MALLCOP_GITHUB_TOKEN)
+
+  migrate Upgrade an EXISTING deploy repo in place to the current schema + pinned release
+    --dir               Deploy-repo directory to upgrade (default: current directory)
+    --mallcop-version   Release tag to pin workflows + go.mod to (default: latest GitHub release)
+    --config-only       Only migrate mallcop.yaml; leave workflows + go.mod untouched
+    --dry-run           Print what would change without writing any files
+                Rewrites a pre-v0.10 mallcop.yaml (secrets/routing/pro blocks,
+                connectors-as-map) to the current strict schema, force-refreshes
+                .github/workflows/{scan,mallcop-investigate}.yml, and bumps the
+                go.mod mallcop pin. Loudly reports every dropped legacy key.
+                Commit + push is the operator's step (printed next-steps).
 
   status  Report findings/resolutions recorded in a store
     --store    Path to the git-repo store written by 'mallcop scan' (required)
