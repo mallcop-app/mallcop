@@ -69,6 +69,14 @@ func splitOwnerRepo(ownerRepo string) (owner, name string, ok bool) {
 // ephemeral Actions runs. See the D3 SAME-REPO note in the package doc.
 const mallcopFindingsBranch = "mallcop-findings"
 
+// mallcopChatBranch is the dedicated branch (of the SAME deployment repo,
+// separate from mallcopFindingsBranch so scan pushes and chat pushes never
+// collide) the scaffolded mallcop-investigate.yml workflow mounts the
+// browser<->runner mailbox on -- see mallcop-pro's
+// docs/chat-investigate-protocol.md §1 and core/investigate/gitmailbox.go
+// (mallcoppro-067).
+const mallcopChatBranch = "mallcop-chat"
+
 // repoToken produces a bearer token authorized to create a repo under, and
 // push to, the customer's GitHub account/org.
 type repoToken interface {
@@ -203,6 +211,16 @@ func scaffoldDeployAssets(dir, moduleName, mallcopVersion string) error {
 		workflow = strings.ReplaceAll(workflow, "{{FINDINGS_BRANCH}}", mallcopFindingsBranch)
 		if err := os.WriteFile(workflowPath, []byte(workflow), 0o644); err != nil {
 			return fmt.Errorf("deploy-repo: writing .github/workflows/scan.yml: %w", err)
+		}
+	}
+
+	investigateWorkflowPath := filepath.Join(workflowDir, "mallcop-investigate.yml")
+	if _, err := os.Stat(investigateWorkflowPath); err != nil {
+		workflow := strings.ReplaceAll(investigateWorkflowTemplate, "{{VERSION}}", mallcopVersion)
+		workflow = strings.ReplaceAll(workflow, "{{FINDINGS_BRANCH}}", mallcopFindingsBranch)
+		workflow = strings.ReplaceAll(workflow, "{{CHAT_BRANCH}}", mallcopChatBranch)
+		if err := os.WriteFile(investigateWorkflowPath, []byte(workflow), 0o644); err != nil {
+			return fmt.Errorf("deploy-repo: writing .github/workflows/mallcop-investigate.yml: %w", err)
 		}
 	}
 
@@ -421,6 +439,123 @@ jobs:
         env:
           TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
+`
+
+// investigateWorkflowTemplate is the mallcop-investigate.yml SKELETON
+// (mallcoppro-067): workflow_dispatch(session_id) -> install the pinned
+// mallcop release binary (never rebuilds from customer code, same D2+2fd
+// ruling as scanWorkflowTemplate) -> restore the findings store from
+// '{{FINDINGS_BRANCH}}' (same pattern as scan.yml) -> run the long-lived
+// `mallcop investigate --serve --session <id> --chat-branch {{CHAT_BRANCH}}`
+// session-mailbox loop (core/investigate/gitmailbox.go). Boundary invariant
+// (docs/chat-investigate-protocol.md): all agent logic, store contents, and
+// the inference credential stay in THIS runner -- only the natural-language
+// question/answer trace crosses via the '{{CHAT_BRANCH}}' branch of this
+// same repo, never findings/events/baseline/credentials.
+const investigateWorkflowTemplate = `name: mallcop investigate (chat)
+
+# SKELETON (mallcoppro-067): checkout the deployment repo, install the pinned
+# mallcop release binary, restore the findings store, and run the
+# long-lived 'mallcop investigate --serve' session-mailbox loop for
+# inputs.session_id. See core/investigate/gitmailbox.go and mallcop-pro's
+# docs/chat-investigate-protocol.md for the full protocol this implements.
+#
+# D2+2fd ruling (shared with scan.yml): this workflow NEVER rebuilds the
+# whole mallcop binary from repo content -- the core binary run here is
+# always the pinned prebuilt release tarball below.
+on:
+  workflow_dispatch:
+    inputs:
+      session_id:
+        description: 'Chat session id -- sessions/<session_id>/ on the {{CHAT_BRANCH}} branch'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  MALLCOP_VERSION: "{{VERSION}}"
+  MALLCOP_API_KEY: ${{ secrets.MALLCOP_API_KEY }}
+
+jobs:
+  investigate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout deployment repo
+        # fetch-depth 0: the runner git-pulls/pushes the '{{CHAT_BRANCH}}'
+        # mailbox branch (a sibling of whatever ref triggered this dispatch),
+        # so the checkout needs full history/refs to check it out or create
+        # it. actions/checkout@v4's persisted credential for this repo's
+        # 'origin' remote already authorizes that fetch/push -- unlike the
+        # NESTED store/ checkout below (a separate git repository object),
+        # no manual x-access-token URL is needed for the chat branch.
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Determine pinned-release asset for this runner
+        # Maps the Actions-provided RUNNER_OS/RUNNER_ARCH to the exact asset
+        # name mallcop's release workflow publishes -- mirrors scan.yml's
+        # own platform-detection step exactly.
+        id: platform
+        run: |
+          set -euo pipefail
+          case "${RUNNER_OS}-${RUNNER_ARCH}" in
+            Linux-X64) echo "asset=linux-amd64" >> "$GITHUB_OUTPUT" ;;
+            Linux-ARM64) echo "asset=linux-arm64" >> "$GITHUB_OUTPUT" ;;
+            macOS-ARM64) echo "asset=darwin-arm64" >> "$GITHUB_OUTPUT" ;;
+            *)
+              echo "no published mallcop release asset for ${RUNNER_OS}-${RUNNER_ARCH}" >&2
+              exit 1
+              ;;
+          esac
+
+      - name: Install pinned mallcop release binary
+        env:
+          MALLCOP_ASSET: ${{ steps.platform.outputs.asset }}
+        run: |
+          set -euo pipefail
+          curl -fsSLO "https://github.com/mallcop-app/mallcop/releases/download/${MALLCOP_VERSION}/mallcop-${MALLCOP_ASSET}.tar.gz"
+          curl -fsSLO "https://github.com/mallcop-app/mallcop/releases/download/${MALLCOP_VERSION}/mallcop-${MALLCOP_ASSET}.tar.gz.sha256"
+          sha256sum -c "mallcop-${MALLCOP_ASSET}.tar.gz.sha256"
+          tar -xzf "mallcop-${MALLCOP_ASSET}.tar.gz"
+          echo "$PWD/bin" >> "$GITHUB_PATH"
+
+      - name: Restore findings store from previous runs
+        # Identical pattern to scan.yml: store/ is its own nested git repo
+        # (D3 SAME-REPO), backed by the '{{FINDINGS_BRANCH}}' branch of this
+        # same deployment repo, restored via an explicit x-access-token URL
+        # because this nested checkout is NOT covered by the top-level
+        # actions/checkout@v4 credential above.
+        run: |
+          set -euo pipefail
+          rm -rf store
+          git clone --quiet --branch "{{FINDINGS_BRANCH}}" --single-branch \
+            "https://x-access-token:${TOKEN}@github.com/${REPO}.git" store \
+            || mkdir -p store
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+
+      - name: Run mallcop investigate --serve
+        # The long-lived session-mailbox loop: reads
+        # sessions/<session_id>/inbox.jsonl and appends
+        # sessions/<session_id>/outbox.jsonl on the '{{CHAT_BRANCH}}' branch
+        # of THIS repo (--repo .), self-exiting on idle timeout or a
+        # control:shutdown record -- see core/investigate/gitmailbox.go.
+        # Inference is metered via MALLCOP_API_KEY (the mallcop-sk repo
+        # secret), same rail as 'mallcop scan'.
+        run: |
+          set -euo pipefail
+          mallcop investigate --serve \
+            --session "${SESSION_ID}" \
+            --chat-branch "{{CHAT_BRANCH}}" \
+            --chat-remote origin \
+            --repo . \
+            --store ./store
+        env:
+          SESSION_ID: ${{ inputs.session_id }}
 `
 
 // deployRepoResult is returned by createAndPushDeployRepo with everything a
