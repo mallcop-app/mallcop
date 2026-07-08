@@ -321,7 +321,6 @@ permissions:
 
 env:
   MALLCOP_VERSION: "{{VERSION}}"
-  MALLCOP_API_KEY: ${{ secrets.MALLCOP_API_KEY }}
 
 jobs:
   scan:
@@ -410,6 +409,12 @@ jobs:
       - name: Run mallcop scan
         # Exit codes (see cli/main.go): 0 = no findings, 1 = findings
         # detected (expected, NOT a workflow failure), 2 = real scan failure.
+        # MALLCOP_API_KEY is scoped to only THIS step's env (mallcoppro-c32):
+        # a job-level env would expose the inference credential to every
+        # other step in this job, including the third-party
+        # actions/setup-go@v5 action above.
+        env:
+          MALLCOP_API_KEY: ${{ secrets.MALLCOP_API_KEY }}
         run: |
           set +e
           mallcop scan
@@ -476,7 +481,6 @@ permissions:
 
 env:
   MALLCOP_VERSION: "{{VERSION}}"
-  MALLCOP_API_KEY: ${{ secrets.MALLCOP_API_KEY }}
 
 jobs:
   investigate:
@@ -545,7 +549,10 @@ jobs:
         # of THIS repo (--repo .), self-exiting on idle timeout or a
         # control:shutdown record -- see core/investigate/gitmailbox.go.
         # Inference is metered via MALLCOP_API_KEY (the mallcop-sk repo
-        # secret), same rail as 'mallcop scan'.
+        # secret), same rail as 'mallcop scan'. MALLCOP_API_KEY is scoped to
+        # only THIS step's env (mallcoppro-c32): a job-level env would expose
+        # the inference credential to every other step in this job, including
+        # the third-party actions/checkout@v4 action above.
         run: |
           set -euo pipefail
           mallcop investigate --serve \
@@ -556,6 +563,7 @@ jobs:
             --store ./store
         env:
           SESSION_ID: ${{ inputs.session_id }}
+          MALLCOP_API_KEY: ${{ secrets.MALLCOP_API_KEY }}
 `
 
 // deployRepoResult is returned by createAndPushDeployRepo with everything a

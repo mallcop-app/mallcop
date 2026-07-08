@@ -335,6 +335,53 @@ func TestGitMailbox_ShutdownOverGit(t *testing.T) {
 	}
 }
 
+// TestOpenGitMailbox_RejectsUnsafeSessionID is the mallcoppro-c32 regression
+// test for boundary fix (2): SessionID flows unvalidated into
+// filepath.Join(RepoPath, "sessions", SessionID) (sessionDir/relOutboxPath).
+// A session id containing a path separator or ".." must be rejected by
+// OpenGitMailbox itself -- before any filesystem/git operation runs -- rather
+// than silently resolving outside the sessions/ tree. A real UUID-shaped id
+// (what the browser actually generates per the protocol doc) must still be
+// accepted.
+func TestOpenGitMailbox_RejectsUnsafeSessionID(t *testing.T) {
+	const branch = "mallcop-chat"
+	bare := newBareOrigin(t)
+	_ = newSeededClone(t, bare) // seeds "main" content on origin exactly once
+
+	for _, bad := range []string{"../evil", "a/b", "../../etc/passwd", ""} {
+		runnerDir := cloneRepo(t, bare)
+		_, err := OpenGitMailbox(GitMailboxOptions{
+			RepoPath:  runnerDir,
+			Branch:    branch,
+			SessionID: bad,
+			Remote:    "origin",
+		})
+		if err == nil {
+			t.Fatalf("OpenGitMailbox accepted unsafe SessionID %q, want an error", bad)
+		}
+		// Must never have escaped sessions/ onto the real filesystem.
+		if _, statErr := os.Stat(filepath.Join(runnerDir, "..", "evil")); statErr == nil {
+			t.Fatalf("SessionID %q escaped the repo root onto disk", bad)
+		}
+	}
+
+	// A real UUID (the browser's actual session-id shape) must still work.
+	runnerDir := cloneRepo(t, bare)
+	const uuid = "550e8400-e29b-41d4-a716-446655440000"
+	mb, err := OpenGitMailbox(GitMailboxOptions{
+		RepoPath:  runnerDir,
+		Branch:    branch,
+		SessionID: uuid,
+		Remote:    "origin",
+	})
+	if err != nil {
+		t.Fatalf("OpenGitMailbox rejected a valid UUID SessionID: %v", err)
+	}
+	if info, statErr := os.Stat(mb.SessionDir()); statErr != nil || !info.IsDir() {
+		t.Fatalf("session dir %s was not created for a valid UUID SessionID: %v", mb.SessionDir(), statErr)
+	}
+}
+
 // TestOpenGitMailbox_CreatesBranchWhenAbsent proves protocol §2 step 3's
 // "creates the chat branch if absent": a repo whose remote has no
 // mallcop-chat branch at all yet still ends up with one, pushed, after Open.

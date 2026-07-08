@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -105,6 +107,88 @@ func TestServe_QuestionFlowThenIdleExit(t *testing.T) {
 	}
 	if !strings.Contains(string(raw), `"reason":"idle"`) {
 		t.Fatalf("exit record did not carry reason idle:\n%s", raw)
+	}
+}
+
+// erroringServer is a REAL httptest.Server that always answers /v1/messages
+// with an HTTP 500 whose body embeds sentinel — standing in for whatever
+// internal detail a real failure could leak (a Bedrock/Forge error body, a
+// filesystem path, a model/lane routing decision). inference.DirectClient
+// (core/inference/direct.go) folds that body verbatim into the Go error text
+// it returns (`"inference: %s returned HTTP %d: %s"`), so this is the REAL
+// code path a leaked secret would travel — not a hand-rolled fake error.
+func erroringServer(t *testing.T, sentinel string) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(sentinel))
+	}))
+}
+
+// TestServe_AnswerRecordSanitizesInternalErrorDetail is the mallcoppro-c32
+// regression test for boundary fix (1): when askCore fails (here, because the
+// real inference transport got back an HTTP 500 whose body carries
+// secret-like internal detail), the outbox "answer" record Serve emits must
+// NOT contain that detail — only a generic natural-language message. The full
+// error must still make it somewhere useful for operators (the runner's own
+// log), just never across the mailbox boundary into the customer repo's git
+// history or the browser.
+func TestServe_AnswerRecordSanitizesInternalErrorDetail(t *testing.T) {
+	const sentinel = "SECRET_FORGE_API_KEY_sk-mallcop-t0p-s3cr3t-9f8e7d"
+
+	st := seedStore(t)
+	srv := erroringServer(t, sentinel)
+	defer srv.Close()
+
+	dir := t.TempDir()
+	inboxPath := filepath.Join(dir, "inbox.jsonl")
+	outboxPath := filepath.Join(dir, "outbox.jsonl")
+
+	question := map[string]any{"type": "question", "seq": 1, "id": "q_1", "text": "What has ghost been doing?"}
+	line, _ := json.Marshal(question)
+	if err := os.WriteFile(inboxPath, append(line, '\n'), 0o644); err != nil {
+		t.Fatalf("write inbox: %v", err)
+	}
+
+	client := &inference.DirectClient{BaseURL: srv.URL, Model: "test-model"}
+	opts := ServeOptions{
+		Options:         Options{Client: client, Model: "test-model", Store: st},
+		InboxPath:       inboxPath,
+		OutboxPath:      outboxPath,
+		IdleTimeout:     150 * time.Millisecond,
+		PollInterval:    20 * time.Millisecond,
+		HeartbeatPeriod: time.Hour,
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := Serve(ctx, opts); err != nil {
+		t.Fatalf("Serve: unexpected error: %v", err)
+	}
+
+	raw, err := os.ReadFile(outboxPath)
+	if err != nil {
+		t.Fatalf("read outbox: %v", err)
+	}
+	out := string(raw)
+
+	if strings.Contains(out, sentinel) {
+		t.Fatalf("outbox leaked the internal error sentinel across the mailbox boundary:\n%s", out)
+	}
+	if !strings.Contains(out, "an internal error occurred") {
+		t.Fatalf("outbox answer record does not carry the generic error message:\n%s", out)
+	}
+
+	types := readOutboxTypes(t, outboxPath)
+	foundAnswer := false
+	for _, ty := range types {
+		if ty == "answer" {
+			foundAnswer = true
+		}
+	}
+	if !foundAnswer {
+		t.Fatalf("outbox never got an answer record for the failed question: %v", types)
 	}
 }
 

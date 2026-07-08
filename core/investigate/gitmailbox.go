@@ -25,10 +25,20 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
 )
+
+// sessionIDPattern is the strict charset SessionID must match: a UUID or
+// slug-shaped identifier, nothing else. SessionID is used unvalidated as a
+// path component (sessionDir/relOutboxPath both filepath.Join it under
+// "sessions/"), so this is the boundary that keeps a malicious or malformed
+// session id (e.g. "../evil", "a/b") from ever resolving outside the
+// sessions/ tree -- there is no path separator, "..", or any other
+// filesystem-meaningful character in the allowed set.
+var sessionIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,128}$`)
 
 // Default tunables for GitMailbox, matching the protocol doc.
 const (
@@ -122,6 +132,9 @@ func OpenGitMailbox(opts GitMailboxOptions) (*GitMailbox, error) {
 	}
 	if opts.SessionID == "" {
 		return nil, fmt.Errorf("investigate: gitmailbox: SessionID is required")
+	}
+	if !sessionIDPattern.MatchString(opts.SessionID) {
+		return nil, fmt.Errorf("investigate: gitmailbox: SessionID %q is invalid (must match %s)", opts.SessionID, sessionIDPattern.String())
 	}
 	if _, err := os.Stat(filepath.Join(opts.RepoPath, ".git")); err != nil {
 		return nil, fmt.Errorf("investigate: gitmailbox: %q is not a git repository: %w", opts.RepoPath, err)

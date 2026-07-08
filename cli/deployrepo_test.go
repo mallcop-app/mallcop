@@ -59,6 +59,12 @@ func TestScaffoldDeployAssetsWritesAllExpectedFiles(t *testing.T) {
 	}
 	w := string(workflow)
 
+	// mallcoppro-c32 boundary fix (3): MALLCOP_API_KEY must never be a
+	// job-level env var (every step, including any third-party `uses:`
+	// action, would inherit it) -- it must be scoped to only the specific
+	// run step that actually needs it ("Run mallcop scan").
+	assertAPIKeyScopedToRunStep(t, w, "mallcop scan")
+
 	// D2+2fd: the pinned release binary is installed, never rebuilt from
 	// customer code; only detectors/<name> compiles, and only to wasip1/wasm.
 	if !strings.Contains(w, `MALLCOP_VERSION: "v0.7.0"`) {
@@ -230,9 +236,85 @@ func TestScaffoldDeployAssetsWritesWellFormedInvestigateWorkflow(t *testing.T) {
 		t.Fatalf("mallcop-investigate.yml's serve invocation does not pin --chat-branch to mallcop-chat (must differ from the findings branch):\n%s", raw)
 	}
 
+	// mallcoppro-c32 boundary fix (3): MALLCOP_API_KEY must never be a
+	// job-level env var (every step, including any third-party `uses:`
+	// action, would inherit it) -- it must be scoped to only the
+	// "Run mallcop investigate --serve" step's own env.
+	assertAPIKeyScopedToRunStep(t, string(raw), "mallcop investigate --serve")
+
 	perms, ok := doc["permissions"].(map[string]any)
 	if !ok || perms["contents"] != "write" {
 		t.Fatalf("mallcop-investigate.yml does not grant contents: write:\n%s", raw)
+	}
+}
+
+// assertAPIKeyScopedToRunStep is the mallcoppro-c32 regression check shared by
+// both scan.yml and mallcop-investigate.yml: MALLCOP_API_KEY must appear ONLY
+// in the env: map of the specific run step whose `run:` text contains
+// runStepSubstring (e.g. "mallcop scan" or "mallcop investigate --serve"),
+// never as a job-level or top-level workflow env key -- a job-level env is
+// visible to every step in the job, including any third-party `uses:` action,
+// which is exactly the exposure this item closes.
+func assertAPIKeyScopedToRunStep(t *testing.T, raw string, runStepSubstring string) {
+	t.Helper()
+
+	var doc map[string]any
+	if err := yaml.Unmarshal([]byte(raw), &doc); err != nil {
+		t.Fatalf("workflow does not parse as YAML: %v\n%s", err, raw)
+	}
+
+	if topEnv, ok := doc["env"].(map[string]any); ok {
+		if _, has := topEnv["MALLCOP_API_KEY"]; has {
+			t.Fatalf("workflow exposes MALLCOP_API_KEY as a job-level/top-level env var (every step, incl. third-party actions, would inherit it):\n%s", raw)
+		}
+	}
+
+	jobs, ok := doc["jobs"].(map[string]any)
+	if !ok || len(jobs) == 0 {
+		t.Fatalf("workflow has no jobs:\n%s", raw)
+	}
+	for _, job := range jobs {
+		jobMap, ok := job.(map[string]any)
+		if !ok {
+			continue
+		}
+		if jobEnv, ok := jobMap["env"].(map[string]any); ok {
+			if _, has := jobEnv["MALLCOP_API_KEY"]; has {
+				t.Fatalf("workflow exposes MALLCOP_API_KEY as a job-level env var (every step, incl. third-party actions, would inherit it):\n%s", raw)
+			}
+		}
+	}
+
+	var runStep map[string]any
+	for _, job := range jobs {
+		jobMap, ok := job.(map[string]any)
+		if !ok {
+			continue
+		}
+		steps, ok := jobMap["steps"].([]any)
+		if !ok {
+			continue
+		}
+		for _, s := range steps {
+			stepMap, ok := s.(map[string]any)
+			if !ok {
+				continue
+			}
+			run, _ := stepMap["run"].(string)
+			if strings.Contains(run, runStepSubstring) {
+				runStep = stepMap
+			}
+		}
+	}
+	if runStep == nil {
+		t.Fatalf("workflow has no run step containing %q to check env scoping:\n%s", runStepSubstring, raw)
+	}
+	stepEnv, ok := runStep["env"].(map[string]any)
+	if !ok {
+		t.Fatalf("the %q run step has no env map -- MALLCOP_API_KEY must be scoped there:\n%s", runStepSubstring, raw)
+	}
+	if _, has := stepEnv["MALLCOP_API_KEY"]; !has {
+		t.Fatalf("the %q run step's env does not include MALLCOP_API_KEY:\n%s", runStepSubstring, raw)
 	}
 }
 
