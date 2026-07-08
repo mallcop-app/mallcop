@@ -24,6 +24,7 @@
 //	mallcop config set connector --kind=file|github|cloud --id=<id> [...]
 //	mallcop config set autonomy <non|semi|fully>
 //	mallcop feedback    <finding_id> approve|dismiss --store <dir> [--reason <text>] [--by <name>]
+//	mallcop investigate --question <text> --store <dir> [--baseline <path>] | --serve --inbox <file> --outbox <file> --store <dir>
 package cli
 
 import (
@@ -79,6 +80,8 @@ func Main() {
 		}
 	case "feedback":
 		err = runFeedback(args)
+	case "investigate":
+		err = runInvestigate(args)
 	default:
 		fmt.Fprintf(os.Stderr, "mallcop: unknown command %q\n\n", cmd)
 		usage()
@@ -201,6 +204,23 @@ Commands:
     --by       Operator identity (defaults to $USER)
                Both verbs persist a 'suppress' directive keyed on the finding's
                source/type/actor, so future findings of that class are dropped.
+
+  investigate  Run a real tool-calling analyst over the store (search_events,
+               search_findings, check_baseline, lookup_rules)
+    --question   Ask ONE question and print the answer (single-shot mode)
+    --serve      Run the long-lived loop: read questions from --inbox, stream
+                 trace+answers to --outbox, exit after --idle-timeout with no
+                 new question (default 90s)
+    --inbox      Questions+control JSONL to read from (required with --serve)
+    --outbox     Trace JSONL to append to (required with --serve)
+    --store      Path to the git-repo store to investigate (required)
+    --baseline   Optional path to a baseline JSON file
+    --repo-root  Optional repo root for lookup_rules' operator-decisions corpus
+    --base-url   Inference endpoint base URL (overrides $MALLCOP_INFERENCE_URL)
+    --json       Single-shot mode: print the answer + citations as JSON
+                 Inference auth: $MALLCOP_INFERENCE_URL + $MALLCOP_API_KEY, same
+                 as scan — but unlike scan, a missing endpoint is FATAL here
+                 (there is no useful "investigate offline" degraded mode).
 
 Exit codes (scan):
   0  No findings
