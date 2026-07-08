@@ -20,12 +20,31 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"time"
 
 	"github.com/mallcop-app/mallcop/core/tools"
 	"github.com/mallcop-app/mallcop/pkg/finding"
 )
+
+// genericServeErrMessage is the ONLY text that may ever reach the outbox
+// (and therefore the customer repo's git history / the browser) in place of
+// a real error. Internal error detail -- fs paths, model/lane routing,
+// Forge/inference API responses (which can themselves embed credentials or
+// account detail, see core/inference/direct.go's HTTP-status branch), or any
+// other implementation-internal string -- must never cross the mailbox
+// boundary. The full error is always logged to the runner's own stderr via
+// logServeErr, which stays inside the GHA job log rather than the (public or
+// shared) customer repo.
+const genericServeErrMessage = "an internal error occurred"
+
+// logServeErr logs the full error detail to the runner's own log (GHA job
+// output), which never leaves this runner process -- the only place internal
+// error detail is allowed to be observable.
+func logServeErr(context string, err error) {
+	log.Printf("investigate: %s: %v", context, err)
+}
 
 // Default tunables for Serve, matching the protocol doc.
 const (
@@ -138,7 +157,8 @@ func Serve(ctx context.Context, opts ServeOptions) error {
 
 	for {
 		if err := ctx.Err(); err != nil {
-			_ = emit(ob, opts.Mailbox, map[string]any{"type": "exit", "reason": "error", "detail": err.Error(), "ts": nowRFC3339()}, true)
+			logServeErr("serve loop context error", err)
+			_ = emit(ob, opts.Mailbox, map[string]any{"type": "exit", "reason": "error", "detail": genericServeErrMessage, "ts": nowRFC3339()}, true)
 			return nil
 		}
 
@@ -191,7 +211,8 @@ func Serve(ctx context.Context, opts ServeOptions) error {
 
 		select {
 		case <-ctx.Done():
-			_ = emit(ob, opts.Mailbox, map[string]any{"type": "exit", "reason": "error", "detail": ctx.Err().Error(), "ts": nowRFC3339()}, true)
+			logServeErr("serve loop context done", ctx.Err())
+			_ = emit(ob, opts.Mailbox, map[string]any{"type": "exit", "reason": "error", "detail": genericServeErrMessage, "ts": nowRFC3339()}, true)
 			return nil
 		case <-time.After(opts.pollInterval()):
 		}
@@ -235,7 +256,8 @@ func handleQuestion(ctx context.Context, opts ServeOptions, ob *outboxWriter, re
 
 	res, err := askCore(ctx, opts.Options, rec.Text, hook)
 	if err != nil {
-		_ = emit(ob, opts.Mailbox, map[string]any{"type": "answer", "q": rec.ID, "text": "investigate error: " + err.Error(), "citations": []Citation{}}, true)
+		logServeErr(fmt.Sprintf("askCore error for question %s", rec.ID), err)
+		_ = emit(ob, opts.Mailbox, map[string]any{"type": "answer", "q": rec.ID, "text": "investigation failed: " + genericServeErrMessage, "citations": []Citation{}}, true)
 		_ = emit(ob, opts.Mailbox, map[string]any{"type": "done", "q": rec.ID, "ts": nowRFC3339()}, true)
 		return
 	}
