@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 // TestScaffoldDeployAssetsWritesAllExpectedFiles proves scaffoldDeployAssets
@@ -44,6 +46,7 @@ func TestScaffoldDeployAssetsWritesAllExpectedFiles(t *testing.T) {
 		filepath.Join("detectors", "README.md"),
 		filepath.Join("connectors", "README.md"),
 		filepath.Join(".github", "workflows", "scan.yml"),
+		filepath.Join(".github", "workflows", "mallcop-investigate.yml"),
 	} {
 		if _, err := os.Stat(filepath.Join(dir, p)); err != nil {
 			t.Fatalf("expected %s to exist: %v", p, err)
@@ -110,6 +113,135 @@ func TestScaffoldDeployAssetsWritesAllExpectedFiles(t *testing.T) {
 	if strings.Contains(w, "add -A") || strings.Contains(w, `commit -q -m "scan:`) {
 		t.Fatalf("scan.yml must not run its own git add/commit inside store/ (see mallcoppro-f3b finding):\n%s", w)
 	}
+}
+
+// TestScaffoldDeployAssetsWritesWellFormedInvestigateWorkflow is the
+// mallcoppro-067 DONE CONDITION check for the GHA scaffold half of the item:
+// mallcop-investigate.yml must PARSE as YAML (not just contain the right
+// substrings) and its parsed structure must carry a required
+// workflow_dispatch input named session_id, a pinned-binary install step, a
+// mallcop-findings checkout step, and a 'mallcop investigate --serve'
+// invocation.
+func TestScaffoldDeployAssetsWritesWellFormedInvestigateWorkflow(t *testing.T) {
+	dir := t.TempDir()
+	if err := scaffoldDeployAssets(dir, "github.com/acme/mallcop-deploy", "v0.7.0"); err != nil {
+		t.Fatalf("scaffoldDeployAssets: %v", err)
+	}
+
+	raw, err := os.ReadFile(filepath.Join(dir, ".github", "workflows", "mallcop-investigate.yml"))
+	if err != nil {
+		t.Fatalf("reading mallcop-investigate.yml: %v", err)
+	}
+
+	var doc map[string]any
+	if err := yaml.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("mallcop-investigate.yml does not parse as YAML: %v\n%s", err, raw)
+	}
+
+	// workflow_dispatch input session_id, required. YAML's bare "on:" key
+	// must survive as the literal string "on" (yaml.v3 does NOT apply
+	// YAML-1.1 on/off boolean resolution) -- assert the map key directly
+	// rather than trusting a substring match.
+	onNode, ok := doc["on"].(map[string]any)
+	if !ok {
+		t.Fatalf("mallcop-investigate.yml has no parsed \"on:\" trigger map (keys present: %v)\n%s", mapKeys(doc), raw)
+	}
+	dispatch, ok := onNode["workflow_dispatch"].(map[string]any)
+	if !ok {
+		t.Fatalf("mallcop-investigate.yml's \"on:\" has no workflow_dispatch trigger:\n%s", raw)
+	}
+	inputs, ok := dispatch["inputs"].(map[string]any)
+	if !ok {
+		t.Fatalf("workflow_dispatch has no inputs map:\n%s", raw)
+	}
+	sessionInput, ok := inputs["session_id"].(map[string]any)
+	if !ok {
+		t.Fatalf("workflow_dispatch.inputs has no session_id input:\n%s", raw)
+	}
+	if required, _ := sessionInput["required"].(bool); !required {
+		t.Fatalf("workflow_dispatch.inputs.session_id is not required: %#v", sessionInput)
+	}
+
+	jobs, ok := doc["jobs"].(map[string]any)
+	if !ok || len(jobs) == 0 {
+		t.Fatalf("mallcop-investigate.yml has no jobs:\n%s", raw)
+	}
+	var allSteps []map[string]any
+	for _, job := range jobs {
+		jobMap, ok := job.(map[string]any)
+		if !ok {
+			continue
+		}
+		steps, ok := jobMap["steps"].([]any)
+		if !ok {
+			continue
+		}
+		for _, s := range steps {
+			if stepMap, ok := s.(map[string]any); ok {
+				allSteps = append(allSteps, stepMap)
+			}
+		}
+	}
+	if len(allSteps) == 0 {
+		t.Fatalf("mallcop-investigate.yml's job has no steps:\n%s", raw)
+	}
+
+	stepRun := func(pred func(step map[string]any) bool) (map[string]any, bool) {
+		for _, s := range allSteps {
+			if pred(s) {
+				return s, true
+			}
+		}
+		return nil, false
+	}
+	hasRunSubstring := func(sub string) bool {
+		_, ok := stepRun(func(s map[string]any) bool {
+			run, _ := s["run"].(string)
+			return strings.Contains(run, sub)
+		})
+		return ok
+	}
+	hasUses := func(sub string) bool {
+		_, ok := stepRun(func(s map[string]any) bool {
+			uses, _ := s["uses"].(string)
+			return strings.Contains(uses, sub)
+		})
+		return ok
+	}
+
+	if !hasUses("actions/checkout@") {
+		t.Fatalf("mallcop-investigate.yml has no actions/checkout step:\n%s", raw)
+	}
+	if !hasRunSubstring("releases/download/${MALLCOP_VERSION}/mallcop-${MALLCOP_ASSET}.tar.gz") {
+		t.Fatalf("mallcop-investigate.yml does not install the pinned release binary from GitHub Releases:\n%s", raw)
+	}
+	if !hasRunSubstring("--branch \"mallcop-findings\"") && !hasRunSubstring("--branch \"{{FINDINGS_BRANCH}}\"") {
+		if !strings.Contains(string(raw), "mallcop-findings") {
+			t.Fatalf("mallcop-investigate.yml does not check out the mallcop-findings store branch:\n%s", raw)
+		}
+	}
+	if !hasRunSubstring("mallcop investigate --serve") {
+		t.Fatalf("mallcop-investigate.yml does not run 'mallcop investigate --serve':\n%s", raw)
+	}
+	if !hasRunSubstring("--session") || !hasRunSubstring("SESSION_ID") {
+		t.Fatalf("mallcop-investigate.yml's serve invocation does not pass through the session id:\n%s", raw)
+	}
+	if !hasRunSubstring("--chat-branch \"mallcop-chat\"") {
+		t.Fatalf("mallcop-investigate.yml's serve invocation does not pin --chat-branch to mallcop-chat (must differ from the findings branch):\n%s", raw)
+	}
+
+	perms, ok := doc["permissions"].(map[string]any)
+	if !ok || perms["contents"] != "write" {
+		t.Fatalf("mallcop-investigate.yml does not grant contents: write:\n%s", raw)
+	}
+}
+
+func mapKeys(m map[string]any) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	return keys
 }
 
 // TestScaffoldDeployAssetsIdempotent proves a re-run never clobbers existing

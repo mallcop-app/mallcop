@@ -60,6 +60,14 @@ type ServeOptions struct {
 	// HeartbeatPeriod is how often Serve appends a heartbeat record while
 	// idle-waiting. <= 0 uses DefaultHeartbeatPeriod.
 	HeartbeatPeriod time.Duration
+
+	// Mailbox, when set, backs InboxPath/OutboxPath with a real git branch
+	// (core/investigate/gitmailbox.go, mallcoppro-067): Serve calls
+	// Mailbox.Pull() before each inbox read and Mailbox.Push(force) after
+	// each outbox append, per protocol §4. Nil (the zero value) means plain
+	// local files with no git operations at all -- every existing test in
+	// this file, and laptop/local-only serve mode, are unaffected.
+	Mailbox GitSyncer
 }
 
 func (o ServeOptions) runnerID() string {
@@ -120,7 +128,7 @@ func Serve(ctx context.Context, opts ServeOptions) error {
 	}
 
 	ob := &outboxWriter{path: opts.OutboxPath}
-	if err := ob.append(map[string]any{"type": "ready", "runner": opts.runnerID(), "ts": nowRFC3339()}); err != nil {
+	if err := emit(ob, opts.Mailbox, map[string]any{"type": "ready", "runner": opts.runnerID(), "ts": nowRFC3339()}, true); err != nil {
 		return err
 	}
 
@@ -130,8 +138,14 @@ func Serve(ctx context.Context, opts ServeOptions) error {
 
 	for {
 		if err := ctx.Err(); err != nil {
-			_ = ob.append(map[string]any{"type": "exit", "reason": "error", "detail": err.Error(), "ts": nowRFC3339()})
+			_ = emit(ob, opts.Mailbox, map[string]any{"type": "exit", "reason": "error", "detail": err.Error(), "ts": nowRFC3339()}, true)
 			return nil
+		}
+
+		if opts.Mailbox != nil {
+			if err := opts.Mailbox.Pull(); err != nil {
+				return fmt.Errorf("investigate: pull inbox: %w", err)
+			}
 		}
 
 		records, err := readInbox(opts.InboxPath)
@@ -150,7 +164,7 @@ func Serve(ctx context.Context, opts ServeOptions) error {
 			switch rec.Type {
 			case "control":
 				if rec.Cmd == "shutdown" {
-					_ = ob.append(map[string]any{"type": "exit", "reason": "shutdown", "ts": nowRFC3339()})
+					_ = emit(ob, opts.Mailbox, map[string]any{"type": "exit", "reason": "shutdown", "ts": nowRFC3339()}, true)
 					return nil
 				}
 			case "question":
@@ -160,28 +174,46 @@ func Serve(ctx context.Context, opts ServeOptions) error {
 		}
 
 		if progressed {
-			_ = ob.append(map[string]any{"type": "heartbeat", "runner": opts.runnerID(), "state": "idle", "ts": nowRFC3339()})
+			_ = emit(ob, opts.Mailbox, map[string]any{"type": "heartbeat", "runner": opts.runnerID(), "state": "idle", "ts": nowRFC3339()}, false)
 			lastHeartbeat = time.Now()
 			continue
 		}
 
 		if time.Since(lastActivity) >= opts.idleTimeout() {
-			_ = ob.append(map[string]any{"type": "exit", "reason": "idle", "ts": nowRFC3339()})
+			_ = emit(ob, opts.Mailbox, map[string]any{"type": "exit", "reason": "idle", "ts": nowRFC3339()}, true)
 			return nil
 		}
 
 		if time.Since(lastHeartbeat) >= opts.heartbeatPeriod() {
-			_ = ob.append(map[string]any{"type": "heartbeat", "runner": opts.runnerID(), "state": "idle", "ts": nowRFC3339()})
+			_ = emit(ob, opts.Mailbox, map[string]any{"type": "heartbeat", "runner": opts.runnerID(), "state": "idle", "ts": nowRFC3339()}, false)
 			lastHeartbeat = time.Now()
 		}
 
 		select {
 		case <-ctx.Done():
-			_ = ob.append(map[string]any{"type": "exit", "reason": "error", "detail": ctx.Err().Error(), "ts": nowRFC3339()})
+			_ = emit(ob, opts.Mailbox, map[string]any{"type": "exit", "reason": "error", "detail": ctx.Err().Error(), "ts": nowRFC3339()}, true)
 			return nil
 		case <-time.After(opts.pollInterval()):
 		}
 	}
+}
+
+// emit appends record to the outbox and, when mb is non-nil, syncs it to the
+// git mailbox: force controls whether the push is immediate or coalesced
+// per protocol §4 ("~1/s or on answer/done"). Callers pass force=true for
+// ready/answer/done/exit (the records a browser is actively waiting on) and
+// force=false for ack/tool_call/tool_result/heartbeat (fine to batch).
+func emit(ob *outboxWriter, mb GitSyncer, record map[string]any, force bool) error {
+	if err := ob.append(record); err != nil {
+		return err
+	}
+	if mb == nil {
+		return nil
+	}
+	if err := mb.Push(force); err != nil {
+		return fmt.Errorf("investigate: push outbox: %w", err)
+	}
+	return nil
 }
 
 // handleQuestion runs one question through askCore with a hook that streams
@@ -190,21 +222,21 @@ func Serve(ctx context.Context, opts ServeOptions) error {
 // carrying the error text rather than killing the whole Serve session — one
 // bad question should not take down a warm runner.
 func handleQuestion(ctx context.Context, opts ServeOptions, ob *outboxWriter, rec inboxRecord) {
-	_ = ob.append(map[string]any{"type": "ack", "q": rec.ID, "seq": rec.Seq, "ts": nowRFC3339()})
+	_ = emit(ob, opts.Mailbox, map[string]any{"type": "ack", "q": rec.ID, "seq": rec.Seq, "ts": nowRFC3339()}, false)
 
 	hook := &traceHook{
 		onToolCall: func(step int, name string, input any) {
-			_ = ob.append(map[string]any{"type": "tool_call", "q": rec.ID, "step": step, "tool": name, "input": input})
+			_ = emit(ob, opts.Mailbox, map[string]any{"type": "tool_call", "q": rec.ID, "step": step, "tool": name, "input": input}, false)
 		},
 		onToolResult: func(step int, name string, result any, err error) {
-			_ = ob.append(map[string]any{"type": "tool_result", "q": rec.ID, "step": step, "summary": summarizeToolResult(name, result, err)})
+			_ = emit(ob, opts.Mailbox, map[string]any{"type": "tool_result", "q": rec.ID, "step": step, "summary": summarizeToolResult(name, result, err)}, false)
 		},
 	}
 
 	res, err := askCore(ctx, opts.Options, rec.Text, hook)
 	if err != nil {
-		_ = ob.append(map[string]any{"type": "answer", "q": rec.ID, "text": "investigate error: " + err.Error(), "citations": []Citation{}})
-		_ = ob.append(map[string]any{"type": "done", "q": rec.ID, "ts": nowRFC3339()})
+		_ = emit(ob, opts.Mailbox, map[string]any{"type": "answer", "q": rec.ID, "text": "investigate error: " + err.Error(), "citations": []Citation{}}, true)
+		_ = emit(ob, opts.Mailbox, map[string]any{"type": "done", "q": rec.ID, "ts": nowRFC3339()}, true)
 		return
 	}
 
@@ -212,8 +244,8 @@ func handleQuestion(ctx context.Context, opts ServeOptions, ob *outboxWriter, re
 	if citations == nil {
 		citations = []Citation{}
 	}
-	_ = ob.append(map[string]any{"type": "answer", "q": rec.ID, "text": res.Answer, "citations": citations})
-	_ = ob.append(map[string]any{"type": "done", "q": rec.ID, "ts": nowRFC3339()})
+	_ = emit(ob, opts.Mailbox, map[string]any{"type": "answer", "q": rec.ID, "text": res.Answer, "citations": citations}, true)
+	_ = emit(ob, opts.Mailbox, map[string]any{"type": "done", "q": rec.ID, "ts": nowRFC3339()}, true)
 }
 
 // summarizeToolResult renders the short human trace string the protocol's
@@ -282,12 +314,19 @@ func readInbox(path string) ([]inboxRecord, error) {
 // outboxWriter appends JSON-line trace records to a single file. Serve is the
 // only writer of this file (per the protocol's single-writer-per-file rule),
 // so a simple O_APPEND write is safe — no coordination with any other
-// process is required.
+// process is required. It also assigns the record's "seq" field: protocol
+// §4 states "seq is monotonic per file per session: browser assigns inbox
+// seq, runner assigns outbox seq" -- every record this process appends (not
+// just questions/answers) gets the next outbox seq, so a browser resuming a
+// poll can cursor the outbox exactly like the runner cursors the inbox.
 type outboxWriter struct {
-	path string
+	path    string
+	lastSeq int
 }
 
-func (w *outboxWriter) append(record any) error {
+func (w *outboxWriter) append(record map[string]any) error {
+	w.lastSeq++
+	record["seq"] = w.lastSeq
 	line, err := json.Marshal(record)
 	if err != nil {
 		return fmt.Errorf("investigate: marshal outbox record: %w", err)

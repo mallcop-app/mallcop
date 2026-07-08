@@ -22,7 +22,8 @@ func TestRunInvestigate_FlagValidation(t *testing.T) {
 	}{
 		{"neither question nor serve", []string{"--store", t.TempDir()}},
 		{"both question and serve", []string{"--question", "q", "--serve", "--store", t.TempDir()}},
-		{"serve without inbox/outbox", []string{"--serve", "--store", t.TempDir()}},
+		{"serve without inbox/outbox/session", []string{"--serve", "--store", t.TempDir()}},
+		{"serve with both session and inbox/outbox", []string{"--serve", "--session", "s1", "--inbox", "i", "--outbox", "o", "--store", t.TempDir()}},
 		{"missing store", []string{"--question", "q"}},
 	}
 	for _, c := range cases {

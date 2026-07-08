@@ -23,11 +23,18 @@ import (
 //	  Single-shot: ask one question, print the answer, exit.
 //
 //	mallcop investigate --serve --inbox <path> --outbox <path> --store <dir> [--baseline <path>]
-//	  Long-running: read questions from --inbox, stream the trace + answers
-//	  to --outbox, exit after --idle-timeout (default 90s) with no new
-//	  question. The FILE LAYOUT --inbox/--outbox live under (a session dir on
-//	  a git branch, GHA dispatch, etc.) is a transport concern owned by the
-//	  caller (mallcop-pro / the sibling mallcoppro-067 item), not this flag.
+//	  Long-running, plain-file mode: read questions from --inbox, stream the
+//	  trace + answers to --outbox, exit after --idle-timeout (default 90s)
+//	  with no new question. Local/laptop use.
+//
+//	mallcop investigate --serve --session <id> --chat-branch mallcop-chat --store <dir> [--repo <dir>]
+//	  Long-running, git-mailbox mode (mallcoppro-067,
+//	  core/investigate/gitmailbox.go): --inbox/--outbox are derived from
+//	  sessions/<id>/{inbox,outbox}.jsonl on --chat-branch inside --repo (a
+//	  git working tree, default "."), which is git-pulled/pushed exactly per
+//	  docs/chat-investigate-protocol.md §1,2,4,6 -- this is what
+//	  mallcop-investigate.yml's scaffolded GHA workflow runs. --inbox/--outbox
+//	  are invalid together with --session.
 //
 // Inference auth mirrors `mallcop scan` exactly: $MALLCOP_INFERENCE_URL +
 // $MALLCOP_API_KEY (BYOK: vendor URL+key; Forge: forge URL + mallcop-sk-*
@@ -36,9 +43,14 @@ func runInvestigate(args []string) error {
 	fs := flag.NewFlagSet("investigate", flag.ContinueOnError)
 	question := fs.String("question", "", "Ask ONE question and print the answer (single-shot mode)")
 	serve := fs.Bool("serve", false, "Run the long-lived serve loop: read questions from --inbox, stream trace+answers to --outbox")
-	inboxPath := fs.String("inbox", "", "Questions+control JSONL to read from (required with --serve)")
-	outboxPath := fs.String("outbox", "", "Trace JSONL to append to (required with --serve)")
+	inboxPath := fs.String("inbox", "", "Questions+control JSONL to read from (plain-file mode; invalid with --session)")
+	outboxPath := fs.String("outbox", "", "Trace JSONL to append to (plain-file mode; invalid with --session)")
 	idleTimeout := fs.Duration("idle-timeout", investigate.DefaultIdleTimeout, "Serve mode: exit after this long with no new question")
+	session := fs.String("session", "", "Session id: enables git-mailbox mode, deriving --inbox/--outbox from sessions/<id>/ on --chat-branch")
+	chatBranch := fs.String("chat-branch", mallcopChatBranch, "Git-mailbox mode: the dedicated chat branch (separate from the findings branch)")
+	chatRemote := fs.String("chat-remote", "origin", "Git-mailbox mode: the git remote to pull/push the chat branch against")
+	repoDir := fs.String("repo", ".", "Git-mailbox mode: path to the git working tree the chat branch lives in")
+	gcMaxAge := fs.Duration("gc-max-age", investigate.DefaultGCMaxAge, "Git-mailbox mode: prune sessions/* older than this at boot (<=0 disables)")
 	storePath := fs.String("store", "", "Path to the git-repo store to investigate (required)")
 	baselinePath := fs.String("baseline", "", "Optional path to a baseline JSON file")
 	repoRoot := fs.String("repo-root", "", "Optional repo root for lookup_rules' operator-decisions corpus (empty = self-resolve)")
@@ -56,8 +68,11 @@ func runInvestigate(args []string) error {
 		}
 		return fmt.Errorf("investigate: exactly one of --question or --serve is required")
 	}
-	if *serve && (*inboxPath == "" || *outboxPath == "") {
-		return fmt.Errorf("investigate: --serve requires both --inbox and --outbox")
+	if *serve && *session != "" && (*inboxPath != "" || *outboxPath != "") {
+		return fmt.Errorf("investigate: --session (git-mailbox mode) and --inbox/--outbox (plain-file mode) are mutually exclusive")
+	}
+	if *serve && *session == "" && (*inboxPath == "" || *outboxPath == "") {
+		return fmt.Errorf("investigate: --serve requires either --session or both --inbox and --outbox")
 	}
 	if *storePath == "" {
 		return fmt.Errorf("investigate: --store is required")
@@ -111,12 +126,28 @@ func runInvestigate(args []string) error {
 	ctx := context.Background()
 
 	if *serve {
-		return investigate.Serve(ctx, investigate.ServeOptions{
+		serveOpts := investigate.ServeOptions{
 			Options:     opts,
 			InboxPath:   *inboxPath,
 			OutboxPath:  *outboxPath,
 			IdleTimeout: *idleTimeout,
-		})
+		}
+		if *session != "" {
+			mb, err := investigate.OpenGitMailbox(investigate.GitMailboxOptions{
+				RepoPath:  *repoDir,
+				Branch:    *chatBranch,
+				SessionID: *session,
+				Remote:    *chatRemote,
+				GCMaxAge:  *gcMaxAge,
+			})
+			if err != nil {
+				return fmt.Errorf("investigate: %w", err)
+			}
+			serveOpts.InboxPath = mb.InboxPath()
+			serveOpts.OutboxPath = mb.OutboxPath()
+			serveOpts.Mailbox = mb
+		}
+		return investigate.Serve(ctx, serveOpts)
 	}
 
 	res, err := investigate.Ask(ctx, opts, *question)
