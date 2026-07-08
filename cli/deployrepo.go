@@ -207,24 +207,86 @@ func scaffoldDeployAssets(dir, moduleName, mallcopVersion string) error {
 	}
 	workflowPath := filepath.Join(workflowDir, "scan.yml")
 	if _, err := os.Stat(workflowPath); err != nil {
-		workflow := strings.ReplaceAll(scanWorkflowTemplate, "{{VERSION}}", mallcopVersion)
-		workflow = strings.ReplaceAll(workflow, "{{FINDINGS_BRANCH}}", mallcopFindingsBranch)
-		if err := os.WriteFile(workflowPath, []byte(workflow), 0o644); err != nil {
+		if err := os.WriteFile(workflowPath, []byte(renderScanWorkflow(mallcopVersion)), 0o644); err != nil {
 			return fmt.Errorf("deploy-repo: writing .github/workflows/scan.yml: %w", err)
 		}
 	}
 
 	investigateWorkflowPath := filepath.Join(workflowDir, "mallcop-investigate.yml")
 	if _, err := os.Stat(investigateWorkflowPath); err != nil {
-		workflow := strings.ReplaceAll(investigateWorkflowTemplate, "{{VERSION}}", mallcopVersion)
-		workflow = strings.ReplaceAll(workflow, "{{FINDINGS_BRANCH}}", mallcopFindingsBranch)
-		workflow = strings.ReplaceAll(workflow, "{{CHAT_BRANCH}}", mallcopChatBranch)
-		if err := os.WriteFile(investigateWorkflowPath, []byte(workflow), 0o644); err != nil {
+		if err := os.WriteFile(investigateWorkflowPath, []byte(renderInvestigateWorkflow(mallcopVersion)), 0o644); err != nil {
 			return fmt.Errorf("deploy-repo: writing .github/workflows/mallcop-investigate.yml: %w", err)
 		}
 	}
 
 	return nil
+}
+
+// renderScanWorkflow fills scanWorkflowTemplate's version+branch placeholders.
+func renderScanWorkflow(mallcopVersion string) string {
+	w := strings.ReplaceAll(scanWorkflowTemplate, "{{VERSION}}", mallcopVersion)
+	return strings.ReplaceAll(w, "{{FINDINGS_BRANCH}}", mallcopFindingsBranch)
+}
+
+// renderInvestigateWorkflow fills investigateWorkflowTemplate's placeholders.
+func renderInvestigateWorkflow(mallcopVersion string) string {
+	w := strings.ReplaceAll(investigateWorkflowTemplate, "{{VERSION}}", mallcopVersion)
+	w = strings.ReplaceAll(w, "{{FINDINGS_BRANCH}}", mallcopFindingsBranch)
+	return strings.ReplaceAll(w, "{{CHAT_BRANCH}}", mallcopChatBranch)
+}
+
+// refreshDeployWorkflows re-writes BOTH generated CI workflows to the pinned
+// mallcopVersion, ALWAYS overwriting whatever is there (unlike
+// scaffoldDeployAssets' skip-if-exists). This is the `mallcop migrate` seam:
+// an existing customer deploy repo may carry a stale scan.yml and be missing
+// mallcop-investigate.yml entirely (added in v0.10) — a version bump must
+// force both to the current pinned release. The workflows are generated
+// assets, never hand-edited, so overwriting is safe.
+func refreshDeployWorkflows(dir, mallcopVersion string) error {
+	workflowDir := filepath.Join(dir, ".github", "workflows")
+	if err := os.MkdirAll(workflowDir, 0o755); err != nil {
+		return fmt.Errorf("deploy-repo: creating .github/workflows/: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(workflowDir, "scan.yml"), []byte(renderScanWorkflow(mallcopVersion)), 0o644); err != nil {
+		return fmt.Errorf("deploy-repo: writing .github/workflows/scan.yml: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(workflowDir, "mallcop-investigate.yml"), []byte(renderInvestigateWorkflow(mallcopVersion)), 0o644); err != nil {
+		return fmt.Errorf("deploy-repo: writing .github/workflows/mallcop-investigate.yml: %w", err)
+	}
+	return nil
+}
+
+// refreshGoMod bumps the pinned github.com/mallcop-app/mallcop require version
+// in dir/go.mod to mallcopVersion, so sidecar-detector builds in CI compile
+// against the SAME release the workflow downloads (D1 THIN-EMBED). It only
+// rewrites the one require line; the module name and go directive are left
+// untouched. A go.mod with no mallcop require line, or no go.mod at all, is
+// left as-is (returns hadPin=false) so the caller can warn rather than fail.
+func refreshGoMod(dir, mallcopVersion string) (hadPin bool, err error) {
+	goModPath := filepath.Join(dir, "go.mod")
+	data, err := os.ReadFile(goModPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("deploy-repo: reading go.mod: %w", err)
+	}
+	lines := strings.Split(string(data), "\n")
+	rewrote := false
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "require github.com/mallcop-app/mallcop ") {
+			lines[i] = "require github.com/mallcop-app/mallcop " + mallcopVersion
+			rewrote = true
+		}
+	}
+	if !rewrote {
+		return false, nil
+	}
+	if err := os.WriteFile(goModPath, []byte(strings.Join(lines, "\n")), 0o644); err != nil {
+		return false, fmt.Errorf("deploy-repo: writing go.mod: %w", err)
+	}
+	return true, nil
 }
 
 const detectorsReadmeContent = `# detectors/
