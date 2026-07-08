@@ -19,6 +19,7 @@ package investigate
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -30,6 +31,12 @@ import (
 	"sync"
 	"time"
 )
+
+// gitOpTimeout bounds every git invocation runGitIn makes so a stalled network
+// op (a hung git-remote-https) can never hang the long-lived `investigate
+// --serve` job indefinitely — it errors instead, and the serve loop surfaces
+// it (mallcoppro-d2d). A package var so tests can shrink it.
+var gitOpTimeout = 2 * time.Minute
 
 // sessionIDPattern is the strict charset SessionID must match: a UUID or
 // slug-shaped identifier, nothing else. SessionID is used unvalidated as a
@@ -395,12 +402,18 @@ func gitIdentityArgs(args ...string) []string {
 // error so failures are debuggable (mirrors core/store.go's and
 // cli/deployrepo.go's own git-wrapping convention).
 func runGitIn(dir string, args ...string) (string, error) {
-	cmd := exec.Command("git", args...)
+	ctx, cancel := context.WithTimeout(context.Background(), gitOpTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = dir
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &out
-	if err := cmd.Run(); err != nil {
+	err := cmd.Run()
+	if ctx.Err() == context.DeadlineExceeded {
+		return out.String(), fmt.Errorf("git %v in %q: timed out after %s: %w", args, dir, gitOpTimeout, ctx.Err())
+	}
+	if err != nil {
 		return out.String(), fmt.Errorf("git %v in %q: %w: %s", args, dir, err, strings.TrimSpace(out.String()))
 	}
 	return out.String(), nil

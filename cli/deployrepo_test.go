@@ -448,3 +448,41 @@ func TestEnvGitHubTokenMissing(t *testing.T) {
 		t.Fatal("expected an error when the token env var is unset")
 	}
 }
+
+// TestScaffoldWorkflowsUseShallowGitOps is the regression test for the v0.10.1
+// hang fixes found by the production-path e2e (mallcoppro-5b7, mallcoppro-fce):
+//   - a FULL-history checkout (fetch-depth 0) hangs the investigate job on real
+//     deploy repos, so mallcop-investigate.yml must use fetch-depth 1;
+//   - a non-shallow `git clone` of the store branch pulls the full history of an
+//     ever-growing events.jsonl and hangs BOTH scan.yml and investigate.yml, so
+//     the store restore must clone with --depth 1.
+func TestScaffoldWorkflowsUseShallowGitOps(t *testing.T) {
+	dir := t.TempDir()
+	if err := scaffoldDeployAssets(dir, "github.com/acme/mallcop-deploy", "v0.10.1"); err != nil {
+		t.Fatalf("scaffoldDeployAssets: %v", err)
+	}
+	read := func(name string) string {
+		b, err := os.ReadFile(filepath.Join(dir, ".github", "workflows", name))
+		if err != nil {
+			t.Fatalf("reading %s: %v", name, err)
+		}
+		return string(b)
+	}
+
+	// Both workflows restore the store with a shallow clone (mallcoppro-fce).
+	for _, wf := range []string{"scan.yml", "mallcop-investigate.yml"} {
+		w := read(wf)
+		if !strings.Contains(w, "git clone --quiet --depth 1 --branch") {
+			t.Fatalf("%s store restore must use `git clone --depth 1` (full history hangs on the growing store branch):\n%s", wf, w)
+		}
+	}
+
+	// The investigate workflow must NOT full-history checkout (mallcoppro-5b7).
+	inv := read("mallcop-investigate.yml")
+	if !strings.Contains(inv, "fetch-depth: 1") {
+		t.Fatalf("mallcop-investigate.yml must checkout with fetch-depth: 1:\n%s", inv)
+	}
+	if strings.Contains(inv, "fetch-depth: 0") {
+		t.Fatalf("mallcop-investigate.yml must NOT use fetch-depth: 0 (full-history checkout hangs on large deploy repos):\n%s", inv)
+	}
+}
