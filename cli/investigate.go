@@ -96,7 +96,7 @@ func runInvestigate(args []string) error {
 	if key == "" && haveConfig && cfg.Inference.KeyEnv != "" {
 		key = os.Getenv(cfg.Inference.KeyEnv)
 	}
-	model := config.Resolve(os.Getenv(envInferenceModel), cfgStr(haveConfig, cfg.Inference.Model), "mallcop-default")
+	model := config.Resolve(os.Getenv(envInferenceModel), cfgStr(haveConfig, cfg.Inference.Model), "triage")
 	client := &inference.DirectClient{BaseURL: url, Key: key, Model: model}
 
 	st, err := openOrInitStore(*storePath)

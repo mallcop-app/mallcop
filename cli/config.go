@@ -33,7 +33,7 @@ func runConfig(args []string) error {
 	// Inference: env pivot (MALLCOP_INFERENCE_URL / _MODEL) overrides the config,
 	// matching runScan's resolution order.
 	url := config.Resolve(os.Getenv(envInferenceURL), cfg.Inference.Endpoint)
-	model := config.Resolve(os.Getenv(envInferenceModel), cfg.Inference.Model, "mallcop-default")
+	model := config.Resolve(os.Getenv(envInferenceModel), cfg.Inference.Model, "triage")
 	keyEnv := cfg.Inference.KeyEnv
 	if keyEnv == "" {
 		keyEnv = envInferenceKey
