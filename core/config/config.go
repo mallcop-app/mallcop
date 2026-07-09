@@ -200,7 +200,11 @@ func Defaults() Config {
 			Mode:     "offline",
 			Endpoint: "",
 			KeyEnv:   "MALLCOP_API_KEY",
-			Model:    "mallcop-default",
+			// A real tenant lane, NOT a placeholder: the donut rail only resolves
+			// the lane names (triage/investigate/heal) to a Bedrock model and 404s
+			// on anything else. triage (glm-4.7-flash, open sovereignty) is the
+			// cheapest lane and the safe default (mallcoppro-2b9).
+			Model:    "triage",
 		},
 		Store: Store{Path: "./store", Baseline: ""},
 		Connectors: []Connector{

@@ -167,28 +167,12 @@ func GithubActor(ctx context.Context, in GithubActorInput) (GithubActorEnvelope,
 	if ferr != nil {
 		return GithubActorEnvelope{}, fmt.Errorf("github_actor: fetch profile: %w", ferr)
 	}
-	switch status {
-	case http.StatusOK:
-		var p githubActorProfile
-		if err := json.Unmarshal(body, &p); err != nil {
-			return GithubActorEnvelope{}, fmt.Errorf("github_actor: decode profile: %w", err)
-		}
-		env.Found = true
-		env.AccountType = p.Type
-		env.Name = p.Name
-		env.Bio = p.Bio
-		env.ProfileURL = p.HTMLURL
-		env.CreatedAt = p.CreatedAt
-		env.PublicRepos = p.PublicRepos
-		env.Followers = p.Followers
-	case http.StatusNotFound:
-		env.Notes = "GitHub returned 404 for this login: it does not currently exist under this exact " +
-			"name. That can mean it never existed, was renamed, or was deleted WITHOUT reattribution to " +
-			"the ghost tombstone (reattribution to ghost applies to commit authorship, not every trace of " +
-			"an account)."
+	if done, err := githubActorApplyProfileStatus(&env, status, body, profileURL); err != nil {
+		return GithubActorEnvelope{}, err
+	} else if done {
+		// 404 or a transient/upstream degrade — return the (soft) envelope now.
+		// The follow-up events fetch would fail the same way, so skip it.
 		return env, nil
-	default:
-		return GithubActorEnvelope{}, fmt.Errorf("github_actor: GET %s returned %d: %s", profileURL, status, githubActorTruncate(body, 200))
 	}
 
 	switch {
@@ -231,6 +215,49 @@ func GithubActor(ctx context.Context, in GithubActorInput) (GithubActorEnvelope,
 	}
 
 	return env, nil
+}
+
+// githubActorApplyProfileStatus maps a profile-fetch HTTP status onto env,
+// mirroring the events fetch's graceful degrade: a 403/429/5xx is a soft note,
+// never a hard error (mallcoppro-2a9). It returns done=true when the caller
+// should return (env, nil) immediately — a 404 or a transient/upstream degrade,
+// both of which also make the follow-up events fetch pointless. A genuinely
+// unexpected status (e.g. 401 bad token, 400) stays a hard error so a real
+// auth/config fault surfaces loudly instead of masquerading as "not found".
+func githubActorApplyProfileStatus(env *GithubActorEnvelope, status int, body []byte, profileURL string) (done bool, err error) {
+	switch {
+	case status == http.StatusOK:
+		var p githubActorProfile
+		if err := json.Unmarshal(body, &p); err != nil {
+			return false, fmt.Errorf("github_actor: decode profile: %w", err)
+		}
+		env.Found = true
+		env.AccountType = p.Type
+		env.Name = p.Name
+		env.Bio = p.Bio
+		env.ProfileURL = p.HTMLURL
+		env.CreatedAt = p.CreatedAt
+		env.PublicRepos = p.PublicRepos
+		env.Followers = p.Followers
+		return false, nil
+	case status == http.StatusNotFound:
+		env.Notes = githubActorAppendNote(env.Notes, "GitHub returned 404 for this login: it does not currently exist under this exact "+
+			"name. That can mean it never existed, was renamed, or was deleted WITHOUT reattribution to "+
+			"the ghost tombstone (reattribution to ghost applies to commit authorship, not every trace of "+
+			"an account).")
+		return true, nil
+	case status == http.StatusForbidden || status == http.StatusTooManyRequests || status >= 500:
+		reason := fmt.Sprintf("HTTP %d", status)
+		if status == http.StatusForbidden || status == http.StatusTooManyRequests {
+			reason = fmt.Sprintf("rate limited (HTTP %d)", status)
+		}
+		env.Notes = githubActorAppendNote(env.Notes, fmt.Sprintf("profile unavailable: GitHub returned %s — a "+
+			"transient/upstream condition, not a statement that the login does not exist. found=false here "+
+			"means \"could not confirm\", not \"deleted\".", reason))
+		return true, nil
+	default:
+		return false, fmt.Errorf("github_actor: GET %s returned %d: %s", profileURL, status, githubActorTruncate(body, 200))
+	}
 }
 
 // githubActorBaseURL resolves the API base URL: GITHUB_API_URL overrides the

@@ -193,6 +193,16 @@ func TestLoadRejectsInlineSecretConnectorEnv(t *testing.T) {
 // TestDefaultsAutonomyIsNon proves the safe-by-default dial position is "non"
 // (propose-only, human approves ALL changes) — the fail-safe an absent
 // mallcop.yaml (or an absent learning: section) resolves to. rd mallcoppro-315.
+// TestDefaultsModelIsRealLane locks the default inference model to a real
+// tenant lane. "mallcop-default" was a placeholder that 404s on the donut rail
+// (the proxy only resolves the lane names triage/investigate/heal) —
+// mallcoppro-2b9.
+func TestDefaultsModelIsRealLane(t *testing.T) {
+	if got := Defaults().Inference.Model; got != "triage" {
+		t.Fatalf("Defaults().Inference.Model = %q, want triage (a real lane)", got)
+	}
+}
+
 func TestDefaultsAutonomyIsNon(t *testing.T) {
 	if got := Defaults().Learning.Autonomy; got != AutonomyNon {
 		t.Fatalf("Defaults().Learning.Autonomy = %q, want %q", got, AutonomyNon)

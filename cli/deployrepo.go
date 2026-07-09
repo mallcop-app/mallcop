@@ -389,7 +389,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout deployment repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1 -- pinned by commit SHA (mallcoppro-796): a mutable tag can be repointed at malicious code, and these workflows run with contents:write and hold MALLCOP_API_KEY
 
       - name: Determine pinned-release asset for this runner
         # Maps the Actions-provided RUNNER_OS/RUNNER_ARCH to the exact asset
@@ -418,12 +418,18 @@ jobs:
           set -euo pipefail
           curl -fsSLO "https://github.com/mallcop-app/mallcop/releases/download/${MALLCOP_VERSION}/mallcop-${MALLCOP_ASSET}.tar.gz"
           curl -fsSLO "https://github.com/mallcop-app/mallcop/releases/download/${MALLCOP_VERSION}/mallcop-${MALLCOP_ASSET}.tar.gz.sha256"
+          # INTEGRITY, not authenticity (mallcoppro-796): the .sha256 is co-hosted
+          # on the same Releases URL as the tarball, so this catches corruption/
+          # truncation but NOT a compromised release that swaps both files. Real
+          # tamper-resistance (keyless build-provenance attestation verified with
+          # gh attestation verify) is tracked as a follow-up; it must ship in
+          # the release pipeline BEFORE the templates verify, or every scan breaks.
           sha256sum -c "mallcop-${MALLCOP_ASSET}.tar.gz.sha256"
           tar -xzf "mallcop-${MALLCOP_ASSET}.tar.gz"
           echo "$PWD/bin" >> "$GITHUB_PATH"
 
       - name: Set up Go (sidecar builds only -- never the core binary)
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0 -- pinned by commit SHA (mallcoppro-796)
         with:
           go-version: '1.24'
 
@@ -556,7 +562,7 @@ jobs:
         # own explicit git fetch of the {{CHAT_BRANCH}} branch before checking
         # out / creating the mailbox branch, and actions/checkout@v4's
         # persisted 'origin' credential authorizes that fetch/push.
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1 -- pinned by commit SHA (mallcoppro-796): a mutable tag can be repointed at malicious code, and these workflows run with contents:write and hold MALLCOP_API_KEY
         with:
           fetch-depth: 1
 
@@ -584,6 +590,12 @@ jobs:
           set -euo pipefail
           curl -fsSLO "https://github.com/mallcop-app/mallcop/releases/download/${MALLCOP_VERSION}/mallcop-${MALLCOP_ASSET}.tar.gz"
           curl -fsSLO "https://github.com/mallcop-app/mallcop/releases/download/${MALLCOP_VERSION}/mallcop-${MALLCOP_ASSET}.tar.gz.sha256"
+          # INTEGRITY, not authenticity (mallcoppro-796): the .sha256 is co-hosted
+          # on the same Releases URL as the tarball, so this catches corruption/
+          # truncation but NOT a compromised release that swaps both files. Real
+          # tamper-resistance (keyless build-provenance attestation verified with
+          # gh attestation verify) is tracked as a follow-up; it must ship in
+          # the release pipeline BEFORE the templates verify, or every scan breaks.
           sha256sum -c "mallcop-${MALLCOP_ASSET}.tar.gz.sha256"
           tar -xzf "mallcop-${MALLCOP_ASSET}.tar.gz"
           echo "$PWD/bin" >> "$GITHUB_PATH"

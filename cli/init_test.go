@@ -62,6 +62,11 @@ func TestInitPro(t *testing.T) {
 	if cfg.Inference.KeyEnv != "MALLCOP_API_KEY" {
 		t.Fatalf("--pro key_env = %q, want MALLCOP_API_KEY", cfg.Inference.KeyEnv)
 	}
+	// The scaffolded model must be a real tenant lane, not a placeholder that
+	// 404s on the donut rail (mallcoppro-2b9).
+	if cfg.Inference.Model != "triage" {
+		t.Fatalf("--pro model = %q, want triage (a real lane; mallcop-default 404s on api.mallcop.app)", cfg.Inference.Model)
+	}
 	// Non-inference blocks stay at OSS defaults.
 	if cfg.Learning.Autonomy != config.AutonomyNon || cfg.Sovereignty.Tier != "open" {
 		t.Fatalf("--pro changed a non-inference block: learning=%+v sovereignty=%+v", cfg.Learning, cfg.Sovereignty)
