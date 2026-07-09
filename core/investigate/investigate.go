@@ -397,13 +397,33 @@ func ToolDefs() []agent.Tool {
 			},
 		},
 		{
-			Name:        "lookup_rules",
-			Description: "Look up operator-authored decision rules that apply to a finding family and metadata predicate.",
+			Name: "lookup_rules",
+			Description: "Look up operator-authored decision rules that apply to a finding family and metadata predicate. " +
+				"Many rules only apply when a metadata predicate holds (e.g. the activity is inside a maintenance " +
+				"window, or was scheduled) — supply the matching optional predicate field(s) below, sourced from the " +
+				"finding's/events' metadata, or a rule with a metadata_match block will not be returned. Predicate " +
+				"values are strings, usually \"true\".",
 			InputSchema: map[string]any{
 				"type": "object",
+				// The optional predicate fields below MUST stay in sync with
+				// tools.LookupRulesInput's flat json tags (core/tools/lookup_rules.go):
+				// ExecuteTool unmarshals this raw input straight into that struct, and
+				// matchesRule enforces metadata_match conjunctively, so a predicate the
+				// model never sees is a rule it can never reach (mallcoppro-118). A
+				// schema-coverage test guards the sync.
 				"properties": map[string]any{
-					"finding_id":     map[string]any{"type": "string", "description": "The finding ID this lookup is for. Required."},
-					"finding_family": map[string]any{"type": "string", "description": "The finding's detector family, e.g. 'unusual-timing'. Required."},
+					"finding_id":            map[string]any{"type": "string", "description": "The finding ID this lookup is for. Required."},
+					"finding_family":        map[string]any{"type": "string", "description": "The finding's detector family, e.g. 'unusual-timing'. Required."},
+					"maintenance_window":    map[string]any{"type": "string", "description": "Optional predicate: the finding falls inside a declared maintenance window (\"true\")."},
+					"scheduled":             map[string]any{"type": "string", "description": "Optional predicate: the activity was scheduled (\"true\")."},
+					"resolution_event":      map[string]any{"type": "string", "description": "Optional predicate: a terminal resolution event, e.g. \"login_success\"."},
+					"location_change":       map[string]any{"type": "string", "description": "Optional predicate: the actor's location changed (\"true\")."},
+					"automation_provenance": map[string]any{"type": "string", "description": "Optional predicate: automation source, e.g. \"terraform\"."},
+					"deploy_release":        map[string]any{"type": "string", "description": "Optional predicate: coincides with a deploy/release (\"true\")."},
+					"sensitive_bulk_read":   map[string]any{"type": "string", "description": "Optional predicate: a sensitive bulk read (\"true\")."},
+					"hr_provisioning":       map[string]any{"type": "string", "description": "Optional predicate: an HR provisioning event (\"true\")."},
+					"scenario_pattern":      map[string]any{"type": "string", "description": "Optional predicate: a named scenario pattern."},
+					"actor_role":            map[string]any{"type": "string", "description": "Optional predicate: the actor's role."},
 				},
 				"required": []string{"finding_id", "finding_family"},
 			},
