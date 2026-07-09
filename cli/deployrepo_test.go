@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -484,5 +485,38 @@ func TestScaffoldWorkflowsUseShallowGitOps(t *testing.T) {
 	}
 	if strings.Contains(inv, "fetch-depth: 0") {
 		t.Fatalf("mallcop-investigate.yml must NOT use fetch-depth: 0 (full-history checkout hangs on large deploy repos):\n%s", inv)
+	}
+}
+
+// TestScaffoldWorkflowsPinActionsBySHA proves both scaffolded workflows pin
+// third-party actions by immutable commit SHA, never a mutable @vN tag
+// (mallcoppro-796): these workflows run with contents:write and hold
+// MALLCOP_API_KEY, so a repointed tag is a real supply-chain exposure.
+func TestScaffoldWorkflowsPinActionsBySHA(t *testing.T) {
+	dir := t.TempDir()
+	if err := scaffoldDeployAssets(dir, "github.com/acme/mallcop-deploy", "v0.10.1"); err != nil {
+		t.Fatalf("scaffoldDeployAssets: %v", err)
+	}
+	// Every actions/* ref must be @<40 hex>; a mutable @vN tag is forbidden.
+	shaPin := regexp.MustCompile(`uses: actions/[^@\s]+@[0-9a-f]{40}\b`)
+	mutableTag := regexp.MustCompile(`uses: actions/[^@\s]+@v[0-9]`)
+	for _, wf := range []string{"scan.yml", "mallcop-investigate.yml"} {
+		b, err := os.ReadFile(filepath.Join(dir, ".github", "workflows", wf))
+		if err != nil {
+			t.Fatalf("reading %s: %v", wf, err)
+		}
+		w := string(b)
+		if m := mutableTag.FindString(w); m != "" {
+			t.Errorf("%s pins an action by a mutable tag %q — must be a commit SHA", wf, m)
+		}
+		if !shaPin.MatchString(w) {
+			t.Errorf("%s has no SHA-pinned actions/* ref:\n%s", wf, w)
+		}
+		// No bare actions/* @-ref may escape the SHA form.
+		for _, line := range strings.Split(w, "\n") {
+			if strings.Contains(line, "uses: actions/") && !shaPin.MatchString(line) {
+				t.Errorf("%s: unpinned action ref: %q", wf, strings.TrimSpace(line))
+			}
+		}
 	}
 }
