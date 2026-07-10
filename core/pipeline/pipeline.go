@@ -37,6 +37,7 @@ package pipeline
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sync"
 	"time"
@@ -46,6 +47,7 @@ import (
 	"github.com/mallcop-app/mallcop/core/detect"
 	"github.com/mallcop-app/mallcop/core/store"
 	"github.com/mallcop-app/mallcop/pkg/baseline"
+	"github.com/mallcop-app/mallcop/pkg/event"
 	"github.com/mallcop-app/mallcop/pkg/finding"
 	"github.com/mallcop-app/mallcop/pkg/resolution"
 )
@@ -172,20 +174,58 @@ func Run(ctx context.Context, cfg Config) (Summary, error) {
 		return Summary{}, fmt.Errorf("pipeline: connect: %w", err)
 	}
 
+	// (1a) DERIVE THE BASELINE FROM PRIOR HISTORY — the idempotency keystone.
+	// Read the store's ALREADY-committed events (everything earlier scans saw)
+	// BEFORE appending THIS scan's batch below, then derive the baseline the
+	// baseline-dependent detectors gate on. The ordering is load-bearing: an actor
+	// or pattern first seen in THIS scan must NOT already be in the baseline (it is
+	// investigated exactly once — now), so the prior-events read MUST precede the
+	// KindEvents append. An explicit Config.Baseline (the eval/academy pre-built
+	// corpus, or a --baseline file) ALWAYS wins — the derived baseline is used only
+	// when none was supplied, so the explicit-override path is unchanged. On the
+	// first scan the store holds no prior events → an empty baseline → every actor
+	// fires (correct). This is the fix for the steady-state re-investigation cost
+	// bug: without it cfg.Baseline was nil, detect saw an EMPTY baseline, and
+	// new-actor re-flagged (and the cascade re-charged inference for) every actor on
+	// every scan.
+	bl := cfg.Baseline
+	derived := false
+	if bl == nil {
+		priorEvents, perr := loadPriorEvents(cfg.Store)
+		if perr != nil {
+			return Summary{}, fmt.Errorf("pipeline: load prior events for baseline: %w", perr)
+		}
+		bl = baseline.Build(priorEvents)
+		derived = true
+	}
+
 	// Append every pulled event to the durable store so the scan's input corpus is
-	// itself reconstructable from the git log (the store is the one brain).
+	// itself reconstructable from the git log (the store is the one brain). This
+	// runs AFTER the prior-events read above so this scan's events never baseline
+	// themselves.
 	for i := range events {
 		if _, err := cfg.Store.Append(store.KindEvents, events[i]); err != nil {
 			return Summary{}, fmt.Errorf("pipeline: store event %s: %w", events[i].ID, err)
 		}
 	}
 
-	// (2) DETECT — deterministic, offline.
-	bl := cfg.Baseline
-	if bl == nil {
-		bl = &baseline.Baseline{}
-	}
+	// (2) DETECT — deterministic, offline. Gated on the baseline derived from prior
+	// history (or the explicit override), so a KNOWN actor/pattern is not re-detected
+	// on a steady-state re-scan, while a genuinely new actor/pattern still fires once.
 	findings := detect.Detect(events, bl)
+
+	// Persist the DERIVED baseline as a KindBaseline snapshot: it is otherwise
+	// ephemeral (built in-memory each scan), so recording it makes it observable in
+	// the git log, portable (a fresh clone reconstructs it), and loadable by the
+	// investigate path so check-baseline can see the same baseline the scan gated on.
+	// Only the derived baseline is persisted — an explicit Config.Baseline is already
+	// a durable file, and re-appending it would only add noise to the eval/academy
+	// path. Append (not overwrite): KindBaseline is the append-only history stream.
+	if derived {
+		if _, err := cfg.Store.Append(store.KindBaseline, bl); err != nil {
+			return Summary{}, fmt.Errorf("pipeline: store baseline snapshot: %w", err)
+		}
+	}
 
 	// OPERATOR FEEDBACK: replay the directives stream and DROP any finding an
 	// operator has suppressed (via `mallcop feedback <id> dismiss`). This is the
@@ -322,6 +362,32 @@ func resolveAll(ctx context.Context, cfg Config, findings []finding.Finding) ([]
 	wg.Wait()
 
 	return results, nil
+}
+
+// loadPriorEvents replays the store's committed KindEvents stream (everything
+// earlier scans durably recorded at HEAD) and unmarshals it to []event.Event —
+// the corpus baseline.Build derives the derived baseline from. A stream with no
+// records (a first scan, or a fresh store) is not an error: it yields nil, which
+// Build turns into an empty baseline (every actor fires — correct for scan one).
+// A malformed record is a hard error: a corrupt event history must not silently
+// degrade the baseline into re-investigating everything.
+func loadPriorEvents(st *store.Store) ([]event.Event, error) {
+	raws, err := st.Load(store.KindEvents)
+	if err != nil {
+		return nil, err
+	}
+	if len(raws) == 0 {
+		return nil, nil
+	}
+	out := make([]event.Event, 0, len(raws))
+	for i, raw := range raws {
+		var ev event.Event
+		if err := json.Unmarshal(raw, &ev); err != nil {
+			return nil, fmt.Errorf("decode prior event %d: %w", i, err)
+		}
+		out = append(out, ev)
+	}
+	return out, nil
 }
 
 // toResolutionRecord maps the cascade's internal agent.Resolution onto the

@@ -15,6 +15,17 @@ type Baseline struct {
 	// Used by detector-new-actor.
 	KnownActors []string `json:"known_actors,omitempty"`
 
+	// KnownCreatedEntities is the set of principal identities (display_name /
+	// principal_id / member) already OBSERVED being created via an entity-creation
+	// event during the baseline window. detector-new-actor's created-entity gate
+	// (createdEntityEvaluate) keys on THIS set — NOT KnownActors — so a genuinely
+	// new created principal whose display_name collides with an existing known ACTOR
+	// name still fires the first time it is created, while a repeat scan of the same
+	// creation is gated. Kept distinct from KnownActors precisely so "this name is a
+	// known actor" and "this created-principal entity was already seen" cannot be
+	// conflated (the fix for the created-principal name-collision false negative).
+	KnownCreatedEntities []string `json:"known_created_entities,omitempty"`
+
 	// FrequencyTables maps "source:event_type" → baseline event count.
 	// Used by detector-volume-anomaly.
 	FrequencyTables map[string]int `json:"frequency_tables,omitempty"`
@@ -109,6 +120,20 @@ func (b *Baseline) KnownGeo(actor, geo string) bool {
 func (b *Baseline) IsKnownActor(actor string) bool {
 	for _, a := range b.KnownActors {
 		if a == actor {
+			return true
+		}
+	}
+	return false
+}
+
+// IsKnownCreatedEntity returns true when the identity was already observed being
+// CREATED (via an entity-creation event) during the baseline window. This is the
+// gate detector-new-actor's created-entity check uses so a repeat scan of the same
+// principal creation is suppressed while a brand-new created principal — even one
+// whose name collides with a known actor — still fires the first time.
+func (b *Baseline) IsKnownCreatedEntity(name string) bool {
+	for _, c := range b.KnownCreatedEntities {
+		if c == name {
 			return true
 		}
 	}
@@ -225,6 +250,7 @@ func (b *Baseline) Clone() *Baseline {
 	}
 
 	out.KnownActors = cloneStrings(b.KnownActors)
+	out.KnownCreatedEntities = cloneStrings(b.KnownCreatedEntities)
 
 	if b.FrequencyTables != nil {
 		out.FrequencyTables = make(map[string]int, len(b.FrequencyTables))

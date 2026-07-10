@@ -10,6 +10,7 @@ import (
 	"github.com/mallcop-app/mallcop/core/config"
 	"github.com/mallcop-app/mallcop/core/inference"
 	"github.com/mallcop-app/mallcop/core/investigate"
+	"github.com/mallcop-app/mallcop/core/store"
 	"github.com/mallcop-app/mallcop/pkg/baseline"
 )
 
@@ -116,6 +117,19 @@ func runInvestigate(args []string) error {
 		}
 	}
 
+	// When no explicit baseline is supplied, fall back to the baseline the SCAN
+	// derived and persisted (KindBaseline). This hands check_baseline the SAME
+	// actor/role/frequency context the scan gated on, so the analyst reasons over
+	// what the scan actually saw instead of an empty baseline. An unscanned/eval
+	// store has no persisted baseline → nil (check_baseline degrades to "unknown
+	// entity", exactly as before this fallback existed).
+	if bl == nil {
+		bl, err = loadPersistedBaseline(st)
+		if err != nil {
+			return fmt.Errorf("investigate: %w", err)
+		}
+	}
+
 	opts := investigate.Options{
 		Client:   client,
 		Model:    model,
@@ -164,4 +178,25 @@ func runInvestigate(args []string) error {
 	}
 	fmt.Println(res.Answer)
 	return nil
+}
+
+// loadPersistedBaseline returns the MOST RECENT baseline the scan pipeline
+// persisted to the store's KindBaseline stream, or nil when the stream is empty
+// (a store never scanned in derive mode — e.g. a fresh or eval store). KindBaseline
+// is append-only history, so the LAST record is the current baseline. A nil result
+// is not an error: check_baseline treats it as "no baseline data", exactly as an
+// absent --baseline file did before this fallback existed.
+func loadPersistedBaseline(st *store.Store) (*baseline.Baseline, error) {
+	raws, err := st.Load(store.KindBaseline)
+	if err != nil {
+		return nil, fmt.Errorf("load persisted baseline: %w", err)
+	}
+	if len(raws) == 0 {
+		return nil, nil
+	}
+	var b baseline.Baseline
+	if err := json.Unmarshal(raws[len(raws)-1], &b); err != nil {
+		return nil, fmt.Errorf("decode persisted baseline: %w", err)
+	}
+	return &b, nil
 }
