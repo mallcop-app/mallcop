@@ -135,6 +135,44 @@ func TestBuild_EntityCreationBaselinesCreatedPrincipal(t *testing.T) {
 	if !b.IsKnownActor("deploy-svc-new") {
 		t.Errorf("created principal deploy-svc-new not baselined; KnownActors=%v", b.KnownActors)
 	}
+	// The created principal also enters KnownCreatedEntities (the created-entity gate)
+	// so a repeat scan of the same creation is suppressed.
+	if !b.IsKnownCreatedEntity("deploy-svc-new") {
+		t.Errorf("created principal deploy-svc-new not in KnownCreatedEntities; got %v", b.KnownCreatedEntities)
+	}
+}
+
+// TestBuild_CreatedEntityDistinctFromKnownActor proves KnownCreatedEntities and
+// KnownActors are SEPARATE (the fix for the created-principal name-collision false
+// negative). A plain actor that was never CREATED must NOT be a known created
+// entity — otherwise creating a backdoor principal named after an existing actor
+// would be silently gated on first sight.
+func TestBuild_CreatedEntityDistinctFromKnownActor(t *testing.T) {
+	utc := time.UTC
+	events := []event.Event{
+		// realuser is only ever an ACTOR — never created.
+		ev("e1", "github", "api_request", "realuser", time.Date(2026, 6, 18, 9, 0, 0, 0, utc), map[string]any{"n": 1}),
+		// admin CREATES a distinct principal "backdoor".
+		ev("e2", "azure", "service_principal_created", "admin", time.Date(2026, 6, 18, 9, 5, 0, 0, utc),
+			map[string]any{"metadata": map[string]any{"display_name": "backdoor"}}),
+	}
+	b := Build(events)
+
+	// realuser is a known actor but NOT a known created entity.
+	if !b.IsKnownActor("realuser") {
+		t.Errorf("realuser should be a known actor")
+	}
+	if b.IsKnownCreatedEntity("realuser") {
+		t.Errorf("realuser was never CREATED — must not be a known created entity (name-collision gate would suppress a real backdoor)")
+	}
+	// backdoor is both a known created entity (gate for repeat creations) AND a known
+	// actor (so its later activity does not churn new-actor).
+	if !b.IsKnownCreatedEntity("backdoor") {
+		t.Errorf("backdoor creation not recorded in KnownCreatedEntities; got %v", b.KnownCreatedEntities)
+	}
+	if !b.IsKnownActor("backdoor") {
+		t.Errorf("created principal backdoor should also be a known actor (actor-novelty gate); KnownActors=%v", b.KnownActors)
+	}
 }
 
 // TestBuild_EmptyCorpus proves an empty event set yields an empty (all-unknown)

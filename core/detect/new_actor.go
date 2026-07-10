@@ -48,15 +48,22 @@ func (newActorDetector) Detect(events []event.Event, bl *baseline.Baseline) []fi
 
 // createdEntityEvaluate emits a new-actor finding for the principal NAMED in an
 // entity-creation event's metadata (display_name / principal_id) when that
-// principal is not in the baseline — fired with Actor = the created entity. Gated
-// to entity-creation event types so it never fires on ordinary activity.
+// principal creation was not already observed in the baseline — fired with
+// Actor = the created entity. Gated to entity-creation event types so it never
+// fires on ordinary activity.
+//
+// SECURITY: the "already seen" gate keys on IsKnownCreatedEntity — whether THIS
+// specific principal creation was previously observed — NOT IsKnownActor. Keying
+// on actor-known-ness (the prior bug) let an attacker evade the finding on FIRST
+// sight simply by naming a fresh backdoor principal after any existing known
+// actor: the creation is a genuine new entity even when the NAME collides.
 func createdEntityEvaluate(ev event.Event, bl *baseline.Baseline, emitted map[string]bool) *finding.Finding {
 	if !entityCreationEventTypes[ev.Type] {
 		return nil
 	}
 	meta := payloadMeta(ev.Payload)
 	created := metaStr(meta, "display_name", "principal_id", "member", "new_principal")
-	if created == "" || bl.IsKnownActor(created) || emitted[created] {
+	if created == "" || bl.IsKnownCreatedEntity(created) || emitted[created] {
 		return nil
 	}
 	emitted[created] = true
