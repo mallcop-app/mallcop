@@ -366,6 +366,52 @@ func TestPipeline_RoleOnNonElevationEventDoesNotSuppressGrant(t *testing.T) {
 	}
 }
 
+// TestPipeline_WhitespaceRoleDoesNotPoisonCleanGrant — HOLE 1 variant (roleKey
+// byte-fidelity). priv-escalation keys a role by lower-casing the RAW metadata
+// value with NO whitespace trim; Build's buildPrivRoleKey must match byte-for-byte.
+// If Build trims, a benign whitespace-padded grant (" admin ") baselines as "admin"
+// and then SUPPRESSES a later clean-role attack grant ("admin") — a false negative
+// in the highest-severity detector. Post-fix Build keys " admin " untrimmed, so the
+// clean-role grant is a distinct key the detector still fires on.
+func TestPipeline_WhitespaceRoleDoesNotPoisonCleanGrant(t *testing.T) {
+	ts := time.Date(2026, 6, 18, 14, 0, 0, 0, time.UTC)
+
+	// Scan 1: admin-user grants a whitespace-padded "admin" role — a benign, already
+	// reviewed change. It fires and admin-user + its role key enter the baseline.
+	padded := []event.Event{
+		benignEvent("p1", "github", "role_assignment", "admin-user", ts, map[string]any{
+			"role": " admin ", "action": "add_role_assignment", "target_user": "contractor",
+		}),
+	}
+	// Scan 2: admin-user grants a CLEAN "admin" role to a fresh target — a real
+	// escalation that MUST reach the human. If Build trimmed the scan-1 key, this is
+	// silently gated.
+	clean := []event.Event{
+		benignEvent("c1", "github", "role_assignment", "admin-user", ts, map[string]any{
+			"role": "admin", "action": "add_role_assignment", "target_user": "attacker",
+		}),
+	}
+	pPadded := writeEventsFile(t, padded)
+	pClean := writeEventsFile(t, clean)
+	st := newGitStore(t)
+
+	if _, err := pipeline.Run(context.Background(), baseCfg(t, st, pPadded)); err != nil {
+		t.Fatalf("scan 1: %v", err)
+	}
+	sum2, err := pipeline.Run(context.Background(), baseCfg(t, st, pClean))
+	if err != nil {
+		t.Fatalf("scan 2: %v", err)
+	}
+	if sum2.FindingsDetected != 1 {
+		t.Fatalf("scan 2 FindingsDetected = %d, want 1 — a whitespace-padded prior grant poisoned the baseline (buildPrivRoleKey trimmed) and suppressed the clean-role grant (false negative)", sum2.FindingsDetected)
+	}
+	got := loadFindings(t, st)
+	last := got[len(got)-1]
+	if last.Type != "priv-escalation" || last.Actor != "admin-user" {
+		t.Fatalf("scan 2 finding = {actor=%q type=%q}, want {admin-user priv-escalation}", last.Actor, last.Type)
+	}
+}
+
 // TestPipeline_CreatedPrincipalNameCollisionStillFires — HOLE 2 (created-principal
 // name collision). Creating a brand-new principal whose display_name COLLIDES with
 // an existing known ACTOR must still fire the "new principal created" finding on

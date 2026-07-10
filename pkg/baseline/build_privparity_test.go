@@ -112,6 +112,15 @@ func TestBuild_ActorRoles_MirrorsPrivEscalationFiring(t *testing.T) {
 			ev:       parityEvent("a10", "member_added", "a10", map[string]any{"role": "Admin"}),
 			wantFire: true, wantRole: "admin",
 		},
+		{
+			// The detector's roleKey lower-cases the RAW value with NO trim, so Build
+			// must baseline " admin " untrimmed. If buildPrivRoleKey trimmed, Build
+			// would key "admin" here and a later clean-role grant would be suppressed
+			// (false negative). wantRole carries the surrounding spaces deliberately.
+			name:     "whitespace-padded admin role → fires and is baselined UNTRIMMED (byte-faithful roleKey)",
+			ev:       parityEvent("a11", "role_assignment", "a11", map[string]any{"role": " admin ", "action": "add_role_assignment", "target_user": "t"}),
+			wantFire: true, wantRole: " admin ",
+		},
 	}
 
 	battery := make([]event.Event, 0, len(cases))

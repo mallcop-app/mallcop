@@ -333,14 +333,19 @@ func buildContainsElevatedKeyword(val string) bool {
 }
 
 // buildPrivRoleKey mirrors priv_escalation.go's roleKey for the EXPLICIT-field
-// case: lower-cased role_name, else lower-cased permission_level. Build calls it
-// only when one of those fields is present, so the event-type fallback (never
-// baselined — field-less escalations fail safe) is intentionally not reached here.
+// case: lower-cased role_name, else lower-cased permission_level. It must be
+// BYTE-FAITHFUL to the detector's roleKey, which lower-cases the raw metadata
+// value with NO whitespace trim. Do NOT TrimSpace here: trimming would key
+// " admin " as "admin" while the detector keys it " admin ", so a benign
+// whitespace-padded grant would baseline "admin" and then SUPPRESS a later
+// clean-role attack grant — a false negative. Build calls it only when a role/
+// permission field is present, so the event-type fallback (never baselined —
+// field-less escalations fail safe) is intentionally not reached here.
 func buildPrivRoleKey(roleName, permissionLevel string) string {
 	if roleName != "" {
-		return strings.ToLower(strings.TrimSpace(roleName))
+		return strings.ToLower(roleName)
 	}
-	return strings.ToLower(strings.TrimSpace(permissionLevel))
+	return strings.ToLower(permissionLevel)
 }
 
 // buildTopAction reads the TOP-LEVEL "action" string from an event payload,
