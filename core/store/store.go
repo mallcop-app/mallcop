@@ -35,7 +35,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"math"
 	"math/rand"
 	"os"
 	"os/exec"
@@ -48,6 +47,12 @@ import (
 // Kind identifies one of the six append-only streams. The string value is also
 // the on-disk basename (Kind+".jsonl").
 type Kind string
+
+// maxStreamBytes is the sanity ceiling for a single stream blob and for one
+// appended chunk (1 TiB). Bounding both operands of the pre-allocation size
+// arithmetic below a fixed constant makes the sum provably overflow-free; a
+// stream anywhere near this size is corruption, not data.
+const maxStreamBytes = 1 << 40
 
 const (
 	// KindEvents is the normalized security-event stream.
@@ -368,13 +373,15 @@ func (s *Store) commitAppend(kind Kind, chunk []byte, count int) (string, error)
 		}
 
 		// (2) Append our chunk (already newline-terminated, one-or-more
-		// lines) in memory and write the new blob. Bound the capacity
-		// arithmetic explicitly: prev comes from a repo blob a hostile clone
-		// could have made pathological, and an overflowed make() capacity
-		// must fail loud here, not panic in the allocator.
-		if len(prev) > math.MaxInt-len(chunk) {
-			return "", fmt.Errorf("store: %s stream too large to append to (%d + %d bytes overflows)",
-				kind, len(prev), len(chunk))
+		// lines) in memory and write the new blob. Bound BOTH operands
+		// against a fixed ceiling before the capacity arithmetic: prev comes
+		// from a repo blob a hostile clone could have made pathological, and
+		// an absurd length must fail loud here — not overflow the make()
+		// capacity or panic in the allocator. A stream anywhere near a TiB
+		// is corruption, not data (the whole file is re-hashed per commit).
+		if len(prev) > maxStreamBytes || len(chunk) > maxStreamBytes {
+			return "", fmt.Errorf("store: %s stream too large to append to (%d + %d bytes, ceiling %d)",
+				kind, len(prev), len(chunk), maxStreamBytes)
 		}
 		next := make([]byte, 0, len(prev)+len(chunk))
 		next = append(next, prev...)
