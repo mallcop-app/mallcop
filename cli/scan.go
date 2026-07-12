@@ -49,10 +49,14 @@ const (
 
 // ScanSummary holds the results of a completed scan cycle.
 type ScanSummary struct {
-	EventsScanned    int `json:"events_scanned"`
-	FindingsDetected int `json:"findings_detected"`
-	Escalated        int `json:"escalated"`
-	Resolved         int `json:"resolved"`
+	EventsScanned int `json:"events_scanned"`
+	// DuplicatesSkipped mirrors pipeline.Summary.DuplicatesSkipped: pulled
+	// events dropped because their ID was already committed by an earlier scan,
+	// or repeated within this scan's own pull. Omitted when zero.
+	DuplicatesSkipped int `json:"duplicates_skipped,omitempty"`
+	FindingsDetected  int `json:"findings_detected"`
+	Escalated         int `json:"escalated"`
+	Resolved          int `json:"resolved"`
 }
 
 // scanOutput collects structured Findings and Resolutions parsed from a JSONL
@@ -315,10 +319,11 @@ func runScan(args []string) error {
 	}
 
 	out := ScanSummary{
-		EventsScanned:    sum.EventsScanned,
-		FindingsDetected: sum.FindingsDetected,
-		Escalated:        sum.Escalated,
-		Resolved:         sum.Resolved,
+		EventsScanned:     sum.EventsScanned,
+		DuplicatesSkipped: sum.DuplicatesSkipped,
+		FindingsDetected:  sum.FindingsDetected,
+		Escalated:         sum.Escalated,
+		Resolved:          sum.Resolved,
 	}
 	if *asJSON {
 		if err := printJSON(out); err != nil {
@@ -584,6 +589,9 @@ func buildSummary(out scanOutput) ScanSummary {
 func printSummary(s ScanSummary) {
 	fmt.Printf("Scan complete\n")
 	fmt.Printf("  Events scanned:     %d\n", s.EventsScanned)
+	if s.DuplicatesSkipped > 0 {
+		fmt.Printf("  Duplicates skipped: %d\n", s.DuplicatesSkipped)
+	}
 	fmt.Printf("  Findings detected:  %d\n", s.FindingsDetected)
 	fmt.Printf("  Escalated:          %d\n", s.Escalated)
 	fmt.Printf("  Resolved:           %d\n", s.Resolved)
