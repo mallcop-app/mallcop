@@ -479,10 +479,14 @@ func (s *Store) commitAppend(kind Kind, chunk []byte, count int) (string, error)
 // — and a later in-scan write to it would be silently REVERTED by the reset
 // below (observed live: aws-3dl's committed cursor froze at its first value
 // forever, every scan re-pulling the full window). syncWorkTree therefore
-// snapshots every regular file under .mallcop/ before the reset and rewrites
-// it after: in-flight sidecar state always survives reconciliation, tracked
-// or not. A failed restore is a hard error — silently losing a cursor means
-// silently re-pulling (or worse, skipping) a window on the next scan.
+// snapshots every regular file under .mallcop/cursors/ before the reset and
+// rewrites it after: in-flight cursor state always survives reconciliation,
+// tracked or not. A failed restore is a hard error — silently losing a
+// cursor means silently re-pulling (or worse, skipping) a window on the next
+// scan. NOTE: unlike the stream reconcile above, the sidecar restore is
+// last-write-wins and NOT monotonic across concurrent same-store processes —
+// acceptable because cursors are only ever written by the single scan
+// process that owns the store in every supported deployment.
 //
 // Contention on the real index lock (a second writer's sync running at the
 // same instant) is expected only under true multi-process/goroutine
@@ -509,16 +513,20 @@ func (s *Store) syncWorkTree() error {
 	return fmt.Errorf("store: sync work tree gave up after %d retries: %w", maxRetries, lastErr)
 }
 
-// sidecarDir is the CLI-owned dotdir inside the store repo whose in-flight
-// file state (connector cursors, etc.) must survive syncWorkTree's reset.
-const sidecarDir = ".mallcop"
+// sidecarCursorsDir is the CLI-owned directory inside the store repo whose
+// in-flight file state (connector cursors) must survive syncWorkTree's
+// reset. Deliberately NARROW — .mallcop/cursors/, not all of .mallcop/ — so
+// a hostile or misconfigured store clone cannot make the per-commit snapshot
+// read arbitrarily large unrelated content (e.g. a wasm cache) into memory.
+const sidecarCursorsDir = ".mallcop/cursors"
 
-// snapshotSidecar reads every regular file under <repo>/.mallcop into memory.
-// A missing .mallcop/ is the common case (nothing to preserve) and returns an
-// empty map. The directory is small by construction (a handful of sub-KB
-// cursor files), so reading it wholesale per sync is trivially cheap.
+// snapshotSidecar reads every regular file under <repo>/.mallcop/cursors
+// into memory. A missing directory is the common case (nothing to preserve)
+// and returns an empty map. The directory is small by construction (a
+// handful of sub-KB cursor files), so reading it wholesale per sync is
+// trivially cheap.
 func (s *Store) snapshotSidecar() (map[string][]byte, error) {
-	root := filepath.Join(s.repoPath, sidecarDir)
+	root := filepath.Join(s.repoPath, filepath.FromSlash(sidecarCursorsDir))
 	files := map[string][]byte{}
 	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
@@ -532,6 +540,11 @@ func (s *Store) snapshotSidecar() (map[string][]byte, error) {
 		}
 		b, rerr := os.ReadFile(path)
 		if rerr != nil {
+			// A cursor removed between the walk listing and this read is a
+			// skip, not a failure — there is simply nothing to preserve.
+			if os.IsNotExist(rerr) {
+				return nil
+			}
 			return rerr
 		}
 		files[path] = b
