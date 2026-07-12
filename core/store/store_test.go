@@ -647,6 +647,249 @@ func TestBootstrapRaceNoDoubleRoot(t *testing.T) {
 	}
 }
 
+// TestAppendBatchSingleCommitOrderRoundTrip proves the headline AppendBatch
+// property: N records land as EXACTLY ONE new commit (git rev-list --count
+// grows by 1, not N), the returned sha is that commit, and Load replays every
+// record back in order.
+func TestAppendBatchSingleCommitOrderRoundTrip(t *testing.T) {
+	repo := initRepo(t)
+	s, err := Open(repo)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+
+	before := revListCount(t, repo)
+
+	const n = 20
+	recs := make([]any, n)
+	for i := 0; i < n; i++ {
+		recs[i] = map[string]any{"n": i, "msg": fmt.Sprintf("batch-record-%d", i)}
+	}
+	sha, err := s.AppendBatch(KindEvents, recs)
+	if err != nil {
+		t.Fatalf("AppendBatch: %v", err)
+	}
+	if sha == "" {
+		t.Fatal("AppendBatch returned empty sha")
+	}
+
+	after := revListCount(t, repo)
+	if after-before != 1 {
+		t.Fatalf("AppendBatch of %d records grew the log by %d commits, want exactly 1", n, after-before)
+	}
+
+	head, err := exec.Command("git", "-C", repo, "rev-parse", "HEAD").Output()
+	if err != nil {
+		t.Fatalf("rev-parse HEAD: %v", err)
+	}
+	if strings.TrimSpace(string(head)) != sha {
+		t.Fatalf("AppendBatch sha %s does not match new HEAD %s", sha, strings.TrimSpace(string(head)))
+	}
+
+	// Fresh handle — reconstruct from the repo alone.
+	s2, err := Open(repo)
+	if err != nil {
+		t.Fatalf("re-Open: %v", err)
+	}
+	got, err := s2.Load(KindEvents)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(got) != n {
+		t.Fatalf("want %d records, got %d", n, len(got))
+	}
+	for i, raw := range got {
+		var r map[string]any
+		if err := json.Unmarshal(raw, &r); err != nil {
+			t.Fatalf("unmarshal record %d: %v", i, err)
+		}
+		if int(r["n"].(float64)) != i {
+			t.Fatalf("record %d out of order: %v", i, r)
+		}
+	}
+
+	// The commit message carries the batch count (n>1 format).
+	msg := gitLog(t, repo)[0]
+	if !strings.Contains(msg, "store: append events (n=20)") {
+		t.Fatalf("commit message = %q, want it to contain \"store: append events (n=20)\"", msg)
+	}
+}
+
+// TestAppendBatchEmptyIsNoop proves an empty batch is a documented no-op: it
+// returns ("", nil) and creates NO commit.
+func TestAppendBatchEmptyIsNoop(t *testing.T) {
+	repo := initRepo(t)
+	s, _ := Open(repo)
+
+	before := revListCount(t, repo)
+	sha, err := s.AppendBatch(KindEvents, nil)
+	if err != nil {
+		t.Fatalf("AppendBatch(empty): %v", err)
+	}
+	if sha != "" {
+		t.Fatalf("AppendBatch(empty) sha = %q, want empty", sha)
+	}
+	if after := revListCount(t, repo); after != before {
+		t.Fatalf("AppendBatch(empty) created a commit: %d -> %d", before, after)
+	}
+}
+
+// TestAppendBatchMarshalFailureIsAtomic proves a single unmarshalable record
+// (a channel, at index k) rejects the WHOLE batch — naming index k in the
+// error — and leaves the repo untouched: no commit, not even a partial one for
+// the records before k.
+func TestAppendBatchMarshalFailureIsAtomic(t *testing.T) {
+	repo := initRepo(t)
+	s, _ := Open(repo)
+
+	before := revListCount(t, repo)
+	const badIndex = 2
+	recs := []any{
+		map[string]any{"n": 0},
+		map[string]any{"n": 1},
+		map[string]any{"bad": make(chan int)}, // unmarshalable — index 2
+		map[string]any{"n": 3},
+	}
+	_, err := s.AppendBatch(KindEvents, recs)
+	if err == nil {
+		t.Fatal("AppendBatch with an unmarshalable record should fail")
+	}
+	if !strings.Contains(err.Error(), fmt.Sprintf("record %d", badIndex)) {
+		t.Fatalf("error %q does not name the failing index %d", err, badIndex)
+	}
+
+	if after := revListCount(t, repo); after != before {
+		t.Fatalf("failed AppendBatch created a commit: %d -> %d", before, after)
+	}
+	got, err := s.Load(KindEvents)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("failed AppendBatch left %d records committed, want 0 (all-or-nothing)", len(got))
+	}
+}
+
+// TestAppendBatchConcurrentWithAppendNoLostWrite races AppendBatch and Append
+// writers against the SAME store: every record from every writer must survive
+// exactly once, and the merged log must be linear (the CAS/rebase-retry must
+// hold for batches exactly as it does for single appends).
+func TestAppendBatchConcurrentWithAppendNoLostWrite(t *testing.T) {
+	repo := initRepo(t)
+	baseCommits := revListCount(t, repo)
+
+	const batchWriters = 6
+	const batchSize = 5
+	const singleWriters = 10
+
+	var wg sync.WaitGroup
+	errs := make([]error, batchWriters+singleWriters)
+
+	for i := 0; i < batchWriters; i++ {
+		wg.Add(1)
+		go func(n int) {
+			defer wg.Done()
+			s, err := OpenWith(repo, noopSerializer{})
+			if err != nil {
+				errs[n] = err
+				return
+			}
+			recs := make([]any, batchSize)
+			for j := 0; j < batchSize; j++ {
+				recs[j] = map[string]any{"batch": n, "j": j}
+			}
+			_, errs[n] = s.AppendBatch(KindEvents, recs)
+		}(i)
+	}
+	for i := 0; i < singleWriters; i++ {
+		wg.Add(1)
+		go func(n int) {
+			defer wg.Done()
+			s, err := OpenWith(repo, noopSerializer{})
+			if err != nil {
+				errs[batchWriters+n] = err
+				return
+			}
+			_, errs[batchWriters+n] = s.Append(KindEvents, map[string]any{"single": n})
+		}(i)
+	}
+	wg.Wait()
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("writer %d failed: %v", i, err)
+		}
+	}
+
+	s, _ := Open(repo)
+	got, err := s.Load(KindEvents)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	wantTotal := batchWriters*batchSize + singleWriters
+	if len(got) != wantTotal {
+		t.Fatalf("mixed-race lost/duplicated writes: want %d records, got %d", wantTotal, len(got))
+	}
+
+	batchSeen := map[int]map[int]int{}
+	singleSeen := map[int]int{}
+	for _, raw := range got {
+		var r map[string]any
+		if err := json.Unmarshal(raw, &r); err != nil {
+			t.Fatalf("corrupt record: %v", err)
+		}
+		if bn, ok := r["batch"]; ok {
+			n := int(bn.(float64))
+			j := int(r["j"].(float64))
+			if batchSeen[n] == nil {
+				batchSeen[n] = map[int]int{}
+			}
+			batchSeen[n][j]++
+		} else if sn, ok := r["single"]; ok {
+			singleSeen[int(sn.(float64))]++
+		}
+	}
+	for n := 0; n < batchWriters; n++ {
+		for j := 0; j < batchSize; j++ {
+			if batchSeen[n][j] != 1 {
+				t.Fatalf("batch %d record %d landed %d times, want exactly 1", n, j, batchSeen[n][j])
+			}
+		}
+	}
+	for n := 0; n < singleWriters; n++ {
+		if singleSeen[n] != 1 {
+			t.Fatalf("single writer %d landed %d times, want exactly 1", n, singleSeen[n])
+		}
+	}
+
+	// Linear history: no merge commits introduced by the retry loop.
+	mp := exec.Command("git", "log", "--merges", "--format=%H")
+	mp.Dir = repo
+	mout, _ := mp.CombinedOutput()
+	if strings.TrimSpace(string(mout)) != "" {
+		t.Fatalf("mixed-race AppendBatch/Append produced merge commits (non-linear log):\n%s", mout)
+	}
+
+	// Commit count: one per batch writer + one per single writer.
+	wantCommits := batchWriters + singleWriters
+	if got := revListCount(t, repo) - baseCommits; got != wantCommits {
+		t.Fatalf("want %d new commits (one per writer, batched or not), got %d", wantCommits, got)
+	}
+}
+
+// revListCount returns the total commit count reachable from HEAD.
+func revListCount(t *testing.T, repo string) int {
+	t.Helper()
+	out, err := exec.Command("git", "-C", repo, "rev-list", "--count", "HEAD").Output()
+	if err != nil {
+		t.Fatalf("rev-list --count: %v", err)
+	}
+	n := 0
+	if _, err := fmt.Sscanf(strings.TrimSpace(string(out)), "%d", &n); err != nil {
+		t.Fatalf("parse rev-list count %q: %v", out, err)
+	}
+	return n
+}
+
 func TestAppendRejectsUnknownKind(t *testing.T) {
 	repo := initRepo(t)
 	s, _ := Open(repo)

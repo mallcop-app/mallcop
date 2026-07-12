@@ -115,8 +115,13 @@ type Config struct {
 // Invariant: Resolved + Escalated == FindingsDetected (every finding terminates
 // in exactly one of the two dispositions — the cascade has no third outcome).
 type Summary struct {
-	// EventsScanned is the number of events the connector pulled and the detector
-	// floor evaluated.
+	// EventsScanned is the number of events the detector floor actually
+	// evaluated this scan — i.e. the connector's pull count MINUS any events
+	// dropped by the ID-based dedupe (see DuplicatesSkipped) because they were
+	// already committed by an earlier scan, or repeated within this same pull.
+	// A connector without a durable pull cursor (azure, github) can re-pull an
+	// overlapping window every scan; EventsScanned reflects only the NEW events
+	// this scan processed, not the raw pull size.
 	EventsScanned int `json:"events_scanned"`
 	// FindingsDetected is the number of findings the detector floor produced.
 	FindingsDetected int `json:"findings_detected"`
@@ -126,6 +131,12 @@ type Summary struct {
 	// Escalated is the number of findings the cascade routed to a human
 	// (ActionEscalated), whether by the pre-LLM floor or a tier verdict.
 	Escalated int `json:"escalated"`
+	// DuplicatesSkipped is the number of pulled events dropped by the dedupe:
+	// events whose ID already exists in the store's committed KindEvents
+	// stream, plus any repeat IDs within this scan's own pulled batch. Omitted
+	// from the JSON encoding when zero (the common case: a connector with a
+	// durable cursor never re-pulls).
+	DuplicatesSkipped int `json:"duplicates_skipped,omitempty"`
 	// Duration is the wall-clock time the whole Run took, for latency reporting.
 	Duration time.Duration `json:"duration_ms"`
 }
@@ -188,24 +199,61 @@ func Run(ctx context.Context, cfg Config) (Summary, error) {
 	// bug: without it cfg.Baseline was nil, detect saw an EMPTY baseline, and
 	// new-actor re-flagged (and the cascade re-charged inference for) every actor on
 	// every scan.
+	//
+	// This SAME prior-events read also feeds the DEDUPE below (a second, load-
+	// bearing reason the ordering must not move): a connector without a durable
+	// pull cursor (azure, github) can re-pull events its OWN earlier scan already
+	// committed, and without a dedupe the events stream only grows — regrowing
+	// exactly the O(N * filesize) commit-churn problem AppendBatch fixes on the
+	// write side. On the derived-baseline path (bl == nil) priorEvents is already
+	// being loaded for baseline.Build, so the dedupe ID set reuses that EXACT
+	// slice — zero extra I/O. On the explicit-Config.Baseline path priorEvents is
+	// NOT otherwise loaded (the explicit baseline needs no history), so we load it
+	// here purely to build the dedupe ID set; it is never fed to baseline.Build in
+	// that branch.
 	bl := cfg.Baseline
 	derived := false
+	var priorEvents []event.Event
 	if bl == nil {
-		priorEvents, perr := loadPriorEvents(cfg.Store)
+		var perr error
+		priorEvents, perr = loadPriorEvents(cfg.Store)
 		if perr != nil {
 			return Summary{}, fmt.Errorf("pipeline: load prior events for baseline: %w", perr)
 		}
 		bl = baseline.Build(priorEvents)
 		derived = true
+	} else {
+		var perr error
+		priorEvents, perr = loadPriorEvents(cfg.Store)
+		if perr != nil {
+			return Summary{}, fmt.Errorf("pipeline: load prior events for dedupe: %w", perr)
+		}
 	}
 
-	// Append every pulled event to the durable store so the scan's input corpus is
-	// itself reconstructable from the git log (the store is the one brain). This
-	// runs AFTER the prior-events read above so this scan's events never baseline
-	// themselves.
-	for i := range events {
-		if _, err := cfg.Store.Append(store.KindEvents, events[i]); err != nil {
-			return Summary{}, fmt.Errorf("pipeline: store event %s: %w", events[i].ID, err)
+	// DEDUPE-ON-APPEND (mallcoppro-ee3): drop every pulled event whose ID already
+	// exists in the store's committed KindEvents stream (priorEvents, read above
+	// — BEFORE this scan's batch is appended), and collapse duplicate IDs WITHIN
+	// the pulled batch itself (keep the first). An event with an EMPTY ID is
+	// NEVER dropped — an empty-string ID is not an identity, and a connector or
+	// test fixture that never assigns one must not have its events silently
+	// discarded. detect MUST see this DEDUPED slice (not the raw pull), so a
+	// re-pulled duplicate is neither re-detected nor re-appended.
+	var duplicatesSkipped int
+	events, duplicatesSkipped = dedupeEvents(events, priorEvents)
+
+	// Append every (deduped) pulled event to the durable store, in ONE commit
+	// instead of one commit per event, so the scan's input corpus is itself
+	// reconstructable from the git log (the store is the one brain) without
+	// paying a per-event commit's whole-file re-hash cost (see
+	// store.AppendBatch's doc comment). This runs AFTER the prior-events read
+	// above so this scan's events never baseline (or dedupe) themselves.
+	if len(events) > 0 {
+		batch := make([]any, len(events))
+		for i := range events {
+			batch[i] = events[i]
+		}
+		if _, err := cfg.Store.AppendBatch(store.KindEvents, batch); err != nil {
+			return Summary{}, fmt.Errorf("pipeline: store events batch: %w", err)
 		}
 	}
 
@@ -262,16 +310,22 @@ func Run(ctx context.Context, cfg Config) (Summary, error) {
 	}
 
 	summary := Summary{
-		EventsScanned:    len(events),
-		FindingsDetected: len(findings),
+		EventsScanned:     len(events),
+		FindingsDetected:  len(findings),
+		DuplicatesSkipped: duplicatesSkipped,
 	}
 
-	// Persist the findings BEFORE resolving them. The findings stream is the
-	// durable record of "what the floor flagged"; it must survive a crash during
-	// resolution. Append is the only path; the store linearizes.
-	for i := range findings {
-		if _, err := cfg.Store.Append(store.KindFindings, findings[i]); err != nil {
-			return Summary{}, fmt.Errorf("pipeline: store finding %s: %w", findings[i].ID, err)
+	// Persist the findings BEFORE resolving them, in ONE commit. The findings
+	// stream is the durable record of "what the floor flagged"; it must survive
+	// a crash during resolution. AppendBatch is the only path; the store
+	// linearizes.
+	if len(findings) > 0 {
+		batch := make([]any, len(findings))
+		for i := range findings {
+			batch[i] = findings[i]
+		}
+		if _, err := cfg.Store.AppendBatch(store.KindFindings, batch); err != nil {
+			return Summary{}, fmt.Errorf("pipeline: store findings batch: %w", err)
 		}
 	}
 
@@ -296,19 +350,23 @@ func Run(ctx context.Context, cfg Config) (Summary, error) {
 		return Summary{}, err
 	}
 
-	// (4) STORE resolutions + count. Writes happen here, in finding order, on one
-	// goroutine — deterministic on-disk ordering for a fixed input. The store
-	// would linearize concurrent writes anyway; ordering them keeps the log
-	// reproducible.
-	for _, r := range results {
-		res := toResolutionRecord(r.finding, r.resolution)
-		if _, err := cfg.Store.Append(store.KindResolutions, res); err != nil {
-			return Summary{}, fmt.Errorf("pipeline: store resolution for %s: %w", r.finding.ID, err)
-		}
+	// (4) STORE resolutions + count. Build every resolution record and tally
+	// Escalated/Resolved in the SAME deterministic finding-order loop as before,
+	// then persist the whole set as ONE commit (instead of one commit per
+	// resolution) — deterministic on-disk ordering for a fixed input is
+	// unchanged; only the number of commits it costs to get there drops.
+	resRecords := make([]any, len(results))
+	for i, r := range results {
+		resRecords[i] = toResolutionRecord(r.finding, r.resolution)
 		if r.resolution.Action == agent.ActionEscalated {
 			summary.Escalated++
 		} else {
 			summary.Resolved++
+		}
+	}
+	if len(resRecords) > 0 {
+		if _, err := cfg.Store.AppendBatch(store.KindResolutions, resRecords); err != nil {
+			return Summary{}, fmt.Errorf("pipeline: store resolutions batch: %w", err)
 		}
 	}
 
@@ -388,6 +446,41 @@ func loadPriorEvents(st *store.Store) ([]event.Event, error) {
 		out = append(out, ev)
 	}
 	return out, nil
+}
+
+// dedupeEvents drops every event in pulled whose ID already appears in prior
+// (the store's already-committed KindEvents stream, read BEFORE this scan's
+// batch is appended — see the (1a) ordering invariant in Run) and collapses
+// duplicate IDs WITHIN pulled itself, keeping the first occurrence. An event
+// with an EMPTY ID is NEVER dropped, by either rule: an empty string is not an
+// identity, so it can never be a "duplicate" of anything, and treating it as
+// one would silently discard events from a connector (or test fixture) that
+// assigns no ID. Order is preserved. Returns the deduped slice and the count
+// of events dropped (for Summary.DuplicatesSkipped).
+func dedupeEvents(pulled, prior []event.Event) ([]event.Event, int) {
+	priorIDs := make(map[string]bool, len(prior))
+	for _, ev := range prior {
+		if ev.ID != "" {
+			priorIDs[ev.ID] = true
+		}
+	}
+
+	seen := make(map[string]bool, len(pulled))
+	out := make([]event.Event, 0, len(pulled))
+	skipped := 0
+	for _, ev := range pulled {
+		if ev.ID == "" {
+			out = append(out, ev)
+			continue
+		}
+		if priorIDs[ev.ID] || seen[ev.ID] {
+			skipped++
+			continue
+		}
+		seen[ev.ID] = true
+		out = append(out, ev)
+	}
+	return out, skipped
 }
 
 // toResolutionRecord maps the cascade's internal agent.Resolution onto the

@@ -48,6 +48,12 @@ import (
 // the on-disk basename (Kind+".jsonl").
 type Kind string
 
+// maxStreamBytes is the sanity ceiling for a single stream blob and for one
+// appended chunk (1 TiB). Bounding both operands of the pre-allocation size
+// arithmetic below a fixed constant makes the sum provably overflow-free; a
+// stream anywhere near this size is corruption, not data.
+const maxStreamBytes = 1 << 40
+
 const (
 	// KindEvents is the normalized security-event stream.
 	KindEvents Kind = "events"
@@ -200,14 +206,9 @@ func (s *Store) Append(kind Kind, record any) (sha string, err error) {
 	if !kind.valid() {
 		return "", fmt.Errorf("store: unknown stream kind %q", kind)
 	}
-	line, err := json.Marshal(record)
+	line, err := marshalLine(kind, record)
 	if err != nil {
-		return "", fmt.Errorf("store: marshal %s record: %w", kind, err)
-	}
-	if bytes.ContainsRune(line, '\n') {
-		// json.Marshal never emits a bare newline, but guard the JSONL
-		// invariant explicitly: one record == one line.
-		return "", fmt.Errorf("store: marshaled %s record contains a newline", kind)
+		return "", err
 	}
 
 	release, err := s.serializer.Lock(s.repoPath)
@@ -216,7 +217,87 @@ func (s *Store) Append(kind Kind, record any) (sha string, err error) {
 	}
 	defer release()
 
-	return s.commitAppend(kind, line)
+	chunk := append(append([]byte(nil), line...), '\n')
+	return s.commitAppend(kind, chunk, 1)
+}
+
+// AppendBatch serializes and commits MULTIPLE records to kind's stream as a
+// SINGLE commit, instead of one commit per record.
+//
+// WHY THIS EXISTS: commitAppend's plumbing (see its doc comment) re-reads and
+// re-hashes the ENTIRE stream blob on every call — that is the price of the
+// work-tree-free CAS design, and it is fine at the granularity of "one commit
+// per Append call". It stops being fine when a caller drives thousands of
+// Appends back to back (a scan ingesting a large connector pull): the cost of
+// N single-record commits against a stream of size F is O(N * F), because
+// each commit re-hashes the (growing) whole file. In production this produced
+// thousands of commits per scan, each writing a multi-MB blob into the object
+// store — tens of gigabytes of loose-object churn that exhausted CI runner
+// disk (mallcoppro-ee3). AppendBatch collapses the whole batch into ONE
+// commitAppend call — one blob re-hash, one commit — so the cost for a
+// same-size batch drops to O(F) regardless of N.
+//
+// ATOMICITY CONTRACT: AppendBatch is all-or-nothing. Every record is
+// marshaled and JSONL-validated (one record, no bare newline) BEFORE the
+// Serializer lock is acquired and before anything is written to the object
+// store. If any record at index k fails to marshal or contains a newline, the
+// WHOLE batch is rejected with an error naming index k, and NOTHING is
+// committed — not even the records before k. Once validation passes, the
+// batch is committed as a single atomic commitAppend call: there is no
+// intermediate state where only part of the batch has landed.
+//
+// EMPTY BATCH: len(records) == 0 is a documented no-op. It returns ("", nil)
+// without taking the Serializer lock or creating a commit — there is nothing
+// to append, so there is nothing to charge a commit for.
+//
+// Append (the per-record path) remains correct and is the right choice for
+// low-volume streams where the batching overhead isn't worth it (e.g.
+// KindConversation, KindDirectives, or any single-record write) — it is not
+// deprecated by this addition.
+func (s *Store) AppendBatch(kind Kind, records []any) (sha string, err error) {
+	if !kind.valid() {
+		return "", fmt.Errorf("store: unknown stream kind %q", kind)
+	}
+	if len(records) == 0 {
+		return "", nil
+	}
+
+	// Marshal + validate EVERY record up front, before the lock and before any
+	// write — a bad record anywhere in the batch must reject the whole batch,
+	// leaving the store untouched.
+	var chunk bytes.Buffer
+	for i, rec := range records {
+		line, err := marshalLine(kind, rec)
+		if err != nil {
+			return "", fmt.Errorf("store: batch %s record %d: %w", kind, i, err)
+		}
+		chunk.Write(line)
+		chunk.WriteByte('\n')
+	}
+
+	release, err := s.serializer.Lock(s.repoPath)
+	if err != nil {
+		return "", fmt.Errorf("store: acquire write lock: %w", err)
+	}
+	defer release()
+
+	return s.commitAppend(kind, chunk.Bytes(), len(records))
+}
+
+// marshalLine serializes record to a single JSONL line (no trailing newline)
+// and enforces the one-record-one-line invariant Append/AppendBatch both
+// depend on: json.Marshal never emits a bare newline itself, but this guards
+// the invariant explicitly so a future encoder change can't silently corrupt
+// the stream format.
+func marshalLine(kind Kind, record any) ([]byte, error) {
+	line, err := json.Marshal(record)
+	if err != nil {
+		return nil, fmt.Errorf("store: marshal %s record: %w", kind, err)
+	}
+	if bytes.ContainsRune(line, '\n') {
+		return nil, fmt.Errorf("store: marshaled %s record contains a newline", kind)
+	}
+	return line, nil
 }
 
 // commitAppend performs the append-and-commit critical section: REBASE-RETRY on
@@ -234,8 +315,8 @@ func (s *Store) Append(kind Kind, record any) (sha string, err error) {
 //
 //  1. Read the current HEAD (oldHead) and the committed content of the stream
 //     blob at HEAD.
-//  2. Append our line to that content in memory and write a NEW BLOB
-//     (git hash-object -w).
+//  2. Append our chunk (one or more already newline-terminated JSONL lines)
+//     to that content in memory and write a NEW BLOB (git hash-object -w).
 //  3. Build a NEW TREE from HEAD's tree with our blob swapped in
 //     (read-tree + update-index in a TEMPORARY, per-attempt index file — never
 //     the shared index — then write-tree).
@@ -256,7 +337,16 @@ func (s *Store) Append(kind Kind, record any) (sha string, err error) {
 // winner reconciles the real index/work tree to HEAD (syncWorkTree) so the
 // repo never sits, even transiently, in the drifted state where an ordinary
 // `git status` sees every stream file as staged-deleted (mallcoppro-4fe).
-func (s *Store) commitAppend(kind Kind, line []byte) (string, error) {
+//
+// chunk is one-or-more COMPLETE, newline-terminated JSONL lines (the caller —
+// Append for one record, AppendBatch for many — has already validated and
+// terminated every line); commitAppend never parses or re-splits it, it only
+// concatenates: next = prev + chunk. count is the number of records chunk
+// carries, purely for the commit message: exactly 1 keeps the historical
+// "store: append <kind>" format (existing greps/tests depend on this exact
+// string), anything else appends "(n=<count>)" so `git log` shows the batch
+// size without breaking the single-record format.
+func (s *Store) commitAppend(kind Kind, chunk []byte, count int) (string, error) {
 	const maxRetries = 128
 	var lastErr error
 	for attempt := 0; attempt < maxRetries; attempt++ {
@@ -282,11 +372,20 @@ func (s *Store) commitAppend(kind Kind, line []byte) (string, error) {
 			}
 		}
 
-		// (2) Append our line in memory and write the new blob.
-		next := make([]byte, 0, len(prev)+len(line)+1)
+		// (2) Append our chunk (already newline-terminated, one-or-more
+		// lines) in memory and write the new blob. Bound BOTH operands
+		// against a fixed ceiling before the capacity arithmetic: prev comes
+		// from a repo blob a hostile clone could have made pathological, and
+		// an absurd length must fail loud here — not overflow the make()
+		// capacity or panic in the allocator. A stream anywhere near a TiB
+		// is corruption, not data (the whole file is re-hashed per commit).
+		if len(prev) > maxStreamBytes || len(chunk) > maxStreamBytes {
+			return "", fmt.Errorf("store: %s stream too large to append to (%d + %d bytes, ceiling %d)",
+				kind, len(prev), len(chunk), maxStreamBytes)
+		}
+		next := make([]byte, 0, len(prev)+len(chunk))
 		next = append(next, prev...)
-		next = append(next, line...)
-		next = append(next, '\n')
+		next = append(next, chunk...)
 		blobSHA, err := s.hashObject(next)
 		if err != nil {
 			lastErr = err
@@ -303,7 +402,15 @@ func (s *Store) commitAppend(kind Kind, line []byte) (string, error) {
 		}
 
 		// (4) Commit the tree on top of oldHead (no parent on bootstrap).
-		commitSHA, err := s.commitTree(treeSHA, oldHead, fmt.Sprintf("store: append %s", kind))
+		// count==1 keeps the historical "store: append <kind>" message
+		// exactly as before (existing greps/tests depend on this literal
+		// string); a batch of more than one record appends "(n=<count>)" so
+		// `git log` shows the batch size.
+		message := fmt.Sprintf("store: append %s", kind)
+		if count != 1 {
+			message = fmt.Sprintf("store: append %s (n=%d)", kind, count)
+		}
+		commitSHA, err := s.commitTree(treeSHA, oldHead, message)
 		if err != nil {
 			lastErr = err
 			continue
