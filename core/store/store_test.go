@@ -914,3 +914,79 @@ func TestKindsCoverage(t *testing.T) {
 		}
 	}
 }
+
+// TestSyncWorkTreePreservesDirtySidecarState reproduces the live cursor-freeze
+// defect: a deployment COMMITS .mallcop/cursors/<id> into the store branch
+// (making it tracked), a later scan's connector advances the cursor with a
+// plain file write mid-scan, and the first store commit's syncWorkTree
+// (`read-tree --reset -u HEAD`) silently reverted the dirty tracked file to
+// HEAD's content — freezing the cursor at its first committed value forever.
+// The sidecar snapshot/restore must keep the in-flight write.
+func TestSyncWorkTreePreservesDirtySidecarState(t *testing.T) {
+	dir := initRepo(t)
+
+	// A deployment commits the cursor (tracked in HEAD from here on).
+	cursorPath := filepath.Join(dir, ".mallcop", "cursors", "aws-3dl")
+	if err := os.MkdirAll(filepath.Dir(cursorPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cursorPath, []byte("mark-old\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"add", ".mallcop"}, {"commit", "-q", "-m", "cursors: persist"}} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		cmd.Env = append(os.Environ(),
+			"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@example.com",
+			"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@example.com")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+
+	// Mid-scan, the connector advances the cursor (plain write, uncommitted)
+	// and drops a brand-new untracked sidecar file next to it.
+	if err := os.WriteFile(cursorPath, []byte("mark-new\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	untrackedPath := filepath.Join(dir, ".mallcop", "cursors", "mercury-3dl")
+	if err := os.WriteFile(untrackedPath, []byte("mark-fresh\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Any store write triggers syncWorkTree.
+	st, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Append(KindEvents, map[string]any{"id": "e1"}); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+
+	got, err := os.ReadFile(cursorPath)
+	if err != nil {
+		t.Fatalf("read cursor after sync: %v", err)
+	}
+	if string(got) != "mark-new\n" {
+		t.Fatalf("tracked-dirty cursor after syncWorkTree = %q, want %q (in-flight write clobbered)", got, "mark-new\n")
+	}
+	got, err = os.ReadFile(untrackedPath)
+	if err != nil {
+		t.Fatalf("read untracked cursor after sync: %v", err)
+	}
+	if string(got) != "mark-fresh\n" {
+		t.Fatalf("untracked cursor after syncWorkTree = %q, want %q", got, "mark-fresh\n")
+	}
+
+	// And a batch write (the other syncWorkTree caller) must preserve it too.
+	if err := os.WriteFile(cursorPath, []byte("mark-newer\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.AppendBatch(KindEvents, []any{map[string]any{"id": "e2"}, map[string]any{"id": "e3"}}); err != nil {
+		t.Fatalf("AppendBatch: %v", err)
+	}
+	got, _ = os.ReadFile(cursorPath)
+	if string(got) != "mark-newer\n" {
+		t.Fatalf("cursor after batch syncWorkTree = %q, want %q", got, "mark-newer\n")
+	}
+}
