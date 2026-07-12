@@ -468,8 +468,21 @@ func (s *Store) commitAppend(kind Kind, chunk []byte, count int) (string, error)
 // slower concurrent writer's sync can never regress a faster one's — whatever
 // order concurrent syncs land in, each converges the repo to whatever HEAD
 // currently holds, never backward). It does not disturb untracked paths
-// outside HEAD's tree (e.g. a cloud connector's .mallcop/cursors/* cursor
-// files), because those were never part of any index to begin with.
+// outside HEAD's tree, because those were never part of any index to begin
+// with.
+//
+// SIDECAR STATE (.mallcop/): the CLI keeps sidecar files INSIDE the store
+// repo — most importantly the cloud connectors' incremental cursors at
+// .mallcop/cursors/<id>, written as plain files mid-scan and committed by the
+// deployment AFTER the scan. While such a path is untracked the reset leaves
+// it alone, but the moment a deployment commits it, it is part of HEAD's tree
+// — and a later in-scan write to it would be silently REVERTED by the reset
+// below (observed live: aws-3dl's committed cursor froze at its first value
+// forever, every scan re-pulling the full window). syncWorkTree therefore
+// snapshots every regular file under .mallcop/ before the reset and rewrites
+// it after: in-flight sidecar state always survives reconciliation, tracked
+// or not. A failed restore is a hard error — silently losing a cursor means
+// silently re-pulling (or worse, skipping) a window on the next scan.
 //
 // Contention on the real index lock (a second writer's sync running at the
 // same instant) is expected only under true multi-process/goroutine
@@ -477,6 +490,10 @@ func (s *Store) commitAppend(kind Kind, chunk []byte, count int) (string, error)
 // `mallcop scan` uses — so it is retried with the same backoff as the CAS
 // loop rather than failing outright.
 func (s *Store) syncWorkTree() error {
+	sidecar, err := s.snapshotSidecar()
+	if err != nil {
+		return err
+	}
 	const maxRetries = 32
 	var lastErr error
 	for attempt := 0; attempt < maxRetries; attempt++ {
@@ -487,9 +504,58 @@ func (s *Store) syncWorkTree() error {
 			lastErr = err
 			continue
 		}
-		return nil
+		return s.restoreSidecar(sidecar)
 	}
 	return fmt.Errorf("store: sync work tree gave up after %d retries: %w", maxRetries, lastErr)
+}
+
+// sidecarDir is the CLI-owned dotdir inside the store repo whose in-flight
+// file state (connector cursors, etc.) must survive syncWorkTree's reset.
+const sidecarDir = ".mallcop"
+
+// snapshotSidecar reads every regular file under <repo>/.mallcop into memory.
+// A missing .mallcop/ is the common case (nothing to preserve) and returns an
+// empty map. The directory is small by construction (a handful of sub-KB
+// cursor files), so reading it wholesale per sync is trivially cheap.
+func (s *Store) snapshotSidecar() (map[string][]byte, error) {
+	root := filepath.Join(s.repoPath, sidecarDir)
+	files := map[string][]byte{}
+	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			if os.IsNotExist(err) {
+				return nil
+			}
+			return err
+		}
+		if !d.Type().IsRegular() {
+			return nil
+		}
+		b, rerr := os.ReadFile(path)
+		if rerr != nil {
+			return rerr
+		}
+		files[path] = b
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("store: snapshot sidecar state: %w", err)
+	}
+	return files, nil
+}
+
+// restoreSidecar rewrites the snapshotted sidecar files after the work-tree
+// reset. Restoring is unconditional (byte-identical rewrites are harmless)
+// and MUST succeed: a lost cursor silently widens or gaps the next scan.
+func (s *Store) restoreSidecar(files map[string][]byte) error {
+	for path, content := range files {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			return fmt.Errorf("store: restore sidecar dir for %s: %w", path, err)
+		}
+		if err := os.WriteFile(path, content, 0o644); err != nil {
+			return fmt.Errorf("store: restore sidecar file %s: %w", path, err)
+		}
+	}
+	return nil
 }
 
 // WriteSnapshot commits a full-content JSON document named `name` at the repo
