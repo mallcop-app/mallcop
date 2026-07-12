@@ -35,6 +35,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"math"
 	"math/rand"
 	"os"
 	"os/exec"
@@ -211,9 +212,7 @@ func (s *Store) Append(kind Kind, record any) (sha string, err error) {
 	}
 	defer release()
 
-	chunk := make([]byte, 0, len(line)+1)
-	chunk = append(chunk, line...)
-	chunk = append(chunk, '\n')
+	chunk := append(append([]byte(nil), line...), '\n')
 	return s.commitAppend(kind, chunk, 1)
 }
 
@@ -369,7 +368,14 @@ func (s *Store) commitAppend(kind Kind, chunk []byte, count int) (string, error)
 		}
 
 		// (2) Append our chunk (already newline-terminated, one-or-more
-		// lines) in memory and write the new blob.
+		// lines) in memory and write the new blob. Bound the capacity
+		// arithmetic explicitly: prev comes from a repo blob a hostile clone
+		// could have made pathological, and an overflowed make() capacity
+		// must fail loud here, not panic in the allocator.
+		if len(prev) > math.MaxInt-len(chunk) {
+			return "", fmt.Errorf("store: %s stream too large to append to (%d + %d bytes overflows)",
+				kind, len(prev), len(chunk))
+		}
 		next := make([]byte, 0, len(prev)+len(chunk))
 		next = append(next, prev...)
 		next = append(next, chunk...)
