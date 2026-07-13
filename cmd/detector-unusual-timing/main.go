@@ -1,6 +1,8 @@
-// detector-unusual-timing reads events JSONL from stdin and emits findings
-// JSONL to stdout for events that occur at UTC hours not seen for that actor
-// in the baseline period.
+// detector-unusual-timing reads events JSONL from stdin and emits ONE finding
+// JSONL line per distinct (actor, UTC hour) group whose hour is not seen for
+// that actor in the baseline period (mallcoppro-d73 — collapsed from one
+// finding per matching event, which used to fan out N findings for N events
+// sharing a single novel actor-hour).
 //
 // Usage:
 //
@@ -32,9 +34,11 @@ func main() {
 		log.Fatalf("loading baseline: %v", err)
 	}
 
-	enc := json.NewEncoder(os.Stdout)
-	enc.SetEscapeHTML(false)
-
+	// Buffer the whole batch — grouping by (actor, hour) requires seeing every
+	// event sharing a key before the group's finding (event_count, event_ids,
+	// sources, event_types) can be emitted. Mirrors core/detect.Detect, which
+	// is likewise whole-corpus, not a per-line stream.
+	var events []event.Event
 	scanner := bufio.NewScanner(os.Stdin)
 	for scanner.Scan() {
 		line := scanner.Bytes()
@@ -47,18 +51,18 @@ func main() {
 			log.Printf("skipping malformed event: %v", err)
 			continue
 		}
+		events = append(events, ev)
+	}
+	if err := scanner.Err(); err != nil && err != io.EOF {
+		log.Fatalf("reading stdin: %v", err)
+	}
 
-		f := evaluate(ev, bl)
-		if f == nil {
-			continue
-		}
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetEscapeHTML(false)
 
+	for _, f := range collapse(events, bl) {
 		if err := enc.Encode(f); err != nil {
 			log.Fatalf("encoding finding: %v", err)
 		}
-	}
-
-	if err := scanner.Err(); err != nil && err != io.EOF {
-		log.Fatalf("reading stdin: %v", err)
 	}
 }
