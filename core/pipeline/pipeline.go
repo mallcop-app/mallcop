@@ -220,7 +220,23 @@ func Run(ctx context.Context, cfg Config) (Summary, error) {
 		if perr != nil {
 			return Summary{}, fmt.Errorf("pipeline: load prior events for baseline: %w", perr)
 		}
-		bl = baseline.Build(priorEvents)
+		fresh := baseline.Build(priorEvents)
+
+		// STORE-ROTATION SURVIVAL (mallcoppro-9e2): merge in the LAST persisted
+		// KindBaseline snapshot before gating. An operational store rotation
+		// (mallcoppro-ee3: the events stream is archived and truncated to bound git
+		// blob churn) empties priorEvents WITHOUT touching the separately persisted
+		// KindBaseline stream — so `fresh` alone would forget every actor/hour/role
+		// this system already investigated and re-fire on all of them. Baseline.Merge
+		// unions the two (MAX on counts, so a normal non-rotated scan — where fresh is
+		// already a superset — is unaffected; see Merge's doc comment). A store that
+		// was never scanned in derive mode has no persisted snapshot, so
+		// lastPersisted is nil and the merge is a no-op.
+		lastPersisted, perr := loadPersistedBaseline(cfg.Store)
+		if perr != nil {
+			return Summary{}, fmt.Errorf("pipeline: load persisted baseline: %w", perr)
+		}
+		bl = lastPersisted.Merge(fresh)
 		derived = true
 	} else {
 		var perr error
@@ -446,6 +462,31 @@ func loadPriorEvents(st *store.Store) ([]event.Event, error) {
 		out = append(out, ev)
 	}
 	return out, nil
+}
+
+// loadPersistedBaseline returns the MOST RECENT baseline the pipeline persisted
+// to the store's KindBaseline stream on an earlier derived scan, or nil when the
+// stream is empty (a fresh store, or one whose every scan supplied an explicit
+// Config.Baseline — never persisted, see the derived-only Append below). KindBaseline
+// is append-only history, so the LAST record is the most current snapshot. Used by
+// the (1a) derivation step to survive a store rotation (mallcoppro-9e2): mirrors
+// cli/investigate.go's loadPersistedBaseline (duplicated, not imported — cli
+// depends on core/pipeline's sibling packages, not the reverse, and this package's
+// import-lint forbids reaching into cli). A nil result is not an error; Merge
+// treats a nil receiver as an empty baseline.
+func loadPersistedBaseline(st *store.Store) (*baseline.Baseline, error) {
+	raws, err := st.Load(store.KindBaseline)
+	if err != nil {
+		return nil, err
+	}
+	if len(raws) == 0 {
+		return nil, nil
+	}
+	var b baseline.Baseline
+	if err := json.Unmarshal(raws[len(raws)-1], &b); err != nil {
+		return nil, fmt.Errorf("decode persisted baseline: %w", err)
+	}
+	return &b, nil
 }
 
 // dedupeEvents drops every event in pulled whose ID already appears in prior

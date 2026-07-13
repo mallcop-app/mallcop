@@ -14,6 +14,9 @@ package pipeline_test
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -504,5 +507,188 @@ func TestPipeline_EmptyProfileLoginNewIPStillFires(t *testing.T) {
 	last := got[len(got)-1]
 	if last.Type != "unusual-login" || last.Actor != "eve" {
 		t.Fatalf("scan 2 finding = {actor=%q type=%q}, want {eve unusual-login}", last.Actor, last.Type)
+	}
+}
+
+// --- STORE ROTATION SURVIVAL (mallcoppro-9e2) ---------------------------------
+//
+// mallcoppro-ee3 documented an OPERATIONAL store rotation: to bound git blob
+// churn, the deployment archives events.jsonl to a gzip sidecar and truncates
+// the LIVE events stream to empty, committing that truncation to the store.
+// KindBaseline (a SEPARATE stream) is untouched by rotation. Pre-fix, Run's
+// derived-baseline step read ONLY the (now-truncated) events stream, so a
+// rotation silently forgot every actor/hour/role the system had already
+// investigated — the next scan re-fired on all of them (the reported ~24h
+// refire storm). These tests simulate that exact operational sequence against
+// a REAL git store and assert the derived baseline survives it.
+
+// simulateStoreRotation reproduces the mallcoppro-ee3 rotation operationally: it
+// truncates the store's committed events.jsonl to empty and commits that
+// truncation directly (mirroring the deployment's archive-then-truncate step),
+// WITHOUT touching any other stream (baseline.jsonl, findings.jsonl, …) — the
+// exact asymmetry that caused the bug.
+func simulateStoreRotation(t *testing.T, st *store.Store) {
+	t.Helper()
+	dir := st.Path()
+	path := filepath.Join(dir, "events.jsonl")
+	if err := os.WriteFile(path, nil, 0o644); err != nil {
+		t.Fatalf("rotate: truncate events.jsonl: %v", err)
+	}
+	for _, args := range [][]string{
+		{"add", "events.jsonl"},
+		{"-c", "user.email=test@mallcop.app", "-c", "user.name=mallcop-test",
+			"commit", "-q", "-m", "rotate: archive events.jsonl"},
+	} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+}
+
+// TestPipeline_BaselineSurvivesStoreRotation is THE regression test for
+// mallcoppro-9e2: a previously-baselined actor/hour must NOT re-investigate on
+// the first scan after a store rotation. Against pre-fix code (derivation read
+// ONLY the truncated events stream) scan 3 below re-fires new-actor for alice —
+// the sabotage check this test distinguishes.
+func TestPipeline_BaselineSurvivesStoreRotation(t *testing.T) {
+	ts := time.Date(2026, 6, 18, 9, 0, 0, 0, time.UTC) // hour 9 UTC
+
+	seed := []event.Event{
+		benignEvent("s1", "github", "api_request", "alice", ts, map[string]any{"note": "routine"}),
+	}
+	pSeed := writeEventsFile(t, seed)
+	st := newGitStore(t)
+
+	// Scan 1: alice, brand new, fires new-actor once (the baseline PERSISTED at
+	// the end of this scan reflects events PRIOR to it — still empty, same as
+	// TestPipeline_DerivedBaselinePersisted's first scan).
+	sum1, err := pipeline.Run(context.Background(), baseCfg(t, st, pSeed))
+	if err != nil {
+		t.Fatalf("scan 1: %v", err)
+	}
+	if sum1.FindingsDetected != 1 {
+		t.Fatalf("scan 1 FindingsDetected = %d, want 1 (alice new)", sum1.FindingsDetected)
+	}
+
+	// Scan 2: steady-state re-scan of the SAME alice/hour-9 event. priorEvents now
+	// includes scan 1's committed event, so THIS scan's derived+persisted baseline
+	// carries KnownActors=[alice], ActorHours[alice]=[9] — and alice is gated (0
+	// findings), proving the fixture is quiet before rotation is even introduced.
+	sum2, err := pipeline.Run(context.Background(), baseCfg(t, st, pSeed))
+	if err != nil {
+		t.Fatalf("scan 2: %v", err)
+	}
+	if sum2.FindingsDetected != 0 {
+		t.Fatalf("scan 2 FindingsDetected = %d, want 0 (alice/hour-9 already baselined by scan 1's committed event)", sum2.FindingsDetected)
+	}
+
+	// ROTATE: the deployment archives + truncates events.jsonl. The events
+	// stream now looks like a fresh store; KindBaseline (persisted at the end of
+	// scan 2, which knows alice/hour-9) is untouched.
+	simulateStoreRotation(t, st)
+
+	raws, err := st.Load(store.KindEvents)
+	if err != nil {
+		t.Fatalf("load events post-rotation: %v", err)
+	}
+	if len(raws) != 0 {
+		t.Fatalf("post-rotation events stream holds %d records, want 0 (rotation did not truncate as expected)", len(raws))
+	}
+
+	// Scan 3 (first post-rotation scan): alice appears AGAIN at the SAME known
+	// hour (9). A previously-baselined actor/hour must NOT re-investigate.
+	sum3, err := pipeline.Run(context.Background(), baseCfg(t, st, pSeed))
+	if err != nil {
+		t.Fatalf("scan 3 (post-rotation): %v", err)
+	}
+	if sum3.FindingsDetected != 0 {
+		t.Fatalf("scan 3 (post-rotation) FindingsDetected = %d, want 0 — alice/hour-9 was already baselined before rotation and must not re-fire (the reported refire storm)", sum3.FindingsDetected)
+	}
+
+	// Scan 4: alice at a GENUINELY NEW hour (14) post-rotation → unusual-timing
+	// must still fire. Proves the rotation-survival merge does not over-suppress
+	// real novelty — only the ALREADY-KNOWN actor/hour is gated.
+	newHour := time.Date(2026, 6, 18, 14, 0, 0, 0, time.UTC)
+	novel := []event.Event{
+		benignEvent("n1", "github", "api_request", "alice", newHour, map[string]any{"note": "routine"}),
+	}
+	pNovel := writeEventsFile(t, novel)
+	sum4, err := pipeline.Run(context.Background(), baseCfg(t, st, pNovel))
+	if err != nil {
+		t.Fatalf("scan 4: %v", err)
+	}
+	if sum4.FindingsDetected != 1 {
+		t.Fatalf("scan 4 FindingsDetected = %d, want 1 — alice at a genuinely NEW hour must still fire (rotation-survival must not over-suppress)", sum4.FindingsDetected)
+	}
+	got := loadFindings(t, st)
+	last := got[len(got)-1]
+	if last.Type != "unusual-timing" || last.Actor != "alice" {
+		t.Fatalf("scan 4 finding = {actor=%q type=%q}, want {alice unusual-timing}", last.Actor, last.Type)
+	}
+}
+
+// TestPipeline_DerivedBaselinePersistsRotationMerge proves the KindBaseline
+// snapshot persisted AFTER a post-rotation scan carries the MERGED (pre + post
+// rotation) knowledge — not just what the truncated events stream alone could
+// derive — so a SECOND rotation would still find alice known.
+func TestPipeline_DerivedBaselinePersistsRotationMerge(t *testing.T) {
+	ts := time.Date(2026, 6, 18, 9, 0, 0, 0, time.UTC)
+	seed := []event.Event{
+		benignEvent("s1", "github", "api_request", "alice", ts, map[string]any{"note": "routine"}),
+	}
+	pSeed := writeEventsFile(t, seed)
+	st := newGitStore(t)
+
+	if _, err := pipeline.Run(context.Background(), baseCfg(t, st, pSeed)); err != nil {
+		t.Fatalf("scan 1: %v", err)
+	}
+	// Scan 2: steady-state re-scan so the PERSISTED baseline actually carries
+	// alice/hour-9 (scan 1's persisted snapshot reflects events PRIOR to it —
+	// still empty; see TestPipeline_DerivedBaselinePersisted).
+	if _, err := pipeline.Run(context.Background(), baseCfg(t, st, pSeed)); err != nil {
+		t.Fatalf("scan 2: %v", err)
+	}
+	simulateStoreRotation(t, st)
+
+	// Post-rotation scan over a DIFFERENT, unrelated actor. The events stream
+	// this scan derives from never mentions alice at all.
+	otherTs := time.Date(2026, 6, 18, 10, 0, 0, 0, time.UTC)
+	other := []event.Event{
+		benignEvent("o1", "github", "api_request", "bob", otherTs, map[string]any{"note": "routine"}),
+	}
+	pOther := writeEventsFile(t, other)
+	if _, err := pipeline.Run(context.Background(), baseCfg(t, st, pOther)); err != nil {
+		t.Fatalf("scan 3 (post-rotation, unrelated actor): %v", err)
+	}
+	// Scan 4: re-scan the same bob event so THIS scan's priorEvents (post-
+	// rotation events.jsonl, which now holds scan 3's committed bob event)
+	// derives a fresh baseline that knows bob — proving the LATEST persisted
+	// snapshot carries BOTH the pre-rotation knowledge (alice, via the merge)
+	// AND newly-learned post-rotation knowledge (bob, via fresh derivation).
+	if _, err := pipeline.Run(context.Background(), baseCfg(t, st, pOther)); err != nil {
+		t.Fatalf("scan 4 (post-rotation, re-scan): %v", err)
+	}
+
+	raws, err := st.Load(store.KindBaseline)
+	if err != nil {
+		t.Fatalf("load baseline stream: %v", err)
+	}
+	if len(raws) == 0 {
+		t.Fatalf("KindBaseline holds 0 records after a derived scan")
+	}
+	var latest baseline.Baseline
+	if err := json.Unmarshal(raws[len(raws)-1], &latest); err != nil {
+		t.Fatalf("unmarshal persisted baseline: %v", err)
+	}
+	if !latest.IsKnownActor("alice") {
+		t.Errorf("post-rotation persisted baseline forgot alice (KnownActors=%v) — the merge did not carry pre-rotation knowledge forward", latest.KnownActors)
+	}
+	if !latest.KnownHour("alice", 9) {
+		t.Errorf("post-rotation persisted baseline forgot alice's hour 9 (ActorHours=%v)", latest.ActorHours)
+	}
+	if !latest.IsKnownActor("bob") {
+		t.Errorf("post-rotation persisted baseline did not learn bob (KnownActors=%v)", latest.KnownActors)
 	}
 }

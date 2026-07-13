@@ -227,6 +227,173 @@ func Build(events []event.Event) *Baseline {
 	return b
 }
 
+// Merge returns a NEW *Baseline holding the UNION of b and other: every known
+// actor, created entity, actor-hour, actor-role, known-user profile, and
+// relationship present in EITHER input is present in the result. Neither input
+// is mutated. A nil receiver or nil argument merges as an empty baseline, so
+// this is safe to call with either side unset.
+//
+// This is the STORE-ROTATION persistence primitive (mallcoppro-9e2). Build
+// always recomputes a baseline FRESH from whatever prior events currently sit
+// in the store's events stream — it does not accumulate incrementally. Under
+// normal (non-rotated) operation that fresh recompute is already a superset of
+// every earlier scan's baseline (the events stream only grows), so merging in
+// the LAST persisted KindBaseline snapshot is a safe no-op. But an operational
+// store rotation (documented in mallcoppro-ee3: the events stream is archived
+// to a gzip sidecar and the live stream truncated to keep git blob churn
+// bounded) empties the events history WITHOUT touching the separately
+// persisted KindBaseline stream. Post-rotation, Build(priorEvents) alone would
+// see zero (or only post-rotation) events and derive an EMPTY (or partial)
+// baseline — re-flagging every already-known actor/hour/role as novel. Merging
+// the freshly-derived baseline with the last persisted snapshot keeps every
+// actor/hour/role this system has EVER investigated known, independent of
+// whether the events that originally earned that knowledge are still present
+// to re-derive from.
+//
+// FrequencyTables and Relationship.Count use MAX, not sum: because Build
+// recomputes fresh from the FULL available corpus each scan (not
+// incrementally), the freshly-derived count for a non-rotated scan already
+// equals-or-exceeds the persisted count for the same key — summing would
+// double-count every steady-state scan. Taking the max is safe both ways: it
+// equals the (correct) fresh value when nothing rotated, and it falls back to
+// the (correct, larger) persisted value when the fresh corpus was truncated by
+// a rotation. Set-valued fields (KnownActors, ActorHours, …) have no such
+// hazard — union already means "member of either", so it costs nothing to
+// apply unconditionally.
+func (b *Baseline) Merge(other *Baseline) *Baseline {
+	out := &Baseline{}
+
+	actorSet := map[string]struct{}{}
+	createdSet := map[string]struct{}{}
+	freq := map[string]int{}
+	hourSet := map[string]map[int]struct{}{}
+	roleSet := map[string]map[string]struct{}{}
+	users := map[string]UserProfile{}
+	rels := map[string]Relationship{}
+
+	for _, src := range [2]*Baseline{b, other} {
+		if src == nil {
+			continue
+		}
+		for _, a := range src.KnownActors {
+			actorSet[a] = struct{}{}
+		}
+		for _, c := range src.KnownCreatedEntities {
+			createdSet[c] = struct{}{}
+		}
+		for k, v := range src.FrequencyTables {
+			if v > freq[k] {
+				freq[k] = v
+			}
+		}
+		for actor, hours := range src.ActorHours {
+			if hourSet[actor] == nil {
+				hourSet[actor] = map[int]struct{}{}
+			}
+			for _, h := range hours {
+				hourSet[actor][h] = struct{}{}
+			}
+		}
+		for actor, roles := range src.ActorRoles {
+			if roleSet[actor] == nil {
+				roleSet[actor] = map[string]struct{}{}
+			}
+			for _, r := range roles {
+				roleSet[actor][r] = struct{}{}
+			}
+		}
+		for actor, p := range src.KnownUsers {
+			merged, ok := users[actor]
+			if !ok {
+				merged = UserProfile{LastSeen: p.LastSeen}
+			} else if p.LastSeen.After(merged.LastSeen) {
+				merged.LastSeen = p.LastSeen
+			}
+			merged.KnownIPs = mergeStrings(merged.KnownIPs, p.KnownIPs)
+			merged.KnownGeos = mergeStrings(merged.KnownGeos, p.KnownGeos)
+			users[actor] = merged
+		}
+		for k, r := range src.Relationships {
+			merged, ok := rels[k]
+			if !ok {
+				rels[k] = r
+				continue
+			}
+			if r.Count > merged.Count {
+				merged.Count = r.Count
+			}
+			if merged.FirstSeen == "" || (r.FirstSeen != "" && r.FirstSeen < merged.FirstSeen) {
+				merged.FirstSeen = r.FirstSeen
+			}
+			if r.LastSeen > merged.LastSeen {
+				merged.LastSeen = r.LastSeen
+			}
+			rels[k] = merged
+		}
+	}
+
+	if len(actorSet) > 0 {
+		out.KnownActors = sortedKeys(actorSet)
+	}
+	if len(createdSet) > 0 {
+		out.KnownCreatedEntities = sortedKeys(createdSet)
+	}
+	if len(freq) > 0 {
+		out.FrequencyTables = freq
+	}
+	if len(hourSet) > 0 {
+		out.ActorHours = make(map[string][]int, len(hourSet))
+		for actor, hs := range hourSet {
+			hours := make([]int, 0, len(hs))
+			for h := range hs {
+				hours = append(hours, h)
+			}
+			sort.Ints(hours)
+			out.ActorHours[actor] = hours
+		}
+	}
+	if len(roleSet) > 0 {
+		out.ActorRoles = make(map[string][]string, len(roleSet))
+		for actor, rs := range roleSet {
+			out.ActorRoles[actor] = sortedKeys(rs)
+		}
+	}
+	if len(users) > 0 {
+		out.KnownUsers = make(map[string]UserProfile, len(users))
+		for actor, p := range users {
+			if p.KnownIPs != nil {
+				sort.Strings(p.KnownIPs)
+			}
+			if p.KnownGeos != nil {
+				sort.Strings(p.KnownGeos)
+			}
+			out.KnownUsers[actor] = p
+		}
+	}
+	if len(rels) > 0 {
+		out.Relationships = rels
+	}
+
+	return out
+}
+
+// mergeStrings returns the sorted, de-duplicated union of a and b, or nil when
+// both are empty (preserves the "unset" nil-vs-empty distinction the rest of
+// this package relies on for round-trip fidelity).
+func mergeStrings(a, b []string) []string {
+	if len(a) == 0 && len(b) == 0 {
+		return nil
+	}
+	set := make(map[string]struct{}, len(a)+len(b))
+	for _, v := range a {
+		set[v] = struct{}{}
+	}
+	for _, v := range b {
+		set[v] = struct{}{}
+	}
+	return sortedKeys(set)
+}
+
 // buildEntityCreationEventTypes mirrors core/detect/new_actor.go's
 // entityCreationEventTypes: event types that CREATE a new principal named in
 // metadata while the performing actor is an existing admin. Duplicated here
