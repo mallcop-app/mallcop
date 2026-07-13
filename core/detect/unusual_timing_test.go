@@ -238,3 +238,76 @@ func TestUnusualTimingCollapse_MixedKnownAndUnknownHours(t *testing.T) {
 		t.Errorf("event_count = %v, want 2", ev["event_count"])
 	}
 }
+
+// TestUnusualTimingCollapse_TwoActorsSameHourNotMerged proves the grouping key
+// is (actor, hour) — not hour alone. Two actors sharing the same novel hour in
+// one scan must produce TWO findings, one per actor, each carrying only that
+// actor's events. A regression that dropped `actor` from unusualTimingKey
+// would silently merge these into a single finding and misattribute one
+// actor's events under the other actor's Actor field — this pins per-actor
+// grouping explicitly, with events interleaved across actors to also pin
+// first-seen ordering.
+func TestUnusualTimingCollapse_TwoActorsSameHourNotMerged(t *testing.T) {
+	bl := &baseline.Baseline{
+		ActorHours: map[string][]int{
+			"actor-a": {9, 10, 11},
+			"actor-b": {9, 10, 11},
+		},
+	}
+	evs := []event.Event{
+		utEvent("e1", "actor-a", "github", "push", 3, 0), // actor-a, first-seen
+		utEvent("e2", "actor-b", "github", "push", 3, 1), // actor-b, first-seen
+		utEvent("e3", "actor-a", "github", "push", 3, 2),
+		utEvent("e4", "actor-b", "github", "push", 3, 3),
+		utEvent("e5", "actor-b", "github", "push", 3, 4),
+	}
+
+	got := unusualTimingCollapse(evs, bl)
+	if len(got) != 2 {
+		t.Fatalf("expected exactly 2 findings (one per actor), got %d: %+v", len(got), got)
+	}
+
+	fa, fb := got[0], got[1]
+	if fa.ID != "finding-e1" {
+		t.Errorf("first finding ID = %q, want finding-e1 (actor-a's first-seen event)", fa.ID)
+	}
+	if fb.ID != "finding-e2" {
+		t.Errorf("second finding ID = %q, want finding-e2 (actor-b's first-seen event)", fb.ID)
+	}
+	if fa.Actor != "actor-a" {
+		t.Errorf("first finding Actor = %q, want actor-a", fa.Actor)
+	}
+	if fb.Actor != "actor-b" {
+		t.Errorf("second finding Actor = %q, want actor-b", fb.Actor)
+	}
+
+	var eva, evb map[string]any
+	if err := json.Unmarshal(fa.Evidence, &eva); err != nil {
+		t.Fatalf("unmarshal actor-a evidence: %v", err)
+	}
+	if err := json.Unmarshal(fb.Evidence, &evb); err != nil {
+		t.Fatalf("unmarshal actor-b evidence: %v", err)
+	}
+
+	if eva["actor"] != "actor-a" {
+		t.Errorf("actor-a evidence actor = %v, want actor-a", eva["actor"])
+	}
+	if evb["actor"] != "actor-b" {
+		t.Errorf("actor-b evidence actor = %v, want actor-b", evb["actor"])
+	}
+	if eva["event_count"] != float64(2) {
+		t.Errorf("actor-a event_count = %v, want 2", eva["event_count"])
+	}
+	if evb["event_count"] != float64(3) {
+		t.Errorf("actor-b event_count = %v, want 3", evb["event_count"])
+	}
+
+	idsA, _ := eva["event_ids"].([]any)
+	if len(idsA) != 2 || idsA[0] != "e1" || idsA[1] != "e3" {
+		t.Errorf("actor-a event_ids = %v, want [e1 e3] (only actor-a's events)", idsA)
+	}
+	idsB, _ := evb["event_ids"].([]any)
+	if len(idsB) != 3 || idsB[0] != "e2" || idsB[1] != "e4" || idsB[2] != "e5" {
+		t.Errorf("actor-b event_ids = %v, want [e2 e4 e5] (only actor-b's events)", idsB)
+	}
+}
