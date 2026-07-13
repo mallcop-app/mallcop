@@ -127,9 +127,33 @@ type ExpectedResolution struct {
 // family PRESENCE over the whole emitted set — not counts or actors. Scenarios
 // without the block unmarshal to a nil pointer (additive yaml-tagged fields are
 // safe — see the KnownEntities doc above) and are skipped by the grader.
+//
+// Reserved marks a RESERVED TEST (mallcoppro-db0): the requester — a human
+// operator, or a real customer event captured verbatim via chat's "flag
+// things like this" — is asserting this must_fire/must_not_fire ground truth
+// TODAY, even though a detector that can satisfy it may not exist yet. This
+// is the author-INDEPENDENT control the held-out-corpus check in
+// core/selfgate approximates: the scenario predates and is written by someone
+// other than whoever eventually authors the detector.
+//
+// A Reserved scenario is not exempt from grading — RunExamDetectExtra still
+// runs it through the real core/detect.Detect and reports RED exactly like
+// any other unmet label. What changes is the BLOCKING behavior: a must_fire
+// family that has no REGISTERED detector at all (absent from
+// core/detect.Detectors(), checked by name) is a TRACKED EXPECTED-MISS —
+// visible on the row (see ExamDetectRow.ReservedPending) but excluded from
+// ExamDetectTotals.Failed, so a reserved-but-not-yet-authored detector never
+// hard-fails the exam or blocks CI. The instant a detector implementing that
+// family registers, the exemption stops applying for that family: a
+// registered detector that still doesn't fire is graded as a REAL failure
+// again, and one that fires correctly makes the scenario pass — the "flips to
+// a real pass/fail once the detector is registered" property, automatic, no
+// re-flagging required. must_not_fire violations are NEVER exempted by
+// Reserved — a detector firing where it shouldn't is always a real failure.
 type ExpectedDetection struct {
 	MustFire    []string `yaml:"must_fire"`
 	MustNotFire []string `yaml:"must_not_fire"`
+	Reserved    bool     `yaml:"reserved"`
 }
 
 // Scenario is the Go representation of a mallcop exam scenario YAML file.

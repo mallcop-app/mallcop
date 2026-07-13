@@ -22,6 +22,15 @@
 //   - UNLABELED scenarios (nil ExpectedDetection) are skipped-but-counted:
 //     grading covers only explicit labels; the corpus-wide backfill is a
 //     deferred human decision.
+//   - RESERVED scenarios (expected_detection.reserved: true, mallcoppro-db0)
+//     specify a must-fire outcome for a detector that may not exist yet — the
+//     REQUESTER's ground truth, authored independent of and prior to whoever
+//     eventually writes the detector. A reserved must_fire family with no
+//     REGISTERED detector (core/detect.Detectors()) grades as a TRACKED
+//     expected-miss (ExamDetectTotals.Reserved), not a hard failure — it
+//     still shows RED on the row, it just doesn't block the exam or CI. The
+//     day a detector implementing that family registers, grading reverts to
+//     the ordinary hard rule for it automatically — no re-flagging required.
 package eval
 
 import (
@@ -55,6 +64,23 @@ type ExamDetectRow struct {
 	// ordinary reference-corpus row, so the wire shape is unchanged for every
 	// existing caller that never passes an extra dir.
 	Extra bool `json:"extra,omitempty"`
+	// Reserved mirrors the scenario's expected_detection.reserved flag
+	// (mallcoppro-db0) — an operator/requester-authored must-fire ground
+	// truth for a detector that may not exist yet. Omitted (false) for every
+	// ordinary row.
+	Reserved bool `json:"reserved,omitempty"`
+	// ReservedPending lists the normalized must_fire family tokens that are
+	// STILL unregistered — no core/detect.Detectors() entry emits that family
+	// in this process — on a Reserved row. Non-empty only when Reserved is
+	// true. A row with ReservedPending is still Pass=false (the family
+	// genuinely did not fire — it shows RED like any other unmet label) but
+	// is EXCLUDED from ExamDetectTotals.Failed and instead counted in
+	// ExamDetectTotals.Reserved: a TRACKED expected-miss, not a hard exam
+	// failure. Every OTHER must_fire/must_not_fire label on the same row —
+	// including a must_fire family whose detector HAS registered but still
+	// doesn't fire, and any must_not_fire violation — is graded by the
+	// ordinary hard rule and can still fail the row for real.
+	ReservedPending []string `json:"reserved_pending,omitempty"`
 }
 
 // ExamDetectTotals aggregates the run.
@@ -64,9 +90,15 @@ type ExamDetectTotals struct {
 	// Unlabeled is the number of scenarios WITHOUT the block — skipped from
 	// grading but counted so coverage drift is visible.
 	Unlabeled int `json:"unlabeled"`
-	// Passed / Failed partition the labeled set.
-	Passed int `json:"passed"`
-	Failed int `json:"failed"`
+	// Passed / Failed / Reserved partition the labeled set (Labeled ==
+	// Passed+Failed+Reserved). Reserved counts rows whose ONLY reason for not
+	// passing is a still-unregistered Reserved must_fire family
+	// (ExamDetectRow.ReservedPending) — a TRACKED expected-miss, deliberately
+	// excluded from Failed so a reserved-but-not-yet-authored detector never
+	// hard-fails the exam or blocks CI (mallcoppro-db0).
+	Passed   int `json:"passed"`
+	Failed   int `json:"failed"`
+	Reserved int `json:"reserved,omitempty"`
 }
 
 // ExamDetectReport is the full run result: one row per labeled scenario (in
@@ -81,6 +113,22 @@ type ExamDetectReport struct {
 // applies to stored findings.
 func normalizeFamilyToken(tok string) string {
 	return strings.ToLower(strings.TrimSpace(tok))
+}
+
+// registeredFamilies returns the set of normalized family tokens backed by a
+// REGISTERED detector in THIS process — core/detect.Detectors(), keyed by
+// each detector's own Name() (framework detectors' Type/Name pair are
+// identical tokens, e.g. "volume-anomaly"; see core/detect/*.go). This is the
+// live registration state a Reserved scenario's must_fire family is checked
+// against: a family with no entry here has no detector that can possibly
+// satisfy it yet, regardless of what the scenario's events contain.
+func registeredFamilies() map[string]bool {
+	dets := detect.Detectors()
+	set := make(map[string]bool, len(dets))
+	for _, d := range dets {
+		set[normalizeFamilyToken(d.Name())] = true
+	}
+	return set
 }
 
 // RunExamDetect loads the pinned corpus under repoRoot and grades the REAL
@@ -117,6 +165,10 @@ func RunExamDetectExtra(repoRoot, extraScenariosDir string) (ExamDetectReport, e
 		return ExamDetectReport{}, fmt.Errorf("loading extra scenarios dir %s: %w", extraScenariosDir, err)
 	}
 
+	// Computed once per run — the live detector registration state a Reserved
+	// scenario's must_fire families are checked against (mallcoppro-db0).
+	registered := registeredFamilies()
+
 	var report ExamDetectReport
 	grade := func(ls LoadedScenario, isExtra bool) {
 		s := ls.Scenario
@@ -137,30 +189,49 @@ func RunExamDetectExtra(repoRoot, extraScenariosDir string) (ExamDetectReport, e
 			emittedTokens = append(emittedTokens, tok)
 		}
 
-		pass := true
+		// realFailure tracks any must_fire/must_not_fire violation that is NOT
+		// exempted as a reserved-and-unregistered gap. reservedPending
+		// collects the must_fire families that WERE exempted — a Reserved
+		// scenario whose family has no registered detector yet
+		// (mallcoppro-db0). must_not_fire violations are never exempted.
+		realFailure := false
+		var reservedPending []string
 		for _, want := range s.ExpectedDetection.MustFire {
-			if !present[normalizeFamilyToken(want)] {
-				pass = false
+			tok := normalizeFamilyToken(want)
+			if present[tok] {
+				continue
 			}
+			if s.ExpectedDetection.Reserved && !registered[tok] {
+				reservedPending = append(reservedPending, tok)
+				continue
+			}
+			realFailure = true
 		}
 		for _, banned := range s.ExpectedDetection.MustNotFire {
 			if present[normalizeFamilyToken(banned)] {
-				pass = false
+				realFailure = true
 			}
 		}
 
-		if pass {
+		pass := !realFailure && len(reservedPending) == 0
+		switch {
+		case pass:
 			report.Totals.Passed++
-		} else {
+		case !realFailure && len(reservedPending) > 0:
+			// Tracked expected-miss: RED, but not a hard exam failure.
+			report.Totals.Reserved++
+		default:
 			report.Totals.Failed++
 		}
 		report.Rows = append(report.Rows, ExamDetectRow{
-			ScenarioID:  s.ID,
-			MustFire:    append([]string{}, s.ExpectedDetection.MustFire...),
-			MustNotFire: append([]string{}, s.ExpectedDetection.MustNotFire...),
-			Emitted:     emittedTokens,
-			Pass:        pass,
-			Extra:       isExtra,
+			ScenarioID:      s.ID,
+			MustFire:        append([]string{}, s.ExpectedDetection.MustFire...),
+			MustNotFire:     append([]string{}, s.ExpectedDetection.MustNotFire...),
+			Emitted:         emittedTokens,
+			Pass:            pass,
+			Extra:           isExtra,
+			Reserved:        s.ExpectedDetection.Reserved,
+			ReservedPending: reservedPending,
 		})
 	}
 
