@@ -133,8 +133,9 @@ type CascadeOptions struct {
 	// mistakes). It is threaded into buildTierRequest / buildEscalateRequest only
 	// for the re-run options the gate constructs — the ORIGINAL (first) chain run
 	// leaves it 0 (nil MessagesRequest.Temperature → provider default, the existing
-	// behavior). 0 means "fill the default" (1.0) when the gate is active; a
-	// non-zero value overrides it. See consensus.go.
+	// behavior). 0 means "fill the default" (0.4, tuned down from 1.0 — see
+	// consensus.go's "TEMPERATURE TUNED" note) when the gate is active; a non-zero
+	// value overrides it. See consensus.go.
 	ConsensusTemperature float64
 }
 

@@ -37,6 +37,19 @@ func main() {
 	// as "gate disabled" (it gates only on ConsensusRuns > 0). This is the lever the
 	// validation bakeoff uses to measure the cascade WITHOUT the consensus gate.
 	consensus := flag.Int("consensus", 3, "additional consensus re-runs per resolve (0 = gate OFF)")
+	// consensusTemp overrides the sampling temperature forced on every consensus
+	// re-run (agent.consensusTemperature, built-in default 1.0 — see consensus.go).
+	// 0 (the flag default) leaves the built-in default untouched: CascadeOptions
+	// .ConsensusTemperature == 0 is the "unset" sentinel the gate coerces to 1.0
+	// (consensus.go: "if reRunOpts.ConsensusTemperature == 0"). This is a TUNING
+	// KNOB for the mallcoppro-9dd detection-coverage loop: 1.0 is high-variance
+	// sampling, which can inject a spurious dissenting vote (pure sampling noise,
+	// not a genuine second opinion) into an otherwise-unanimous benign resolve and
+	// flip it to escalate via any-escalate-wins. Lowering the temperature narrows
+	// that noise band while keeping the re-runs non-deterministic (STOCHASTICITY IS
+	// MANDATORY per consensus.go — pass a value in (0, 1.0], never 0, or the gate
+	// silently reverts to the built-in 1.0 default).
+	consensusTemp := flag.Float64("consensus-temp", 0, "override the consensus re-run sampling temperature (0 = built-in default 1.0; must be >0 if set)")
 	dumpTranscripts := flag.String("dump-transcripts", "", "directory to write per-scenario transcripts of run 0 (<sid>.txt)")
 	flag.Parse()
 
@@ -47,6 +60,9 @@ func main() {
 		cfg.Opts.ConsensusRuns = -1
 	} else {
 		cfg.Opts.ConsensusRuns = *consensus
+	}
+	if *consensusTemp != 0 {
+		cfg.Opts.ConsensusTemperature = *consensusTemp
 	}
 	switch *mode {
 	case "canned":
