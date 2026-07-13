@@ -31,7 +31,11 @@ func makeEvent(id, actor string, hour int) event.Event {
 	}
 }
 
-func TestEvaluate(t *testing.T) {
+// TestCollapseSingleEvent proves collapse's per-event gating (skip-gates: no
+// actor-hours baseline, unknown actor, known hour) is unchanged from the old
+// per-event evaluate — a batch of exactly one event behaves identically to
+// the pre-collapse semantics.
+func TestCollapseSingleEvent(t *testing.T) {
 	tests := []struct {
 		name         string
 		ev           event.Event
@@ -69,15 +73,15 @@ func TestEvaluate(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			f := evaluate(tc.ev, testBaseline)
-			if tc.wantFinding && f == nil {
-				t.Fatalf("expected a finding but got nil")
+			findings := collapse([]event.Event{tc.ev}, testBaseline)
+			if tc.wantFinding && len(findings) != 1 {
+				t.Fatalf("expected exactly 1 finding, got %d: %+v", len(findings), findings)
 			}
-			if !tc.wantFinding && f != nil {
-				t.Fatalf("expected no finding but got: %+v", f)
+			if !tc.wantFinding && len(findings) != 0 {
+				t.Fatalf("expected no finding but got: %+v", findings)
 			}
-			if tc.wantFinding && f.Severity != tc.wantSeverity {
-				t.Fatalf("severity: got %q want %q", f.Severity, tc.wantSeverity)
+			if tc.wantFinding && findings[0].Severity != tc.wantSeverity {
+				t.Fatalf("severity: got %q want %q", findings[0].Severity, tc.wantSeverity)
 			}
 		})
 	}
@@ -86,12 +90,60 @@ func TestEvaluate(t *testing.T) {
 func TestNoBaselineData(t *testing.T) {
 	bl := &baseline.Baseline{} // no actor hours
 	ev := makeEvent("evt-x", "alice", 3)
-	f := evaluate(ev, bl)
-	if f != nil {
-		t.Fatalf("expected no finding when no baseline data, got: %+v", f)
+	findings := collapse([]event.Event{ev}, bl)
+	if findings != nil {
+		t.Fatalf("expected no finding when no baseline data, got: %+v", findings)
 	}
 }
 
+// TestCollapseGroupsMultipleEvents proves the fan-out fix (mallcoppro-d73):
+// several events sharing one (actor, hour) group collapse into ONE finding,
+// keyed on the first event, with evidence carrying the full group's event
+// count, sampled event IDs, and distinct sorted sources/types.
+func TestCollapseGroupsMultipleEvents(t *testing.T) {
+	base := time.Date(2026, 4, 10, 3, 0, 0, 0, time.UTC)
+	events := []event.Event{
+		{ID: "evt-1", Source: "github", Type: "push", Actor: "alice", Timestamp: base},
+		{ID: "evt-2", Source: "azure", Type: "login", Actor: "alice", Timestamp: base.Add(time.Minute)},
+		{ID: "evt-3", Source: "github", Type: "push", Actor: "alice", Timestamp: base.Add(2 * time.Minute)},
+	}
+
+	findings := collapse(events, testBaseline)
+	if len(findings) != 1 {
+		t.Fatalf("expected exactly 1 collapsed finding, got %d: %+v", len(findings), findings)
+	}
+
+	f := findings[0]
+	if f.ID != "finding-evt-1" {
+		t.Errorf("ID: got %q, want finding-evt-1 (first event in the group)", f.ID)
+	}
+
+	var ev map[string]any
+	if err := json.Unmarshal(f.Evidence, &ev); err != nil {
+		t.Fatalf("unmarshal evidence: %v", err)
+	}
+	if got := ev["event_count"]; got != float64(3) {
+		t.Errorf("event_count: got %v, want 3", got)
+	}
+	eventIDs, _ := ev["event_ids"].([]any)
+	if len(eventIDs) != 3 || eventIDs[0] != "evt-1" || eventIDs[1] != "evt-2" || eventIDs[2] != "evt-3" {
+		t.Errorf("event_ids: got %v, want [evt-1 evt-2 evt-3] in order", eventIDs)
+	}
+	sources, _ := ev["sources"].([]any)
+	if len(sources) != 2 || sources[0] != "azure" || sources[1] != "github" {
+		t.Errorf("sources: got %v, want sorted [azure github]", sources)
+	}
+	types, _ := ev["event_types"].([]any)
+	if len(types) != 2 || types[0] != "login" || types[1] != "push" {
+		t.Errorf("event_types: got %v, want sorted [login push]", types)
+	}
+}
+
+// TestGoldenFixture proves whole-batch parity against a fixed corpus, run
+// through collapse EXACTLY as main() runs it (buffer the batch, collapse
+// once) — not per-event. Every group in this fixture is a singleton, so the
+// finding count matches the pre-collapse golden set; the golden file's
+// evidence/reason strings reflect the new collapsed shape.
 func TestGoldenFixture(t *testing.T) {
 	bl, err := baseline.Load("testdata/baseline.json")
 	if err != nil {
@@ -110,7 +162,7 @@ func TestGoldenFixture(t *testing.T) {
 	}
 	defer goldenFile.Close()
 
-	var got []finding.Finding
+	var events []event.Event
 	scanner := bufio.NewScanner(eventsFile)
 	for scanner.Scan() {
 		line := scanner.Bytes()
@@ -121,11 +173,9 @@ func TestGoldenFixture(t *testing.T) {
 		if err := json.Unmarshal(line, &ev); err != nil {
 			t.Fatalf("unmarshal event: %v", err)
 		}
-		f := evaluate(ev, bl)
-		if f != nil {
-			got = append(got, *f)
-		}
+		events = append(events, ev)
 	}
+	got := collapse(events, bl)
 
 	var want []finding.Finding
 	gScanner := bufio.NewScanner(goldenFile)
