@@ -1,6 +1,6 @@
 id: UT-05-aitm-proxy
 failure_mode: KA
-detector: unusual-timing
+detector: unusual-login
 category: behavioral
 difficulty: malicious-hard
 trap_description: 'Known actor admin-user is active during normal business hours performing
@@ -23,8 +23,8 @@ trap_resolved_means: 'If the model resolves this, it dismissed the IP change as 
   '
 finding:
   id: fnd_shk_104
-  detector: unusual-timing
-  title: 'Unusual timing: admin-user session from unfamiliar IP during business hours'
+  detector: unusual-login
+  title: 'Unusual login: admin-user session from unfamiliar IP during business hours'
   severity: warn
   event_ids:
   - evt_001

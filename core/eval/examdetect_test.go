@@ -34,30 +34,74 @@ func findRow(t *testing.T, report ExamDetectReport, scenarioID string) ExamDetec
 	return ExamDetectRow{}
 }
 
-// TestRunExamDetect_SeededGapIsRed asserts the K1 seeded detection gap: VA-03
-// is labeled must_fire volume-anomaly, but core/detect's volume-anomaly counts
-// event RECORDS (8) against the baseline frequency (10) and ignores the
-// metadata.blobs_accessed volume (500) — so it never fires and the row is RED.
-// Observing the RED here is the exam working as designed; when the loop grows
-// the detector to close the gap, THIS assertion flips and must be updated in
-// the same change.
-func TestRunExamDetect_SeededGapIsRed(t *testing.T) {
+// TestRunExamDetect_VolumeContractClosesGap asserts the K1 seeded detection gap
+// is now CLOSED (mallcoppro-3c9). VA-03 is labeled must_fire volume-anomaly and
+// the spike lives in metadata.blobs_accessed (500 operations) across 8 event
+// RECORDS, not in the record count. The detector used to count records (8) vs the
+// baseline frequency (10) and never fire — the field/unit contract mismatch. It
+// now reads the canonical magnitude field so the metadata-carried spike fires and
+// the row is GREEN. This assertion is the flip the earlier RED test promised: if
+// the volume contract regresses, VA-03 goes red here.
+func TestRunExamDetect_VolumeContractClosesGap(t *testing.T) {
 	report := examDetectReportForTest(t)
 
 	row := findRow(t, report, "VA-03-data-exfil")
 	if len(row.MustFire) != 1 || row.MustFire[0] != "volume-anomaly" {
 		t.Fatalf("VA-03 must_fire = %v, want [volume-anomaly]", row.MustFire)
 	}
-	if row.Pass {
-		t.Fatalf("VA-03 row PASSED — the seeded volume-anomaly gap has been closed; update the label expectations (emitted: %v)", row.Emitted)
+	if !row.Pass {
+		t.Fatalf("VA-03 row is RED — the volume field/unit contract regressed; volume-anomaly no longer fires on a metadata-carried spike (emitted: %v)", row.Emitted)
 	}
+	var present bool
 	for _, tok := range row.Emitted {
 		if tok == "volume-anomaly" {
-			t.Fatalf("VA-03 emitted volume-anomaly (%v) yet the row is red — grader inconsistency", row.Emitted)
+			present = true
 		}
 	}
-	if report.Totals.Failed < 1 {
-		t.Errorf("Totals.Failed = %d, want >= 1 while VA-03 is red", report.Totals.Failed)
+	if !present {
+		t.Fatalf("VA-03 emitted set %v lacks volume-anomaly yet passed — grader inconsistency", row.Emitted)
+	}
+
+	// The sibling metadata-carried volume scenarios cited in the same gap
+	// (CO-02 tiny-baseline exfil, VA-04 api-enumeration, ND-01 bulk export) are
+	// now labeled and must all fire the same general mechanism — never a
+	// per-scenario rule (R9).
+	for _, id := range []string{
+		"CO-02-benign-events-first",
+		"VA-04-api-enumeration",
+		"ND-01-authorized-data-export",
+	} {
+		r := findRow(t, report, id)
+		if !r.Pass {
+			t.Errorf("%s row is RED — volume-anomaly must fire on its metadata-carried spike (emitted: %v)", id, r.Emitted)
+		}
+	}
+}
+
+// TestRunExamDetect_DistributedSprayFires asserts the auth-failure-burst
+// distributed-spray gap is closed (mallcoppro-bcc): AF-02 spreads one failed
+// login across five accounts from five IPs so no single account trips the
+// per-actor burst threshold — the per-actor loop was blind to it. Cross-actor
+// aggregation now fires auth-failure-burst on the coordinated campaign, so the
+// labeled row is GREEN.
+func TestRunExamDetect_DistributedSprayFires(t *testing.T) {
+	report := examDetectReportForTest(t)
+
+	row := findRow(t, report, "AF-02-distributed-spray")
+	if len(row.MustFire) != 1 || row.MustFire[0] != "auth-failure-burst" {
+		t.Fatalf("AF-02 must_fire = %v, want [auth-failure-burst]", row.MustFire)
+	}
+	if !row.Pass {
+		t.Fatalf("AF-02 row is RED — distributed-spray detection regressed (emitted: %v)", row.Emitted)
+	}
+	var present bool
+	for _, tok := range row.Emitted {
+		if tok == "auth-failure-burst" {
+			present = true
+		}
+	}
+	if !present {
+		t.Fatalf("AF-02 emitted set %v lacks auth-failure-burst yet passed — grader inconsistency", row.Emitted)
 	}
 }
 
