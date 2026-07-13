@@ -186,3 +186,116 @@ func TestBuild_EmptyCorpus(t *testing.T) {
 		t.Errorf("empty-corpus baseline is not empty: %+v", b)
 	}
 }
+
+// --- Merge (mallcoppro-9e2: store-rotation baseline persistence) --------------
+
+// TestMerge_NilReceiverAndArgument proves Merge treats a nil receiver and/or a
+// nil argument as an empty baseline rather than panicking — the store-rotation
+// caller passes a nil lastPersisted on a store's very first derived scan.
+func TestMerge_NilReceiverAndArgument(t *testing.T) {
+	var nilB *Baseline
+	other := &Baseline{KnownActors: []string{"alice"}}
+
+	got := nilB.Merge(other)
+	if !got.IsKnownActor("alice") {
+		t.Errorf("nil.Merge(other) lost other's data: %+v", got)
+	}
+
+	got2 := other.Merge(nil)
+	if !got2.IsKnownActor("alice") {
+		t.Errorf("other.Merge(nil) lost receiver's data: %+v", got2)
+	}
+
+	got3 := nilB.Merge(nil)
+	if got3 == nil || got3.IsKnownActor("anyone") {
+		t.Errorf("nil.Merge(nil) = %+v, want a non-nil empty baseline", got3)
+	}
+}
+
+// TestMerge_UnionsSetValuedFields proves KnownActors, KnownCreatedEntities,
+// ActorHours, and ActorRoles are the UNION of both inputs — the property the
+// store-rotation fix depends on: an actor/hour/role known on EITHER side of a
+// rotation stays known in the merged result.
+func TestMerge_UnionsSetValuedFields(t *testing.T) {
+	a := &Baseline{
+		KnownActors:          []string{"alice"},
+		KnownCreatedEntities: []string{"svc-a"},
+		ActorHours:           map[string][]int{"alice": {9}},
+		ActorRoles:           map[string][]string{"alice": {"admin"}},
+	}
+	b := &Baseline{
+		KnownActors:          []string{"bob"},
+		KnownCreatedEntities: []string{"svc-b"},
+		ActorHours:           map[string][]int{"alice": {14}, "bob": {22}},
+		ActorRoles:           map[string][]string{"bob": {"contributor"}},
+	}
+
+	got := a.Merge(b)
+
+	if !got.IsKnownActor("alice") || !got.IsKnownActor("bob") {
+		t.Errorf("KnownActors = %v, want union [alice bob]", got.KnownActors)
+	}
+	if !got.IsKnownCreatedEntity("svc-a") || !got.IsKnownCreatedEntity("svc-b") {
+		t.Errorf("KnownCreatedEntities = %v, want union [svc-a svc-b]", got.KnownCreatedEntities)
+	}
+	if !got.KnownHour("alice", 9) || !got.KnownHour("alice", 14) {
+		t.Errorf("alice's merged hours = %v, want union [9 14]", got.ActorHours["alice"])
+	}
+	if !got.KnownHour("bob", 22) {
+		t.Errorf("bob's merged hours = %v, want [22]", got.ActorHours["bob"])
+	}
+	if !got.IsKnownRole("alice", "admin") || !got.IsKnownRole("bob", "contributor") {
+		t.Errorf("merged roles missing an input side: alice=%v bob=%v", got.ActorRoles["alice"], got.ActorRoles["bob"])
+	}
+
+	// Neither input was mutated.
+	if len(a.KnownActors) != 1 || len(b.KnownActors) != 1 {
+		t.Errorf("Merge mutated an input: a.KnownActors=%v b.KnownActors=%v", a.KnownActors, b.KnownActors)
+	}
+}
+
+// TestMerge_FrequencyTablesTakeMax proves FrequencyTables merge by MAX, not
+// sum. This is the correctness-critical property documented on Merge: Build
+// recomputes FRESH from the full available corpus every scan (not
+// incrementally), so under normal non-rotated operation the freshly-derived
+// count is already >= the previously-persisted count for the same key — a sum
+// would double-count every steady-state scan, while max is a no-op there and
+// correctly falls back to the larger (persisted) value when the fresh corpus
+// was truncated by a rotation.
+func TestMerge_FrequencyTablesTakeMax(t *testing.T) {
+	persisted := &Baseline{FrequencyTables: map[string]int{"github:api_request:alice": 500}}
+	freshFullCorpus := &Baseline{FrequencyTables: map[string]int{"github:api_request:alice": 503}} // 3 new events, non-rotated
+	freshPostRotation := &Baseline{FrequencyTables: map[string]int{"github:api_request:alice": 2}} // rotation truncated the corpus
+
+	if got := persisted.Merge(freshFullCorpus).FreqCountActor("github", "api_request", "alice"); got != 503 {
+		t.Errorf("non-rotated merge FreqCount = %d, want 503 (fresh already superset — sum would double-count to 1003)", got)
+	}
+	if got := persisted.Merge(freshPostRotation).FreqCountActor("github", "api_request", "alice"); got != 500 {
+		t.Errorf("post-rotation merge FreqCount = %d, want 500 (persisted count must survive a truncated fresh corpus)", got)
+	}
+}
+
+// TestMerge_KnownUsersUnionsIPsGeosAndLatestLastSeen proves KnownUsers profiles
+// merge per-actor: IPs/geos union, LastSeen takes the later timestamp.
+func TestMerge_KnownUsersUnionsIPsGeosAndLatestLastSeen(t *testing.T) {
+	early := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	late := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+
+	a := &Baseline{KnownUsers: map[string]UserProfile{
+		"alice": {KnownIPs: []string{"1.1.1.1"}, KnownGeos: []string{"US"}, LastSeen: early},
+	}}
+	b := &Baseline{KnownUsers: map[string]UserProfile{
+		"alice": {KnownIPs: []string{"2.2.2.2"}, KnownGeos: []string{"CA"}, LastSeen: late},
+	}}
+
+	got := a.Merge(b)
+	if !got.KnownIP("alice", "1.1.1.1") || !got.KnownIP("alice", "2.2.2.2") {
+		t.Errorf("merged IPs = %v, want union of both sides", got.KnownUsers["alice"].KnownIPs)
+	}
+	if !got.KnownGeo("alice", "US") || !got.KnownGeo("alice", "CA") {
+		t.Errorf("merged geos = %v, want union of both sides", got.KnownUsers["alice"].KnownGeos)
+	}
+	if !got.KnownUsers["alice"].LastSeen.Equal(late) {
+		t.Errorf("merged LastSeen = %v, want the LATER timestamp %v", got.KnownUsers["alice"].LastSeen, late)
+	}
+}
