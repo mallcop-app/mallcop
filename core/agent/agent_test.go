@@ -505,3 +505,42 @@ func TestFix3_TriagePromptCarriesPriorResolutionClause(t *testing.T) {
 		t.Fatalf("the prior-resolution clause must live in the Step 4 decision/override block; decideIdx=%d clauseIdx=%d securityIdx=%d", decideIdx, clauseIdx, securityIdx)
 	}
 }
+
+// TestNewActorOnboardingClause_InvestigatePromptCarriesGeneralEvidenceBar proves
+// mallcoppro-b48's evidence-bar fix: the investigate prompt gives the model a
+// GENERAL (not ID-02-specific) path to credit a brand-new automation actor as
+// legitimate pipeline onboarding, gated on THREE tool-verifiable conditions
+// (automation signature, single correlation id, target precedent from OTHER known
+// actors) — never on the actor's novelty alone. This is a prompt-evidence-bar
+// fix, not a family-match rule: it names no scenario id, no actor name (tf-
+// automation), and no specific detector family, and it also asserts the negative
+// guard (novelty alone is still insufficient) survives in the same clause.
+func TestNewActorOnboardingClause_InvestigatePromptCarriesGeneralEvidenceBar(t *testing.T) {
+	const clause = "New-actor pipeline onboarding is POSITIVE evidence"
+	if !strings.Contains(investigateSystemPrompt, clause) {
+		t.Fatalf("investigateSystemPrompt is missing the new-actor onboarding evidence-bar clause (mallcoppro-b48):\nwant substring: %q", clause)
+	}
+	for _, forbidden := range []string{"ID-02", "tf-automation", "Terraform automation actor"} {
+		if strings.Contains(investigateSystemPrompt, forbidden) {
+			t.Fatalf("investigateSystemPrompt names %q — the evidence-bar fix must be general, not a scenario-specific rule (R9)", forbidden)
+		}
+	}
+	// The credit must be conditioned on tool-verified precedent (someone ELSE's
+	// established history on the same target), not on the actor's novelty alone —
+	// the negative guard must survive in the same bullet.
+	if !strings.Contains(investigateSystemPrompt, "is not automatically insufficient-data") {
+		t.Fatalf("investigateSystemPrompt's new-actor clause must frame novelty as NOT automatically insufficient, not force a resolve")
+	}
+	if !strings.Contains(investigateSystemPrompt, "is still NOT\n  evidence of legitimacy on its own") {
+		t.Fatalf("investigateSystemPrompt's new-actor clause must keep the negative guard: novelty alone never suffices")
+	}
+	// It must live in the "Weigh signals in combination" block, alongside the
+	// sibling resource-group-provenance credit, and before the hard constraints —
+	// not bolted on somewhere inert.
+	weighIdx := strings.Index(investigateSystemPrompt, "## Weigh signals in combination")
+	clauseIdx := strings.Index(investigateSystemPrompt, clause)
+	hardIdx := strings.Index(investigateSystemPrompt, "## Hard Constraints")
+	if weighIdx < 0 || clauseIdx < 0 || hardIdx < 0 || clauseIdx < weighIdx || clauseIdx > hardIdx {
+		t.Fatalf("the new-actor onboarding clause must live in the Weigh-signals block; weighIdx=%d clauseIdx=%d hardIdx=%d", weighIdx, clauseIdx, hardIdx)
+	}
+}

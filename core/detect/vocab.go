@@ -33,12 +33,14 @@ import "strings"
 //	rate-anomaly        api_request / api_burst / rate_event    (rate_anomaly.go)
 //	malicious-skill     skill_install/_update/_register/_invoke (malicious_skill.go)
 //	log-format-drift    log_format_drift                        (log_format_drift.go)
-//	auth-failure-burst  login_failure / login_success           (auth_failure_burst.go)
 //
 // admin_action (priv_escalation.go:195) and dependency_add (dependency_tamper.go:174)
 // are ALSO inline ev.Type comparisons, but they already belong to a gate map
 // (builtinElevationEventTypes / depTamperEventTypes), so they are NOT duplicated
-// here — the union with the map keys already covers them.
+// here — the union with the map keys already covers them. auth-failure-burst's
+// login_failure/login_success/mfa_failure/mfa_enrollment_complete gates moved
+// from inline literals to the authFailureEventTypes/authSuccessEventTypes gate
+// maps (mallcoppro-45f) and are picked up by the map-based aggregation below.
 //
 // The scan-all detectors (injection-probe, secrets-exposure, volume-anomaly,
 // unusual-timing) gate on NO specific Type and contribute no vocabulary members.
@@ -48,7 +50,6 @@ var literalGateEventTypes = []string{
 	"api_request", "api_burst", "rate_event",
 	"skill_install", "skill_update", "skill_register", "skill_invoke",
 	"log_format_drift",
-	"login_failure", "login_success",
 }
 
 // KnownEventTypes returns a FRESH set of every event type any built-in detector
@@ -66,6 +67,8 @@ func KnownEventTypes() map[string]bool {
 		exfilEventTypes,            // exfil-pattern
 		depTamperEventTypes,        // dependency-tamper
 		resourceAccessEventTypes,   // unusual-resource-access
+		authFailureEventTypes,      // auth-failure-burst (failure signal)
+		authSuccessEventTypes,      // auth-failure-burst (terminal success)
 	} {
 		for k := range gate {
 			out[k] = true

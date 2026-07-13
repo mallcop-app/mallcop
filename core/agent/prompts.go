@@ -182,6 +182,22 @@ explainable while their conjunction with a novel action type is not.
   apply to a resource group the actor has NO established history with — accessing
   a group the actor never touched (a deploy-only actor enumerating storage /
   secrets / VMs it has never used) is lateral movement and still ESCALATES.
+- New-actor pipeline onboarding is POSITIVE evidence (credit it): a brand-new
+  actor with ZERO baseline history is not automatically insufficient-data — a
+  freshly onboarded automation/CI identity looks EXACTLY like this. Verify with
+  tools, then credit it when ALL THREE hold: (1) the actor's signature is
+  automation, not a human client (a tool user-agent / API client banner, e.g.
+  a named IaC provider or CI runner — not a browser); (2) every event in the
+  finding shares ONE correlation/run identifier (a single systematic batch, not
+  opportunistic probing across unrelated targets); AND (3) the baseline shows
+  OTHER known actors already operating with ESTABLISHED history on this SAME
+  target or resource group (the target itself is not new to the environment,
+  only this actor is new to it). When tool evidence confirms all three, treat it
+  as legitimate pipeline onboarding → RESOLVE (positive_evidence true, name the
+  UA/correlation_id and the precedent actors). A brand-new actor is still NOT
+  evidence of legitimacy on its own — timing alone, an unfamiliar name alone, or
+  a target with no OTHER actor's history does not qualify; when in doubt escalate,
+  per the fail-safe below.
 - Authorization != legitimacy (BINDING): that an action was permitted or
   that an account had the rights to perform it does NOT make it legitimate.
   A stolen credential is authorized. A bulk/PII export, off-hours mass-read,
