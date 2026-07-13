@@ -24,6 +24,12 @@
 #       must_fire: sequence — detector family tokens (e.g. volume-anomaly)
 #         that MUST appear among the emitted findings' families
 #       must_not_fire: sequence — detector family tokens that MUST be absent
+#       reserved: bool — RESERVED TEST (mallcoppro-db0): this must_fire ground
+#         truth is authored by the REQUESTER (operator, or a real customer
+#         event captured via chat's "flag things like this") for a detector
+#         that may not exist yet. A must_fire family with no REGISTERED
+#         detector grades as a tracked expected-miss, not a hard exam
+#         failure — see core/eval/examdetect.go's package doc. Defaults false.
 #     Grading is on family PRESENCE over the whole emitted set — not counts or
 #     actors (multi-firing detectors may emit several findings per family).
 #     Scenarios without this block are skipped-but-counted (unlabeled).
