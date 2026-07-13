@@ -191,7 +191,7 @@ func TestGuard_RejectsWeakeningTheConsensusCommittee(t *testing.T) {
 	base := f.commit("base")
 
 	mutated := replaceOnce(t, real, "const DefaultConsensusRuns = 3", "const DefaultConsensusRuns = 0")
-	mutated = replaceOnce(t, mutated, "const consensusTemperature = 1.0", "const consensusTemperature = 0.0")
+	mutated = replaceOnce(t, mutated, "const consensusTemperature = 0.4", "const consensusTemperature = 0.0")
 	f.write("core/agent/consensus.go", mutated)
 	head := f.commit("proposal: weaken consensus")
 
