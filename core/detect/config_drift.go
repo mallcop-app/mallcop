@@ -175,6 +175,7 @@ func configDriftEvaluate(ev event.Event, _ *baseline.Baseline) *finding.Finding 
 
 	evidence, _ := json.Marshal(map[string]string{
 		"actor":       ev.Actor,
+		"source":      ev.Source,
 		"event_type":  ev.Type,
 		"resource":    cp.ResourceName,
 		"policy":      cp.PolicyName,
