@@ -642,14 +642,29 @@ func baselineFromScenario(s *exam.Scenario) *baseline.Baseline {
 	for k, v := range s.Baseline.FrequencyTables {
 		b.FrequencyTables[k] = v
 	}
-	// CLASS D (timing baseline): the corpus encodes an actor's KNOWN active hours
-	// NOT as actor_hours but as 5-segment frequency keys
-	// "source:event_type:actor:N:partofday" (UT-03 / UT-05 carry these). Derive
-	// ActorHours from those keys so unusual-timing has a profile to compare an
-	// event's UTC hour against. Only the part-of-day token's hour set is known —
-	// the index segment (N) is a window ordinal, not an hour. ActorRoles is
-	// deliberately NOT populated (priv-escalation must still escalate a known-role
-	// grant — the PE-05 Known-Actor-Trust trap).
+	// CLASS D (timing baseline): a scenario can encode an actor's KNOWN active
+	// hours TWO ways, and unusual-timing must read BOTH or it silently misses.
+	//
+	//  1. The EXPLICIT canonical format: known_entities.actor_hours — a direct
+	//     actor → []UTC-hour map (the same shape pkg/baseline.Baseline.ActorHours
+	//     carries and production builds from real events). This is the format an
+	//     operator or the self-extension loop authors a reserved timing case in.
+	//     baselineFromScenario used to DROP it entirely — the exam parsed the YAML
+	//     into KnownEntities.ActorHours but the projection never copied it into the
+	//     typed baseline, so any scenario expressing timing this way had NO profile
+	//     and unusual-timing could never fire (the baseline-key format miss).
+	//  2. The DERIVED format: 5-segment frequency keys
+	//     "source:event_type:actor:N:partofday" (UT-03 carries these). Only the
+	//     part-of-day token's hour set is known — the index segment (N) is a window
+	//     ordinal, not an hour.
+	//
+	// Copy the explicit map first, then UNION the derived hours over it, so a
+	// scenario using either (or both) formats gets the full known-hours set.
+	// ActorRoles is deliberately NOT populated (priv-escalation must still escalate
+	// a known-role grant — the PE-05 Known-Actor-Trust trap).
+	for actor, hrs := range s.Baseline.KnownEntities.ActorHours {
+		b.ActorHours[actor] = append([]int{}, hrs...)
+	}
 	deriveActorHours(b, s.Baseline.FrequencyTables)
 	// EVAL FIDELITY (FIX 4): reconstruct the scenario's relationships table into the
 	// typed baseline so check-baseline can surface the actor↔target history legion's
@@ -701,6 +716,18 @@ func partOfDayHours(token string) []int {
 // design documents for UT-01/02/04/06/07).
 func deriveActorHours(b *baseline.Baseline, freq map[string]int) {
 	seen := map[string]map[int]bool{}
+	// Seed from any hours ALREADY on the baseline (the explicit
+	// known_entities.actor_hours format baselineFromScenario copies in first) so the
+	// derived 5-segment hours UNION with them instead of overwriting — an actor that
+	// carries both formats keeps every known hour.
+	for actor, hrs := range b.ActorHours {
+		if seen[actor] == nil {
+			seen[actor] = map[int]bool{}
+		}
+		for _, h := range hrs {
+			seen[actor][h] = true
+		}
+	}
 	for key := range freq {
 		segs := strings.Split(key, ":")
 		if len(segs) != 5 {

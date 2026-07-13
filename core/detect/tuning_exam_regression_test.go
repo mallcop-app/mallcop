@@ -148,9 +148,15 @@ func TestTuningClosesPE08GapDataOnly(t *testing.T) {
 		}
 	}
 
-	// The VA-03 seeded volume-anomaly gap is untouched by priv-escalation tuning.
-	va03 := examRow(t, after, seededVA03Gap)
-	if va03.Pass {
-		t.Errorf("%s went GREEN under priv-escalation tuning — tuning leaked into another detector family", seededVA03Gap)
+	// VA-03 (volume-anomaly family) is UNTOUCHED by priv-escalation tuning: its
+	// pass state must be identical with and without the tuning applied. VA-03 is
+	// GREEN on its own merits now (the volume field/unit contract fix,
+	// mallcoppro-3c9) — this control proves priv-escalation tuning does not LEAK
+	// into another family and flip it either way.
+	va03Before := examRow(t, before, seededVA03Gap)
+	va03After := examRow(t, after, seededVA03Gap)
+	if va03After.Pass != va03Before.Pass {
+		t.Errorf("%s pass state changed under priv-escalation tuning (before=%v after=%v) — tuning leaked into another detector family",
+			seededVA03Gap, va03Before.Pass, va03After.Pass)
 	}
 }

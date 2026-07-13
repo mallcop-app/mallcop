@@ -91,14 +91,14 @@ func TestE2E_CannedVerification(t *testing.T) {
 	// TestE2E_DetectReproductionProbe / the detect map):
 	//   ID-03 — detect emits new-actor/ext-user-7f3a, the scenario's expected
 	//           (new-actor, ext-user-7f3a) → REPRODUCED (expected escalated).
-	//   VA-04 — the volume spike's magnitude lives only in the finding metadata
-	//           (volume_ratio); the corpus emits a representative handful of
-	//           api_call events whose RAW count never clears the 3× baseline, so
-	//           volume-anomaly cannot fire from events alone → DETECT-MISS
-	//           (expected escalated → an end-to-end FAIL). A durable corpus-data
-	//           limit, not a detector defect — the canonical DETECT-MISS anchor.
+	//   UT-05 — an AiTM proxy replays a post-MFA session from a new IP during the
+	//           actor's normal business hours. Every event dimension is benign
+	//           (known actor, known hour, routine actions); the ONLY signal is the
+	//           IP-origin change, which no detector fires on from the event stream
+	//           alone → DETECT-MISS (expected escalated → an end-to-end FAIL). A
+	//           durable detector-reach limit, not a defect — the DETECT-MISS anchor.
 	const wantReproduced = "ID-03-new-actor-suspicious-unknown"
-	const wantDetectMiss = "VA-04-api-enumeration"
+	const wantDetectMiss = "UT-05-aitm-proxy"
 	subset := []LoadedScenario{
 		pickScenario(t, corpus, wantReproduced),
 		pickScenario(t, corpus, wantDetectMiss),
@@ -202,14 +202,14 @@ func TestE2E_DetectReproductionProbe(t *testing.T) {
 		if strings.HasPrefix(s.ID, "ID-03-") && row.Outcome != OutcomeReproduced {
 			t.Errorf("ID-03 expected REPRODUCED, got %s (emitted=%v)", row.Outcome, row.EmittedDetectors)
 		}
-		// AC-01 now REPRODUCES (new-external-access detector). VA-04 is the durable
-		// DETECT-MISS anchor: the volume magnitude lives only in finding metadata,
-		// so volume-anomaly cannot fire from the representative event sample.
+		// AC-01 now REPRODUCES (new-external-access detector). UT-05 is the durable
+		// DETECT-MISS anchor: an AiTM IP-origin change during the actor's normal
+		// business hours carries no signal any detector fires on from events alone.
 		if strings.HasPrefix(s.ID, "AC-01-") && row.Outcome != OutcomeReproduced {
 			t.Errorf("AC-01 expected REPRODUCED, got %s (emitted=%v)", row.Outcome, row.EmittedDetectors)
 		}
-		if strings.HasPrefix(s.ID, "VA-04-") && row.Outcome != OutcomeDetectMiss {
-			t.Errorf("VA-04 expected DETECT-MISS, got %s (emitted=%v)", row.Outcome, row.EmittedDetectors)
+		if strings.HasPrefix(s.ID, "UT-05-") && row.Outcome != OutcomeDetectMiss {
+			t.Errorf("UT-05 expected DETECT-MISS, got %s (emitted=%v)", row.Outcome, row.EmittedDetectors)
 		}
 	}
 	if reproduced == 0 {

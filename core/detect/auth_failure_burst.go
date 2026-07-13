@@ -3,6 +3,8 @@ package detect
 import (
 	"encoding/json"
 	"fmt"
+	"sort"
+	"time"
 
 	"github.com/mallcop-app/mallcop/pkg/baseline"
 	"github.com/mallcop-app/mallcop/pkg/event"
@@ -21,6 +23,18 @@ const (
 	// slice of the burst (AF-03: 6 failures), so a threshold of 5 separates a real
 	// burst from a benign fat-finger (AF-01: 3 failures then success).
 	authBurstThreshold = 5
+
+	// A DISTRIBUTED password spray (Midnight Blizzard low-and-slow) spreads failed
+	// logins across MANY accounts from MANY IPs so no single account trips
+	// authBurstThreshold. The per-actor loop above is blind to it: every actor has
+	// one failure. The aggregate signal is the cross-actor correlation — N distinct
+	// accounts each failing from a distinct source IP inside a tight window. The
+	// thresholds are calibrated between the benign single-actor recoveries (AF-01 /
+	// AF-04: one actor, one IP) and the coordinated campaign (AF-02: 5 accounts, 5
+	// IPs, 9 minutes): three-of-each cleanly separates them.
+	spraySameWindow    = 15 * time.Minute
+	sprayMinActors     = 3
+	sprayMinDistinctIP = 3
 )
 
 // Detect groups login_failure events by actor and fires when an actor accrues
@@ -88,5 +102,102 @@ func (authFailureBurstDetector) Detect(events []event.Event, bl *baseline.Baseli
 			Evidence: evidence,
 		})
 	}
+
+	if spray := detectDistributedSpray(events); spray != nil {
+		out = append(out, *spray)
+	}
+	return out
+}
+
+// detectDistributedSpray finds a low-and-slow password spray: many DISTINCT
+// accounts each failing to log in from a DISTINCT source IP inside a tight window,
+// where no single account trips the per-actor burst threshold. It slides a window
+// over the login_failure events (sorted by time) and fires ONCE when any window
+// holds at least sprayMinActors distinct actors AND sprayMinDistinctIP distinct
+// source IPs — the cross-actor correlation the per-actor loop cannot see.
+//
+// General mechanism (calibrated thresholds + cross-actor aggregation), NOT a
+// per-scenario rule: the benign single-actor recoveries stay below sprayMinActors
+// and never match; a coordinated campaign across many accounts/IPs does. The
+// finding actor is "multiple" (the canonical cross-actor marker the finding
+// metadata names) since no single identity owns the campaign.
+func detectDistributedSpray(events []event.Event) *finding.Finding {
+	type fail struct {
+		ts    time.Time
+		actor string
+		ip    string
+		ev    event.Event
+	}
+	var fails []fail
+	for _, ev := range events {
+		if ev.Type != "login_failure" {
+			continue
+		}
+		meta := payloadMeta(ev.Payload)
+		fails = append(fails, fail{
+			ts:    ev.Timestamp.UTC(),
+			actor: ev.Actor,
+			ip:    metaStr(meta, "ip", "source_ip"),
+			ev:    ev,
+		})
+	}
+	if len(fails) < sprayMinActors {
+		return nil
+	}
+	sort.SliceStable(fails, func(i, j int) bool { return fails[i].ts.Before(fails[j].ts) })
+
+	// Slide a window anchored on each failure; a window covers [anchor, anchor+W].
+	for i := range fails {
+		windowEnd := fails[i].ts.Add(spraySameWindow)
+		actors := map[string]struct{}{}
+		ips := map[string]struct{}{}
+		var members []fail
+		for j := i; j < len(fails); j++ {
+			if fails[j].ts.After(windowEnd) {
+				break
+			}
+			members = append(members, fails[j])
+			actors[fails[j].actor] = struct{}{}
+			if fails[j].ip != "" {
+				ips[fails[j].ip] = struct{}{}
+			}
+		}
+		if len(actors) >= sprayMinActors && len(ips) >= sprayMinDistinctIP {
+			first := members[0].ev
+			acct := sortedKeys(actors)
+			evidence, _ := json.Marshal(map[string]any{
+				"pattern":           "distributed-spray",
+				"accounts_affected": len(actors),
+				"distinct_ips":      len(ips),
+				"failure_count":     len(members),
+				"accounts":          acct,
+				"event_id":          first.ID,
+			})
+			return &finding.Finding{
+				ID:        "finding-spray-" + first.ID,
+				Source:    "detector:auth-failure-burst",
+				Severity:  "critical",
+				Type:      "auth-failure-burst",
+				Actor:     "multiple",
+				Timestamp: first.Timestamp,
+				Reason: fmt.Sprintf(
+					"distributed authentication failure spray: %d accounts failed from %d distinct IPs within %s (coordinated low-and-slow campaign)",
+					len(actors), len(ips), spraySameWindow,
+				),
+				Evidence: evidence,
+			}
+		}
+	}
+	return nil
+}
+
+// sortedKeys returns a set's members sorted ascending (never nil), so spray
+// evidence is deterministic for a fixed input.
+func sortedKeys(set map[string]struct{}) []string {
+	out := make([]string, 0, len(set))
+	for k := range set {
+		out = append(out, k)
+	}
+	sort.Strings(out)
 	return out
 }

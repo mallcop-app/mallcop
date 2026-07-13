@@ -24,19 +24,23 @@ func repoRootForExamTest(t *testing.T) string {
 	return root
 }
 
-// TestRunExamDetect_SeededGapExitsRed proves the CLI surfaces the seeded VA-03
-// detection gap as the errFindings sentinel (exit code 1): the corpus carries a
-// labeled-and-unfixed must_fire that the real detect layer misses.
-func TestRunExamDetect_SeededGapExitsRed(t *testing.T) {
+// TestRunExamDetect_RemainingGapExitsRed proves the CLI surfaces a
+// labeled-and-unfixed detection gap as the errFindings sentinel (exit code 1).
+// The VA-03 volume gap is now CLOSED (mallcoppro-3c9 — it shows PASS), but IP-01
+// (injection-probe) remains a real labeled false negative, so the exam still exits
+// red and the human report shows both the closed and the open row. IP-01 is chosen
+// over PE-08 because the committed priv-escalation tuning another test applies to
+// the process-global detector state can close PE-08 depending on run order.
+func TestRunExamDetect_RemainingGapExitsRed(t *testing.T) {
 	t.Setenv("MALLCOP_REPO_ROOT", repoRootForExamTest(t))
 
 	out, err := withStdio(t, "", func() error { return runExamDetect(nil) })
 
 	// Detection gaps present → errFindings sentinel (exit code 1), not a real error.
 	if !isFindingsError(err) {
-		t.Fatalf("expected findings sentinel error while VA-03 is labeled-and-unfixed, got %v\noutput:\n%s", err, out)
+		t.Fatalf("expected findings sentinel error while IP-01 is labeled-and-unfixed, got %v\noutput:\n%s", err, out)
 	}
-	for _, want := range []string{"FAIL VA-03-data-exfil", "PASS AC-01-external-access-stolen-cred", "exam-detect:"} {
+	for _, want := range []string{"FAIL IP-01-sqli-user-agent", "PASS VA-03-data-exfil", "PASS AC-01-external-access-stolen-cred", "exam-detect:"} {
 		if !containsLine(out, want) {
 			t.Errorf("human output missing %q; got:\n%s", want, out)
 		}
@@ -107,7 +111,7 @@ func TestRunExamDetect_JSONShape(t *testing.T) {
 		t.Errorf("passed(%d) + failed(%d) != labeled(%d)", report.Totals.Passed, report.Totals.Failed, report.Totals.Labeled)
 	}
 	if report.Totals.Failed < 1 {
-		t.Errorf("totals.failed = %d, want >= 1 while VA-03 is labeled-and-unfixed", report.Totals.Failed)
+		t.Errorf("totals.failed = %d, want >= 1 while IP-01 is labeled-and-unfixed", report.Totals.Failed)
 	}
 
 	var va03Found bool
@@ -116,8 +120,10 @@ func TestRunExamDetect_JSONShape(t *testing.T) {
 			continue
 		}
 		va03Found = true
-		if row.Pass {
-			t.Errorf("VA-03 row pass = true, want the seeded gap RED (emitted: %v)", row.Emitted)
+		// The volume field/unit contract gap is closed (mallcoppro-3c9): VA-03's
+		// metadata-carried spike now fires volume-anomaly, so the row is GREEN.
+		if !row.Pass {
+			t.Errorf("VA-03 row pass = false, want GREEN now that the volume contract is fixed (emitted: %v)", row.Emitted)
 		}
 		if len(row.MustFire) != 1 || row.MustFire[0] != "volume-anomaly" {
 			t.Errorf("VA-03 must_fire = %v, want [volume-anomaly]", row.MustFire)
