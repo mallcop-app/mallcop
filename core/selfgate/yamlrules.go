@@ -1,5 +1,5 @@
 // yamlrules.go — the SEMANTIC widen-only rules the guard applies to YAML data
-// the self-extension loop is allowed to modify in place. Two checkers:
+// the self-extension loop is allowed to modify in place. Checkers:
 //
 //   - checkOperatorDecisions: agents/rules/operator-decisions.yaml. Pure
 //     widens only — new escalate_routes entries or alias additions to an
@@ -9,9 +9,13 @@
 //     overlays, e.g. connect learned_mappings). For every list under every
 //     section, old must be a subset of new after the same lowercase/trim
 //     normalization core/detect's ApplyTuning applies.
+//   - checkBuiltinDisableOwnerOnly: mallcop.yaml's
+//     detectors.builtin.disable (cfg-8, rd mallcoppro-06a). NOT a widen
+//     rule — an OWNER-ONLY field the loop may never write at all, so base
+//     and head must carry the identical set, full stop.
 //
-// Both checkers FAIL CLOSED: an unparseable document, an unrecognized shape,
-// or an unknown top-level section change is a rejection, never a pass.
+// All three checkers FAIL CLOSED: an unparseable document, an unrecognized
+// shape, or an unknown top-level section change is a rejection, never a pass.
 package selfgate
 
 import (
@@ -21,6 +25,8 @@ import (
 	"strings"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/mallcop-app/mallcop/core/config"
 )
 
 // ---- operator-decisions.yaml ------------------------------------------------
@@ -203,6 +209,75 @@ func routesByID(p string, v any, which string) (map[string]map[string]any, []Gua
 		routes[id] = route
 	}
 	return routes, nil
+}
+
+// ---- mallcop.yaml: detectors.builtin.disable (owner-only, NOT a widen) -----
+
+// checkBuiltinDisableOwnerOnly enforces that detectors.builtin.disable in
+// mallcop.yaml is IDENTICAL between base and head (as a set — order does not
+// matter). Unlike every other checker in this file, this is not a widen-only
+// rule: config.Builtin.Disable is documented OWNER discretion ONLY
+// (core/config/config.go) because disabling a built-in detector NARROWS what
+// the committee sees, so the loop is structurally forbidden from writing this
+// field at all — adding an entry, removing one, or setting it for the first
+// time on a brand-new file (baseData == nil, the Add case) are all rejected
+// identically. Every other mallcop.yaml key is untouched by this checker —
+// it inspects only this one field.
+func checkBuiltinDisableOwnerOnly(p string, baseData, headData []byte) []GuardFinding {
+	reject := func(format string, args ...any) []GuardFinding {
+		return []GuardFinding{{Path: p, Rule: RuleBuiltinDisableOwnerOnly, Detail: fmt.Sprintf(format, args...)}}
+	}
+
+	baseDisable, err := decodeBuiltinDisable(baseData)
+	if err != nil {
+		return reject("base version: %v — cannot prove no change, fail closed", err)
+	}
+	headDisable, err := decodeBuiltinDisable(headData)
+	if err != nil {
+		return reject("head version: %v — fail closed", err)
+	}
+
+	if !sameStringSet(baseDisable, headDisable) {
+		return reject("detectors.builtin.disable changed (base=%v, head=%v) — disabling a built-in detector is owner discretion ONLY; the self-extension loop may not write this field", baseDisable, headDisable)
+	}
+	return nil
+}
+
+// decodeBuiltinDisable decodes data as a mallcop.yaml document and returns its
+// detectors.builtin.disable list. Nil/empty data (the Add case, where base has
+// no prior file) decodes to a zero config.Config, whose Disable is nil — "no
+// disable entries", the correct base for a brand-new file. A non-empty
+// document that fails to parse is an error (fail closed): this checker cannot
+// prove the field is unchanged if it cannot read it.
+func decodeBuiltinDisable(data []byte) ([]string, error) {
+	if len(data) == 0 {
+		return nil, nil
+	}
+	var cfg config.Config
+	if err := yaml.Unmarshal(data, &cfg); err != nil {
+		return nil, fmt.Errorf("unparseable mallcop.yaml (%v)", err)
+	}
+	return cfg.Detectors.Builtin.Disable, nil
+}
+
+// sameStringSet reports whether a and b contain the same strings, ignoring
+// order (detectors.builtin.disable is a set of detector names — reordering it
+// is not a write the owner cares about; adding, removing, or replacing an
+// entry is).
+func sameStringSet(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	as := append([]string{}, a...)
+	bs := append([]string{}, b...)
+	sort.Strings(as)
+	sort.Strings(bs)
+	for i := range as {
+		if as[i] != bs[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // ---- widen-only list data (detectors/tuning.yaml + future overlays) ---------
