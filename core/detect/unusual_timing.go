@@ -100,6 +100,20 @@ const unusualTimingEventIDCap = 10
 func unusualTimingFindingForGroup(k unusualTimingKey, evs []event.Event) finding.Finding {
 	first := evs[0]
 
+	// A first event with an EMPTY ID (a connector or test fixture that assigns
+	// none — see pipeline.dedupeEvents' identical "ev.ID == \"\" is never an
+	// identity" guard) would otherwise make every such group's finding ID
+	// exactly "finding-", colliding across ANY OTHER empty-ID group in the
+	// same scan (e.g. actor-a at hour 3 and actor-b at hour 9, both with
+	// empty-ID first events, would both mint finding ID "finding-"). Fall back
+	// to the group's (actor, hour) key: unusualTimingCollapse groups events by
+	// exactly that key, so it is guaranteed unique WITHIN one Detect() call —
+	// unlike first.ID, which carries no such guarantee when empty.
+	idSuffix := first.ID
+	if idSuffix == "" {
+		idSuffix = fmt.Sprintf("actor-%s-hour-%02d", k.actor, k.hour)
+	}
+
 	sourceSet := map[string]struct{}{}
 	typeSet := map[string]struct{}{}
 	eventIDs := make([]string, 0, unusualTimingEventIDCap)
@@ -130,7 +144,7 @@ func unusualTimingFindingForGroup(k unusualTimingKey, evs []event.Event) finding
 	})
 
 	return finding.Finding{
-		ID:        "finding-" + first.ID,
+		ID:        "finding-" + idSuffix,
 		Source:    "detector:unusual-timing",
 		Severity:  "low",
 		Type:      "unusual-timing",

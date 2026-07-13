@@ -311,3 +311,60 @@ func TestUnusualTimingCollapse_TwoActorsSameHourNotMerged(t *testing.T) {
 		t.Errorf("actor-b event_ids = %v, want [e2 e4 e5] (only actor-b's events)", idsB)
 	}
 }
+
+// TestUnusualTimingCollapse_EmptyFirstEventID_NoCollision proves the
+// empty-ID finding guard: when a group's first-seen event carries no ID (a
+// connector or test fixture that assigns none — the same legitimate case
+// pipeline.dedupeEvents guards for), the finding ID must NOT collapse to the
+// literal "finding-" for every such group. Two DIFFERENT actors, each with an
+// empty-ID first event at their own novel hour, must still mint two DISTINCT
+// finding IDs — proving no cross-group collision even though first.ID is
+// empty in both groups.
+func TestUnusualTimingCollapse_EmptyFirstEventID_NoCollision(t *testing.T) {
+	bl := &baseline.Baseline{
+		ActorHours: map[string][]int{
+			"actor-a": {9, 10, 11},
+			"actor-b": {9, 10, 11},
+		},
+	}
+	evs := []event.Event{
+		utEvent("", "actor-a", "github", "push", 3, 0), // empty ID, first-seen for actor-a
+		utEvent("", "actor-b", "github", "push", 5, 0), // empty ID, first-seen for actor-b (DIFFERENT hour)
+	}
+
+	got := unusualTimingCollapse(evs, bl)
+	if len(got) != 2 {
+		t.Fatalf("expected exactly 2 findings, got %d: %+v", len(got), got)
+	}
+	if got[0].ID == "" || got[1].ID == "" {
+		t.Fatalf("finding ID must never be empty, got %q and %q", got[0].ID, got[1].ID)
+	}
+	if got[0].ID == got[1].ID {
+		t.Fatalf("two DIFFERENT groups with empty-ID first events collided on the same finding ID %q — the empty-ID guard must fall back to the (actor,hour) group key, not the empty first.ID", got[0].ID)
+	}
+	if got[0].ID == "finding-" || got[1].ID == "finding-" {
+		t.Errorf("finding ID must not be the bare \"finding-\" literal (first.ID was used unguarded): got %q, %q", got[0].ID, got[1].ID)
+	}
+}
+
+// TestUnusualTimingCollapse_EmptyFirstEventID_StableWithinGroup proves the
+// empty-ID fallback still keys on the group (actor, hour), not per-call
+// randomness: re-running collapse over the SAME input yields the SAME finding
+// ID both times (determinism the rest of the pipeline — sorted-by-finding-ID
+// writes — depends on).
+func TestUnusualTimingCollapse_EmptyFirstEventID_StableWithinGroup(t *testing.T) {
+	bl := utBaseline()
+	evs := []event.Event{utEvent("", "alice", "github", "push", 3, 0)}
+
+	got1 := unusualTimingCollapse(evs, bl)
+	got2 := unusualTimingCollapse(evs, bl)
+	if len(got1) != 1 || len(got2) != 1 {
+		t.Fatalf("expected exactly 1 finding per call, got %d and %d", len(got1), len(got2))
+	}
+	if got1[0].ID != got2[0].ID {
+		t.Fatalf("empty-ID fallback is not deterministic: %q vs %q", got1[0].ID, got2[0].ID)
+	}
+	if got1[0].ID != "finding-actor-alice-hour-03" {
+		t.Errorf("expected the (actor,hour)-keyed fallback ID, got %q", got1[0].ID)
+	}
+}
