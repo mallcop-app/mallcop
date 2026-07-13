@@ -43,6 +43,13 @@
 //     are parsed (base and head) and only pure widens pass. Anything
 //     unrecognized — including an unknown top-level section or field — fails
 //     closed.
+//   - OWNER-ONLY FIELD (cfg-8, rd mallcoppro-06a) — mallcop.yaml's
+//     detectors.builtin.disable is human/owner discretion only. A proposal
+//     that Adds or Modifies mallcop.yaml with a different disable list than
+//     base (setting it for the first time, adding an entry, or otherwise
+//     changing it) is rejected: disabling a built-in detector NARROWS what
+//     the committee sees, so the loop may never write this field at all —
+//     not even as a "widen" of some other list.
 //
 // DESIGN DECISION (no mechanical-pair exception): a proposal that widens
 // agents/rules/operator-decisions.yaml is ADDITIVE at this layer (new routes /
@@ -70,6 +77,8 @@ import (
 	"path"
 	"sort"
 	"strings"
+
+	"github.com/mallcop-app/mallcop/core/config"
 )
 
 // GuardFinding is one rejected change. Path is the repo-relative path that
@@ -118,6 +127,13 @@ const (
 	// human-bootstrapped once (A/D rejected); thereafter only append-only
 	// blank-import growth is allowed.
 	RuleAuthoredRegistry = "authored-registry-append-only"
+	// RuleBuiltinDisableOwnerOnly — a mallcop.yaml change (Add or Modify) whose
+	// detectors.builtin.disable list differs from what it was at base (cfg-8,
+	// rd mallcoppro-06a). Disabling a built-in detector NARROWS what the
+	// committee sees, and the config.Builtin.Disable field is documented OWNER
+	// discretion ONLY (core/config/config.go) — the self-extension loop is
+	// structurally forbidden from writing it at all, not just from widening it.
+	RuleBuiltinDisableOwnerOnly = "builtin-disable-owner-only"
 )
 
 // Paths with special (non-prefix) handling.
@@ -298,6 +314,33 @@ func Guard(repoRoot, baseRef, headRef string, customerTreeMode bool) ([]GuardFin
 					Rule:   RuleCorpusPinPairing,
 					Detail: "bare corpus.pin modification with no added scenario files — a repin must accompany additive scenario changes, never stand alone",
 				})
+			}
+
+		case c.path == config.ConfigFileName:
+			// mallcop.yaml (cfg-8, rd mallcoppro-06a): the OWNER-ONLY field is
+			// detectors.builtin.disable — disabling a built-in detector narrows
+			// committee coverage, and the field is documented owner discretion
+			// ONLY (core/config/config.go). This layer checks ONLY that field;
+			// every other mallcop.yaml key is out of this rule's scope (the
+			// broader mutation path is a separate, not-yet-built item — see
+			// rd mallcoppro-901's crux ruling).
+			switch c.status {
+			case 'D':
+				// Deleting the file resets everything (including disable) to
+				// config.Defaults()'s empty list at load time — never a way to
+				// SET or WIDEN disable, so this rule has nothing to check.
+			case 'A':
+				head, err := readBlob(repoRoot, headRef, c.path)
+				if err != nil {
+					return nil, err
+				}
+				findings = append(findings, checkBuiltinDisableOwnerOnly(c.path, nil, head)...)
+			case 'M':
+				base, head, err := readBlobs(repoRoot, baseRef, headRef, c.path)
+				if err != nil {
+					return nil, err
+				}
+				findings = append(findings, checkBuiltinDisableOwnerOnly(c.path, base, head)...)
 			}
 
 		case strings.HasPrefix(c.path, scenariosPrefix):
