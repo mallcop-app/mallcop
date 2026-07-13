@@ -85,19 +85,26 @@ type Store struct {
 //   - cloud:  Source maps to the sibling binary mallcop-connector-<source>;
 //     Args/Since/Env/Binary parameterize the exec (later item). Env lists
 //     env-var NAMES, never values.
+//
+// Kind and ID are always emitted (they identify the connector even at their
+// zero value). Every other field is kind-specific — file uses Path only,
+// github uses Org only, cloud uses Source/Args/Since/Env/Binary — so they
+// marshal with `omitempty`: without it, the generated mallcop.yaml pads every
+// connector entry with the OTHER kinds' unused fields as empty noise
+// (`org: ""`, `source: ""`, `args: []`).
 type Connector struct {
 	Kind   string   `yaml:"kind"`
 	ID     string   `yaml:"id"`
-	Path   string   `yaml:"path"`
-	Org    string   `yaml:"org"`
-	Source string   `yaml:"source"`
-	Args   []string `yaml:"args"`
-	Since  string   `yaml:"since"`
-	Env    []string `yaml:"env"`
+	Path   string   `yaml:"path,omitempty"`
+	Org    string   `yaml:"org,omitempty"`
+	Source string   `yaml:"source,omitempty"`
+	Args   []string `yaml:"args,omitempty"`
+	Since  string   `yaml:"since,omitempty"`
+	Env    []string `yaml:"env,omitempty"`
 	// Binary is an optional explicit override for the kind:cloud sibling path
 	// (design §A / Ruling #3); empty means the mallcop-connector-<source>
 	// convention on $PATH.
-	Binary string `yaml:"binary"`
+	Binary string `yaml:"binary,omitempty"`
 }
 
 // Detectors gates the built-in framework detectors and configures WASM
@@ -348,10 +355,12 @@ const marshalHeader = `# mallcop.yaml — the one file mallcop reads. Generated 
 `
 
 // Marshal serializes cfg to the YAML bytes `mallcop init` writes. The output is
-// a header comment plus the strict, fully-keyed encoding of every struct field,
-// so it round-trips through Load with no error (the doc-test seed for §14): the
-// generated default IS a valid config. Two-space indent matches the schema in
-// the design doc.
+// a header comment plus the strict, fully-keyed encoding of every struct field
+// — EXCEPT Connector's kind-specific fields (Path/Org/Source/Args/Since/Env/
+// Binary), which omit when empty so a connector entry only shows the fields its
+// own kind uses (see Connector's doc comment) — so it round-trips through Load
+// with no error (the doc-test seed for §14): the generated default IS a valid
+// config. Two-space indent matches the schema in the design doc.
 func Marshal(cfg Config) ([]byte, error) {
 	var buf bytes.Buffer
 	buf.WriteString(marshalHeader)

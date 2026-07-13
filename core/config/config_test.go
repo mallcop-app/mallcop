@@ -383,6 +383,30 @@ func TestMarshalRoundTrip(t *testing.T) {
 	}
 }
 
+// TestMarshalOmitsEmptyConnectorFields is the regression for rd mallcoppro-8f5:
+// the default file connector sets only Kind/ID/Path — the github/cloud-only
+// fields (Org, Source, Args, Since, Env, Binary) are all zero-valued and MUST
+// NOT appear in the generated mallcop.yaml as noise (`org: ""`, `source: ""`,
+// `args: []`).
+func TestMarshalOmitsEmptyConnectorFields(t *testing.T) {
+	data, err := Marshal(Defaults())
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	s := string(data)
+	// Match the connector list item's own 4-space-indented field lines
+	// (`    org:`), not lookalike substrings elsewhere in the document (e.g.
+	// inference's `key_env:` also contains "env:").
+	for _, noise := range []string{"\n    org:", "\n    source:", "\n    args:", "\n    since:", "\n    env:", "\n    binary:"} {
+		if strings.Contains(s, noise) {
+			t.Fatalf("Marshal output still contains empty-field noise %q:\n%s", noise, s)
+		}
+	}
+	if !strings.Contains(s, "path: ./events.jsonl") {
+		t.Fatalf("Marshal output missing the connector's actual field (path):\n%s", s)
+	}
+}
+
 // TestWriteConfigRoundTrip proves the WriteConfig helper writes a file Load
 // accepts, and that a --pro-style donut inference flip survives the round-trip.
 func TestWriteConfigRoundTrip(t *testing.T) {
