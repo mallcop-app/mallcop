@@ -18,10 +18,15 @@ func (newExternalAccessDetector) Name() string { return "new-external-access" }
 
 // externalAccessEventTypes are the grant/trust event types that can introduce an
 // external principal: GitHub collaborator/member adds, outside-collaborator adds,
-// and Azure AD federation/domain-trust changes.
+// and Azure AD federation/domain-trust changes. "org.member_added" is carried
+// alongside "org.add_member" as the same signal under GitHub's other verb-order
+// naming convention (event.action vs action.event) — a connector emitting either
+// spelling for an org-membership grant must be recognized identically; this is a
+// naming-synonym, not a new signal (mallcoppro-45f).
 var externalAccessEventTypes = map[string]bool{
 	"repo.add_collaborator":        true,
 	"org.add_member":               true,
+	"org.member_added":             true,
 	"org.add_outside_collaborator": true,
 	"trust_added":                  true,
 	"domain_trust":                 true,

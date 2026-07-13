@@ -18,7 +18,7 @@ type authFailureBurstDetector struct{}
 func (authFailureBurstDetector) Name() string { return "auth-failure-burst" }
 
 const (
-	// authBurstThreshold is the minimum same-actor login_failure count that marks
+	// authBurstThreshold is the minimum same-actor auth-failure count that marks
 	// a brute-force / credential-stuffing burst. The corpus emits a representative
 	// slice of the burst (AF-03: 6 failures), so a threshold of 5 separates a real
 	// burst from a benign fat-finger (AF-01: 3 failures then success).
@@ -37,11 +37,34 @@ const (
 	sprayMinDistinctIP = 3
 )
 
-// Detect groups login_failure events by actor and fires when an actor accrues
-// authBurstThreshold or more failures WITHOUT a terminal login_success — the
-// brute-force signature. A short run of failures that ENDS in a success is a
-// benign fat-finger / password-reset recovery (AF-01, AF-04) and is NOT escalated.
-// Fires on ev.Actor (the performing identity the finding metadata names).
+// authFailureEventTypes are the event types that carry a FAILED authentication
+// challenge attempt. login_failure is the password-challenge form; mfa_failure is
+// the same "failed proof of identity" signal for a second-factor challenge (TOTP/
+// push code entered wrong) — recognizing both means a genuine MFA-based brute-force
+// or MFA-bombing burst (5+ mfa_failures with no eventual success) is owned by
+// auth-failure-burst rather than going undetected (mallcoppro-45f).
+var authFailureEventTypes = map[string]bool{
+	"login_failure": true,
+	"mfa_failure":   true,
+}
+
+// authSuccessEventTypes are the TERMINAL event types that resolve a same-actor
+// failure run as benign recovery: the account owner (or new-hire enrolling a
+// device) eventually succeeded. login_success pairs with login_failure;
+// mfa_enrollment_complete is the terminal success of an MFA enrollment flow that
+// starts with mfa_failure attempts (a struggled-but-successful authenticator setup,
+// not an attack).
+var authSuccessEventTypes = map[string]bool{
+	"login_success":           true,
+	"mfa_enrollment_complete": true,
+}
+
+// Detect groups auth-failure events (see authFailureEventTypes) by actor and fires
+// when an actor accrues authBurstThreshold or more failures WITHOUT a terminal
+// success (see authSuccessEventTypes) — the brute-force signature. A short run of
+// failures that ENDS in a success is a benign fat-finger / password-reset recovery
+// / MFA-enrollment struggle (AF-01, AF-04, AF-05) and is NOT escalated. Fires on
+// ev.Actor (the performing identity the finding metadata names).
 func (authFailureBurstDetector) Detect(events []event.Event, bl *baseline.Baseline) []finding.Finding {
 	type actorState struct {
 		failures   int
@@ -52,8 +75,8 @@ func (authFailureBurstDetector) Detect(events []event.Event, bl *baseline.Baseli
 	order := []string{}
 
 	for _, ev := range events {
-		switch ev.Type {
-		case "login_failure":
+		switch {
+		case authFailureEventTypes[ev.Type]:
 			st := states[ev.Actor]
 			if st == nil {
 				st = &actorState{firstEvent: ev}
@@ -61,10 +84,11 @@ func (authFailureBurstDetector) Detect(events []event.Event, bl *baseline.Baseli
 				order = append(order, ev.Actor)
 			}
 			st.failures++
-		case "login_success":
+		case authSuccessEventTypes[ev.Type]:
 			if st := states[ev.Actor]; st != nil {
 				// A terminal success after the failures resolves the burst: the
-				// account owner recovered. Mark it benign.
+				// account owner recovered (or completed MFA enrollment). Mark it
+				// benign.
 				st.succeeded = true
 			}
 		}

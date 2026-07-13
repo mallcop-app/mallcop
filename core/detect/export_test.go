@@ -12,3 +12,12 @@ func SnapshotTuningKnobsForTest() (restore func()) {
 	s := saveKnobs()
 	return func() { restoreKnobs(s) }
 }
+
+// ContainsElevatedKeywordForTest exposes containsElevatedKeyword against the
+// CURRENTLY-PUBLISHED tuning snapshot for external test packages (the
+// detect_test regression) that need a live precondition check — e.g. "no
+// built-in keyword already matches this synthetic role" — without duplicating
+// the substring-match logic. Test-only; never linked into shipped binaries.
+func ContainsElevatedKeywordForTest(role string) bool {
+	return containsElevatedKeyword(role, loadPrivEscalationTuning())
+}
