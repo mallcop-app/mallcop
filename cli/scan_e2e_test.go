@@ -19,28 +19,48 @@ import (
 )
 
 // TestScanE2E_BinaryAgainstCannedBackend builds the mallcop binary and drives the
-// REAL `mallcop scan` end to end: it starts a cannedbackend (the fake
-// Anthropic-compatible /v1/messages server), points MALLCOP_INFERENCE_URL at it,
-// runs the binary over a multi-finding fixture events file writing to a git
-// store, and asserts:
+// REAL `mallcop scan` end to end, WITH the consensus gate on (scan.go wires
+// agent.DefaultConsensusRuns=3 in production — this test does not override it,
+// so it exercises the real any-escalate-wins committee, not a stand-in). It
+// starts a cannedbackend (the fake Anthropic-compatible /v1/messages server),
+// points MALLCOP_INFERENCE_URL at it, runs the binary over a multi-finding
+// fixture events file writing to a git store, and asserts:
 //
 //   - the process exits 1 (findings present, the errFindings sentinel);
 //   - the printed summary reports the right counts (2 events, 2 findings,
 //     1 resolved, 1 escalated);
 //   - resolutions are durably persisted to the git store and replayable.
 //
-// The fixture mixes a config-drift finding (resolved at triage by the canned
-// script) with an injection-probe finding (force-escalated by the cascade's
-// pre-LLM floor, no model call) — proving the built binary runs the full pipeline
-// and does not bypass the untrusted-data floor.
+// The fixture mixes a config-drift finding (mfa_disabled, severity=high) with an
+// injection-probe finding (force-escalated by the cascade's pre-LLM floor, no
+// model call) — proving the built binary runs the full pipeline and does not
+// bypass the untrusted-data floor.
+//
+// WHY THE CANNED RESOLVE IS EVIDENCE-RICH (not a bare action=resolve): mfa_disabled
+// is HIGH severity, so triagerisk.go's triageResolveMustEscalate forces even a
+// clean triage resolve to hand off to investigate (§ risky-severity gate) — the
+// cheap tier can never terminally close it. At investigate, GuardResolve's
+// structural-confidence gate (resolveguard.go / confidence.go) scores the
+// resolve from OBSERVABLE signals only (tool calls, distinct tools, evidence
+// citations in the reason) — never the model's self-reported confidence. The
+// reason text below carries >=3 of the scorer's evidence-citation patterns (an
+// ISO date, a time, "baseline", "frequency", "known", "first_seen", "events") so
+// investigate's resolve (3 tool calls, 3 distinct tools) scores comfortably above
+// ConfidenceFanOutThreshold (0.45) and clears the gate directly — proving the
+// TRUE resolve path (investigate resolved + gate-cleared), not the fan-out-to-
+// deep-panel path fanout.go covers separately. A bare, uncited resolve
+// legitimately scores ~0.04-0.40 here (few/no tool-call credit, no evidence
+// citations) and is correctly blocked — that is the gate working, not a stale
+// test; see fanout_test.go for that path.
 func TestScanE2E_BinaryAgainstCannedBackend(t *testing.T) {
 	mallcopBin := buildMallcop(t)
 
 	be := &cannedbackend.CannedBackend{
 		CannedResolutionFunc: func(callIndex int) string {
 			return `{"action":"resolve","confidence":5,"positive_evidence":true,` +
-				`"reason":"ops-bot disabled MFA via the documented break-glass runbook RB-114 during the ` +
-				`approved maintenance window; reverted at 14:40. No standing exposure."}`
+				`"reason":"ops-bot disabled MFA via the documented break-glass runbook RB-114 on 2026-06-18 ` +
+				`at 14:40, consistent with ops-bot's known baseline maintenance frequency (first_seen 2026-01-02); ` +
+				`reverted immediately, matching prior maintenance events. No standing exposure."}`
 		},
 	}
 	if err := be.Start(); err != nil {
@@ -102,10 +122,23 @@ func TestScanE2E_BinaryAgainstCannedBackend(t *testing.T) {
 		t.Errorf("Escalated = %d, want 1", sum.Escalated)
 	}
 
-	// The injection-probe finding must not have reached the model: exactly one
-	// triage call for the config-drift finding.
-	if be.CallCount() != 1 {
-		t.Errorf("model call count = %d, want 1 (injection-probe force-escalated pre-model)", be.CallCount())
+	// The injection-probe finding must not have reached the model at all (it is
+	// force-escalated by the pre-LLM hard-constraints floor before any tier runs).
+	// The config-drift finding's ORIGINAL cascade pass costs exactly 2 model calls
+	// (triage hands off to investigate — mfa_disabled is HIGH severity, so
+	// triagerisk.go forbids a terminal triage resolve regardless of confidence —
+	// then investigate resolves and clears the structural-confidence gate). With
+	// the consensus gate ON (scan.go's production default, agent.DefaultConsensusRuns
+	// = 3), a resolve triggers 3 ADDITIONAL independent re-runs of that same
+	// 2-call pass (consensus.go's any-escalate-wins committee) before the resolve
+	// is accepted as unanimous. The canned backend is deterministic (same reply
+	// regardless of call index or the re-runs' forced sampling temperature), so
+	// every re-run retraces the identical resolve path: 4 total passes (1
+	// original + 3 consensus re-runs) x 2 calls/pass = 8.
+	const wantCalls = 8
+	if be.CallCount() != wantCalls {
+		t.Errorf("model call count = %d, want %d (4 cascade passes [1 original + 3 consensus re-runs] x 2 calls/pass "+
+			"[triage handoff + investigate resolve]; injection-probe force-escalated pre-model)", be.CallCount(), wantCalls)
 	}
 
 	// Resolutions must be durably persisted to the git store. Read them back from
