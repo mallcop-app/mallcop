@@ -92,3 +92,42 @@ func TestRunStatus_DecisionsWording(t *testing.T) {
 		t.Errorf("status output must not say \"Resolved:\" (ambiguous with scan's per-run summary word); got:\n%s", out)
 	}
 }
+
+// TestRunStatus_SurfacesReportedMissRecallRed proves `mallcop status` surfaces the
+// store-pure coverage gaps and flags a RECALL RED when the operator has recorded a
+// report-miss (mallcop feedback report-miss) — the self-heal loop's per-operator
+// detected-miss visibility.
+func TestRunStatus_SurfacesReportedMissRecallRed(t *testing.T) {
+	repo := initStatusRepo(t)
+	st, err := store.Open(repo)
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	meta := []byte(`{"source":"github","event_type":"github.permission.grant","actor":"mallory"}`)
+	if _, err := st.Append(store.KindDirectives, store.Directive{
+		Op: "report-miss", Pattern: "github/github.permission.grant/mallory",
+		Reason: "operator note", Actor: "baron", Meta: meta,
+	}); err != nil {
+		t.Fatalf("append report-miss directive: %v", err)
+	}
+
+	out := captureStdout(t, func() {
+		if err := runStatus([]string{"--store", filepath.Clean(repo)}); err != nil {
+			t.Fatalf("runStatus: %v", err)
+		}
+	})
+
+	if !bytes.Contains([]byte(out), []byte("Coverage gaps:")) {
+		t.Errorf("expected a Coverage gaps line, got:\n%s", out)
+	}
+	if !bytes.Contains([]byte(out), []byte("1 reported miss")) {
+		t.Errorf("expected \"1 reported miss\" in output, got:\n%s", out)
+	}
+	if !bytes.Contains([]byte(out), []byte("Recall reds:")) {
+		t.Errorf("expected a Recall reds line flagging the miss, got:\n%s", out)
+	}
+	// The operator's free-text audit note must NOT be surfaced in status output.
+	if bytes.Contains([]byte(out), []byte("operator note")) {
+		t.Errorf("status must not surface the raw operator description, got:\n%s", out)
+	}
+}

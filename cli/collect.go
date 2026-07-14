@@ -63,15 +63,22 @@ type collectReport struct {
 // `rows` block of a detect-fidelity dump). Absent the flag, detect_miss gaps
 // are simply not surfaced — they are not silently faked.
 //
-// Exit codes mirror `scan` / `detect` / `status`:
+// Exit codes:
 //
-//	0  Collected (gaps may be present — collect reports, it does not gate)
+//	0  Collected (gaps may be present — WITHOUT --gate, collect reports, it does
+//	   not gate)
+//	1  --gate only: a RECALL RED is present (a missed known attack on a
+//	   non-reserved label — a detect_miss or an operator-reported miss). This is
+//	   the errFindings sentinel, so a scheduled-scan workflow step FAILS on a
+//	   recall red at EVERY autonomy dial (Baron FAIL-ON-MISS ruling). Precision
+//	   gaps (override_fp, dissent) never gate — they warn only.
 //	2  Failure (missing/unreadable store, bad --fidelity file)
 func runCollect(args []string) error {
 	fs := flag.NewFlagSet("collect", flag.ContinueOnError)
 	storePath := fs.String("store", "", "Path to the git-repo store written by `mallcop scan` (required)")
 	fidelityPath := fs.String("fidelity", "", "Optional JSON file: an array of eval.DetectFidelityRow (the `rows` of an exam-detect fidelity dump) — enables the detect_miss gap kind the store cannot produce")
 	jsonOut := fs.Bool("json", false, "Emit the versioned JSON envelope (schema_version, mapping_gaps, gap_candidates)")
+	gate := fs.Bool("gate", false, "Exit 1 (fail) when a RECALL RED is present (a detect_miss or operator-reported miss). Precision gaps never gate. The scheduled-scan fail-on-miss switch.")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -135,11 +142,30 @@ func runCollect(args []string) error {
 		if err := enc.Encode(report); err != nil {
 			return fmt.Errorf("collect: encode envelope: %w", err)
 		}
-		return nil
+	} else {
+		printCollectReport(*storePath, report)
 	}
 
-	printCollectReport(*storePath, report)
+	// FAIL-ON-MISS (Baron ruling): under --gate, a recall red fails the run. The
+	// gate is applied AFTER the report is emitted so the caller still gets the full
+	// gaps.json / summary even when the scan is failing — the workflow publishes
+	// the gaps AND fails the job. Precision gaps (override_fp, dissent) are not
+	// recall reds and never gate.
+	if *gate && anyRecallRed(gapCandidates) {
+		return errFindings
+	}
 	return nil
+}
+
+// anyRecallRed reports whether any gap is a recall red (a missed known attack the
+// loop should have caught). See collect.GapCandidate.IsRecallRed.
+func anyRecallRed(gaps []collect.GapCandidate) bool {
+	for _, g := range gaps {
+		if g.IsRecallRed() {
+			return true
+		}
+	}
+	return false
 }
 
 // printCollectReport renders the human-readable summary (non-JSON mode).
@@ -154,7 +180,18 @@ func printCollectReport(storePath string, r collectReport) {
 		fmt.Printf("  %4dx %s/%s\n", g.Count, g.Source, action)
 	}
 	fmt.Printf("Gap candidates: %d\n", len(r.GapCandidates))
+	recallReds := 0
 	for _, g := range r.GapCandidates {
-		fmt.Printf("  %-11s %s %s %s\n", g.Kind, g.Source, g.DetectorFamily, g.Severity)
+		marker := "  "
+		if g.IsRecallRed() {
+			marker = "! " // recall red: a missed known attack the loop should have caught
+			recallReds++
+		}
+		// reported_miss gaps carry an event_type but often no finding source, so
+		// include event_type in the line to keep them legible.
+		fmt.Printf("%s%-13s %s %s %s %s\n", marker, g.Kind, g.Source, g.EventType, g.DetectorFamily, g.Severity)
+	}
+	if recallReds > 0 {
+		fmt.Printf("Recall reds:    %d (missed known attacks — fail the scan under --gate)\n", recallReds)
 	}
 }

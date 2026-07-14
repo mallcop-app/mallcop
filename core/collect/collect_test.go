@@ -327,6 +327,92 @@ func TestDissentMarkerDriftGuard(t *testing.T) {
 	}
 }
 
+// TestDetectorGaps_ReportedMissSurfacesStructuredNoFreeText proves (d): a
+// report-miss directive surfaces as a GapReportedMiss carrying ONLY the structured
+// (source, event_type, actor, window) meta — never the operator's free-text
+// description (which lives in the directive Reason). It also proves a report-miss
+// with no structured target is skipped, and that reported_miss is a recall red.
+func TestDetectorGaps_ReportedMissSurfacesStructuredNoFreeText(t *testing.T) {
+	st := openStore(t)
+
+	// An actionable report-miss: structured source/event_type/actor/window plus a
+	// free-text description in the Reason that must NOT leak into the gap.
+	meta, _ := json.Marshal(map[string]any{
+		"source": "github", "event_type": "github.permission.grant",
+		"actor": "mallory", "window": "off-hours",
+	})
+	appendRec(t, st, store.KindDirectives, store.Directive{
+		Op:      "report-miss",
+		Pattern: "github/github.permission.grant/mallory",
+		Reason:  "SECRET operator note: mallory keeps granting herself owner, see ticket 42",
+		Actor:   "baron",
+		Meta:    meta,
+	})
+	// A bare report-miss with only a description (no structured target) is
+	// un-actionable and must NOT surface.
+	bareMeta, _ := json.Marshal(map[string]any{"source": "", "event_type": ""})
+	appendRec(t, st, store.KindDirectives, store.Directive{
+		Op: "report-miss", Reason: "we missed something, dunno what", Meta: bareMeta,
+	})
+
+	gaps, err := DetectorGaps(st, nil)
+	if err != nil {
+		t.Fatalf("DetectorGaps: %v", err)
+	}
+
+	var reported int
+	for _, g := range gaps {
+		if g.Kind != GapReportedMiss {
+			continue
+		}
+		reported++
+		if g.Source != "github" || g.EventType != "github.permission.grant" {
+			t.Fatalf("reported_miss wrong structured fields: %+v", g)
+		}
+		if g.DetectorFamily != "github" {
+			t.Fatalf("reported_miss family = %q, want github", g.DetectorFamily)
+		}
+		if g.Evidence.ExpectedActor != "mallory" || g.Evidence.Window != "off-hours" {
+			t.Fatalf("reported_miss evidence = %+v, want actor=mallory window=off-hours", g.Evidence)
+		}
+		if !g.IsRecallRed() {
+			t.Fatalf("reported_miss must be a recall red: %+v", g)
+		}
+		// The operator's free-text description must NOT appear ANYWHERE in the gap.
+		blob := mustJSON(t, g)
+		for _, leak := range []string{"SECRET", "ticket 42", "dunno"} {
+			if strings.Contains(blob, leak) {
+				t.Fatalf("raw operator free text %q leaked into gap: %s", leak, blob)
+			}
+		}
+	}
+	if reported != 1 {
+		t.Fatalf("want exactly one reported_miss gap (the actionable one), got %d (all=%+v)", reported, gaps)
+	}
+
+	// Deterministic: a rerun yields identical output.
+	gaps2, _ := DetectorGaps(st, nil)
+	if a, b := mustJSON(t, gaps), mustJSON(t, gaps2); a != b {
+		t.Fatalf("non-deterministic output:\n%s\n---\n%s", a, b)
+	}
+}
+
+// TestIsRecallRed_OnlyMissKinds proves the recall-red predicate: detect_miss and
+// reported_miss are recall reds; override_fp and dissent (precision gaps) are not.
+func TestIsRecallRed_OnlyMissKinds(t *testing.T) {
+	cases := map[GapKind]bool{
+		GapDetectMiss:   true,
+		GapReportedMiss: true,
+		GapOverrideFP:   false,
+		GapDissent:      false,
+	}
+	for kind, want := range cases {
+		if got := (GapCandidate{Kind: kind}).IsRecallRed(); got != want {
+			t.Errorf("IsRecallRed(%s) = %v, want %v", kind, got, want)
+		}
+	}
+}
+
 // --- test helpers -----------------------------------------------------------
 
 func sortedStrings(s []string) bool {

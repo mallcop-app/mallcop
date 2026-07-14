@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/mallcop-app/mallcop/core/collect"
 	"github.com/mallcop-app/mallcop/core/store"
 )
 
@@ -57,6 +58,32 @@ func runStatus(args []string) error {
 
 	fmt.Printf("Findings:   %d recorded\n", len(findings))
 	fmt.Printf("Decisions:  %d recorded\n", len(resolutions))
+
+	// Surface the STORE-PURE coverage gaps the self-heal loop tracks — the same
+	// offline collectors `mallcop collect` runs, with no --fidelity (so no
+	// detect_miss, which needs an exam dump) and no inference. This makes the
+	// operator's own reported misses (mallcop feedback report-miss) and the
+	// override/dissent gaps visible at a glance, and flags any RECALL RED — a
+	// missed known attack the loop should have caught, which fails a scheduled
+	// scan under `mallcop collect --gate`.
+	gaps, err := collect.DetectorGaps(st, nil)
+	if err != nil {
+		return fmt.Errorf("status: detector gaps: %w", err)
+	}
+	recallReds := 0
+	reportedMisses := 0
+	for _, g := range gaps {
+		if g.IsRecallRed() {
+			recallReds++
+		}
+		if g.Kind == collect.GapReportedMiss {
+			reportedMisses++
+		}
+	}
+	fmt.Printf("Coverage gaps:   %d (%d reported miss)\n", len(gaps), reportedMisses)
+	if recallReds > 0 {
+		fmt.Printf("Recall reds:     %d (missed known attacks — fail a scheduled scan under 'mallcop collect --gate')\n", recallReds)
+	}
 	fmt.Printf("State:      idle\n")
 	return nil
 }

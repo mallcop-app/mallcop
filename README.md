@@ -120,6 +120,7 @@ mallcop status --store store
 Store:      store
 Findings:   2 recorded
 Decisions:  2 recorded
+Coverage gaps:   0 (0 reported miss)
 State:      idle
 ```
 
