@@ -17,8 +17,11 @@
 //     payloadMeta discriminators from the projected payload, so a naive
 //     re-projection would silently blind them.
 //   - Findings are graded on family PRESENCE over the whole emitted set
-//     (findingFamilyToken), NOT counts or actors — multi-firing detectors
-//     (e.g. unusual-timing) legitimately emit several findings per family.
+//     (findingFamilyToken), NOT counts or actors — some detectors legitimately
+//     emit multiple findings per family in one scan (e.g. unusual-timing:
+//     one finding per distinct (actor, hour) GROUP per scan, not one per
+//     event — mallcoppro-d73 collapsed the old per-event fan-out — so a scan
+//     touching several novel actor-hours still yields several findings).
 //   - UNLABELED scenarios (nil ExpectedDetection) are skipped-but-counted:
 //     grading covers only explicit labels; the corpus-wide backfill is a
 //     deferred human decision.

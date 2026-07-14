@@ -12,6 +12,15 @@ on:
 
 permissions:
   contents: write
+  # id-token + attestations: write are required for the keyless (OIDC/Sigstore)
+  # build-provenance attestation step below (mallcoppro-299). No signing key to
+  # manage: GitHub's OIDC token proves this workflow/repo/commit built the
+  # artifact, and the attestation is recorded against the artifact's digest —
+  # authenticity, not just the integrity a co-hosted .sha256 file provides (a
+  # compromised release can swap both the tarball and its checksum; it cannot
+  # forge a Sigstore-backed attestation without the OIDC token this job holds).
+  id-token: write
+  attestations: write
 
 jobs:
   release:
@@ -100,6 +109,31 @@ jobs:
             fi
           done
           echo "All 3 platforms built successfully"
+
+      # Keyless (OIDC/Sigstore) build-provenance attestation over the release
+      # tarballs (mallcoppro-299, follow-up to mallcoppro-796 which SHA-pinned
+      # the actions here). This records, in Sigstore's public transparency log,
+      # that THIS workflow run — this repo, this commit, this GitHub Actions
+      # identity — produced each dist/mallcop-*.tar.gz digest. It closes the
+      # authenticity gap the co-hosted `.sha256` file cannot close: a
+      # compromised release can swap both the tarball and its checksum, but it
+      # cannot forge an attestation without control of this workflow's OIDC
+      # identity. No key management: GitHub mints a short-lived OIDC token
+      # (id-token: write, above) and Sigstore's Fulcio issues a signing cert
+      # bound to it.
+      #
+      # SEQUENCING (load-bearing, see mallcoppro-299 context): this step alone
+      # is safe to ship immediately — it only adds provenance to future
+      # releases and changes nothing customers already depend on. The PAIRED
+      # verify step (deployrepo.go: `gh attestation verify ... --repo
+      # mallcop-app/mallcop`) must NOT ship until at least one tagged release
+      # has run with this step present and published attested assets — a
+      # customer install that runs `gh attestation verify` against a release
+      # with no attestation fails closed, breaking scan/investigate setup.
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        with:
+          subject-path: "dist/mallcop-*.tar.gz"
 
       - name: Generate release notes
         run: |
