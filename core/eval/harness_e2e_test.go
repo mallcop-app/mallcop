@@ -172,6 +172,19 @@ func TestE2E_CannedVerification(t *testing.T) {
 	if df.ReproductionRate <= 0 {
 		t.Errorf("reproduction rate %v <= 0 — fidelity accounting broken", df.ReproductionRate)
 	}
+
+	// RECALL/PRECISION SPLIT (mallcoppro C2): both hand-picked scenarios are
+	// expected-escalate (attacks) — ID-03 reproduces and passes, UT-05 is a
+	// DETECT-MISS on an attack (a real end-to-end fail). So E2ERecall must show
+	// exactly the honest 1-of-2, and E2EPrecision (no benign rows in this subset)
+	// must stay at its zero-denominator default, never silently inherit the
+	// attack-only rate.
+	if df.E2ERecall != 0.5 {
+		t.Errorf("E2ERecall = %.4f, want 0.5 (ID-03 caught, UT-05 missed — both are attacks)", df.E2ERecall)
+	}
+	if df.E2EPrecision != 0 {
+		t.Errorf("E2EPrecision = %.4f, want 0 (no benign scenario in this subset — zero denominator)", df.E2EPrecision)
+	}
 }
 
 // TestE2E_DetectReproductionProbe documents the detect-fidelity landscape over the

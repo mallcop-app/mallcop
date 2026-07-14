@@ -104,6 +104,17 @@ type DetectFidelity struct {
 	// escalate and MISMATCH-on-escalate count as fails — the honest "live scan from
 	// raw events" number. Far below the agent-reasoning rate when reproduction is low.
 	EndToEndPassRate float64 `json:"end_to_end_pass_rate"`
+	// E2ERecall is EndToEndPass / count over rows whose ExpectedAction demands
+	// escalate (actionIsEscalate) — the TRUE live-scan attack-detection rate: a
+	// DETECT-MISS or a MISMATCH that never escalates on an attack scenario counts
+	// as a miss. Split out of EndToEndPassRate the same way harness.go's
+	// RunResult.RecallRate splits the blended agent-reasoning PassRate (mallcoppro
+	// C2; mirrors recall.go's exam-detect split at the detect-fidelity layer).
+	E2ERecall float64 `json:"e2e_recall"`
+	// E2EPrecision is EndToEndPass / count over rows whose ExpectedAction does NOT
+	// demand escalate (the benign scenarios) — the TRUE live-scan rate of correctly
+	// leaving benign activity alone (1.0 = no live-scan over-escalations).
+	E2EPrecision float64 `json:"e2e_precision"`
 	// Rows is the per-scenario fidelity detail.
 	Rows []DetectFidelityRow `json:"rows"`
 }
@@ -332,6 +343,8 @@ func emittedSummary(emitted []finding.Finding) []string {
 func aggregateDetectFidelity(rows []DetectFidelityRow) DetectFidelity {
 	df := DetectFidelity{Total: len(rows), Rows: rows}
 	endToEndPasses := 0
+	attacks, attacksPassed := 0, 0
+	benigns, benignsPassed := 0, 0
 	for _, r := range rows {
 		switch r.Outcome {
 		case OutcomeReproduced:
@@ -344,10 +357,29 @@ func aggregateDetectFidelity(rows []DetectFidelityRow) DetectFidelity {
 		if r.EndToEndPass {
 			endToEndPasses++
 		}
+		// Recall/precision split (mallcoppro C2): the SAME actionIsEscalate test
+		// classifyDetectFidelity used to derive expectEscalate for this row.
+		if actionIsEscalate(r.ExpectedAction) {
+			attacks++
+			if r.EndToEndPass {
+				attacksPassed++
+			}
+		} else {
+			benigns++
+			if r.EndToEndPass {
+				benignsPassed++
+			}
+		}
 	}
 	if df.Total > 0 {
 		df.ReproductionRate = float64(df.Reproduced) / float64(df.Total)
 		df.EndToEndPassRate = float64(endToEndPasses) / float64(df.Total)
+	}
+	if attacks > 0 {
+		df.E2ERecall = float64(attacksPassed) / float64(attacks)
+	}
+	if benigns > 0 {
+		df.E2EPrecision = float64(benignsPassed) / float64(benigns)
 	}
 	return df
 }
