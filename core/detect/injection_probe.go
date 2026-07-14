@@ -116,6 +116,86 @@ var injectionPatterns = []injectionRule{
 		name:     "role-confusion",
 		severity: "high",
 	},
+
+	// ---------------------------------------------------------------------
+	// Classic web/system injection signatures (SQLi / XSS / command).
+	//
+	// R9-clean design note: this is a GENERAL signal family that recognizes
+	// the *attack syntax* of an injection payload — the breakout tokens an
+	// attacker uses to escape a query/markup/shell context — NOT a lookup of
+	// any one scenario, and NOT a bare "contains SQL keywords" match. The
+	// distinction is deliberate: a benign application log that merely contains
+	// a legitimate query ("SELECT count FROM metrics_table WHERE ts > NOW()")
+	// carries no breakout syntax and MUST stay silent, while an injection
+	// probe ("' OR 1=1 --" in a User-Agent header) carries a quote-break +
+	// boolean tautology + comment terminator. The scanner already walks EVERY
+	// string field in the payload (identity/request fields — User-Agent,
+	// headers, path, params — included), so no field is special-cased.
+
+	// SQLi — quote-break boolean tautology (e.g. `' OR 1=1`, `" AND 'a'='a`).
+	// The leading quote is the string-context breakout that separates an
+	// injection payload from an in-context legitimate query.
+	{
+		re:       regexp.MustCompile(`(?i)['"]\s*(?:or|and)\s+['"]?\w+['"]?\s*=\s*['"]?\w+['"]?`),
+		name:     "sqli-tautology",
+		severity: "critical",
+	},
+	// SQLi — numeric tautology even without a quote (`OR 1=1`, `AND 7=7`).
+	{
+		re:       regexp.MustCompile(`(?i)\b(?:or|and)\s+(\d+)\s*=\s*\d+\b`),
+		name:     "sqli-numeric-tautology",
+		severity: "critical",
+	},
+	// SQLi — comment terminator used to truncate the rest of a query. Anchored
+	// to a preceding quote so a single hyphen in ordinary prose ("NOW() -
+	// INTERVAL") is not mistaken for a `--` comment.
+	{
+		re:       regexp.MustCompile(`(?i)['"][^'"]*\s(?:--|#)(?:\s|$)`),
+		name:     "sqli-comment-terminator",
+		severity: "high",
+	},
+	// SQLi — UNION-based extraction.
+	{
+		re:       regexp.MustCompile(`(?i)\bunion\s+(?:all\s+)?select\b`),
+		name:     "sqli-union",
+		severity: "critical",
+	},
+	// SQLi — stacked destructive query.
+	{
+		re:       regexp.MustCompile(`(?i);\s*(?:drop|delete|truncate|update|insert|alter)\b`),
+		name:     "sqli-stacked-query",
+		severity: "critical",
+	},
+	// XSS — inline <script> injection.
+	{
+		re:       regexp.MustCompile(`(?i)<\s*script\b`),
+		name:     "xss-script-tag",
+		severity: "critical",
+	},
+	// XSS — javascript: URI scheme.
+	{
+		re:       regexp.MustCompile(`(?i)\bjavascript:\s*\S`),
+		name:     "xss-js-uri",
+		severity: "high",
+	},
+	// XSS — inline event-handler attribute injection (onerror=, onload=, ...).
+	{
+		re:       regexp.MustCompile(`(?i)\bon(?:error|load|click|mouseover|focus|submit)\s*=\s*['"]?\S`),
+		name:     "xss-event-handler",
+		severity: "high",
+	},
+	// Command injection — shell metacharacter chained to a known binary.
+	{
+		re:       regexp.MustCompile(`(?i)(?:;|\|\||&&|\|)\s*(?:cat|ls|rm|wget|curl|nc|ncat|bash|sh|zsh|whoami|id|uname|chmod|chown|kill|nslookup|dig|ping)\b`),
+		name:     "command-injection-chain",
+		severity: "critical",
+	},
+	// Command injection — command substitution ($(...) or backticks).
+	{
+		re:       regexp.MustCompile("(?:\\$\\([^)]{1,120}\\)|`[^`]{1,120}`)"),
+		name:     "command-injection-substitution",
+		severity: "high",
+	},
 }
 
 type injectionRule struct {
