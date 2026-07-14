@@ -137,6 +137,17 @@ func runFeedback(args []string) error {
 	fmt.Printf("  Operator:         %s\n", operator)
 	fmt.Printf("  Reason:           %s\n", reasonText)
 	fmt.Printf("The next scan will suppress findings matching this pattern.\n")
+	// A dismiss is exactly the moment 'mallcop scenario capture --must-not-fire'
+	// exists for (mallcoppro-65c4): the operator just confirmed this finding's
+	// underlying activity was a FALSE ALARM. Point at the pairing command so
+	// growing the local benign-twin corpus is one copy-paste away, not a
+	// separate discovery. f.Actor/f.Type are always populated on a resolved
+	// finding (see pkg/finding.Finding), so this suggestion never needs
+	// hedging for an empty value.
+	if verb == "dismiss" && f.Actor != "" && f.Type != "" {
+		fmt.Printf("Tip: capture this as a benign-twin scenario for your local corpus --\n")
+		fmt.Printf("  mallcop scenario capture --store %s --actor %s --window 24h --must-not-fire %s\n", *storePath, f.Actor, f.Type)
+	}
 	return nil
 }
 
