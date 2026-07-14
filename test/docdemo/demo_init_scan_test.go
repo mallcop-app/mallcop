@@ -84,6 +84,7 @@ func TestDemo_Scan(t *testing.T) {
 	const statusShown = "Store:      store\n" +
 		"Findings:   2 recorded\n" +
 		"Decisions:  2 recorded\n" +
+		"Coverage gaps:   0 (0 reported miss)\n" +
 		"State:      idle\n"
 	mustContain(t, "README.md", doc, statusShown, "`mallcop status --store store` output")
 
