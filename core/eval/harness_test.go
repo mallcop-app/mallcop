@@ -87,7 +87,7 @@ func TestCorpus_LoadsPinnedCountAndSHA(t *testing.T) {
 		t.Fatalf("Load shipped corpus: %v", err)
 	}
 
-	pin, err := readPin(filepath.Join(root, pinRelPath))
+	pin, err := readPin(os.DirFS(root), pinRelPath)
 	if err != nil {
 		t.Fatalf("read pin: %v", err)
 	}
@@ -101,7 +101,7 @@ func TestCorpus_LoadsPinnedCountAndSHA(t *testing.T) {
 		t.Fatal("corpus loaded 0 scenarios; layout changed?")
 	}
 	// Re-scanning yields the identical digest (deterministic manifest).
-	c2, err := scanCorpus(filepath.Join(root, scenariosRelPath))
+	c2, err := scanCorpus(os.DirFS(root), scenariosRelPath)
 	if err != nil {
 		t.Fatalf("rescan: %v", err)
 	}
