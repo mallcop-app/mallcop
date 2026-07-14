@@ -118,6 +118,38 @@ func TestSetAutonomy_TypoDoesNotSilentlyFallBackToDefault(t *testing.T) {
 	}
 }
 
+// ---- SetContributeBack ----
+
+func TestSetContributeBack_TogglesAndPreservesOtherFields(t *testing.T) {
+	cfg := Defaults()
+	if cfg.Learning.ContributeBack != false {
+		t.Fatalf("Defaults(): Learning.ContributeBack = %v, want false (zero value)", cfg.Learning.ContributeBack)
+	}
+
+	on, err := SetContributeBack(cfg, true)
+	if err != nil {
+		t.Fatalf("SetContributeBack(true): unexpected error: %v", err)
+	}
+	if !on.Learning.ContributeBack {
+		t.Fatalf("SetContributeBack(true): Learning.ContributeBack = false, want true")
+	}
+	if on.Learning.Autonomy != cfg.Learning.Autonomy || on.Learning.Dir != cfg.Learning.Dir {
+		t.Fatalf("SetContributeBack changed unrelated Learning fields: got %+v", on.Learning)
+	}
+	// input untouched
+	if cfg.Learning.ContributeBack {
+		t.Fatal("SetContributeBack mutated its input cfg in place")
+	}
+
+	off, err := SetContributeBack(on, false)
+	if err != nil {
+		t.Fatalf("SetContributeBack(false): unexpected error: %v", err)
+	}
+	if off.Learning.ContributeBack {
+		t.Fatalf("SetContributeBack(false): Learning.ContributeBack = true, want false")
+	}
+}
+
 // ---- Round trip: AddConnector + SetAutonomy -> WriteConfigAtomic -> Load ----
 
 func TestMutate_RoundTripThroughWriteAndLoad(t *testing.T) {
@@ -142,6 +174,10 @@ func TestMutate_RoundTripThroughWriteAndLoad(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SetAutonomy: %v", err)
 	}
+	mutated, err = SetContributeBack(mutated, true)
+	if err != nil {
+		t.Fatalf("SetContributeBack: %v", err)
+	}
 
 	if err := WriteConfigAtomic(path, mutated); err != nil {
 		t.Fatalf("WriteConfigAtomic: %v", err)
@@ -162,6 +198,9 @@ func TestMutate_RoundTripThroughWriteAndLoad(t *testing.T) {
 	}
 	if reloaded.Learning.Autonomy != AutonomySemi {
 		t.Fatalf("autonomy not persisted: got %q", reloaded.Learning.Autonomy)
+	}
+	if !reloaded.Learning.ContributeBack {
+		t.Fatal("contribute_back not persisted: got false")
 	}
 
 	// No leftover temp files from the atomic write.

@@ -158,10 +158,29 @@ type Builtin struct {
 // this dial (a hard line, not operator-overridable — rd mallcoppro-13c/49f):
 // the router's OSS-PR artifact is always a human/maintainer-reviewed
 // deliverable, at every autonomy setting.
+//
+// ContributeBack is the STANDING operator opt-in gate for the shared OSS
+// contribute-back path (rd mallcoppro-9af, ruling: standing knob + per-
+// improvement confirm — two layers of consent, both required):
+//
+//  1. STANDING (this field, default FALSE): the operator opts their
+//     deployment in to contribute-back being offered AT ALL. false means the
+//     router never proposes opening a shared-OSS PR for this deployment's
+//     learned improvements, full stop — the second gate below never comes
+//     into play.
+//  2. PER-IMPROVEMENT (a later slice — chat/CLI confirmation at promote
+//     time): even with the standing knob on, each individual improvement
+//     still requires an explicit confirm before a PR is opened.
+//
+// Contribute-back NEVER auto-merges at any autonomy dial setting — the
+// router's OSS-PR artifact has no merge path; it always lands as a human/
+// maintainer-reviewed PR. This field only controls whether the flow is
+// offered at all, never whether it merges unattended.
 type Learning struct {
-	Dir        string `yaml:"dir"`
-	Autonomy   string `yaml:"autonomy"`
-	EnforcePin bool   `yaml:"enforce_pin"`
+	Dir            string `yaml:"dir"`
+	Autonomy       string `yaml:"autonomy"`
+	EnforcePin     bool   `yaml:"enforce_pin"`
+	ContributeBack bool   `yaml:"contribute_back"`
 }
 
 // The three self-extension autonomy dial positions (Learning.Autonomy).
@@ -221,7 +240,7 @@ func Defaults() Config {
 			Builtin:  Builtin{Enabled: true, Disable: []string{}},
 			Sidecars: Sidecars{Dir: "./detectors/bin"},
 		},
-		Learning:    Learning{Dir: "detectors", Autonomy: AutonomyNon, EnforcePin: false},
+		Learning:    Learning{Dir: "detectors", Autonomy: AutonomyNon, EnforcePin: false, ContributeBack: false},
 		Sovereignty: Sovereignty{Tier: "open", ContributeBack: false},
 		Budgets:     Budgets{MaxFindings: 25, ScanTimeout: "10m", SelfextSpendCapUSD: 25},
 	}
