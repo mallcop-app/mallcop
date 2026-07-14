@@ -592,8 +592,14 @@ func examEventDocFromStored(ev event.Event) captureEventDoc {
 		// metadata block rather than failing the whole capture.
 		_ = json.Unmarshal(ev.Payload, &flat)
 	}
-	action, _ := flat["action"].(string)
+	// Scrub the payload FIRST, then promote fields out of the SCRUBBED copy —
+	// never out of raw `flat`. Audit of promotions: `action` is the ONLY field
+	// lifted from the payload; ID/Source/EventType/Actor below come from the
+	// ev.* envelope (not the payload), and actor/target are intentionally
+	// preserved (see the scrub note). Promoting action from raw `flat` would
+	// leak a credential the metadata copy already redacted.
 	meta := scrubPayloadMap(flat)
+	action, _ := meta["action"].(string)
 
 	ts := ""
 	if !ev.Timestamp.IsZero() {
@@ -648,18 +654,34 @@ func renderCaptureScenarioYAML(doc captureScenarioDoc, operator, storePath strin
 // ev.Actor/ev.Target) — this file stays local to the customer's own repo, and
 // actor/target identity is exactly what makes a captured scenario useful.
 var captureSecretPatterns = []*regexp.Regexp{
-	regexp.MustCompile(`AKIA[0-9A-Z]{16}`),                                       // AWS access key id
-	regexp.MustCompile(`ghp_[a-zA-Z0-9]{36}`),                                    // GitHub PAT
-	regexp.MustCompile(`gho_[a-zA-Z0-9]{36}`),                                    // GitHub OAuth token
-	regexp.MustCompile(`ghs_[a-zA-Z0-9]{36}`),                                    // GitHub app token
-	regexp.MustCompile(`github_pat_[a-zA-Z0-9_]{82}`),                            // GitHub fine-grained PAT
-	regexp.MustCompile(`xox[bpsar]-[0-9a-zA-Z\-]{10,}`),                          // Slack token
-	regexp.MustCompile(`sk-[a-zA-Z0-9\-_]{20,}`),                                 // OpenAI/Anthropic-shaped secret key
-	regexp.MustCompile(`-----BEGIN [A-Z ]*PRIVATE KEY-----`),                     // PEM private key
-	regexp.MustCompile(`eyJ[a-zA-Z0-9\-_]+\.[a-zA-Z0-9\-_]+\.[a-zA-Z0-9\-_]+`),   // JWT
-	regexp.MustCompile(`(?i)bearer\s+[a-zA-Z0-9\-_.]{20,}`),                      // bearer token
-	regexp.MustCompile(`(?i)(postgres|mysql|mongodb|redis|amqp)://[^:]+:[^@]+@`), // connection string w/ creds
+	regexp.MustCompile(`AKIA[0-9A-Z]{16}`),                                     // AWS access key id
+	regexp.MustCompile(`ghp_[a-zA-Z0-9]{36}`),                                  // GitHub PAT
+	regexp.MustCompile(`gho_[a-zA-Z0-9]{36}`),                                  // GitHub OAuth token
+	regexp.MustCompile(`ghs_[a-zA-Z0-9]{36}`),                                  // GitHub app token
+	regexp.MustCompile(`github_pat_[a-zA-Z0-9_]{82}`),                          // GitHub fine-grained PAT
+	regexp.MustCompile(`xox[bpsar]-[0-9a-zA-Z\-]{10,}`),                        // Slack token
+	regexp.MustCompile(`sk-[a-zA-Z0-9\-_]{20,}`),                               // OpenAI/Anthropic-shaped secret key
+	regexp.MustCompile(`-----BEGIN [A-Z ]*PRIVATE KEY-----`),                   // PEM private key
+	regexp.MustCompile(`eyJ[a-zA-Z0-9\-_]+\.[a-zA-Z0-9\-_]+\.[a-zA-Z0-9\-_]+`), // JWT
+	regexp.MustCompile(`(?i)bearer\s+[a-zA-Z0-9\-_.]{20,}`),                    // bearer token
 }
+
+// captureURLUserinfoRE strips credentials embedded in a URL's userinfo for ANY
+// scheme (scheme://user:pass@host, or scheme://token@host) — a GENERIC scheme
+// pattern, NOT a fixed (postgres|mysql|...) whitelist, so mssql://, oracle://,
+// https://, ftp://, amqps://, etc. are all covered. The scheme and host are
+// preserved; the whole userinfo span (username included) is blanked. Bias: for
+// a LOCAL fixture, redacting the entire userinfo is preferred over trying to
+// keep the username and risking password residue.
+var captureURLUserinfoRE = regexp.MustCompile(`([a-zA-Z][a-zA-Z0-9+.\-]*://)[^\s/@]+@`)
+
+// captureKVSecretRE blanks the VALUE of a credential-shaped KEY inside a
+// delimited key=value connection string: ADO/JDBC ("Server=..;Password=..;"),
+// an Azure storage string ("..;AccountKey=..;"), or a SAS query ("..&sig=..").
+// Case-insensitive; the value is taken up to the next delimiter (';', '&',
+// whitespace, or end of string). Bias: for a LOCAL fixture, over-redaction
+// beats residue — when in doubt whether a value carries a secret, blank it.
+var captureKVSecretRE = regexp.MustCompile(`(?i)\b(password|passwd|pwd|accountkey|account_key|sharedaccesssignature|shared_access_signature|secret|access[_-]?key|api[_-]?key|apikey|auth[_-]?token|token|sig|credential)\s*=\s*[^;&\s]+`)
 
 // captureSensitiveKeySubstrings: a metadata value whose KEY contains any of
 // these (case-insensitive) is redacted unconditionally, regardless of whether
@@ -668,6 +690,12 @@ var captureSecretPatterns = []*regexp.Regexp{
 var captureSensitiveKeySubstrings = []string{
 	"password", "passwd", "secret", "token", "api_key", "apikey",
 	"access_key", "private_key", "client_secret", "credential",
+	// Connection-string / DSN carriers: a value under any of these keys is
+	// assumed to embed live credentials (URL userinfo or k=v pairs) and is
+	// blanked wholesale. Over-redaction of an occasional benign URL is the
+	// intended trade for a LOCAL fixture — never leak, even when the pattern
+	// nets below don't recognize the specific secret shape.
+	"url", "uri", "dsn", "conn", "connection_string", "database_url",
 }
 
 const captureRedactedPlaceholder = "[REDACTED]"
@@ -702,6 +730,13 @@ func scrubMetadataValue(key string, v any) any {
 				return captureRedactedPlaceholder
 			}
 		}
+		// In-string redactors: strip credentials embedded inside an otherwise
+		// non-secret value (a URL's userinfo, or the sensitive fields of a
+		// key=value connection string) without discarding the whole value.
+		// Both deliberately blank the entire matched credential span — for a
+		// LOCAL fixture, over-redaction is always preferable to residue.
+		val = captureURLUserinfoRE.ReplaceAllString(val, "${1}"+captureRedactedPlaceholder+"@")
+		val = captureKVSecretRE.ReplaceAllString(val, "${1}="+captureRedactedPlaceholder)
 		return val
 	case map[string]any:
 		out := make(map[string]any, len(val))

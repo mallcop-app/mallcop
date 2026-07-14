@@ -255,6 +255,107 @@ func TestScenarioCapture_RedactsSecrets(t *testing.T) {
 	}
 }
 
+// TestScenarioCapture_RedactsConnectionCreds is the regression guard for the
+// REVISE on PR #190 (rd mallcoppro-aa9): credential-carrying shapes that the
+// original scrubber missed — URL userinfo for ANY scheme, key=value
+// connection strings (ADO/JDBC, Azure storage AccountKey, SAS sig), and the
+// promotion of a raw payload `action` into the top-level YAML key without
+// scrubbing. It seeds ONE event whose payload embeds every reviewer repro
+// string, captures it, and asserts (grep-class) that NO secret substring
+// survives ANYWHERE in the emitted YAML, while non-secret fields (repo, actor)
+// are preserved.
+func TestScenarioCapture_RedactsConnectionCreds(t *testing.T) {
+	// action is credential-shaped so the LOW promotion bypass is exercised:
+	// pre-fix, the metadata copy was scrubbed but the promoted top-level
+	// action carried the raw token. Kept a ghp_ PAT so the existing pattern
+	// list scrubs it in metadata — isolating the promotion bug specifically.
+	const actionToken = "ghp_BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
+	st := seedCaptureStore(t, []event.Event{
+		{
+			ID: "leak-2", Source: "aws", Type: "config_change", Actor: "ci-bot",
+			Timestamp: time.Now(),
+			Payload: mustPayload(t, map[string]any{
+				"action": actionToken, // promoted -> top-level Action; must be scrubbed there too
+				// Four reviewer repro strings, under keys that do NOT trip the
+				// key-substring net, so the URL-userinfo / k=v redactors are what
+				// must catch them:
+				"db_endpoint": "mssql://sa:P4ssw0rd@dbhost:1433/db",
+				"webhook":     "https://admin:hunter2@internal.example",
+				"datasource":  "Server=x;User=sa;Password=hunter2;",
+				"legacy_db":   "oracle://scott:tiger@ora:1521/orcl",
+				// A generic-scheme URL userinfo (proves it's not a scheme whitelist):
+				"mirror": "ftp://ftpuser:s3cr3tpw@ftp.example/pub",
+				// Azure storage connection string (AccountKey=...):
+				"storage": "DefaultEndpointsProtocol=https;AccountName=acct;AccountKey=Zm9vYmFyYmF6cXV4Cg==;EndpointSuffix=core.windows.net",
+				// A SAS token (the sig= value is the secret):
+				"download_link": "https://acct.blob.core.windows.net/c/b?sv=2021-06-08&ss=b&srt=o&sp=r&se=2026-01-01T00:00:00Z&sig=aB3xYzSecretSig%3D",
+				// Non-secret — must survive verbatim:
+				"repo": "acme/widgets",
+			}),
+		},
+	})
+
+	scenariosDir := t.TempDir()
+	out, err := withStdio(t, "", func() error {
+		return runScenarioCapture([]string{
+			"--store", st.Path(),
+			"--event-ids", "leak-2",
+			"--must-fire", "config-drift",
+			"--id", "LOCAL-TEST-conncreds",
+			"--scenarios-dir", scenariosDir,
+		})
+	})
+	if err != nil {
+		t.Fatalf("runScenarioCapture: %v\noutput:\n%s", err, out)
+	}
+
+	raw, err := os.ReadFile(filepath.Join(scenariosDir, "LOCAL-TEST-conncreds.yaml"))
+	if err != nil {
+		t.Fatalf("read captured file: %v", err)
+	}
+	body := string(raw)
+
+	// grep-class residue assertions: not one secret substring may appear
+	// anywhere in the emitted YAML.
+	for _, secret := range []string{
+		actionToken,            // promoted-action bypass (LOW)
+		"P4ssw0rd",             // mssql:// userinfo
+		"hunter2",              // https:// userinfo AND Password= k=v
+		"tiger",                // oracle:// userinfo
+		"s3cr3tpw",             // ftp:// userinfo (generic scheme)
+		"Zm9vYmFyYmF6cXV4Cg==", // Azure AccountKey value
+		"aB3xYzSecretSig",      // SAS sig= value
+	} {
+		if strings.Contains(body, secret) {
+			t.Errorf("captured YAML still contains secret residue %q:\n%s", secret, body)
+		}
+	}
+
+	// Redaction actually ran, and non-secret fields survived.
+	if !strings.Contains(body, "REDACTED") {
+		t.Error("captured YAML has no [REDACTED] marker — secret scrub did not run")
+	}
+	if !strings.Contains(body, "acme/widgets") {
+		t.Error("captured YAML dropped a non-secret metadata field (repo) — over-redaction")
+	}
+	if !strings.Contains(body, "ci-bot") {
+		t.Error("captured YAML dropped the actor — actors must be kept")
+	}
+
+	// The promoted top-level action must be redacted, not merely the metadata copy.
+	sc, err := exam.Load(filepath.Join(scenariosDir, "LOCAL-TEST-conncreds.yaml"))
+	if err != nil {
+		t.Fatalf("exam.Load: %v", err)
+	}
+	if len(sc.Events) != 1 {
+		t.Fatalf("captured %d events, want 1", len(sc.Events))
+	}
+	if sc.Events[0].Action != captureRedactedPlaceholder {
+		t.Errorf("top-level event action = %q, want %q (promotion bypass not scrubbed)",
+			sc.Events[0].Action, captureRedactedPlaceholder)
+	}
+}
+
 // TestScenarioCapture_MustFireAndMustNotFireMutuallyExclusive and the
 // selector-validation cases below prove the flag-combination guard rails.
 func TestScenarioCapture_ValidationErrors(t *testing.T) {
