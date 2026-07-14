@@ -137,3 +137,90 @@ func TestFeedback_MissingStoreErrors(t *testing.T) {
 		t.Fatal("expected error when --store is missing")
 	}
 }
+
+// TestFeedbackReportMiss_WritesStructuredDirective proves `mallcop feedback
+// report-miss` persists a report-miss directive whose STRUCTURED meta carries the
+// (source, event_type, actor, window), whose Reason holds the free-text
+// description (audit only), and which collect surfaces as a recall gap — the
+// operator false-NEGATIVE seam distinct from approve|dismiss suppression.
+func TestFeedbackReportMiss_WritesStructuredDirective(t *testing.T) {
+	dir := t.TempDir()
+	// report-miss needs no finding — initialize the store directly.
+	if _, err := openOrInitStore(dir); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+
+	err := runFeedback([]string{"report-miss",
+		"--store", dir,
+		"--source", "github",
+		"--event-type", "github.permission.grant",
+		"--actor", "mallory",
+		"--window", "off-hours",
+		"--description", "mallory grants herself owner off-hours",
+		"--by", "baron",
+	})
+	if err != nil {
+		t.Fatalf("runFeedback report-miss: %v", err)
+	}
+
+	st, err := store.Open(dir)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	directives, err := st.LoadDirectives()
+	if err != nil {
+		t.Fatalf("load directives: %v", err)
+	}
+	if len(directives) != 1 {
+		t.Fatalf("expected 1 directive, got %d", len(directives))
+	}
+	d := directives[0]
+	if d.Op != "report-miss" {
+		t.Fatalf("Op = %q, want report-miss", d.Op)
+	}
+	if d.Actor != "baron" {
+		t.Fatalf("Actor = %q, want baron", d.Actor)
+	}
+	if d.Reason != "mallory grants herself owner off-hours" {
+		t.Fatalf("Reason (audit description) = %q", d.Reason)
+	}
+	var meta struct {
+		Source    string `json:"source"`
+		EventType string `json:"event_type"`
+		Actor     string `json:"actor"`
+		Window    string `json:"window"`
+	}
+	if err := json.Unmarshal(d.Meta, &meta); err != nil {
+		t.Fatalf("decode meta: %v", err)
+	}
+	if meta.Source != "github" || meta.EventType != "github.permission.grant" ||
+		meta.Actor != "mallory" || meta.Window != "off-hours" {
+		t.Fatalf("meta = %+v, want structured github/permission.grant/mallory/off-hours", meta)
+	}
+}
+
+// TestFeedbackReportMiss_RequiresStructuredTarget proves a bare report-miss (only
+// a --description, no --source/--event-type) is rejected and writes NO directive:
+// the description never crosses into a proposal, so a description-only report would
+// be a silent no-op gap.
+func TestFeedbackReportMiss_RequiresStructuredTarget(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := openOrInitStore(dir); err != nil {
+		t.Fatalf("init store: %v", err)
+	}
+	err := runFeedback([]string{"report-miss", "--store", dir, "--description", "we missed something"})
+	if err == nil {
+		t.Fatal("expected error for a report-miss with no --source/--event-type")
+	}
+	st, _ := store.Open(dir)
+	directives, _ := st.LoadDirectives()
+	if len(directives) != 0 {
+		t.Fatalf("no directive should be written for a bare report-miss, got %d", len(directives))
+	}
+}
+
+func TestFeedbackReportMiss_MissingStoreErrors(t *testing.T) {
+	if err := runFeedback([]string{"report-miss", "--source", "github", "--event-type", "x"}); err == nil {
+		t.Fatal("expected error when --store is missing")
+	}
+}

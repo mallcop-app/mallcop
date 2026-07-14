@@ -40,7 +40,33 @@ const (
 	// GapDissent is a consensus-dissent cluster: a resolution whose reason carries
 	// the fanout dissent marker (the panel did not agree unanimously).
 	GapDissent GapKind = "dissent"
+	// GapReportedMiss is an OPERATOR-REPORTED false-NEGATIVE: an operator ran
+	// `mallcop feedback report-miss` to assert the loop MISSED something it should
+	// have flagged (a (source, event_type[, actor]) the scan let through). It is a
+	// recall gap sourced from a report-miss directive on the directives stream —
+	// distinct from GapOverrideFP (a false-POSITIVE the operator suppressed). The
+	// operator's free-text description is deliberately NOT carried here (see
+	// DetectorGaps): only the structured (source, event_type, actor, window)
+	// fields cross into a proposal, so a report-miss cannot smuggle raw operator
+	// text downstream.
+	GapReportedMiss GapKind = "reported_miss"
 )
+
+// reportMissOp is the directive Op `mallcop feedback report-miss` writes to record
+// an operator-reported false-negative. Kept in one place so the CLI writer and this
+// collector's reader stay coupled.
+const reportMissOp = "report-miss"
+
+// IsRecallRed reports whether a gap is a RECALL RED — a MISSED known attack the
+// loop should have caught. Exactly two kinds are recall reds: a real exam-detect
+// false-negative (GapDetectMiss) and an operator-reported miss (GapReportedMiss).
+// The precision-side kinds (GapOverrideFP, GapDissent) are NOT recall reds — a
+// false-positive the operator suppressed, or a panel that merely disagreed, are
+// precision signals that warn but must never FAIL a scheduled scan (Baron
+// FAIL-ON-MISS ruling: only a recall red fails the scan, at every autonomy dial).
+func (g GapCandidate) IsRecallRed() bool {
+	return g.Kind == GapDetectMiss || g.Kind == GapReportedMiss
+}
 
 // GapEvidence is the STRUCTURED, enumerated evidence attached to a GapCandidate.
 // It carries only derived / classifier-controlled fields — NEVER raw untrusted
@@ -57,6 +83,12 @@ type GapEvidence struct {
 	AgentAction string `json:"agent_action,omitempty"`
 	// dissent provenance: the marker constant that matched (NOT the raw reason).
 	DissentMarker string `json:"dissent_marker,omitempty"`
+	// reported_miss provenance: the optional time window the operator scoped the
+	// miss to (a structured, operator-chosen token like "24h" or "off-hours" —
+	// NOT free text derived from a payload). The reported actor, when given, rides
+	// ExpectedActor above (reused: "the actor the gap concerns"). The operator's
+	// free-text --description is intentionally absent from GapEvidence entirely.
+	Window string `json:"window,omitempty"`
 }
 
 // GapCandidate is a proposer-ready detection-gap record. Plain data with json
@@ -95,6 +127,9 @@ type GapCandidate struct {
 //	    Meta.finding_id/verb to the resolution stream by FindingID/Action;
 //	(c) consensus-dissent clusters — resolutions whose Reason carries the fanout
 //	    dissent marker.
+//	(d) operator-reported misses — report-miss directives (mallcop feedback
+//	    report-miss): the operator asserting a false-NEGATIVE, surfaced from the
+//	    directive's STRUCTURED meta only (never its free-text description).
 //
 // It is a pure read of st (resolutions + directives) plus the caller's rows — no
 // inference, no network. Output ordering is deterministic (see gapSortKey).
@@ -201,6 +236,39 @@ func DetectorGaps(st *store.Store, rows []eval.DetectFidelityRow) ([]GapCandidat
 		})
 	}
 
+	// (d) Operator-reported misses: a report-miss directive is the operator saying
+	// "the loop MISSED this — a (source, event_type[, actor]) it should have
+	// flagged". Surface ONLY the structured fields the operator supplied; the
+	// directive's Reason (the free-text --description) is deliberately dropped so a
+	// report-miss cannot smuggle raw operator text into a downstream proposal
+	// (same no-free-text posture as GapEvidence everywhere else).
+	for _, d := range dirs {
+		if !strings.EqualFold(strings.TrimSpace(d.Op), reportMissOp) {
+			continue
+		}
+		var meta struct {
+			Source    string `json:"source"`
+			EventType string `json:"event_type"`
+			Actor     string `json:"actor"`
+			Window    string `json:"window"`
+		}
+		if len(d.Meta) > 0 {
+			_ = json.Unmarshal(d.Meta, &meta)
+		}
+		// A report-miss with no structured source/event_type is un-actionable — the
+		// proposer has nothing to map. Skip it rather than emit an empty gap.
+		if meta.Source == "" && meta.EventType == "" {
+			continue
+		}
+		out = append(out, GapCandidate{
+			Kind:           GapReportedMiss,
+			Source:         meta.Source,
+			EventType:      meta.EventType,
+			DetectorFamily: familyFromSource(meta.Source),
+			Evidence:       GapEvidence{ExpectedActor: meta.Actor, Window: meta.Window},
+		})
+	}
+
 	sort.SliceStable(out, func(i, j int) bool {
 		return gapSortKey(out[i]) < gapSortKey(out[j])
 	})
@@ -208,14 +276,16 @@ func DetectorGaps(st *store.Store, rows []eval.DetectFidelityRow) ([]GapCandidat
 }
 
 // gapSortKey builds a stable, total ordering key for a GapCandidate:
-// kind | primary-id | source. The primary id is the first finding id, or the
-// scenario id for a detect_miss (which has no finding).
+// kind | primary-id | source | event_type. The primary id is the first finding
+// id, or the scenario id for a detect_miss (which has no finding). event_type is
+// the final tiebreaker so a reported_miss gap (which carries neither a finding id
+// nor a scenario id) still totally orders by its (source, event_type).
 func gapSortKey(g GapCandidate) string {
 	id := g.Evidence.ScenarioID
 	if len(g.FindingIDs) > 0 {
 		id = g.FindingIDs[0]
 	}
-	return string(g.Kind) + "|" + id + "|" + g.Source
+	return string(g.Kind) + "|" + id + "|" + g.Source + "|" + g.EventType
 }
 
 // expectsEscalate reports whether an expected chain_action demands an escalate

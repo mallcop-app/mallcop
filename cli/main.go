@@ -25,6 +25,8 @@
 //	mallcop config set connector --kind=file|github|cloud --id=<id> [...]
 //	mallcop config set autonomy <non|semi|fully>
 //	mallcop feedback    <finding_id> approve|dismiss --store <dir> [--reason <text>] [--by <name>]
+//	mallcop feedback    report-miss --store <dir> --source <src> --event-type <type> [--actor <a>] [--window <w>] [--description <text>]
+//	mallcop improve     "<free text>" | --detector-id <id> --event-type <type> [--target-family <f>] [--rail <r>] [--json]
 //	mallcop investigate --question <text> --store <dir> [--baseline <path>] | --serve --inbox <file> --outbox <file> --store <dir>
 package cli
 
@@ -83,6 +85,8 @@ func Main() {
 		}
 	case "feedback":
 		err = runFeedback(args)
+	case "improve":
+		err = runImprove(args)
 	case "investigate":
 		err = runInvestigate(args)
 	default:
@@ -168,7 +172,11 @@ Commands:
     --fidelity  Optional JSON array of eval.DetectFidelityRow (an exam-detect
                 fidelity dump's 'rows') — enables the detect_miss gap kind the
                 store cannot produce on its own. Absent, only the store-pure
-                gap kinds (override_fp, dissent) are surfaced.
+                gap kinds (override_fp, dissent, reported_miss) are surfaced.
+    --gate      Exit 1 when a RECALL RED is present (a missed known attack — a
+                detect_miss or an operator report-miss). Precision gaps
+                (override_fp, dissent) never gate. The scheduled-scan
+                fail-on-miss switch (Baron ruling).
     --json      Emit the versioned envelope {schema_version, mapping_gaps,
                 gap_candidates} — the stable process boundary the mallcop-pro
                 proposer consumes. Offline, deterministic, no inference key.
@@ -198,8 +206,10 @@ Commands:
                 go.mod mallcop pin. Loudly reports every dropped legacy key.
                 Commit + push is the operator's step (printed next-steps).
 
-  status  Report findings/resolutions recorded in a store
+  status  Report findings/resolutions + coverage gaps recorded in a store
     --store    Path to the git-repo store written by 'mallcop scan' (required)
+               Also surfaces the store-pure coverage gaps (operator report-miss
+               reports + override/dissent) and flags any RECALL RED.
 
   config  Print the effective scan config merged from a discovered mallcop.yaml + the environment
   config set connector --kind=file|github|cloud --id=<id> [--path=][--org=][--source=][--binary=][--since=][--args=a,b][--env=NAME1,NAME2]
@@ -218,6 +228,32 @@ Commands:
     --by       Operator identity (defaults to $USER)
                Both verbs persist a 'suppress' directive keyed on the finding's
                source/type/actor, so future findings of that class are dropped.
+
+  feedback report-miss  Record an operator-asserted FALSE-NEGATIVE (a miss)
+    --store       Path to the git-repo store (required)
+    --source      Source id the miss concerns (required unless --event-type given)
+    --event-type  Event/action type the loop should have flagged (required unless --source given)
+    --actor       Optional actor the miss concerns
+    --window      Optional structured time window (e.g. "24h", "off-hours")
+    --description Optional free-text rationale (AUDIT only — never forwarded into a proposal)
+    --by          Operator identity (defaults to $USER)
+               Persists a 'report-miss' directive; 'mallcop collect' surfaces it
+               as a recall gap and 'mallcop status' counts it. The description is
+               NEVER forwarded raw into a proposal — only the structured fields.
+
+  improve  Turn a request into a PROPOSE-ONLY self-extension proposal (gated PR)
+    "<free text>"    Free-text mode: ONE inference call structures the request
+                     into a strict-JSON proposal (same extraction as the chat
+                     surface); an out-of-scope request honestly refuses.
+    --detector-id    Flags mode (no inference): the detector id to propose
+    --event-type     Flags mode: the dotted event type it gates on
+    --target-family  Optional detector family the proposal targets
+    --rail           Optional self-extension rail forwarded to the dispatcher
+    --base-url       Free-text mode inference endpoint (overrides $MALLCOP_INFERENCE_URL)
+    --json           Emit the versioned proposal envelope as JSON
+               Propose-only (R3): emits the structured proposal a gated dispatcher
+               turns into a REVIEWED PR — this command never applies anything.
+               Free-text auth: $MALLCOP_INFERENCE_URL + $MALLCOP_API_KEY.
 
   investigate  Run a real tool-calling analyst over the store (search_events,
                search_findings, check_baseline, lookup_rules)

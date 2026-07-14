@@ -363,11 +363,12 @@ this repo's scaffolded CI does not compile it for you.
 // different item (977) — this workflow is the seam it extends.
 const scanWorkflowTemplate = `name: mallcop scheduled scan
 
-# SKELETON (mallcoppro-f3b): checkout, install the pinned mallcop release
-# binary, build wasip1 sidecar detectors, run 'mallcop scan', persist
-# findings on the '{{FINDINGS_BRANCH}}' branch. Scan/notify/triage CONTENT
-# beyond this build+basic-scan skeleton is a separate item (977) that extends
-# this workflow.
+# SKELETON (mallcoppro-f3b; self-heal S5 rev): checkout, install the pinned
+# mallcop release binary, build wasip1 sidecar detectors, run 'mallcop scan',
+# persist findings on the '{{FINDINGS_BRANCH}}' branch, publish coverage gaps
+# (store/gaps.json) for 'mallcop status', and FAIL the run on a recall red
+# (Baron FAIL-ON-MISS). Scan/notify/triage CONTENT beyond this build+basic-scan
+# skeleton is a separate item (977) that extends this workflow.
 #
 # D2+2fd ruling: this workflow NEVER rebuilds the whole mallcop binary from
 # repo content. The core binary is always the pinned prebuilt release
@@ -492,6 +493,25 @@ jobs:
             exit "$code"
           fi
 
+      - name: Publish coverage gaps (self-heal loop)
+        # SELF-HEAL (S5): mine THIS scan's store for coverage gaps and publish
+        # them as store/gaps.json on the '{{FINDINGS_BRANCH}}' branch so
+        # 'mallcop status' can surface per-operator detected misses (operator
+        # report-miss reports + override/dissent gaps). Offline, deterministic,
+        # NO inference key needed. gaps.json is committed on ONLY its own path
+        # (it stages just that one file, never the whole tree) so this never
+        # restages the working tree the way the mallcoppro-f3b finding warned about.
+        run: |
+          set -euo pipefail
+          if [ -d store/.git ]; then
+            mallcop collect --json --store ./store > store/gaps.json
+            git -C store add gaps.json
+            git -C store -c user.name=mallcop-collect -c user.email=collect@mallcop.app \
+              diff --cached --quiet \
+              || git -C store -c user.name=mallcop-collect -c user.email=collect@mallcop.app \
+                   commit --quiet -m "mallcop collect: publish coverage gaps"
+          fi
+
       - name: Push findings store
         # 'mallcop scan' (core/store) already durably COMMITS every stream
         # write as it runs -- this step only PUSHES whatever store/'s current
@@ -512,6 +532,18 @@ jobs:
         env:
           TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
+
+      - name: Fail on recall red (missed known attack)
+        # BARON FAIL-ON-MISS RULING (S5): a RECALL RED — a missed known attack on
+        # a non-reserved label, i.e. an operator report-miss (or a detect_miss
+        # when an exam fidelity dump is supplied) — must FAIL the scheduled scan
+        # at EVERY autonomy dial. Precision-only gaps (override_fp, dissent) do
+        # NOT gate. 'mallcop collect --gate' exits 1 iff a recall red is present.
+        # This step runs LAST, AFTER the store + gaps.json are already pushed, so
+        # the coverage evidence is durably published even on a failing run.
+        run: |
+          set -euo pipefail
+          mallcop collect --gate --store ./store
 `
 
 // investigateWorkflowTemplate is the mallcop-investigate.yml SKELETON

@@ -122,6 +122,49 @@ func TestScaffoldDeployAssetsWritesAllExpectedFiles(t *testing.T) {
 	}
 }
 
+// TestScanWorkflowPublishesGapsAndGatesOnMiss proves the self-heal S5 additions to
+// the scheduled-scan workflow: it publishes coverage gaps as store/gaps.json (for
+// 'mallcop status') and FAILS the run on a recall red via 'mallcop collect --gate'
+// (Baron FAIL-ON-MISS). The gaps commit must stage ONLY gaps.json (never 'add -A')
+// so it does not restage the working tree the mallcoppro-f3b finding warned about.
+func TestScanWorkflowPublishesGapsAndGatesOnMiss(t *testing.T) {
+	w := renderScanWorkflow("v0.7.0")
+
+	if !strings.Contains(w, "mallcop collect --json --store ./store > store/gaps.json") {
+		t.Fatalf("scan.yml does not publish coverage gaps to store/gaps.json:\n%s", w)
+	}
+	if !strings.Contains(w, "git -C store add gaps.json") {
+		t.Fatalf("scan.yml gaps publish must stage ONLY gaps.json (never add -A):\n%s", w)
+	}
+	if !strings.Contains(w, "mallcop collect --gate --store ./store") {
+		t.Fatalf("scan.yml does not gate the scan on a recall red (fail-on-miss):\n%s", w)
+	}
+	// Still no forbidden restage-everything / scan-message commit.
+	if strings.Contains(w, "add -A") || strings.Contains(w, `commit -q -m "scan:`) {
+		t.Fatalf("gaps publish must not restage the whole tree or reuse the scan commit form:\n%s", w)
+	}
+	// The gate step runs AFTER the store push, so gaps.json is durably published
+	// even on a failing run. Assert order: push findings, then the gate.
+	pushIdx := strings.Index(w, "git -C store push")
+	gateIdx := strings.Index(w, "mallcop collect --gate")
+	if pushIdx < 0 || gateIdx < 0 || gateIdx < pushIdx {
+		t.Fatalf("the fail-on-miss gate must run AFTER the findings push (push@%d, gate@%d):\n%s", pushIdx, gateIdx, w)
+	}
+	// Migrate force-refreshes generated workflows, so the same publish+gate must be
+	// present in the refresh path too (existing repos upgrade on 'mallcop migrate').
+	dir := t.TempDir()
+	if err := refreshDeployWorkflows(dir, "v0.9.0"); err != nil {
+		t.Fatalf("refreshDeployWorkflows: %v", err)
+	}
+	raw, err := os.ReadFile(filepath.Join(dir, ".github", "workflows", "scan.yml"))
+	if err != nil {
+		t.Fatalf("read refreshed scan.yml: %v", err)
+	}
+	if !strings.Contains(string(raw), "mallcop collect --gate --store ./store") {
+		t.Fatalf("refreshed scan.yml (migrate path) is missing the fail-on-miss gate:\n%s", raw)
+	}
+}
+
 // TestScaffoldDeployAssetsWritesWellFormedInvestigateWorkflow is the
 // mallcoppro-067 DONE CONDITION check for the GHA scaffold half of the item:
 // mallcop-investigate.yml must PARSE as YAML (not just contain the right

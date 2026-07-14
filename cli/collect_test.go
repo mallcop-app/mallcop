@@ -235,6 +235,83 @@ func TestRunCollect_FidelityAddsDetectMiss(t *testing.T) {
 	}
 }
 
+// appendReportMiss appends an actionable report-miss directive to the store at dir.
+func appendReportMiss(t *testing.T, dir string) {
+	t.Helper()
+	st, err := store.Open(dir)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	meta, _ := json.Marshal(map[string]any{
+		"source": "github", "event_type": "github.permission.grant", "actor": "mallory",
+	})
+	appendCollectRec(t, st, store.KindDirectives, store.Directive{
+		Op: "report-miss", Pattern: "github/github.permission.grant/mallory",
+		Reason: "operator note", Actor: "baron", Meta: meta,
+	})
+}
+
+// TestRunCollect_GateNoGateOnPrecisionOnly proves --gate does NOT fail when only
+// precision gaps (override_fp, dissent) are present: a false positive or a panel
+// disagreement warns, it never fails the scan (Baron ruling — only a recall red
+// gates). The seeded store carries exactly those two precision kinds and no miss.
+func TestRunCollect_GateNoGateOnPrecisionOnly(t *testing.T) {
+	dir := seedCollectStore(t)
+	if _, err := withStdout(t, func() error {
+		return runCollect([]string{"--store", dir, "--gate"})
+	}); err != nil {
+		t.Fatalf("--gate must NOT fail on precision-only gaps, got: %v", err)
+	}
+}
+
+// TestRunCollect_GateFailsOnReportedMiss proves --gate returns the findings
+// sentinel (exit 1) when a RECALL RED — here an operator-reported miss — is
+// present. This is the scheduled-scan fail-on-miss switch.
+func TestRunCollect_GateFailsOnReportedMiss(t *testing.T) {
+	dir := seedCollectStore(t)
+	appendReportMiss(t, dir)
+
+	_, err := withStdout(t, func() error {
+		return runCollect([]string{"--store", dir, "--gate"})
+	})
+	if err == nil {
+		t.Fatal("--gate must fail when a recall red (reported miss) is present")
+	}
+	if !isFindingsError(err) {
+		t.Fatalf("--gate recall red must be the findings sentinel (exit 1), got: %v", err)
+	}
+}
+
+// TestRunCollect_GateStillEmitsReportBeforeFailing proves --gate emits the full
+// report (so the workflow can publish gaps.json) even on a failing run.
+func TestRunCollect_GateStillEmitsReportBeforeFailing(t *testing.T) {
+	dir := seedCollectStore(t)
+	appendReportMiss(t, dir)
+
+	out, err := withStdout(t, func() error {
+		return runCollect([]string{"--store", dir, "--gate", "--json"})
+	})
+	if !isFindingsError(err) {
+		t.Fatalf("want findings sentinel, got: %v", err)
+	}
+	var report collectReport
+	if jerr := json.Unmarshal([]byte(out), &report); jerr != nil {
+		t.Fatalf("gate run must still emit a valid envelope: %v\noutput: %s", jerr, out)
+	}
+	var reported int
+	for _, g := range report.GapCandidates {
+		if g.Kind == collect.GapReportedMiss {
+			reported++
+			if g.Source != "github" || g.EventType != "github.permission.grant" {
+				t.Fatalf("reported_miss structured fields wrong: %+v", g)
+			}
+		}
+	}
+	if reported != 1 {
+		t.Fatalf("want one reported_miss in the envelope, got %d (all=%+v)", reported, report.GapCandidates)
+	}
+}
+
 // TestRunCollect_MissingStoreFailsLoud proves a missing/non-git --store fails
 // loud (a real error → exit 2), not the findings sentinel.
 func TestRunCollect_MissingStoreFailsLoud(t *testing.T) {
