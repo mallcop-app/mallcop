@@ -387,6 +387,41 @@ reference corpus, once for YOUR scenarios here ("MY MISSED ATTACKS" / "MY
 FALSE ALARMS") — so your own coverage is never blended into the reference
 number. '--json' emits both splits as {"reference": {...}, "local": {...}}.
 
+## Growing this directory from your own telemetry
+
+You don't have to hand-write YAML. 'mallcop scenario capture' reads REAL
+events out of your own store (the SAME derived baseline the scan pipeline
+gates on) and writes a schema-valid scenario file here for you:
+
+    # An attack you saw (or fear) from a specific actor's recent activity:
+    mallcop scenario capture --store <dir> --actor <a> --window 24h \
+      --must-fire <family> [--reserved]
+
+    # A benign activity that was false-alarmed (pairs with a dismiss you
+    # already recorded):
+    mallcop scenario capture --store <dir> --event-ids <id1,id2> \
+      --must-not-fire <family>
+
+No inference calls, and the output is DATA — a test fixture — never a
+detector or lookup rule. Secret-shaped metadata values (tokens, keys,
+credentials) are scrubbed before the file is written; actors and targets are
+kept, because this file never leaves your own repo. Running
+'mallcop feedback <finding_id> dismiss' prints a ready-to-run capture command
+for the matching benign twin.
+
+After adding or editing files here, run:
+
+    mallcop scenario lint
+
+Every file must parse (the same internal/exam.Load 'mallcop eval' depends
+on — a parse failure is a hard error). It also checks the BENIGN-TWIN
+discipline: every captured must_fire family should have at least one
+must_not_fire twin somewhere in this directory, so a real attack you captured
+is balanced by its closest legitimate look-alike. A missing twin prints a
+WARNING with the exact family and a one-line recipe — it never blocks 'lint'
+or 'eval'; it's authoring-time guidance for building out your corpus, not a
+gate.
+
 ## Schema
 
 Required top-level fields:
@@ -435,9 +470,11 @@ Optional:
                                     "operator" if you want to set it, but the
                                     field itself is informational only —
                                     'mallcop eval' does not grade differently
-                                    based on it. Use "captured" for a real
-                                    event you flagged verbatim (chat's "flag
-                                    things like this", or
+                                    based on it. "mallcop scenario capture"
+                                    always sets this to "captured" for you.
+                                    Use "captured" for a real event you
+                                    flagged verbatim (chat's "flag things like
+                                    this", 'mallcop scenario capture', or
                                     'mallcop feedback report-miss'), or
                                     "authored" for a scenario you wrote
                                     alongside a new detectors/<name> sidecar

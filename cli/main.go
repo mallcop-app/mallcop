@@ -27,6 +27,8 @@
 //	mallcop config set autonomy <non|semi|fully>
 //	mallcop feedback    <finding_id> approve|dismiss --store <dir> [--reason <text>] [--by <name>]
 //	mallcop feedback    report-miss --store <dir> --source <src> --event-type <type> [--actor <a>] [--window <w>] [--description <text>]
+//	mallcop scenario    capture --store <dir> [--event-ids <ids>] [--actor <a> --window <dur>] --must-fire <family>|--must-not-fire <family> [--reserved] [--scenarios-dir <dir>]
+//	mallcop scenario    lint [--scenarios-dir <dir>] [--json]
 //	mallcop improve     "<free text>" | --detector-id <id> --event-type <type> [--target-family <f>] [--rail <r>] [--json]
 //	mallcop investigate --question <text> --store <dir> [--baseline <path>] | --serve --inbox <file> --outbox <file> --store <dir>
 package cli
@@ -88,6 +90,8 @@ func Main() {
 		}
 	case "feedback":
 		err = runFeedback(args)
+	case "scenario":
+		err = runScenario(args)
 	case "improve":
 		err = runImprove(args)
 	case "investigate":
@@ -260,6 +264,45 @@ Commands:
                Persists a 'report-miss' directive; 'mallcop collect' surfaces it
                as a recall gap and 'mallcop status' counts it. The description is
                NEVER forwarded raw into a proposal — only the structured fields.
+
+  scenario capture  Grow scenarios/ from YOUR OWN real telemetry (no hand-writing YAML)
+    --store         Path to the git-repo store written by 'mallcop scan' (required)
+    --event-ids     Comma-separated explicit event IDs to capture
+    --actor         Actor to select events for (requires --window)
+    --window        Duration (e.g. "24h") of the actor's own activity, measured
+                    back from that actor's latest matching event in the store
+                    (requires --actor)
+    --must-fire     Comma-separated detector family token(s) this event set
+                    MUST trigger — an attack the operator saw or fears
+    --must-not-fire Comma-separated detector family token(s) this event set
+                    must NOT trigger — a benign activity that was false-alarmed
+                    (pairs with 'mallcop feedback dismiss')
+    --reserved      Mark --must-fire as a RESERVED TEST (a detector for it may
+                    not exist yet); invalid with --must-not-fire
+    --id            Scenario id (default: auto-generated LOCAL-<family>-<hash>)
+    --title         Finding title (default: derived from family + actor)
+    --severity      Finding severity (default: medium)
+    --scenarios-dir Directory to write into (default: <repo-root>/scenarios)
+    --force         Overwrite an existing scenario file at the resolved path
+    --by            Operator identity recorded in the file header (default: $USER)
+               Reads the REAL stored events + the store's DERIVED baseline (the
+               SAME projection the scan pipeline gates on) and writes a
+               schema-valid, provenance:captured scenario YAML into scenarios/.
+               No inference calls; the output is DATA (a test fixture), never a
+               detector or lookup rule. Secret-shaped metadata values are
+               redacted; actors/targets are kept — this file stays LOCAL to your
+               own repo. Run 'mallcop eval' to grade it, or 'mallcop scenario
+               lint' to check benign-twin coverage.
+
+  scenario lint  Validate scenarios/*.yaml and nudge toward benign-twin coverage
+    --scenarios-dir Directory to lint (default: <repo-root>/scenarios)
+    --json          Output the lint result as JSON
+               Every file must parse via internal/exam.Load (the SAME loader
+               'mallcop eval' uses) — a parse failure is a hard error. Every
+               LOCALLY-CAPTURED must_fire family without a must_not_fire twin
+               ANYWHERE in the directory prints a WARNING with the exact family
+               and a one-line capture recipe — never a block (authoring-time
+               guidance, not a gate).
 
   improve  Turn a request into a PROPOSE-ONLY self-extension proposal (gated PR)
     "<free text>"    Free-text mode: ONE inference call structures the request
