@@ -382,6 +382,12 @@ Run it:
 
     mallcop eval
 
+    From chat: ask "what's my miss rate?" or "am I missing any real
+    attacks?" — the investigate chat session's run-eval tool runs this
+    EXACT command (never a re-implementation) and answers with the same
+    split: "MY missed attacks: n of m (IDs); reference: x of y; false
+    alarms: k".
+
 The report prints the recall/precision split TWICE: once for the shipped
 reference corpus, once for YOUR scenarios here ("MY MISSED ATTACKS" / "MY
 FALSE ALARMS") — so your own coverage is never blended into the reference
@@ -401,6 +407,14 @@ gates on) and writes a schema-valid scenario file here for you:
     # already recorded):
     mallcop scenario capture --store <dir> --event-ids <id1,id2> \
       --must-not-fire <family>
+
+    # From chat: say "flag things like this as <family>" about
+    # finding/event ids already in the conversation (add "there's no
+    # detector for this yet" to mark it reserved). The flag-like-this tool
+    # runs this EXACT command and confirms exactly what it wrote and
+    # where — in YOUR repo, at the real file path. It writes a local
+    # scenario file only; it changes no runtime detection behavior, so it
+    # is propose-safe at every autonomy dial setting.
 
 No inference calls, and the output is DATA — a test fixture — never a
 detector or lookup rule. Secret-shaped metadata values (tokens, keys,

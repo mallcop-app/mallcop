@@ -29,6 +29,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -176,6 +177,8 @@ func runScenarioCapture(args []string) error {
 	scenarioID := strings.TrimSpace(*idFlag)
 	if scenarioID == "" {
 		scenarioID = generateCaptureScenarioID(primaryFamily, selected)
+	} else if err := validateScenarioID(scenarioID); err != nil {
+		return fmt.Errorf("scenario capture: --id %q: %w", scenarioID, err)
 	}
 
 	titleText := strings.TrimSpace(*title)
@@ -201,7 +204,10 @@ func runScenarioCapture(args []string) error {
 	if err := os.MkdirAll(resolvedScenariosDir, 0o755); err != nil {
 		return fmt.Errorf("scenario capture: creating %s: %w", resolvedScenariosDir, err)
 	}
-	outPath := filepath.Join(resolvedScenariosDir, scenarioID+".yaml")
+	outPath, err := confinedScenarioPath(resolvedScenariosDir, scenarioID)
+	if err != nil {
+		return fmt.Errorf("scenario capture: %w", err)
+	}
 	if _, statErr := os.Stat(outPath); statErr == nil && !*force {
 		return fmt.Errorf("scenario capture: %s already exists (pass --force to overwrite, or --id to choose a different id)", outPath)
 	}
@@ -359,6 +365,68 @@ func generateCaptureScenarioID(family string, selected []event.Event) string {
 		slug = "captured"
 	}
 	return fmt.Sprintf("LOCAL-%s-%s", slug, sum)
+}
+
+// maxScenarioIDLen bounds an operator-supplied --id. 128 chars plus ".yaml"
+// stays comfortably under every mainstream filesystem's 255-byte name limit
+// while being far longer than any sane scenario id.
+const maxScenarioIDLen = 128
+
+// validateScenarioID rejects any operator-supplied scenario id that is not a
+// plain, single-path-element slug: it must start with an alphanumeric and
+// contain only [A-Za-z0-9_-]. This is a SECURITY check, not stylistic
+// hygiene: the id becomes a filename under scenarios/ (outPath below), and
+// without it a crafted id like "../../elsewhere/evil" WRITES OUTSIDE the
+// scenarios directory (path traversal). That matters doubly because
+// `mallcop scenario capture` is also reachable conversationally (the
+// flag-like-this investigate chat tool, core/investigate/evaltools.go),
+// where the id can be influenced by attacker-controlled conversation
+// content (indirect prompt injection) — the propose-safe claim ("writes
+// only a local scenario file under scenarios/") is only true if this
+// confinement actually holds. Auto-generated ids (generateCaptureScenarioID)
+// satisfy this by construction.
+func validateScenarioID(id string) error {
+	if id == "" {
+		return errors.New("scenario id must not be empty")
+	}
+	if len(id) > maxScenarioIDLen {
+		return fmt.Errorf("scenario id too long (%d chars, max %d)", len(id), maxScenarioIDLen)
+	}
+	for i, r := range id {
+		alnum := r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9'
+		if i == 0 {
+			if !alnum {
+				return errors.New("scenario id must start with a letter or digit")
+			}
+			continue
+		}
+		if !alnum && r != '-' && r != '_' {
+			return fmt.Errorf("scenario id may only contain letters, digits, '-' and '_' (found %q)", string(r))
+		}
+	}
+	return nil
+}
+
+// confinedScenarioPath returns the output path for scenarioID inside
+// scenariosDir, HARD-VERIFYING that it resolves to a direct child of the
+// (symlink-resolved) directory. Belt+suspenders behind validateScenarioID: a
+// validated id cannot escape, but the write must stay confined even if the
+// charset rule ever regresses — path traversal out of scenarios/ must be
+// structurally impossible, not just filtered. The check compares
+// filepath.Dir of the joined path against the canonical directory; note a
+// filepath.Rel round-trip is NOT sufficient here (Rel reproduces the same
+// "../" traversal it was fed, so it compares equal for the exact attack this
+// exists to stop). scenariosDir must already exist (the caller MkdirAlls it).
+func confinedScenarioPath(scenariosDir, scenarioID string) (string, error) {
+	canonDir, err := filepath.EvalSymlinks(scenariosDir)
+	if err != nil {
+		return "", fmt.Errorf("resolving scenarios dir %s: %w", scenariosDir, err)
+	}
+	outPath := filepath.Join(canonDir, scenarioID+".yaml")
+	if filepath.Dir(outPath) != canonDir || filepath.Base(outPath) != scenarioID+".yaml" {
+		return "", fmt.Errorf("scenario id %q escapes the scenarios directory %s (refusing to write %s)", scenarioID, canonDir, outPath)
+	}
+	return outPath, nil
 }
 
 // slugifyCaptureToken lowercases s and collapses any run of non

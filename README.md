@@ -226,6 +226,29 @@ changes" resolves to a **propose → approve → apply** step that calls the
 identical `core/config` mutation this CLI calls directly. There is no
 separate code path for chat versus the command line.
 
+## Chat-driven investigation
+
+`mallcop investigate` (`core/investigate`) is the same contract applied to
+read/report tools, not just mutation. Every tool it advertises to the model
+is a thin adapter over a real CLI command — never a second implementation —
+so a chat session and a terminal always agree:
+
+| Chat phrasing | Same code path as |
+|----------------|--------------------|
+| "what's my miss rate?" / "am I missing any real attacks?" | `mallcop eval --json` (the `run-eval` tool) |
+| "flag things like this as `<family>`" | `mallcop scenario capture ...` (the `flag-like-this` tool) |
+
+`run-eval` is read-only: it changes nothing and answers with the SAME
+recall-first split `mallcop eval` prints, the operator's own `scenarios/`
+corpus always reported separately from the shipped reference corpus, never
+blended. `flag-like-this` writes a scenario YAML file, but only into the
+operator's own repo (`scenarios/`, see `mallcop init --create-repo`'s
+scaffolded `scenarios/README.md`) — it changes no runtime detection
+behavior, so unlike a config mutation it needs no propose → approve → apply
+gate; it is safe at every autonomy dial setting. Both tools return an honest
+error rather than a fabricated number when the operator's repo/corpus can't
+be resolved.
+
 ## Commands
 
 | Command | Purpose |

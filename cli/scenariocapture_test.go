@@ -496,3 +496,113 @@ func TestScenarioCapture_ValidationErrors(t *testing.T) {
 		})
 	}
 }
+
+// TestScenarioCapture_RejectsPathTraversalID is the PR #191 adversarial-review
+// repro, verbatim: `--id "../../outside/evil-poc"` previously flowed
+// unvalidated into filepath.Join(scenariosDir, id+".yaml") and WROTE OUTSIDE
+// the scenarios directory (exit 0). It must now fail loudly, and NOTHING may
+// be written anywhere outside scenariosDir. This is CLI-layer protection —
+// the flag-like-this chat adapter (core/investigate/evaltools.go) carries its
+// own independent copy of the same check; each layer's test must keep passing
+// with the other layer removed.
+func TestScenarioCapture_RejectsPathTraversalID(t *testing.T) {
+	st := seedCaptureStore(t, []event.Event{
+		{ID: "e1", Source: "aws", Type: "console_login", Actor: "alice", Timestamp: time.Now()},
+	})
+
+	// Nest scenariosDir two levels down so the "../../" escape target stays
+	// INSIDE this test's own TempDir even if the guard were absent.
+	base := t.TempDir()
+	scenariosDir := filepath.Join(base, "deploy", "scenarios")
+	if err := os.MkdirAll(scenariosDir, 0o755); err != nil {
+		t.Fatalf("mkdir scenarios dir: %v", err)
+	}
+
+	_, err := withStdio(t, "", func() error {
+		return runScenarioCapture([]string{
+			"--store", st.Path(),
+			"--event-ids", "e1",
+			"--must-fire", "poc-family",
+			"--scenarios-dir", scenariosDir,
+			"--id", "../../outside/evil-poc",
+		})
+	})
+	if err == nil {
+		t.Fatal("runScenarioCapture with a traversal --id: expected an error, got nil (PATH TRAVERSAL: the write escaped scenarios/)")
+	}
+	if !strings.Contains(err.Error(), "--id") {
+		t.Errorf("error %q does not name --id as the rejected input", err.Error())
+	}
+
+	// The exact escape target must not exist ...
+	escaped := filepath.Join(base, "outside", "evil-poc.yaml")
+	if _, statErr := os.Stat(escaped); !os.IsNotExist(statErr) {
+		t.Fatalf("traversal target %s exists (stat err %v) — the write escaped scenarios/", escaped, statErr)
+	}
+	// ... and NOTHING was written anywhere under base outside scenariosDir.
+	_ = filepath.Walk(base, func(path string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil || info.IsDir() {
+			return nil
+		}
+		if !strings.HasPrefix(path, scenariosDir+string(filepath.Separator)) {
+			t.Errorf("unexpected file written outside scenarios dir: %s", path)
+		}
+		return nil
+	})
+}
+
+// TestValidateScenarioID covers the safe-slug rule directly: the charset half
+// of the two-layer traversal defense (confinedScenarioPath is the other).
+func TestValidateScenarioID(t *testing.T) {
+	valid := []string{"LOCAL-TEST-mallory", "a", "A9", "LOCAL-sql-injection-abcd1234", "x_y-z"}
+	for _, id := range valid {
+		if err := validateScenarioID(id); err != nil {
+			t.Errorf("validateScenarioID(%q) = %v, want nil", id, err)
+		}
+	}
+	invalid := []string{
+		"../../outside/evil-poc", // the review repro
+		"..",
+		"a/b",
+		`a\b`,
+		"/etc/evil",
+		"-leading-dash",
+		"_leading-underscore",
+		"a b",
+		"a.yaml",
+		strings.Repeat("x", 129),
+	}
+	for _, id := range invalid {
+		if err := validateScenarioID(id); err == nil {
+			t.Errorf("validateScenarioID(%q) = nil, want an error", id)
+		}
+	}
+}
+
+// TestConfinedScenarioPath_BlocksTraversalIndependently proves the SECOND
+// layer (path confinement) blocks the escape on its own, so the guarantee
+// survives a regression in validateScenarioID: even a traversal id that
+// somehow reached path construction cannot produce a write target outside the
+// scenarios directory.
+func TestConfinedScenarioPath_BlocksTraversalIndependently(t *testing.T) {
+	dir := t.TempDir()
+
+	if _, err := confinedScenarioPath(dir, "../../outside/evil-poc"); err == nil {
+		t.Fatal("confinedScenarioPath with a traversal id: expected an error, got nil")
+	}
+	if _, err := confinedScenarioPath(dir, "sub/child"); err == nil {
+		t.Fatal("confinedScenarioPath with a subdirectory id: expected an error, got nil (must be a DIRECT child)")
+	}
+
+	got, err := confinedScenarioPath(dir, "good-id")
+	if err != nil {
+		t.Fatalf("confinedScenarioPath(good-id): %v", err)
+	}
+	canonDir, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatalf("EvalSymlinks: %v", err)
+	}
+	if want := filepath.Join(canonDir, "good-id.yaml"); got != want {
+		t.Errorf("confinedScenarioPath(good-id) = %q, want %q", got, want)
+	}
+}

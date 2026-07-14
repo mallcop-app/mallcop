@@ -15,8 +15,8 @@ package eval
 //   - real-model mode is WIRED but refuses to run without creds.
 //
 // Determinism: every test pins the repo root via SetRepoRootForTest (NOT the
-// MALLCOP_REPO_ROOT env var — that is shadowed by the os.Executable() walk and is
-// incompatible with t.Parallel). The suite is built to survive -count=10 + -race:
+// MALLCOP_REPO_ROOT env var — process-global mutable state, incompatible with
+// t.Parallel). The suite is built to survive -count=10 + -race:
 // the recording client is mutex-guarded, the canned backends bind ephemeral
 // ports, and no global state leaks between tests (the override is set+cleared per
 // test under a shared lock).
