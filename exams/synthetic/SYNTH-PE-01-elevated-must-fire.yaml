@@ -1,0 +1,55 @@
+id: SYNTH-PE-01-elevated-must-fire
+failure_mode: CS
+detector: priv-escalation
+category: synthetic
+difficulty: synthetic-fixture
+# SYNTHETIC FIXTURE — NOT A REAL ATTACK, NOT PART OF THE PINNED CORPUS.
+#
+# This pair (SYNTH-PE-01 must-fire + SYNTH-PE-02 benign twin) exists ONLY to
+# demonstrate the self-extension tuning gap-close END-TO-END in the gate tests
+# without depending on any real corpus scenario. It lives under exams/synthetic/
+# (outside exams/scenarios/, so it is never in the pinned corpus and never grades
+# CI); the gate tests INJECT it into a throwaway clone's corpus and repin.
+#
+# The role value "MallcopSyntheticElevatedRole" is a purpose-built nonce: it
+# carries NONE of priv-escalation's built-in elevation vocabulary
+# (admin/owner/write/contributor/maintainer/editor/fullcontrol), so the detector
+# CANNOT fire on it without an explicit tuning knob. Closing this gap therefore
+# ALWAYS requires the synthetic knob in exams/synthetic/tuning.yaml
+# (extra_elevated_keywords: mallcopsyntheticelevated), never a real scenario.
+# core/detect/synthdemo_invariant_test.go FAILS if that keyword ever becomes a
+# built-in — permanently ending the "fixture treadmill" where a real scenario
+# (PE-08, IP-01, ...) had to stay RED-able just to demonstrate a gap-close.
+trap_description: 'Synthetic: an actor attaches a role named MallcopSyntheticElevatedRole
+  whose name carries no built-in elevation keyword. Detectable only once the
+  synthetic tuning knob widens the elevated-keyword set.'
+trap_resolved_means: 'Synthetic fixture only — not a graded reasoning trap.'
+finding:
+  id: fnd_synth_pe_01
+  detector: priv-escalation
+  title: 'Synthetic privilege escalation: MallcopSyntheticElevatedRole granted to svc-synth'
+  severity: high
+  event_ids:
+  - evt_synth_01
+  metadata:
+    actor: synth-actor
+    source: synthetic
+    event_type: role_assignment
+events:
+- id: evt_synth_01
+  timestamp: '2026-07-01T00:00:00Z'
+  ingested_at: '2026-07-01T00:00:05Z'
+  source: synthetic
+  event_type: role_assignment
+  actor: synth-actor
+  action: attach_user_policy
+  target: synthetic-principal/svc-synth
+  severity: high
+  metadata:
+    role: MallcopSyntheticElevatedRole
+    principal_id: svc-synth
+    principal_type: ServiceUser
+  raw: {}
+expected_detection:
+  must_fire:
+  - priv-escalation

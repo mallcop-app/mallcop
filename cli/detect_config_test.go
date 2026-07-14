@@ -1,26 +1,142 @@
 package cli
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 
 	"github.com/mallcop-app/mallcop/pkg/finding"
 )
 
-// powerUserTuning is the widen-only knob that closes the PE-08 data-only false
-// negative: it ADDS "poweruser" to the priv-escalation elevated-keyword set so a
-// PowerUserAccess grant reads as an escalation. It is the exact shape of the
-// committed detectors/tuning.yaml.
-const powerUserTuning = "priv_escalation:\n  extra_elevated_keywords:\n    - poweruser\n"
+// syntheticTuning is the widen-only knob that closes the SYNTHETIC gap-close
+// demo (exams/synthetic/): it ADDS "mallcopsyntheticelevated" to the
+// priv-escalation elevated-keyword set so the MallcopSyntheticElevatedRole grant
+// reads as an escalation. Using the synthetic pair instead of PE-08/poweruser
+// decouples these tests from every REAL corpus scenario, so PE-08 / IP-01 / etc.
+// are free to be fixed (rd mallcoppro-a07 / S1). core/detect/synthdemo_invariant_test.go
+// guarantees the keyword can never become a built-in.
+const syntheticTuning = "priv_escalation:\n  extra_elevated_keywords:\n    - mallcopsyntheticelevated\n"
 
-// powerUserEvent is an AWS PowerUserAccess role grant on the stdin (pkg/event)
-// wire shape. priv-escalation fires on it ONLY once the poweruser tuning knob is
-// applied — PowerUserAccess carries none of the built-in elevation vocabulary
-// (admin/owner/write/...), so it is the ideal probe for "was the tuning applied".
-const powerUserEvent = `{"id":"pe1","source":"aws","type":"role_assignment","actor":"ops","payload":{"role_name":"PowerUserAccess","target_user":"svc-batch"}}` + "\n"
+// syntheticElevatedEvent is a MallcopSyntheticElevatedRole grant on the stdin
+// (pkg/event) wire shape. priv-escalation fires on it ONLY once the synthetic
+// keyword is applied — the role carries none of the built-in elevation
+// vocabulary (admin/owner/write/...), so it is the ideal probe for "was the
+// tuning applied".
+const syntheticElevatedEvent = `{"id":"se1","source":"synthetic","type":"role_assignment","actor":"synth-actor","payload":{"role_name":"MallcopSyntheticElevatedRole","target_user":"svc-synth"}}` + "\n"
+
+// synthMustFireID is the synthetic must-fire scenario id (SYNTH-PE-01).
+const synthMustFireID = "SYNTH-PE-01-elevated-must-fire"
+
+// cliRecomputeCorpusPin replicates core/eval/corpus.go's canonical manifest
+// digest (one "<relpath><two-spaces><sha256(file)>\n" line per included
+// scenario, sorted; leading-underscore paths excluded), the same replication the
+// core/selfgate tests anchor against the committed pin.
+func cliRecomputeCorpusPin(t *testing.T, root string) (int, string) {
+	t.Helper()
+	scenRoot := filepath.Join(root, "exams", "scenarios")
+	type entry struct{ rel, fileSHA string }
+	var entries []entry
+	err := filepath.WalkDir(scenRoot, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, rerr := filepath.Rel(scenRoot, path)
+		if rerr != nil {
+			return rerr
+		}
+		rel = filepath.ToSlash(rel)
+		if rel == "." {
+			return nil
+		}
+		for _, part := range strings.Split(rel, "/") {
+			if strings.HasPrefix(part, "_") {
+				if d.IsDir() {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+		}
+		if d.IsDir() || (!strings.HasSuffix(d.Name(), ".yaml") && !strings.HasSuffix(d.Name(), ".yml")) {
+			return nil
+		}
+		data, rerr := os.ReadFile(path)
+		if rerr != nil {
+			return rerr
+		}
+		sum := sha256.Sum256(data)
+		entries = append(entries, entry{rel: rel, fileSHA: hex.EncodeToString(sum[:])})
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("recompute corpus pin: %v", err)
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].rel < entries[j].rel })
+	var manifest strings.Builder
+	for _, e := range entries {
+		manifest.WriteString(e.rel)
+		manifest.WriteString("  ")
+		manifest.WriteString(e.fileSHA)
+		manifest.WriteByte('\n')
+	}
+	sum := sha256.Sum256([]byte(manifest.String()))
+	return len(entries), hex.EncodeToString(sum[:])
+}
+
+// injectSyntheticCorpus builds a throwaway repo root whose pinned corpus is a
+// copy of the real one PLUS the synthetic gap-close pair (exams/synthetic/)
+// injected under exams/scenarios/synthetic/, with corpus.pin regenerated so the
+// injected corpus verifies. Returns the temp root (usable as MALLCOP_REPO_ROOT).
+func injectSyntheticCorpus(t *testing.T) string {
+	t.Helper()
+	src := cliRepoUnderTest(t)
+	root := t.TempDir()
+	srcScen := filepath.Join(src, "exams", "scenarios")
+	dstScen := filepath.Join(root, "exams", "scenarios")
+	if err := filepath.WalkDir(srcScen, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, rerr := filepath.Rel(srcScen, path)
+		if rerr != nil {
+			return rerr
+		}
+		target := filepath.Join(dstScen, rel)
+		if d.IsDir() {
+			return os.MkdirAll(target, 0o755)
+		}
+		data, rerr := os.ReadFile(path)
+		if rerr != nil {
+			return rerr
+		}
+		return os.WriteFile(target, data, 0o644)
+	}); err != nil {
+		t.Fatalf("copy corpus: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(dstScen, "synthetic"), 0o755); err != nil {
+		t.Fatalf("mkdir synthetic: %v", err)
+	}
+	for _, name := range []string{"SYNTH-PE-01-elevated-must-fire.yaml", "SYNTH-PE-02-baseline-benign-twin.yaml"} {
+		data, err := os.ReadFile(filepath.Join(src, "exams", "synthetic", name))
+		if err != nil {
+			t.Fatalf("read synthetic fixture %s: %v", name, err)
+		}
+		if err := os.WriteFile(filepath.Join(dstScen, "synthetic", name), data, 0o644); err != nil {
+			t.Fatalf("inject %s: %v", name, err)
+		}
+	}
+	count, sha := cliRecomputeCorpusPin(t, root)
+	if err := os.WriteFile(filepath.Join(dstScen, "corpus.pin"),
+		[]byte(fmt.Sprintf("# fixture pin (synthetic gap-close injection)\ncount %d\nsha256 %s\n", count, sha)), 0o644); err != nil {
+		t.Fatalf("write pin: %v", err)
+	}
+	return root
+}
 
 // detectFiredPrivEscalation reports whether the detect JSONL output contains a
 // priv-escalation finding.
@@ -63,14 +179,14 @@ func TestRunDetect_AppliesConfigTuningNoFlag(t *testing.T) {
 	if err := os.MkdirAll(ldir, 0o755); err != nil {
 		t.Fatalf("mkdir learning dir: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(ldir, "tuning.yaml"), []byte(powerUserTuning), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(ldir, "tuning.yaml"), []byte(syntheticTuning), 0o644); err != nil {
 		t.Fatalf("write tuning: %v", err)
 	}
 	cfgPath := writeConfig(t, tmp, "version: 1\nlearning:\n  dir: detectors\n")
 	t.Setenv("MALLCOP_CONFIG", cfgPath)
 	t.Setenv("MALLCOP_DECL_RULES", "")
 
-	out, err := withStdio(t, powerUserEvent, func() error { return runDetect(nil) })
+	out, err := withStdio(t, syntheticElevatedEvent, func() error { return runDetect(nil) })
 	if err != nil && !isFindingsError(err) {
 		t.Fatalf("unexpected detect error: %v\nout:\n%s", err, out)
 	}
@@ -92,11 +208,11 @@ func TestRunDetect_TuningFlagOverridesConfig(t *testing.T) {
 	t.Setenv("MALLCOP_DECL_RULES", "")
 
 	flagTuning := filepath.Join(tmp, "flag-tuning.yaml")
-	if err := os.WriteFile(flagTuning, []byte(powerUserTuning), 0o644); err != nil {
+	if err := os.WriteFile(flagTuning, []byte(syntheticTuning), 0o644); err != nil {
 		t.Fatalf("write flag tuning: %v", err)
 	}
 
-	out, err := withStdio(t, powerUserEvent, func() error {
+	out, err := withStdio(t, syntheticElevatedEvent, func() error {
 		return runDetect([]string{"--tuning", flagTuning})
 	})
 	if err != nil && !isFindingsError(err) {
@@ -155,19 +271,26 @@ func TestResolveBaselinePath_Precedence(t *testing.T) {
 	}
 }
 
-// TestRunExamDetect_ConfigTuningClosesPE proves exam-detect GREEN on the PE-08
-// case using config-only tuning (no --tuning flag): a discovered mallcop.yaml
-// whose learning.dir points at the committed detectors/ applies the poweruser
-// knob, flipping the labeled PE-08 gap RED→GREEN in the REAL grader — the same
-// mechanism that lets the self-extension loop's tuning proposal grade through
-// the exam-detect stage, now driven by config instead of the flag.
+// TestRunExamDetect_ConfigTuningClosesPE proves exam-detect GREEN on the
+// SYNTHETIC gap using config-only tuning (no --tuning flag): a discovered
+// mallcop.yaml whose learning.dir carries the synthetic knob flips the labeled
+// SYNTH-PE-01 gap RED->GREEN in the REAL grader — the same mechanism that lets
+// the self-extension loop's tuning proposal grade through the exam-detect stage,
+// driven by config instead of the flag, and decoupled from every real scenario.
 func TestRunExamDetect_ConfigTuningClosesPE(t *testing.T) {
-	root := repoRootForExamTest(t)
+	root := injectSyntheticCorpus(t)
 	t.Setenv("MALLCOP_REPO_ROOT", root)
 
+	// A learning dir holding ONLY the synthetic knob, discovered via config.
+	ldir := filepath.Join(t.TempDir(), "learn")
+	if err := os.MkdirAll(ldir, 0o755); err != nil {
+		t.Fatalf("mkdir learn dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(ldir, "tuning.yaml"), []byte(syntheticTuning), 0o644); err != nil {
+		t.Fatalf("write tuning: %v", err)
+	}
 	tmp := t.TempDir()
-	body := "version: 1\nlearning:\n  dir: " + filepath.Join(root, "detectors") + "\n"
-	cfgPath := writeConfig(t, tmp, body)
+	cfgPath := writeConfig(t, tmp, "version: 1\nlearning:\n  dir: "+ldir+"\n")
 	t.Setenv("MALLCOP_CONFIG", cfgPath)
 	t.Setenv("MALLCOP_DECL_RULES", "")
 
@@ -187,14 +310,14 @@ func TestRunExamDetect_ConfigTuningClosesPE(t *testing.T) {
 	var found, pass bool
 	var emitted []string
 	for _, r := range report.Rows {
-		if r.ScenarioID == "PE-08-aws-poweruser-grant" {
+		if r.ScenarioID == synthMustFireID {
 			found, pass, emitted = true, r.Pass, r.Emitted
 		}
 	}
 	if !found {
-		t.Fatal("no PE-08-aws-poweruser-grant row in exam-detect output")
+		t.Fatalf("no %s row in exam-detect output", synthMustFireID)
 	}
 	if !pass {
-		t.Fatalf("PE-08 still RED with config-only tuning applied (emitted: %v)", emitted)
+		t.Fatalf("%s still RED with config-only synthetic tuning applied (emitted: %v)", synthMustFireID, emitted)
 	}
 }

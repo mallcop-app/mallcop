@@ -1,0 +1,17 @@
+# exams/synthetic/tuning.yaml — the SYNTHETIC gap-close knob paired with
+# SYNTH-PE-01 / SYNTH-PE-02 (see those files' headers).
+#
+# This is the widen-only tuning entry the gate tests apply at HEAD to close the
+# SYNTH-PE-01 gap: it ADDS "mallcopsyntheticelevated" to the priv-escalation
+# elevated-keyword set. That keyword is a substring of SYNTH-PE-01's role value
+# "MallcopSyntheticElevatedRole" (fires) but not of SYNTH-PE-02's
+# "MallcopSyntheticBaselineRole" (stays silent).
+#
+# It is DELIBERATELY a nonce that carries no meaning to any built-in detector.
+# core/detect/synthdemo_invariant_test.go asserts it is never a built-in keyword,
+# so this synthetic pair is guaranteed to remain a real, unclosable-without-
+# tuning gap forever — decoupling the gate's gap-close demo from every REAL
+# corpus scenario (PE-08, IP-01, ...), which are then free to all be fixed.
+priv_escalation:
+  extra_elevated_keywords:
+    - mallcopsyntheticelevated

@@ -691,6 +691,58 @@ func TestGuard_CustomerTreeMode_LegitSidecarWithScenariosStillPasses(t *testing.
 	requireClean(t, f.guardCustomerTree(base, head))
 }
 
+// customerScenarioYAML is a well-formed co-located efficacy scenario a customer
+// sidecar ships under detectors/<name>/scenarios/. It carries operator-authored
+// ground truth (a must_fire label) — the exact thing an autonomous authoring
+// branch must never be able to rewrite or delete to grade itself green.
+const customerScenarioYAML = "id: WL-01-widget-secret-exposed\n" +
+	"finding:\n  id: fnd_wl_01\n  detector: widget-leak\n  title: 'widget secret exposed'\n  severity: high\n" +
+	"events:\n- id: evt_wl_01\n  timestamp: '2026-07-01T00:00:00Z'\n  source: customer-app\n  event_type: widget-secret-exposed\n  actor: cust-actor\n" +
+	"expected_detection:\n  must_fire:\n  - widget-leak\n"
+
+// TestGuard_CustomerTreeMode_RejectsRewritingExistingScenarioGroundTruth is the
+// GROUND-TRUTH-IMMUTABILITY proof (rd mallcoppro-a07 / S2 ruling): an authoring
+// proposal (customer-tree / self-heal branch) may only ADD eval scenarios —
+// never MODIFY or DELETE an existing one — so an autonomous branch cannot
+// rewrite its OWN ground-truth labels to grade itself green. It is enforced in
+// the customer-tree lane by the widen-only data floor: a co-located efficacy
+// scenario under detectors/<name>/scenarios/ is a non-.go data file, and a
+// scenario-shaped YAML is an unrecognized widen shape, so a MODIFY fails closed
+// (RuleDetectorDataWidenOnly, "unrecognized top-level section") and a DELETE
+// fails closed (RuleDetectorDataWidenOnly, "deleting ... is narrowing"). The
+// additive-ADD control — a NEW scenario passes — is
+// TestGuard_CustomerTreeMode_LegitSidecarWithScenariosStillPasses above; the
+// pinned-corpus counterpart is TestGuard_RejectsTouchingExistingScenarios.
+func TestGuard_CustomerTreeMode_RejectsRewritingExistingScenarioGroundTruth(t *testing.T) {
+	const scen = "detectors/widget-leak/scenarios/widget-leak-01.yaml"
+
+	t.Run("modify", func(t *testing.T) {
+		f := newFixture(t)
+		f.write("detectors/widget-leak/main.go", sidecarWellBehavedMainSrc)
+		f.write(scen, customerScenarioYAML)
+		base := f.commit("base: customer sidecar + its efficacy scenario")
+
+		// The authoring branch nudges its OWN must_fire ground truth to
+		// must_not_fire — rewriting the label it is graded against.
+		f.write(scen, strings.Replace(customerScenarioYAML, "must_fire", "must_not_fire", 1))
+		head := f.commit("proposal: rewrite own scenario ground truth")
+
+		requireRejected(t, f.guardCustomerTree(base, head), RuleDetectorDataWidenOnly, scen)
+	})
+
+	t.Run("delete", func(t *testing.T) {
+		f := newFixture(t)
+		f.write("detectors/widget-leak/main.go", sidecarWellBehavedMainSrc)
+		f.write(scen, customerScenarioYAML)
+		base := f.commit("base: customer sidecar + its efficacy scenario")
+
+		f.remove(scen)
+		head := f.commit("proposal: delete own scenario")
+
+		requireRejected(t, f.guardCustomerTree(base, head), RuleDetectorDataWidenOnly, scen)
+	})
+}
+
 // TestGuard_CustomerTreeMode_DeniesNestedEvilTestGoUnderDetectors is the
 // VARIANT proof: the malicious _test.go sits in a NESTED subdirectory
 // (detectors/widget-leak/sub/x_test.go) rather than directly under

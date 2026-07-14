@@ -236,6 +236,17 @@ type GateResult struct {
 	// (sorted, de-duplicated) — informational detail for the reviewer/log line,
 	// never used to compute NovelGap by a caller (that's the bool above).
 	NovelGapFamilies []string `json:"novel_gap_families,omitempty"`
+	// RecallDelta / PrecisionDelta (C6) are the machine-readable base..head
+	// RECALL / PRECISION deltas the self-heal loop consumes to confirm a gap
+	// closed without regressing recall — see recalldelta.go. Populated ONLY in
+	// the DEFAULT (in-tree) stage-3 lane, where both a base and a head exam
+	// report exist to diff (the customer-tree lane grades a single report against
+	// a baseline and has no monotonic base..head pair). Additive omitempty, like
+	// NovelGap: a consumer that does not know these fields ignores them, so their
+	// presence does NOT require a GateSchemaVersion bump (the mallcop-pro decoder
+	// rejects only a HIGHER schema_version). nil when not computed.
+	RecallDelta    *RecallDelta    `json:"recall_delta,omitempty"`
+	PrecisionDelta *PrecisionDelta `json:"precision_delta,omitempty"`
 }
 
 func (r *GateResult) addStage(name, evidence string, findings []GuardFinding) {
@@ -384,6 +395,11 @@ func ValidateProposal(repoRoot, baseRef, headRef string, opts Options) (GateResu
 	if len(newFirings) > 0 {
 		res.NewFirings = newFirings
 	}
+
+	// C6: attach the machine-readable recall/precision deltas the self-heal loop
+	// consumes. Pure over the base/head reports already computed above — no exam
+	// run, no detection change (R9 untouched).
+	res.RecallDelta, res.PrecisionDelta = recallPrecisionDelta(baseReport, headReport)
 
 	// MANDATORY BENIGN TWIN (L4c). If this proposal ADDED a detector in the
 	// AUTHORED lane (core/detect/authored/: head authored names \ base authored

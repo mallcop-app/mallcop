@@ -147,6 +147,58 @@ func recomputeCorpusPin(t *testing.T, root string) (count int, sha string) {
 	return len(entries), hex.EncodeToString(sum[:])
 }
 
+// ---- fixture: the SYNTHETIC gap-close pair (rd mallcoppro-a07 / S1) ----------
+//
+// The gate's tuning gap-close is demonstrated on a PURPOSE-BUILT synthetic pair
+// (exams/synthetic/SYNTH-PE-01 must-fire + SYNTH-PE-02 benign twin) injected
+// into a throwaway clone's PINNED corpus, NOT on any real corpus scenario. The
+// synthetic elevated role carries none of priv-escalation's built-in vocabulary,
+// so the gap is unclosable without the synthetic tuning knob
+// (core/detect/synthdemo_invariant_test.go guards that permanently) — which is
+// what frees every real scenario (PE-08, IP-01, ...) from being held RED-able
+// just to prove a gap-close.
+const (
+	synthSrcMustFire         = "exams/synthetic/SYNTH-PE-01-elevated-must-fire.yaml"
+	synthSrcTwin             = "exams/synthetic/SYNTH-PE-02-baseline-benign-twin.yaml"
+	synthDstMustFire         = "exams/scenarios/synthetic/SYNTH-PE-01-elevated-must-fire.yaml"
+	synthDstTwin             = "exams/scenarios/synthetic/SYNTH-PE-02-baseline-benign-twin.yaml"
+	syntheticElevatedKeyword = "mallcopsyntheticelevated"
+	// syntheticTwinID is the benign twin's scenario id (its filename stem's id:
+	// field), the NewFiring/regression key the over-broad-widen reject asserts.
+	syntheticTwinID = "SYNTH-PE-02-baseline-benign-twin"
+)
+
+// injectSyntheticGapPair copies the committed synthetic gap-close pair
+// (exams/synthetic/) into the clone's PINNED corpus (exams/scenarios/synthetic/)
+// and regenerates corpus.pin so the injected corpus verifies. It does NOT touch
+// detectors/tuning.yaml — callers stage base (untuned: SYNTH-PE-01 RED) and head
+// (synthetic keyword added: SYNTH-PE-01 GREEN) around it.
+func injectSyntheticGapPair(t *testing.T, clone string) {
+	t.Helper()
+	root := repoUnderTest(t)
+	if err := os.MkdirAll(filepath.Join(clone, "exams", "scenarios", "synthetic"), 0o755); err != nil {
+		t.Fatalf("mkdir synthetic corpus dir: %v", err)
+	}
+	for _, p := range [][2]string{{synthSrcMustFire, synthDstMustFire}, {synthSrcTwin, synthDstTwin}} {
+		data, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(p[0])))
+		if err != nil {
+			t.Fatalf("read synthetic fixture %s: %v", p[0], err)
+		}
+		writeRepoFile(t, clone, p[1], string(data))
+	}
+	count, sha := recomputeCorpusPin(t, clone)
+	writeRepoFile(t, clone, "exams/scenarios/corpus.pin",
+		fmt.Sprintf("# fixture pin (synthetic gap-close injection)\ncount %d\nsha256 %s\n", count, sha))
+}
+
+// appendTuningKeyword appends one extra_elevated_keywords list entry to the
+// clone's committed detectors/tuning.yaml (a pure widen the guard accepts).
+func appendTuningKeyword(t *testing.T, clone, keyword string) {
+	t.Helper()
+	tuning := readRepoFile(t, clone, "detectors/tuning.yaml")
+	writeRepoFile(t, clone, "detectors/tuning.yaml", tuning+"    - "+keyword+"\n")
+}
+
 // requireStageNames asserts the exact set of stages that RAN, in order — the
 // short-circuit evidence lives in what is absent.
 func requireStageNames(t *testing.T, res GateResult, want ...string) {
@@ -161,19 +213,19 @@ func requireStageNames(t *testing.T, res GateResult, want ...string) {
 	}
 }
 
-// ---- (a) end-to-end ACCEPT: the K2b-shaped widen proposal -------------------
-
-// The exact proposal shape the self-extension loop exists to produce: two new
-// labeled scenario files (a must_fire target + its benign twin), the paired
-// corpus.pin regen, and the widen-only tuning entry that closes the gap. The
-// fixture manufactures the BASE by removing the committed K2b widen from a
-// clone of the real repo (delete PE-08/PE-09, delete tuning.yaml, repin), so
-// base→head IS the real, committed K2b widen — coverage +1 (PE-08 absent at
-// base, passing at head), no regressions, no undeclared new firings.
-func TestValidateProposal_AcceptsK2bShapedWidenProposal(t *testing.T) {
+// ---- (a) end-to-end ACCEPT: the SYNTHETIC tuning-widen proposal -------------
+//
+// The exact proposal shape the self-extension loop exists to produce, on the
+// synthetic gap-close pair (exams/synthetic/): BASE has the synthetic
+// must-fire/benign-twin scenarios injected into the pinned corpus with the gap
+// OPEN (SYNTH-PE-01 RED); HEAD is the widen-only tuning entry that adds the
+// synthetic elevated keyword, closing SYNTH-PE-01 while the benign twin stays
+// silent. base..head is a pure tuning widen: coverage +1, no regressions, no
+// undeclared new firings, and it depends on NO real corpus scenario, so PE-08 /
+// IP-01 / etc. are free to be fixed (see injectSyntheticGapPair).
+func TestValidateProposal_AcceptsSyntheticWidenProposal(t *testing.T) {
 	clearInferenceEnv(t)
 	clone := cloneRepo(t)
-	head := headOf(t, clone)
 
 	// Anchor the pin replication to reality BEFORE trusting it: over the
 	// pristine clone it must reproduce the committed corpus.pin exactly.
@@ -183,20 +235,15 @@ func TestValidateProposal_AcceptsK2bShapedWidenProposal(t *testing.T) {
 		t.Fatalf("pin replication drifted from core/eval/corpus.go: recomputed count=%d sha=%s, committed pin:\n%s", count, sha, committedPin)
 	}
 
-	// Manufacture the base: the repo as it was BEFORE the K2b widen.
-	for _, rel := range []string{
-		"exams/scenarios/privilege/PE-08-aws-poweruser-grant.yaml",
-		"exams/scenarios/privilege/PE-09-aws-readonly-grant-benign.yaml",
-		"detectors/tuning.yaml",
-	} {
-		if err := os.Remove(filepath.Join(clone, filepath.FromSlash(rel))); err != nil {
-			t.Fatalf("remove %s: %v", rel, err)
-		}
-	}
-	baseCount, baseSHA := recomputeCorpusPin(t, clone)
-	writeRepoFile(t, clone, "exams/scenarios/corpus.pin",
-		fmt.Sprintf("# fixture pin (K4 validate proof)\ncount %d\nsha256 %s\n", baseCount, baseSHA))
-	base := commitAll(t, clone, "fixture base: repo before the K2b widen")
+	// BASE: inject the synthetic pair into the pinned corpus, gap OPEN
+	// (SYNTH-PE-01 is RED — its role carries no built-in elevation keyword).
+	injectSyntheticGapPair(t, clone)
+	base := commitAll(t, clone, "fixture base: synthetic gap-close pair injected, gap OPEN")
+
+	// HEAD: the widen — add the synthetic elevated keyword to tuning.yaml,
+	// closing SYNTH-PE-01 while the benign twin stays silent.
+	appendTuningKeyword(t, clone, syntheticElevatedKeyword)
+	head := commitAll(t, clone, "proposal: synthetic tuning widen closes SYNTH-PE-01")
 
 	res, err := ValidateProposal(clone, base, head, Options{})
 	if err != nil {
@@ -205,7 +252,7 @@ func TestValidateProposal_AcceptsK2bShapedWidenProposal(t *testing.T) {
 
 	// The FULL GateResult, field by field.
 	if !res.Passed {
-		t.Fatalf("the K2b-shaped widen must pass the free tier, got %+v", res)
+		t.Fatalf("the synthetic widen must pass the free tier, got %+v", res)
 	}
 	if res.SchemaVersion != GateSchemaVersion {
 		t.Fatalf("SchemaVersion = %d, want %d", res.SchemaVersion, GateSchemaVersion)
@@ -226,10 +273,32 @@ func TestValidateProposal_AcceptsK2bShapedWidenProposal(t *testing.T) {
 		}
 	}
 	if res.CoveragePlus != 1 {
-		t.Fatalf("CoveragePlus = %d, want 1 (PE-08 newly labeled and passing)", res.CoveragePlus)
+		t.Fatalf("CoveragePlus = %d, want 1 (SYNTH-PE-01 newly passing)", res.CoveragePlus)
 	}
 	if len(res.NewFirings) != 0 {
 		t.Fatalf("NewFirings = %v, want none", res.NewFirings)
+	}
+
+	// C6: the recall/precision deltas ride on the same GateResult and name the
+	// exact unit this widen adds — SYNTH-PE-01's priv-escalation, newly detected,
+	// with no recall regression and no new precision violation.
+	if res.RecallDelta == nil || res.PrecisionDelta == nil {
+		t.Fatalf("RecallDelta/PrecisionDelta must be populated in the in-tree lane, got %+v / %+v", res.RecallDelta, res.PrecisionDelta)
+	}
+	if len(res.RecallDelta.NewlyMissed) != 0 {
+		t.Fatalf("NewlyMissed = %v, want none (no recall regression)", res.RecallDelta.NewlyMissed)
+	}
+	if len(res.PrecisionDelta.NewlyViolated) != 0 {
+		t.Fatalf("NewlyViolated = %v, want none (benign twin stays silent)", res.PrecisionDelta.NewlyViolated)
+	}
+	foundSynth := false
+	for _, u := range res.RecallDelta.NewlyDetected {
+		if u.ScenarioID == "SYNTH-PE-01-elevated-must-fire" && u.Family == "priv-escalation" {
+			foundSynth = true
+		}
+	}
+	if !foundSynth {
+		t.Fatalf("RecallDelta.NewlyDetected = %v, want it to name SYNTH-PE-01/priv-escalation", res.RecallDelta.NewlyDetected)
 	}
 }
 
@@ -269,24 +338,28 @@ func TestValidateProposal_ShortCircuitsAtGuardOnForceEscalateDiff(t *testing.T) 
 
 // ---- (c) end-to-end REJECT at exam-detect: benign twin starts firing --------
 
-// A tuning add the STATIC guard cannot fault (adding a keyword is a pure
-// widen at the data layer) but that makes a must_not_fire row fire: the
-// "readonly" keyword substring-matches PE-09's ReadOnlyAccess role, so the
-// benign twin starts emitting priv-escalation at head. The exam-detect stage
-// catches it: an undeclared NEW FIRING on PE-09 (and the same flip is a
-// regression — PE-09 passed at base). This is exactly why the free tier ends
-// in a behavioral diff, not static rules.
+// A tuning add the STATIC guard cannot fault (adding a keyword is a pure widen
+// at the data layer) but that makes a must_not_fire row fire: BASE already
+// closes SYNTH-PE-01 with the exact synthetic keyword; HEAD adds an OVER-BROAD
+// keyword ("mallcopsynthetic") that also substring-matches SYNTH-PE-02's benign
+// role, so the twin starts emitting priv-escalation at head. The exam-detect
+// stage catches it: an undeclared NEW FIRING on the twin (and the same flip is a
+// regression - the twin passed at base), while closing no new gap (SYNTH-PE-01
+// was already green at base). This is exactly why the free tier ends in a
+// behavioral diff, not static rules - proven now on the synthetic pair.
 func TestValidateProposal_RejectsTuningThatFiresOnBenignTwin(t *testing.T) {
 	clearInferenceEnv(t)
 	clone := cloneRepo(t)
-	base := headOf(t, clone)
 
-	tuning := readRepoFile(t, clone, "detectors/tuning.yaml")
-	// Anchor on the indented list entry — the bare string also appears in a
-	// file comment.
-	widened := replaceOnce(t, tuning, "\n    - poweruser", "\n    - poweruser\n    - readonly")
-	writeRepoFile(t, clone, "detectors/tuning.yaml", widened)
-	head := commitAll(t, clone, "proposal: add the readonly keyword (fires on the benign twin)")
+	// BASE: synthetic pair injected AND the exact synthetic keyword applied -
+	// SYNTH-PE-01 green, the benign twin silent.
+	injectSyntheticGapPair(t, clone)
+	appendTuningKeyword(t, clone, syntheticElevatedKeyword)
+	base := commitAll(t, clone, "fixture base: synthetic gap closed, twin silent")
+
+	// HEAD: an over-broad keyword that also fires on the benign twin.
+	appendTuningKeyword(t, clone, "mallcopsynthetic")
+	head := commitAll(t, clone, "proposal: over-broad keyword fires on the benign twin")
 
 	res, err := ValidateProposal(clone, base, head, Options{})
 	if err != nil {
@@ -302,11 +375,11 @@ func TestValidateProposal_RejectsTuningThatFiresOnBenignTwin(t *testing.T) {
 		t.Fatalf("expected guard+structural PASS and exam-detect FAIL, got %+v", res.Stages)
 	}
 	examFindings := res.Stages[2].Findings
-	requireRejected(t, examFindings, RuleExamNewFiring, "PE-09")
-	requireRejected(t, examFindings, RuleExamRegression, "PE-09")
+	requireRejected(t, examFindings, RuleExamNewFiring, syntheticTwinID)
+	requireRejected(t, examFindings, RuleExamRegression, syntheticTwinID)
 	requireRejected(t, examFindings, RuleExamNoCoverageGain, StageExamDetect)
 
-	wantFiring := "PE-09-aws-readonly-grant-benign: priv-escalation"
+	wantFiring := syntheticTwinID + ": priv-escalation"
 	found := false
 	for _, nf := range res.NewFirings {
 		if nf == wantFiring {
@@ -317,29 +390,30 @@ func TestValidateProposal_RejectsTuningThatFiresOnBenignTwin(t *testing.T) {
 		t.Fatalf("NewFirings = %v, want it to contain %q", res.NewFirings, wantFiring)
 	}
 	if res.CoveragePlus != 0 {
-		t.Fatalf("CoveragePlus = %d, want 0 (the proposal closes nothing)", res.CoveragePlus)
+		t.Fatalf("CoveragePlus = %d, want 0 (the proposal closes nothing new)", res.CoveragePlus)
 	}
 }
 
 // ---- (d) $0 proof: the whole free tier runs with NO inference env -----------
 
-// A tuning-only widen (base = the committed tuning minus the poweruser
-// keyword, head = the committed state) validated end-to-end with
-// MALLCOP_INFERENCE_URL, MALLCOP_API_KEY, and every FORGE_* variable stripped
-// from the process (and therefore from every subprocess the gate spawns).
-// All three stages run and the proposal is judged on the merits — the free
-// tier needs no inference identity by construction. This shape also proves
-// the NEWLY-PASSING coverage path and the declared-target excusal: PE-08
-// exists at base (failing), passes at head, and its priv-escalation firing at
-// head is excused because the row's must_fire declares it.
+// The synthetic tuning widen (base = the synthetic pair injected with the gap
+// OPEN, head = the same plus the synthetic elevated keyword) validated
+// end-to-end with MALLCOP_INFERENCE_URL, MALLCOP_API_KEY, and every FORGE_*
+// variable stripped from the process (and therefore from every subprocess the
+// gate spawns). All three stages run and the proposal is judged on the merits -
+// the free tier needs no inference identity by construction. This shape also
+// proves the NEWLY-PASSING coverage path and the declared-target excusal:
+// SYNTH-PE-01 exists at base (failing), passes at head, and its priv-escalation
+// firing at head is excused because the row's must_fire declares it.
 func TestValidateProposal_FreeTierIsZeroDollar(t *testing.T) {
 	clearInferenceEnv(t)
 	clone := cloneRepo(t)
-	head := headOf(t, clone)
 
-	tuning := readRepoFile(t, clone, "detectors/tuning.yaml")
-	writeRepoFile(t, clone, "detectors/tuning.yaml", replaceOnce(t, tuning, "\n    - poweruser", ""))
-	base := commitAll(t, clone, "fixture base: reopen the PE-08 gap")
+	injectSyntheticGapPair(t, clone)
+	base := commitAll(t, clone, "fixture base: synthetic gap OPEN")
+
+	appendTuningKeyword(t, clone, syntheticElevatedKeyword)
+	head := commitAll(t, clone, "proposal: synthetic tuning widen closes SYNTH-PE-01")
 
 	res, err := ValidateProposal(clone, base, head, Options{})
 	if err != nil {
@@ -350,10 +424,10 @@ func TestValidateProposal_FreeTierIsZeroDollar(t *testing.T) {
 	}
 	requireStageNames(t, res, StageGuard, StageStructural, StageExamDetect)
 	if res.CoveragePlus != 1 {
-		t.Fatalf("CoveragePlus = %d, want 1 (PE-08 newly passing)", res.CoveragePlus)
+		t.Fatalf("CoveragePlus = %d, want 1 (SYNTH-PE-01 newly passing)", res.CoveragePlus)
 	}
 	if len(res.NewFirings) != 0 {
-		t.Fatalf("NewFirings = %v, want none (PE-08's firing is a declared target)", res.NewFirings)
+		t.Fatalf("NewFirings = %v, want none (SYNTH-PE-01's firing is a declared target)", res.NewFirings)
 	}
 }
 
