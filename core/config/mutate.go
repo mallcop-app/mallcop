@@ -68,6 +68,24 @@ func SetAutonomy(cfg Config, autonomy string) (Config, error) {
 	return next, nil
 }
 
+// SetContributeBack returns a copy of cfg with Learning.ContributeBack set to
+// enabled, after re-validating the resulting whole config (mirroring
+// SetAutonomy's discipline, even though a bool has no enum to reject —
+// Validate is still run so any future cross-field rule on this setting is
+// enforced identically to a file-load path). This sets ONLY the STANDING
+// opt-in gate documented on Learning.ContributeBack — it does not merge
+// anything and does not touch autonomy; the per-improvement confirm is a
+// separate, later gate at promote time. cfg itself is never mutated in
+// place.
+func SetContributeBack(cfg Config, enabled bool) (Config, error) {
+	next := cfg
+	next.Learning.ContributeBack = enabled
+	if err := Validate(next); err != nil {
+		return cfg, err
+	}
+	return next, nil
+}
+
 // Validate exports the package's strict cross-field validation (the same
 // check Load runs after a successful decode) so callers that build a
 // candidate Config in memory — AddConnector/SetAutonomy above, and any future

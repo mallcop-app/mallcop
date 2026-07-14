@@ -150,6 +150,85 @@ func TestConfigSetAutonomy_NoValueErrors(t *testing.T) {
 	}
 }
 
+// ---- `mallcop config set contribute_back` ----
+
+func TestConfigSetContributeBack_OnAndOffPersist(t *testing.T) {
+	dir := t.TempDir()
+	path := seedConfig(t, dir)
+
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("load seed: %v", err)
+	}
+	if cfg.Learning.ContributeBack {
+		t.Fatal("seed config should default learning.contribute_back to false")
+	}
+
+	if err := runConfigSetContributeBack([]string{"--config", path, "on"}); err != nil {
+		t.Fatalf("config set contribute_back on: %v", err)
+	}
+	cfg, err = config.Load(path)
+	if err != nil {
+		t.Fatalf("reload after on: %v", err)
+	}
+	if !cfg.Learning.ContributeBack {
+		t.Fatal("learning.contribute_back not persisted as true after \"on\"")
+	}
+
+	if err := runConfigSetContributeBack([]string{"--config", path, "off"}); err != nil {
+		t.Fatalf("config set contribute_back off: %v", err)
+	}
+	cfg, err = config.Load(path)
+	if err != nil {
+		t.Fatalf("reload after off: %v", err)
+	}
+	if cfg.Learning.ContributeBack {
+		t.Fatal("learning.contribute_back not persisted as false after \"off\"")
+	}
+}
+
+func TestConfigSetContributeBack_InvalidValueFailsAndFileUnchanged(t *testing.T) {
+	dir := t.TempDir()
+	path := seedConfig(t, dir)
+	before, _ := os.ReadFile(path)
+
+	err := runConfigSetContributeBack([]string{"--config", path, "true"})
+	if err == nil {
+		t.Fatal("expected error for value other than on/off")
+	}
+	if !strings.Contains(err.Error(), "on") || !strings.Contains(err.Error(), "off") {
+		t.Fatalf("error should name the accepted values, got: %v", err)
+	}
+	after, _ := os.ReadFile(path)
+	if string(before) != string(after) {
+		t.Fatal("config file changed despite a rejected contribute_back value")
+	}
+}
+
+func TestConfigSetContributeBack_NoValueErrors(t *testing.T) {
+	dir := t.TempDir()
+	path := seedConfig(t, dir)
+	if err := runConfigSetContributeBack([]string{"--config", path}); err == nil {
+		t.Fatal("expected error when no contribute_back value is given")
+	}
+}
+
+func TestRunConfigSet_DispatchesContributeBack(t *testing.T) {
+	dir := t.TempDir()
+	path := seedConfig(t, dir)
+
+	if err := runConfigSet([]string{"contribute_back", "--config", path, "on"}); err != nil {
+		t.Fatalf("config set contribute_back via dispatch: %v", err)
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if !cfg.Learning.ContributeBack {
+		t.Fatal("learning.contribute_back not persisted via runConfigSet dispatch")
+	}
+}
+
 // ---- dispatch (`mallcop config` vs `mallcop config set ...`) ----
 
 func TestRunConfigSet_UnknownTargetErrors(t *testing.T) {

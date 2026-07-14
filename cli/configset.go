@@ -27,8 +27,10 @@ func runConfigSet(args []string) error {
 		return runConfigSetConnector(rest)
 	case "autonomy":
 		return runConfigSetAutonomy(rest)
+	case "contribute_back":
+		return runConfigSetContributeBack(rest)
 	default:
-		return fmt.Errorf("config set: unknown target %q (want \"connector\" or \"autonomy\")", target)
+		return fmt.Errorf("config set: unknown target %q (want \"connector\", \"autonomy\", or \"contribute_back\")", target)
 	}
 }
 
@@ -108,6 +110,56 @@ func runConfigSetAutonomy(args []string) error {
 	}
 
 	fmt.Printf("mallcop config set autonomy: learning.autonomy=%s in %s\n", value, resolvedPath)
+	return nil
+}
+
+// runConfigSetContributeBack implements `mallcop config set contribute_back
+// on|off` — the linux-mode surface over the STANDING opt-in gate documented
+// on config.Learning.ContributeBack (rd mallcoppro-9af). This is layer one of
+// two-layer consent: turning it "on" only makes contribute-back ELIGIBLE to
+// be offered for this deployment; it never merges anything by itself, and it
+// does not bypass the separate per-improvement confirm at promote time (a
+// later slice) or the R3 hard line that contribute-back PRs are always
+// human/maintainer-reviewed, never auto-merged, at any autonomy dial
+// setting.
+func runConfigSetContributeBack(args []string) error {
+	fs := flag.NewFlagSet("config set contribute_back", flag.ContinueOnError)
+	configPath := fs.String("config", "", "Path to mallcop.yaml (overrides $"+config.EnvConfigPath+" and walk-up discovery)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return fmt.Errorf("config set contribute_back: expected exactly one value (%q or %q)", "on", "off")
+	}
+	value := fs.Arg(0)
+
+	var enabled bool
+	switch value {
+	case "on":
+		enabled = true
+	case "off":
+		enabled = false
+	default:
+		return fmt.Errorf("config set contribute_back: value must be %q or %q — got %q", "on", "off", value)
+	}
+
+	cfg, resolvedPath, err := config.LoadEffective(*configPath)
+	if err != nil {
+		return fmt.Errorf("config set contribute_back: %w", err)
+	}
+	if resolvedPath == "" {
+		return fmt.Errorf("config set contribute_back: no %s found (run `mallcop init` first, or pass --config)", config.ConfigFileName)
+	}
+
+	next, err := config.SetContributeBack(cfg, enabled)
+	if err != nil {
+		return fmt.Errorf("config set contribute_back: %w", err)
+	}
+	if err := config.WriteConfigAtomic(resolvedPath, next); err != nil {
+		return fmt.Errorf("config set contribute_back: %w", err)
+	}
+
+	fmt.Printf("mallcop config set contribute_back: learning.contribute_back=%t in %s\n", enabled, resolvedPath)
 	return nil
 }
 
