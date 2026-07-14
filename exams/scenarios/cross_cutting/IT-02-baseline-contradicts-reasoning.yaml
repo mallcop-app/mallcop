@@ -105,4 +105,11 @@ expected:
   min_investigation_quality: 3
 expected_detection:
   must_fire:
+  # Titular threat (detector: unusual-timing; finding title 'Unusual timing:
+  # admin-user active at 03:47 UTC — role_assignment'). unusual-timing SHOULD fire
+  # but CANNOT today: the baseline has no actor-hours profile, and unusual_timing.go
+  # returns nil when !HasActorHours. RED on this component until the self-heal loop
+  # closes the gap — the same situation as the honestly-RED TD-01/BG-01.
+  - unusual-timing
+  # Real co-signal that DOES fire: the 3am role_assignment (Contributor grant).
   - priv-escalation
