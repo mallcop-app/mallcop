@@ -201,6 +201,16 @@ func scaffoldDeployAssets(dir, moduleName, mallcopVersion string) error {
 		}
 	}
 
+	if err := os.MkdirAll(filepath.Join(dir, "scenarios"), 0o755); err != nil {
+		return fmt.Errorf("deploy-repo: creating scenarios/: %w", err)
+	}
+	scenariosReadmePath := filepath.Join(dir, "scenarios", "README.md")
+	if _, err := os.Stat(scenariosReadmePath); err != nil {
+		if err := os.WriteFile(scenariosReadmePath, []byte(scenariosReadmeContent), 0o644); err != nil {
+			return fmt.Errorf("deploy-repo: writing scenarios/README.md: %w", err)
+		}
+	}
+
 	workflowDir := filepath.Join(dir, ".github", "workflows")
 	if err := os.MkdirAll(workflowDir, 0o755); err != nil {
 		return fmt.Errorf("deploy-repo: creating .github/workflows/: %w", err)
@@ -356,6 +366,96 @@ Build it into 'connectors/bin/' however you like (a Go program, 'go build');
 this repo's scaffolded CI does not compile it for you.
 `
 
+// scenariosReadmeContent documents the scenario YAML schema for
+// 'mallcop eval' (mallcoppro-bc2): the recall-first exam an operator runs
+// INSIDE their own deploy repo, over the shipped reference corpus UNIONED
+// with whatever scenario YAML files live in this directory.
+const scenariosReadmeContent = `# scenarios/
+
+Author your OWN exam scenarios here (YAML, same schema as the shipped
+reference corpus). 'mallcop eval' unions every scenario file in this
+directory into its grading pass, IN ADDITION to the reference corpus baked
+into the mallcop binary — a scenario here never touches the reference
+corpus's own corpus.pin digest; it is UNPINNED and purely additive.
+
+Run it:
+
+    mallcop eval
+
+The report prints the recall/precision split TWICE: once for the shipped
+reference corpus, once for YOUR scenarios here ("MY MISSED ATTACKS" / "MY
+FALSE ALARMS") — so your own coverage is never blended into the reference
+number. '--json' emits both splits as {"reference": {...}, "local": {...}}.
+
+## Schema
+
+Required top-level fields:
+
+    id: string                  — unique scenario id (e.g. LOCAL-01-...)
+    finding: mapping             — the finding that enters the pipeline
+      id, detector, title, severity, event_ids: [...]
+    events: sequence             — events the detector reads
+      - id, timestamp, source, event_type, actor, action, target, severity,
+        metadata: {...}
+    baseline: mapping (optional) — baseline state
+      known_entities: {actors: [...], sources: [...]}
+
+Ground truth for the offline detect layer:
+
+    expected_detection:
+      must_fire: [family, ...]      — detector family tokens that MUST appear
+                                       among the emitted findings (e.g.
+                                       "new-actor", "volume-anomaly")
+      must_not_fire: [family, ...]  — detector family tokens that MUST be
+                                       absent
+      reserved: true|false          — RESERVED TEST: this must_fire ground
+                                       truth is asserted TODAY even though a
+                                       detector that can satisfy it may not
+                                       exist in this repo yet (e.g. a
+                                       detectors/<name> sidecar you haven't
+                                       written yet, or a built-in family this
+                                       mallcop version doesn't ship). A
+                                       reserved must_fire family with no
+                                       REGISTERED detector grades as a
+                                       TRACKED GAP on the 'mallcop eval'
+                                       report, not a hard failure — it shows
+                                       up under "MY MISSED ATTACKS" annotated
+                                       "(reserved: not yet built)" so you can
+                                       see exactly what coverage you're still
+                                       missing, without it ever failing CI.
+                                       The day you author the detector, this
+                                       automatically reverts to an ordinary
+                                       hard pass/fail — no re-flagging needed.
+
+Optional:
+
+    provenance: reference|operator|captured|authored|contributed
+                                  — who/what authored this scenario. Every
+                                    scenario you write here defaults to
+                                    "operator" if you want to set it, but the
+                                    field itself is informational only —
+                                    'mallcop eval' does not grade differently
+                                    based on it. Use "captured" for a real
+                                    event you flagged verbatim (chat's "flag
+                                    things like this", or
+                                    'mallcop feedback report-miss'), or
+                                    "authored" for a scenario you wrote
+                                    alongside a new detectors/<name> sidecar
+                                    as its own proof.
+
+See the reference corpus's own exams/scenarios/_schema.yaml in the pinned
+mallcop module (go.mod at this repo's root) for the FULL field reference,
+including the optional 'expected:' block (agent-resolution grading — not
+used by 'mallcop eval', which only grades the offline detect layer).
+
+## CI
+
+The scaffolded '.github/workflows/scan.yml' runs 'mallcop eval' after every
+scan as a REPORT-ONLY step — it never fails the scheduled scan run today.
+Whether a regression in YOUR OWN scenarios here should eventually fail CI is
+an autonomy-dial choice you make later, not a default this scaffold imposes.
+`
+
 // scanWorkflowTemplate is the scheduled-scan Action SKELETON (mallcoppro-f3b
 // scope): checkout, install the pinned mallcop release binary, build wasip1
 // sidecar detectors, run 'mallcop scan', persist findings. The scan/notify/
@@ -492,6 +592,19 @@ jobs:
           if [ "$code" != "0" ] && [ "$code" != "1" ]; then
             exit "$code"
           fi
+
+      - name: Run mallcop eval (report-only; your own scenarios/ scenarios)
+        # REPORT-ONLY (mallcoppro-bc2): grades the shipped reference corpus
+        # UNIONED with THIS repo's own scenarios/ scenarios (see
+        # scenarios/README.md) through the SAME fleet 'mallcop scan' just
+        # ran (configured WASM sidecars included), and prints the recall
+        # split TWICE so your own coverage ("MY MISSED ATTACKS") is never
+        # blended with the reference corpus's own number. No inference key,
+        # no network. Whether this should ever GATE the scheduled scan is an
+        # open autonomy-dial question (Baron) -- for now it NEVER fails this
+        # job, regardless of exit code (0/1/2 all continue).
+        run: |
+          mallcop eval || true
 
       - name: Publish coverage gaps (self-heal loop)
         # SELF-HEAL (S5): mine THIS scan's store for coverage gaps and publish

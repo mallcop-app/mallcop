@@ -33,3 +33,19 @@
 #     Grading is on family PRESENCE over the whole emitted set — not counts or
 #     actors (multi-firing detectors may emit several findings per family).
 #     Scenarios without this block are skipped-but-counted (unlabeled).
+#   provenance: string — who/what authored this scenario (mallcoppro-bc2, the
+#     `mallcop eval` C4 build). One of:
+#       reference    — the shipped reference corpus (the DEFAULT — an absent
+#                      field means "reference"; every scenario that predates
+#                      this field is implicitly reference-provenance)
+#       operator     — hand-authored by a customer in their own deploy repo's
+#                      scenarios/ directory
+#       captured      — a real event the operator flagged verbatim (chat's
+#                      "flag things like this", or `mallcop feedback
+#                      report-miss`)
+#       authored      — written alongside a new detector as its own proof
+#                      scenario
+#       contributed   — an operator scenario proposed back to the shared
+#                      reference corpus
+#     Purely informational — no grading logic branches on it (see
+#     Scenario.EffectiveProvenance in internal/exam/scenario.go).

@@ -16,6 +16,7 @@
 //	mallcop scan        [--config <mallcop.yaml>] | --store <dir> [--events <file> | --connector github --github-org <org>] [--tuning <yaml>] [--json]
 //	mallcop detect      [--baseline <path>] [--tuning <yaml>]   < events.jsonl   > findings.jsonl
 //	mallcop exam-detect [--json] [--tuning <yaml>]
+//	mallcop eval        [--json] [--scenarios-dir <dir>] [--tuning <yaml>]
 //	mallcop validate-proposal --base <ref> [--head <ref>] [--guard-only] [--allow-no-coverage-gain] [--json]
 //	mallcop collect     --store <dir> [--fidelity <json>] [--json]
 //	mallcop init        [--dir <path>] [--pro] [--create-repo owner/name] [--mallcop-version <tag>] [--github-token-env <VAR>]
@@ -67,6 +68,8 @@ func Main() {
 		err = runDetect(args)
 	case "exam-detect":
 		err = runExamDetect(args)
+	case "eval":
+		err = runEval(args)
 	case "validate-proposal":
 		err = runValidateProposal(args)
 	case "collect":
@@ -148,6 +151,23 @@ Commands:
                expected_detection block (must_fire / must_not_fire detector
                families) and reports per-scenario pass/fail. Offline and
                deterministic — no inference key. Exit 1 = detection gap(s).
+
+  eval  Run the recall-first eval INSIDE your own deploy repo (mallcoppro-bc2)
+    --json          Output the reference+local reports as JSON
+    --scenarios-dir Path to your own scenarios/ directory (default:
+                    <repo-root>/scenarios; missing default dir = empty union,
+                    not an error)
+    --tuning        Optional detector tuning YAML (widen-only extra_* knobs)
+               Grades the EMBEDDED reference corpus (no exams/scenarios/ needed
+               on disk) UNIONED with your OWN scenarios/ scenarios, through the
+               SAME fleet 'mallcop scan' runs (configured WASM sidecars
+               included). Prints the recall/precision split TWICE — once for
+               the reference corpus, once for "MY MISSED ATTACKS" / "MY FALSE
+               ALARMS" over just your own scenarios, so your own coverage is
+               never blended with the shipped reference number. Reserved
+               scenarios (reserved: true) in your scenarios/ dir for a family
+               with no detector yet show as tracked gaps, not hard failures.
+               No network, no inference key. Exit codes mirror exam-detect.
 
   validate-proposal  Run the FREE-TIER gate over a self-extension proposal diff
     --base       Base git ref the proposal diffs against (required)
