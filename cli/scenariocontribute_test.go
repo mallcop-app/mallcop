@@ -254,14 +254,14 @@ func TestScenarioContribute_SanitizeRoundTrip(t *testing.T) {
 	if !strings.Contains(body, "sub-") {
 		t.Error("expected the 8-hex-char subscription-style identifier to keep the sub- prefix convention")
 	}
-	if diff.SecretsRedacted == 0 {
+	if len(diff.SecretPaths) == 0 {
 		t.Error("expected at least one secret-shaped metadata value redacted")
 	}
 	if len(diff.ActorRenames) == 0 {
 		t.Error("expected at least one actor rename in the diff")
 	}
-	if len(diff.TargetRenames) == 0 {
-		t.Error("expected at least one target identifier rename in the diff")
+	if len(diff.IdentifierRenames) == 0 {
+		t.Error("expected at least one identifier rename in the diff")
 	}
 
 	// Over-redaction guard: non-secret content must survive verbatim.
@@ -429,9 +429,10 @@ func TestScenarioContribute_DryRun_PrintsRedactionDiffAndPRContent(t *testing.T)
 	for _, want := range []string{
 		"Redaction diff",
 		"Actors renamed:",
-		"Target identifiers redacted:",
+		"Identifiers redacted (targets, prose, metadata):",
 		"Secret-shaped metadata values redacted:",
 		"Timestamps shifted:",
+		"Residue check: PASSED",
 		"Sanitized scenario YAML",
 		"Would-be PR:",
 		"Repo:   mallcop-app/mallcop",
@@ -447,9 +448,17 @@ func TestScenarioContribute_DryRun_PrintsRedactionDiffAndPRContent(t *testing.T)
 	}
 
 	// No confirmation was requested and none should be needed post-dry-run;
-	// PR body counts (not raw values) must appear too.
+	// PR body counts (not raw values) must appear too, plus the ledger-backed
+	// residue-check statement and the enumerated secret PATH (the consent
+	// surface must list every redaction, HIGH fix).
 	if !strings.Contains(out, "actor(s) renamed to canonical corpus tokens") {
 		t.Errorf("PR body summary missing from output:\n%s", out)
+	}
+	if !strings.Contains(out, "Transmit-time residue check: PASSED") {
+		t.Errorf("PR body residue-check statement missing from output:\n%s", out)
+	}
+	if !strings.Contains(out, "events[0].metadata.github_token") {
+		t.Errorf("diff does not enumerate the secret redaction path events[0].metadata.github_token:\n%s", out)
 	}
 }
 
@@ -512,4 +521,396 @@ events:
 func marshalScenarioForTest(t *testing.T, sc *exam.Scenario) ([]byte, error) {
 	t.Helper()
 	return yaml.Marshal(sc)
+}
+
+// --- adversarial-review regressions (PR #192 REJECT round) --------------------
+
+// contributeMetadataLeakFixtureYAML reproduces the reviewer's CRITICAL
+// fixture shapes: identifying values that live ONLY inside metadata (which
+// capture copies wholesale from event payloads) — a coworker email under
+// peer_email AND collaborator, a private hostname twice, an internal IP, an
+// account id (as a string AND as a bare YAML number), and the same
+// subscription/tenant UUID in THREE metadata spots plus the event target.
+// None of these are actors, so the actor pass cannot save any of them — only
+// the metadata identifier scrub can.
+const contributeMetadataLeakFixtureYAML = `id: LOCAL-leak-repro
+category: captured
+detector: volume-anomaly
+provenance: captured
+finding:
+  id: LOCAL-leak-repro-finding
+  detector: volume-anomaly
+  title: 'Bulk reads on prod storage'
+  severity: medium
+  event_ids: [evt-1, evt-2]
+  metadata:
+    actor: victim-user
+    subscription: 169efd95-3a5e-4b2d-9c1e-8f7a6b5c4d3e
+    peer_email: coworker.jane@realcorp.com
+    collaborator: bob.smith@realcorp.com
+events:
+- id: evt-1
+  timestamp: '2025-11-04T10:00:00Z'
+  source: azure
+  event_type: storage_access
+  actor: victim-user
+  target: /subscriptions/169efd95-3a5e-4b2d-9c1e-8f7a6b5c4d3e/resourceGroups/prod-rg
+  metadata:
+    tenant: 169efd95-3a5e-4b2d-9c1e-8f7a6b5c4d3e
+    src_ip: 10.23.4.87
+    db_host: prod-db.realcorp.internal
+    resource_id: /subscriptions/169efd95-3a5e-4b2d-9c1e-8f7a6b5c4d3e/rg/x
+    account_id: "123456789012"
+    billing_account: 210987654321
+    blobs_accessed: 80
+    region: us-east-1
+  raw:
+    secret_blob: raw-payload-must-be-stripped
+- id: evt-2
+  timestamp: '2025-11-04T10:00:30.5Z'
+  source: azure
+  event_type: storage_access
+  actor: victim-user
+  metadata:
+    conn:
+      host: prod-db.realcorp.internal
+    notes:
+    - 'peer coworker.jane@realcorp.com pulled the same blobs'
+expected_detection:
+  must_fire: [volume-anomaly]
+`
+
+// TestScenarioContribute_MetadataIdentifierLeaks_Scrubbed is the regression
+// test for the review's CRITICAL finding: every identifying value that lives
+// ONLY in metadata must be scrubbed from the transmit-bound artifacts (the
+// sanitized YAML and the PR body), enumerated in the redaction ledger (HIGH:
+// the consent surface must not under-report), and mapped to the SAME token as
+// the same identifier elsewhere in the document (target + metadata agree).
+// Non-vacuity: these values appear in NO structured field the pre-fix
+// sanitizer touched — reverting the metadata scrub makes every residue
+// assertion below fail.
+func TestScenarioContribute_MetadataIdentifierLeaks_Scrubbed(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "leak-repro.yaml")
+	if err := os.WriteFile(src, []byte(contributeMetadataLeakFixtureYAML), 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	sc, err := exam.Load(src)
+	if err != nil {
+		t.Fatalf("exam.Load(fixture): %v", err)
+	}
+
+	plan, err := buildContributePlan(sc, src, "mallcop-app/mallcop", "")
+	if err != nil {
+		t.Fatalf("buildContributePlan: %v", err)
+	}
+	body := string(plan.SanitizedYAML)
+
+	// Grep-class: not one private identifier may survive in EITHER
+	// transmit-bound artifact.
+	leaks := []string{
+		"coworker.jane@realcorp.com",
+		"bob.smith@realcorp.com",
+		"prod-db.realcorp.internal",
+		"realcorp", // no fragment of the private domain either
+		"10.23.4.87",
+		"169efd95-3a5e-4b2d-9c1e-8f7a6b5c4d3e",
+		"169efd95",
+		"123456789012",
+		"210987654321",
+		"raw-payload-must-be-stripped", // raw: block stripped wholesale
+		"secret_blob",
+	}
+	for _, leak := range leaks {
+		if strings.Contains(body, leak) {
+			t.Errorf("sanitized YAML still contains metadata residue %q:\n%s", leak, body)
+		}
+		if strings.Contains(plan.PRBody, leak) {
+			t.Errorf("PR body contains residue %q:\n%s", leak, plan.PRBody)
+		}
+	}
+
+	// Same-token agreement: the subscription UUID appears in the event target
+	// AND (twice more) inside metadata — all three must carry the IDENTICAL
+	// deterministic token (shared hash cache).
+	uuid := "169efd95-3a5e-4b2d-9c1e-8f7a6b5c4d3e"
+	uuidTok := "id-" + contentHashToken(uuid, 8)
+	if got := strings.Count(body, uuidTok); got < 3 {
+		t.Errorf("subscription UUID token %s appears %d time(s), want >= 3 (target + metadata.tenant + metadata.resource_id):\n%s", uuidTok, got, body)
+	}
+	// The private hostname appears twice (flat value + nested under conn:) —
+	// same token both times.
+	hostTok := "host-" + contentHashToken("prod-db.realcorp.internal", 8) + ".example"
+	if got := strings.Count(body, hostTok); got != 2 {
+		t.Errorf("hostname token %s appears %d time(s), want exactly 2:\n%s", hostTok, got, body)
+	}
+
+	// HIGH fix: the ledger (the consent surface) must ENUMERATE every one of
+	// these — the operator consents to exactly what leaves.
+	ledger := map[string]bool{}
+	for _, r := range plan.Diff.IdentifierRenames {
+		ledger[r.Original] = true
+	}
+	for _, wantOriginal := range []string{
+		"coworker.jane@realcorp.com",
+		"bob.smith@realcorp.com",
+		"prod-db.realcorp.internal",
+		"10.23.4.87",
+		uuid,
+		"123456789012",
+		"210987654321", // numeric value under an identifier-carrying key
+	} {
+		if !ledger[wantOriginal] {
+			t.Errorf("redaction ledger does not enumerate %q -- the consent diff under-reports what leaves\nledger: %+v", wantOriginal, plan.Diff.IdentifierRenames)
+		}
+	}
+
+	// Over-redaction guards: measurement data and generic values survive.
+	if !strings.Contains(body, "blobs_accessed: 80") {
+		t.Errorf("blobs_accessed count corrupted -- over-redaction broke grading data:\n%s", body)
+	}
+	if !strings.Contains(body, "us-east-1") {
+		t.Errorf("region us-east-1 dropped -- over-redaction:\n%s", body)
+	}
+
+	// LOW fix: sub-second precision. evt-2 was 30.5s after evt-1; the shifted
+	// timestamps must preserve the 30.5s delta exactly.
+	reloaded := struct{ e0, e1 string }{}
+	sanitized, _, err := sanitizeScenarioForContribution(sc)
+	if err != nil {
+		t.Fatalf("sanitizeScenarioForContribution: %v", err)
+	}
+	reloaded.e0, reloaded.e1 = sanitized.Events[0].Timestamp, sanitized.Events[1].Timestamp
+	t0, err := time.Parse(time.RFC3339, reloaded.e0)
+	if err != nil {
+		t.Fatalf("parse shifted events[0].timestamp %q: %v", reloaded.e0, err)
+	}
+	t1, err := time.Parse(time.RFC3339, reloaded.e1)
+	if err != nil {
+		t.Fatalf("parse shifted events[1].timestamp %q: %v", reloaded.e1, err)
+	}
+	if got, want := t1.Sub(t0), 30*time.Second+500*time.Millisecond; got != want {
+		t.Errorf("sub-second delta not preserved: got %s, want %s (events[1].timestamp=%q)", got, want, reloaded.e1)
+	}
+
+	// The sanitized output must still parse via the real loader.
+	outPath := filepath.Join(dir, "sanitized.yaml")
+	if err := os.WriteFile(outPath, plan.SanitizedYAML, 0o644); err != nil {
+		t.Fatalf("write sanitized: %v", err)
+	}
+	if _, err := exam.Load(outPath); err != nil {
+		t.Fatalf("sanitized output failed exam.Load: %v", err)
+	}
+}
+
+// TestScenarioContribute_ResidueCheck_FailsClosed proves verifyLedgerResidue
+// is a real gate, not decoration: an artifact that still contains a ledger
+// original must produce an error naming the residue.
+func TestScenarioContribute_ResidueCheck_FailsClosed(t *testing.T) {
+	diff := contributeDiff{
+		IdentifierRenames: []contributeRename{{Original: "prod-db.realcorp.internal", Canonical: "host-deadbeef.example"}},
+	}
+	if err := verifyLedgerResidue("test artifact", []byte("clean content, nothing to see"), diff); err != nil {
+		t.Fatalf("clean artifact must pass: %v", err)
+	}
+	err := verifyLedgerResidue("test artifact", []byte("still mentions prod-db.realcorp.internal here"), diff)
+	if err == nil {
+		t.Fatal("expected residue to fail the check")
+	}
+	if !strings.Contains(err.Error(), "prod-db.realcorp.internal") {
+		t.Errorf("residue error should name the surviving original: %v", err)
+	}
+}
+
+// --- openContributePR command construction (MED fix) ---------------------------
+//
+// These tests exercise openContributePR through FAKE exec seams
+// (contributeLookupGH / contributeRunCommand) — no git or gh binary ever
+// runs, nothing touches the network, and no PR can possibly open. They exist
+// because the review's MED finding was a misconstructed `gh repo fork` argv
+// (`--clone=true --remote=true <dir>` — gh does not clone into a positional
+// dir that way) that only an argv-level test could have caught.
+
+// fakeContributeExec installs recording seams and returns the recorded call
+// log. The fake simulates `gh api user` returning login, and creates a
+// minimal clone tree (exams/scenarios/corpus.pin) when the clone command
+// runs so the subsequent pin rewrite operates on a real file.
+type fakeContributeCall struct {
+	Dir  string
+	Name string
+	Args []string
+}
+
+func fakeContributeExec(t *testing.T, login string) *[]fakeContributeCall {
+	t.Helper()
+	var calls []fakeContributeCall
+
+	oldLookup, oldRun := contributeLookupGH, contributeRunCommand
+	t.Cleanup(func() { contributeLookupGH, contributeRunCommand = oldLookup, oldRun })
+
+	contributeLookupGH = func() (string, error) { return "gh", nil }
+	contributeRunCommand = func(dir, name string, args ...string) ([]byte, error) {
+		calls = append(calls, fakeContributeCall{Dir: dir, Name: name, Args: args})
+		if name == "gh" && len(args) >= 2 && args[0] == "api" && args[1] == "user" {
+			return []byte(login + "\n"), nil
+		}
+		if name == "gh" && len(args) >= 3 && args[0] == "repo" && args[1] == "clone" {
+			cloneDir := args[3-1] // gh repo clone <target> <dir>
+			if len(args) >= 4 {
+				cloneDir = args[3]
+			}
+			scenDir := filepath.Join(cloneDir, "exams", "scenarios")
+			if err := os.MkdirAll(scenDir, 0o755); err != nil {
+				return nil, err
+			}
+			pin := "# corpus.pin header preserved\ncount 58\nsha256 0000000000000000000000000000000000000000000000000000000000000000\n"
+			if err := os.WriteFile(filepath.Join(scenDir, "corpus.pin"), []byte(pin), 0o644); err != nil {
+				return nil, err
+			}
+		}
+		return []byte("ok\n"), nil
+	}
+	return &calls
+}
+
+// buildContributePlanForExecTest assembles a real plan from the standard
+// fixture (real sanitize, real embedded-corpus pin regen) for the fake-exec
+// tests.
+func buildContributePlanForExecTest(t *testing.T) *contributePlan {
+	t.Helper()
+	dir := t.TempDir()
+	src := filepath.Join(dir, "captured.yaml")
+	if err := os.WriteFile(src, []byte(contributeFixtureYAML), 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	sc, err := exam.Load(src)
+	if err != nil {
+		t.Fatalf("exam.Load: %v", err)
+	}
+	plan, err := buildContributePlan(sc, src, "mallcop-app/mallcop", "")
+	if err != nil {
+		t.Fatalf("buildContributePlan: %v", err)
+	}
+	return plan
+}
+
+func assertCall(t *testing.T, calls []fakeContributeCall, i int, wantName string, wantArgs ...string) fakeContributeCall {
+	t.Helper()
+	if i >= len(calls) {
+		t.Fatalf("expected call %d (%s %v), only %d calls recorded: %+v", i, wantName, wantArgs, len(calls), calls)
+	}
+	c := calls[i]
+	if c.Name != wantName {
+		t.Fatalf("call %d: name = %q, want %q (call: %+v)", i, c.Name, wantName, c)
+	}
+	if len(wantArgs) > len(c.Args) {
+		t.Fatalf("call %d: args %v shorter than want prefix %v", i, c.Args, wantArgs)
+	}
+	for j, w := range wantArgs {
+		if w == "*" {
+			continue // wildcard (tmpdir, generated paths)
+		}
+		if c.Args[j] != w {
+			t.Fatalf("call %d: args[%d] = %q, want %q (full: %v)", i, j, c.Args[j], w, c.Args)
+		}
+	}
+	return c
+}
+
+// TestOpenContributePR_CommandConstruction_ForkPath asserts the EXACT argv
+// sequence for a contributor who is not the target repo's owner: resolve
+// login -> fork (--clone=false, NO positional dir) -> clone THE FORK into the
+// scratch dir (a separate command) -> branch/add/commit/push in that dir ->
+// gh pr create with an owner-qualified --head.
+func TestOpenContributePR_CommandConstruction_ForkPath(t *testing.T) {
+	callsPtr := fakeContributeExec(t, "testbot")
+	plan := buildContributePlanForExecTest(t)
+
+	out, err := withStdio(t, "", func() error { return openContributePR(plan) })
+	if err != nil {
+		t.Fatalf("openContributePR: %v\noutput:\n%s", err, out)
+	}
+	calls := *callsPtr
+
+	assertCall(t, calls, 0, "gh", "api", "user", "--jq", ".login")
+	assertCall(t, calls, 1, "gh", "repo", "fork", "mallcop-app/mallcop", "--clone=false")
+	clone := assertCall(t, calls, 2, "gh", "repo", "clone", "testbot/mallcop", "*")
+	if len(clone.Args) != 4 {
+		t.Fatalf("clone call must be exactly 'repo clone <fork> <dir>', got %v", clone.Args)
+	}
+	cloneDir := clone.Args[3]
+	if cloneDir == "" {
+		t.Fatal("clone target dir is empty")
+	}
+
+	co := assertCall(t, calls, 3, "git", "checkout", "-b", plan.Branch)
+	if co.Dir != cloneDir {
+		t.Fatalf("git checkout ran in %q, want the clone dir %q", co.Dir, cloneDir)
+	}
+	assertCall(t, calls, 4, "git", "add", plan.RelPath, "exams/scenarios/corpus.pin")
+	assertCall(t, calls, 5, "git", "commit", "-F", ".contribute-commit-msg")
+	assertCall(t, calls, 6, "git", "push", "origin", plan.Branch)
+	pr := assertCall(t, calls, 7, "gh", "pr", "create", "--repo", "mallcop-app/mallcop", "--title", plan.PRTitle, "--body-file", "*", "--head", "testbot:"+plan.Branch)
+	if pr.Dir != cloneDir {
+		t.Fatalf("gh pr create ran in %q, want the clone dir %q", pr.Dir, cloneDir)
+	}
+	if len(calls) != 8 {
+		t.Fatalf("expected exactly 8 external commands, got %d: %+v", len(calls), calls)
+	}
+}
+
+// TestOpenContributePR_CommandConstruction_OwnerPath asserts the owner
+// variant: no fork (you cannot fork your own repo), the target repo is cloned
+// directly, and --head is the bare branch name.
+func TestOpenContributePR_CommandConstruction_OwnerPath(t *testing.T) {
+	callsPtr := fakeContributeExec(t, "mallcop-app")
+	plan := buildContributePlanForExecTest(t)
+
+	out, err := withStdio(t, "", func() error { return openContributePR(plan) })
+	if err != nil {
+		t.Fatalf("openContributePR: %v\noutput:\n%s", err, out)
+	}
+	calls := *callsPtr
+
+	assertCall(t, calls, 0, "gh", "api", "user", "--jq", ".login")
+	for _, c := range calls {
+		if c.Name == "gh" && len(c.Args) >= 2 && c.Args[0] == "repo" && c.Args[1] == "fork" {
+			t.Fatalf("owner path must not fork its own repo: %+v", c)
+		}
+	}
+	clone := assertCall(t, calls, 1, "gh", "repo", "clone", "mallcop-app/mallcop", "*")
+	cloneDir := clone.Args[3]
+
+	assertCall(t, calls, 2, "git", "checkout", "-b", plan.Branch)
+	assertCall(t, calls, 3, "git", "add", plan.RelPath, "exams/scenarios/corpus.pin")
+	assertCall(t, calls, 4, "git", "commit", "-F", ".contribute-commit-msg")
+	assertCall(t, calls, 5, "git", "push", "origin", plan.Branch)
+	assertCall(t, calls, 6, "gh", "pr", "create", "--repo", "mallcop-app/mallcop", "--title", plan.PRTitle, "--body-file", "*", "--head", plan.Branch)
+
+	// The scenario file + regenerated pin were written into the clone before
+	// the commit ran. openContributePR removes its scratch dir on return, so
+	// verify via the fake's captured filesystem effects: the pin rewrite is
+	// asserted here through updateContributePinFile directly.
+	pinPath := filepath.Join(t.TempDir(), "corpus.pin")
+	pin := "# header stays\ncount 58\nsha256 aaaa\n"
+	if err := os.WriteFile(pinPath, []byte(pin), 0o644); err != nil {
+		t.Fatalf("write pin: %v", err)
+	}
+	if err := updateContributePinFile(pinPath, plan.Pin); err != nil {
+		t.Fatalf("updateContributePinFile: %v", err)
+	}
+	got, err := os.ReadFile(pinPath)
+	if err != nil {
+		t.Fatalf("read pin: %v", err)
+	}
+	if !strings.Contains(string(got), "# header stays") {
+		t.Error("pin header comment not preserved")
+	}
+	if !strings.Contains(string(got), fmt.Sprintf("count %d", plan.Pin.NewCount)) {
+		t.Errorf("pin count not rewritten to %d:\n%s", plan.Pin.NewCount, got)
+	}
+	if !strings.Contains(string(got), "sha256 "+plan.Pin.NewSHA) {
+		t.Errorf("pin sha not rewritten to %s:\n%s", plan.Pin.NewSHA, got)
+	}
+	_ = cloneDir
 }

@@ -317,14 +317,17 @@ Commands:
     --repo           Target owner/name (default: mallcop-app/mallcop)
     --reference-repo Local checkout used as the base corpus for pin regen
                       (default: this binary's own embedded reference corpus)
-               Sanitizes a copy of the local scenario (actors/targets/
-               identifiers canonicalized, secret-shaped metadata redacted,
-               timestamps shifted onto the corpus's 2026-03 window preserving
-               relative deltas), shows the FULL redaction diff + would-be PR
-               content, then — ONLY on --yes — opens a normal REVIEWED pull
-               request (uses the gh CLI if available, else prints exact manual
-               instructions). Nothing auto-merges. The local scenario file is
-               NEVER modified — contribution is always a copy.
+               Sanitizes a copy of the local scenario: actors/identifiers
+               (UUIDs, emails, hostnames, IPs, account ids) canonicalized
+               EVERYWHERE — including every metadata value and key at any
+               nesting depth — secret-shaped metadata redacted, raw payloads
+               stripped, timestamps shifted onto the corpus's 2026-03 window
+               preserving relative deltas. Shows the FULL redaction ledger +
+               would-be PR content, residue-checks every original against the
+               outgoing bytes, then — ONLY on --yes — opens a normal REVIEWED
+               pull request (uses the gh CLI if available, else prints exact
+               manual instructions). Nothing auto-merges. The local scenario
+               file is NEVER modified — contribution is always a copy.
 
   improve  Turn a request into a PROPOSE-ONLY self-extension proposal (gated PR)
     "<free text>"    Free-text mode: ONE inference call structures the request

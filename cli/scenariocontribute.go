@@ -8,10 +8,16 @@
 // auto-merges; OSS review is the gate at every autonomy-dial setting (mallcop-
 // pro d70 ruling: contribute-back stays reviewed).
 //
-// Two-pass sanitize (deterministic — the SAME input file always produces the
-// SAME sanitized output, so re-running `contribute` on an unchanged file is
-// idempotent):
+// Multi-pass sanitize (deterministic — the SAME input file always produces
+// the SAME sanitized output, so re-running `contribute` on an unchanged file
+// is idempotent). Pass ORDER is load-bearing:
 //
+//  0. RAW STRIP + SECRET pass: every event's raw: payload is dropped
+//     wholesale, and secret-shaped metadata values (credentials, tokens,
+//     connection strings) are scrubbed by REUSING scenariocapture.go's
+//     scrubPayloadMap — the same helper that survived two adversarial review
+//     rounds in C5 (#190); it is not forked. Runs FIRST so no later pass
+//     ever handles (or accidentally preserves spans of) a live credential.
 //  1. IDENTITY pass: every distinct actor value found anywhere in the
 //     scenario (events, finding metadata, actor_chain, baseline known_entities/
 //     actor_roles/actor_hours/relationships) is renamed to a canonical corpus-
@@ -20,19 +26,33 @@
 //     VA-03-data-exfil.yaml), in FIRST-SEEN document order so the mapping is
 //     reproducible. The rename also runs as a substring pass over prose
 //     fields (trap_description, trap_resolved_means, finding.title,
-//     reasoning_must_mention/not_mention, event targets) so an actor name
-//     mentioned in free text doesn't survive just because it wasn't in a
-//     structured field.
-//  2. IDENTIFIER pass: residual identifier-shaped substrings (UUIDs, email
-//     addresses, long all-hex runs like a subscription id) in event/actor-
-//     chain targets, baseline relationship keys, and the same prose fields
-//     are replaced with a deterministic sub-<hash8>/id-<hash8> token (content-
-//     hash derived, so the SAME original identifier always maps to the SAME
-//     token everywhere in the document — VA-03's "sub-169efd95" convention).
+//     reasoning_must_mention/not_mention, event targets) AND over EVERY
+//     metadata string value and map key at ANY nesting depth (event metadata,
+//     finding metadata, connector_tool returns) — capture copies event
+//     payloads WHOLESALE into metadata, so an actor name inside a payload
+//     field must not survive just because it wasn't in a structured field.
+//  2. IDENTIFIER pass: residual identifier-shaped substrings — UUIDs, email
+//     addresses, hostnames/FQDNs, IPv4 addresses, and long all-hex/digit
+//     runs (subscription ids, cloud account ids) — in event/actor-chain
+//     targets, baseline relationship keys, prose fields, and EVERY metadata
+//     string value (and map key) at ANY nesting depth are replaced with a
+//     deterministic content-hash token (sub-<hash8>, id-<hash8>,
+//     host-<hash8>.example, ip-<hash8>, user-<hash8>@example.com). ONE hash
+//     cache spans the whole document, so the SAME original identifier always
+//     maps to the SAME token everywhere — a subscription UUID in an event
+//     target and that same UUID in metadata.tenant agree (VA-03's
+//     "sub-169efd95" convention). A metadata value under an identifier-
+//     carrying KEY (email, ip, host, tenant, account, ...) that matches no
+//     shape pattern is tokenized WHOLESALE — the same never-leak key-net
+//     safety idea scrubPayloadMap applies to credential-shaped keys.
 //
-// Secret-shaped metadata values (credentials, tokens, connection strings) are
-// scrubbed by REUSING scenariocapture.go's scrubPayloadMap — the same helper
-// that survived two adversarial review rounds in C5 (#190). It is not forked.
+// TRANSMIT-TIME RESIDUE CHECK: after the sanitized YAML and the PR body are
+// assembled, every ORIGINAL value in the redaction ledger is grep-verified
+// ABSENT from both artifacts (verifyLedgerResidue). A hit hard-fails plan
+// assembly — nothing is shown as safe, nothing can be sent. The PR body's
+// "raw values never left" statement is generated from this check passing,
+// never merely asserted. Over-redaction bias throughout: for a shared corpus
+// fixture, a false-positive redaction is always preferable to a leak.
 //
 // Timestamps are shifted by a single constant so every relative delta in the
 // document — fine-grained event spacing AND baseline relationship first_seen/
@@ -56,6 +76,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"sort"
 	"strings"
@@ -126,17 +147,66 @@ const contributeDefaultCategory = "cross_cutting"
 
 // --- identifier scrub patterns -----------------------------------------------
 //
-// Deliberately conservative (all-hex / well-known shapes only) to avoid
-// mangling ordinary resource/container names, which mix letters outside
-// [0-9a-f] (e.g. "atomstorage01", "opensign-rg") and so never match these
-// patterns. Bias matches scenariocapture.go's scrub: over-redaction of an
-// occasional benign-looking token beats residue.
+// Shape patterns for identifiers that must never leave the machine. Bias
+// matches scenariocapture.go's scrub: over-redaction of an occasional benign
+// token (a dotted filename that reads like an FQDN, a long numeric run that
+// happens not to be an account id) beats residue — for a shared corpus
+// fixture, a false-positive redaction is always preferable to a leak.
 var (
 	contributeUUIDRE           = regexp.MustCompile(`[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}`)
 	contributeEmailRE          = regexp.MustCompile(`[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}`)
 	contributeSubPrefixedHexRE = regexp.MustCompile(`(?i)\bsub-[0-9a-fA-F]{8}\b`)
 	contributeHexRunRE         = regexp.MustCompile(`\b[0-9a-fA-F]{8,}\b`)
+	// Hostname/FQDN: two or more dot-separated labels with an ALPHABETIC final
+	// label (so version strings like "2.55.0" never match). Candidates whose
+	// final label is a common file extension are filtered out in code
+	// (contributeFilenameExtensions) since RE2 has no negative lookahead.
+	contributeHostnameRE = regexp.MustCompile(`(?i)\b(?:[a-z0-9](?:[a-z0-9\-]{0,61}[a-z0-9])?\.)+[a-z]{2,24}\b`)
+	// IPv4, including private/internal addresses. Documentation-range
+	// addresses (RFC 5737) are scrubbed too — over-redaction bias.
+	contributeIPv4RE = regexp.MustCompile(`\b(?:\d{1,3}\.){3}\d{1,3}\b`)
 )
+
+// contributeFilenameExtensions: a hostname-pattern candidate whose FINAL label
+// is one of these is a dotted filename, not an FQDN — skipped so metadata like
+// "policy.json" or "backup.tar.gz" isn't shredded. Anything not listed here
+// still gets scrubbed (over-redaction bias — an exotic real TLD beats a leak).
+var contributeFilenameExtensions = map[string]bool{
+	"json": true, "yaml": true, "yml": true, "txt": true, "log": true, "md": true,
+	"csv": true, "xml": true, "html": true, "htm": true, "js": true, "mjs": true,
+	"ts": true, "tsx": true, "jsx": true, "py": true, "go": true, "rb": true,
+	"sh": true, "exe": true, "dll": true, "gz": true, "tar": true, "zip": true,
+	"tgz": true, "pdf": true, "png": true, "jpg": true, "jpeg": true, "gif": true,
+	"svg": true, "ico": true, "css": true, "lock": true, "toml": true, "ini": true,
+	"cfg": true, "conf": true, "bak": true, "tmp": true, "sql": true, "db": true,
+	"pem": true, "crt": true, "key": true, "pub": true, "jar": true, "war": true,
+	"sock": true, "service": true, "timer": true, "rs": true, "c": true, "h": true,
+	"cpp": true, "java": true, "php": true, "wasm": true, "bin": true,
+}
+
+// contributeIdentifierKeyTokens: a metadata KEY whose underscore/dash-split
+// tokens include any of these carries an identifying value — the value is
+// tokenized WHOLESALE when no shape pattern recognized it (and numeric values,
+// which shape patterns can't see, are tokenized too). The metadata twin of
+// scrubPayloadMap's captureSensitiveKeySubstrings net, but emitting a
+// deterministic equality-preserving token instead of [REDACTED] so
+// cross-event correlation survives.
+var contributeIdentifierKeyTokens = map[string]bool{
+	"email": true, "mail": true, "ip": true, "ipaddr": true, "ipaddress": true,
+	"host": true, "hostname": true, "fqdn": true, "domain": true, "tenant": true,
+	"subscription": true, "account": true, "actor": true, "username": true,
+	"collaborator": true, "peer": true, "principal": true,
+}
+
+// contributeIdentifierKeyExcludeTokens: a key containing one of these tokens
+// is a MEASUREMENT over an identifier, not the identifier itself
+// ("peer_count", "login_hours") — tokenizing its (numeric) value would corrupt
+// exactly the frequency/timing data detectors grade on, so the key net skips
+// it. Shape patterns still apply to its string values.
+var contributeIdentifierKeyExcludeTokens = map[string]bool{
+	"count": true, "total": true, "num": true, "ratio": true, "hours": true,
+	"window": true, "size": true, "duration": true, "len": true, "agent": true,
+}
 
 // runScenarioContribute implements `mallcop scenario contribute`. Flags MUST
 // precede the positional scenario file path (the same convention `mallcop
@@ -205,14 +275,26 @@ type contributeRename struct {
 	Canonical string
 }
 
-// contributeDiff is the full local-review redaction summary — shown to the
-// operator on stdout BEFORE anything leaves the machine. The PR body
-// (renderContributePRBody) deliberately carries only COUNTS derived from this
-// struct, never the Original values, since the PR body does leave the machine.
+// contributeDiff is the REDACTION LEDGER — the full local-review summary,
+// shown to the operator on stdout BEFORE anything leaves the machine, and the
+// input to verifyLedgerResidue (the transmit-time guarantee that no Original
+// value survives in anything that would be sent). Every rename/redaction the
+// sanitizer performs is enumerated here — the consent surface must never
+// under-report what leaves. The PR body (renderContributePRBody) carries only
+// COUNTS derived from this struct (len of the slices), never the Original
+// values, since the PR body does leave the machine.
 type contributeDiff struct {
-	ActorRenames      []contributeRename
-	TargetRenames     []contributeRename
-	SecretsRedacted   int
+	// ActorRenames: every actor original -> canonical corpus token (identity
+	// mappings excluded — nothing changed, nothing to consent to).
+	ActorRenames []contributeRename
+	// IdentifierRenames: every identifier original -> deterministic token,
+	// from EVERY scrubbed surface: targets, relationship keys, prose, and all
+	// metadata values/keys at any nesting depth.
+	IdentifierRenames []contributeRename
+	// SecretPaths: the document path of every metadata value the C5 secret
+	// scrub redacted (e.g. "events[0].metadata.github_token"). Paths, not
+	// values — the diff must never display a live credential.
+	SecretPaths       []string
 	TimestampsShifted int
 	ShiftDuration     time.Duration
 }
@@ -279,12 +361,15 @@ func buildContributePlan(sc *exam.Scenario, srcPath, repo, referenceRepo string)
 	if err != nil {
 		return nil, fmt.Errorf("marshal final sanitized scenario: %w", err)
 	}
-	header := fmt.Sprintf(
-		"# Contributed via `mallcop scenario contribute` (was a local scenario: %s).\n"+
-			"# Sanitized: actors/targets/identifiers canonicalized, secret-shaped metadata\n"+
-			"# redacted, timestamps shifted onto the corpus's 2026-03 window preserving\n"+
-			"# relative deltas. See the PR body for the redaction summary.\n",
-		sc.ID)
+	// The header deliberately does NOT cite the operator's original local
+	// scenario id: this file leaves the machine, and a local id can itself
+	// carry identifying content (an actor name in a hand-chosen --id). The
+	// old->new id mapping is shown locally by printContributePlan instead.
+	header := "# Contributed via `mallcop scenario contribute` from an operator's local corpus.\n" +
+		"# Sanitized: actors/targets/identifiers canonicalized (including every metadata\n" +
+		"# value at any depth), secret-shaped metadata redacted, raw payloads stripped,\n" +
+		"# timestamps shifted onto the corpus's 2026-03 window preserving relative\n" +
+		"# deltas. See the PR body for the redaction summary.\n"
 	sanitizedBytes := append([]byte(header), out...)
 
 	// manifestPath is relative to exams/scenarios/ (e.g. "behavioral/CONTRIB-
@@ -310,6 +395,17 @@ func buildContributePlan(sc *exam.Scenario, srcPath, repo, referenceRepo string)
 	branch := "contribute/" + newID
 	title := fmt.Sprintf("scenario: contribute %s (%s)", newID, family)
 	body := renderContributePRBody(newID, family, isAttack, relpath, diff, pin)
+
+	// TRANSMIT-TIME RESIDUE CHECK (fail-closed): every original value in the
+	// redaction ledger must be absent from BOTH transmit-bound artifacts — the
+	// sanitized YAML and the PR body. The PR body's "raw values never left"
+	// line is true because this check passed, not because it was asserted.
+	if err := verifyLedgerResidue("the sanitized scenario YAML", sanitizedBytes, diff); err != nil {
+		return nil, err
+	}
+	if err := verifyLedgerResidue("the PR body", []byte(body), diff); err != nil {
+		return nil, err
+	}
 
 	return &contributePlan{
 		SourcePath: srcPath, ScenarioID: sc.ID, NewID: newID, RelPath: relpath,
@@ -413,6 +509,15 @@ func contentHashToken(s string, n int) string {
 // unmarshal round trip, so sanitizing the copy can never mutate sc (and
 // therefore can never touch the operator's original file on disk) — R2/R9-
 // equivalent: contribution is a COPY.
+//
+// Every metadata tree in the copy is then NORMALIZED to plain map[string]any/
+// []any (normalizeMetadataTree): yaml.v3 propagates a NAMED map type (e.g.
+// exam.EventMetadata) to nested mappings it decodes into `any` holes, and a
+// `case map[string]any:` type switch does NOT match a named map type — so
+// without normalization, every recursive scrubber in the sanitize pipeline
+// (the C5 secret scrub's scrubMetadataValue included) would silently SKIP
+// nested metadata blocks. Caught by this build's own transmit-time residue
+// check on a nested-hostname fixture; the normalization is the fix.
 func deepCopyScenario(sc *exam.Scenario) (*exam.Scenario, error) {
 	data, err := yaml.Marshal(sc)
 	if err != nil {
@@ -422,18 +527,75 @@ func deepCopyScenario(sc *exam.Scenario) (*exam.Scenario, error) {
 	if err := yaml.Unmarshal(data, &cp); err != nil {
 		return nil, fmt.Errorf("deep-copy unmarshal: %w", err)
 	}
+
+	if cp.Finding != nil && cp.Finding.Metadata != nil {
+		cp.Finding.Metadata = normalizeMetadataTree(map[string]any(cp.Finding.Metadata)).(map[string]any)
+	}
+	for i := range cp.Events {
+		if cp.Events[i].Metadata != nil {
+			cp.Events[i].Metadata = normalizeMetadataTree(map[string]any(cp.Events[i].Metadata)).(map[string]any)
+		}
+	}
+	for i := range cp.ConnectorTools {
+		if cp.ConnectorTools[i].Returns != nil {
+			cp.ConnectorTools[i].Returns = normalizeMetadataTree(map[string]any(cp.ConnectorTools[i].Returns)).(map[string]any)
+		}
+	}
 	return &cp, nil
 }
 
-// sanitizeScenarioForContribution returns a sanitized deep copy of sc plus a
-// diff describing every rename/redaction/shift performed. sc itself is never
-// mutated.
+// normalizeMetadataTree recursively rebuilds every map (WHATEVER its named Go
+// type — reflection on Kind, not a type switch) as a plain map[string]any and
+// every slice/array as []any, so downstream `case map[string]any:` /
+// `case []any:` type switches reliably reach every nesting level. Scalars
+// pass through unchanged.
+func normalizeMetadataTree(v any) any {
+	if v == nil {
+		return nil
+	}
+	rv := reflect.ValueOf(v)
+	switch rv.Kind() {
+	case reflect.Map:
+		out := make(map[string]any, rv.Len())
+		for _, k := range rv.MapKeys() {
+			out[fmt.Sprint(k.Interface())] = normalizeMetadataTree(rv.MapIndex(k).Interface())
+		}
+		return out
+	case reflect.Slice, reflect.Array:
+		out := make([]any, rv.Len())
+		for i := 0; i < rv.Len(); i++ {
+			out[i] = normalizeMetadataTree(rv.Index(i).Interface())
+		}
+		return out
+	default:
+		return v
+	}
+}
+
+// sanitizeScenarioForContribution returns a sanitized deep copy of sc plus
+// the redaction ledger describing every rename/redaction/shift performed. sc
+// itself is never mutated. Pass order (see the package doc — load-bearing):
+// raw strip + secret scrub FIRST, then actor renames, then identifier scrub,
+// then the timestamp shift.
 func sanitizeScenarioForContribution(sc *exam.Scenario) (*exam.Scenario, contributeDiff, error) {
 	out, err := deepCopyScenario(sc)
 	if err != nil {
 		return nil, contributeDiff{}, err
 	}
 
+	// Pass 0a: strip raw payloads wholesale (C8 spec: "strip raw payloads").
+	// The raw block is the unparsed connector payload — it can contain
+	// anything, so no pattern scrub is trustworthy on it; drop it entirely.
+	for i := range out.Events {
+		out.Events[i].Raw = nil
+	}
+
+	// Pass 0b: C5 secret scrub over every metadata surface — FIRST, so no
+	// later pass ever handles a live credential.
+	secretPaths := scrubScenarioMetadata(out)
+
+	// Pass 1: actor canonicalization (structured fields + prose + every
+	// metadata string at any depth).
 	actorMap := buildContributeActorMap(out)
 	var actorRenames []contributeRename
 	for orig, canon := range actorMap {
@@ -445,16 +607,22 @@ func sanitizeScenarioForContribution(sc *exam.Scenario) (*exam.Scenario, contrib
 	sort.Slice(actorRenames, func(i, j int) bool { return actorRenames[i].Original < actorRenames[j].Original })
 	applyActorRenames(out, actorMap)
 
-	targetRenames := applyIdentifierRenames(out)
+	// Pass 2: identifier scrub. canonActors lets the metadata key-net skip
+	// values the actor pass ALREADY canonicalized — re-tokenizing "ci-bot"
+	// into id-... would destroy the intentional actor mapping.
+	canonActors := make(map[string]bool, len(actorMap))
+	for _, canon := range actorMap {
+		canonActors[canon] = true
+	}
+	identifierRenames := applyIdentifierRenames(out, canonActors)
 
+	// Pass 3: timestamp shift onto the canonical corpus window.
 	shift, shiftedCount := shiftScenarioTimestamps(out)
-
-	secretsRedacted := scrubScenarioMetadata(out)
 
 	diff := contributeDiff{
 		ActorRenames:      actorRenames,
-		TargetRenames:     targetRenames,
-		SecretsRedacted:   secretsRedacted,
+		IdentifierRenames: identifierRenames,
+		SecretPaths:       secretPaths,
 		TimestampsShifted: shiftedCount,
 		ShiftDuration:     shift,
 	}
@@ -609,6 +777,49 @@ func applyActorRenames(sc *exam.Scenario, actorMap map[string]string) {
 	for i := range sc.ActorChain {
 		sc.ActorChain[i].Target = substProse(sc.ActorChain[i].Target)
 	}
+
+	// Metadata walk: capture copies event payloads WHOLESALE into metadata, so
+	// an actor name can sit in ANY payload field (collaborator, granted_by,
+	// requested_for, ...) at ANY nesting depth — the substring pass must reach
+	// every metadata string VALUE and map KEY (a payload map keyed by actor,
+	// e.g. per-actor tallies, is a leak through the key).
+	if sc.Finding != nil && len(sc.Finding.Metadata) > 0 {
+		sc.Finding.Metadata = renameActorsInAnyValue(map[string]any(sc.Finding.Metadata), substProse).(map[string]any)
+	}
+	for i := range sc.Events {
+		if len(sc.Events[i].Metadata) > 0 {
+			sc.Events[i].Metadata = renameActorsInAnyValue(map[string]any(sc.Events[i].Metadata), substProse).(map[string]any)
+		}
+	}
+	for i := range sc.ConnectorTools {
+		if len(sc.ConnectorTools[i].Returns) > 0 {
+			sc.ConnectorTools[i].Returns = renameActorsInAnyValue(map[string]any(sc.ConnectorTools[i].Returns), substProse).(map[string]any)
+		}
+	}
+}
+
+// renameActorsInAnyValue applies subst to every string it can reach in v —
+// scalar strings, map values, map KEYS, and slice elements, recursively.
+// Non-string scalars pass through untouched.
+func renameActorsInAnyValue(v any, subst func(string) string) any {
+	switch val := v.(type) {
+	case string:
+		return subst(val)
+	case map[string]any:
+		out := make(map[string]any, len(val))
+		for k, vv := range val {
+			out[subst(k)] = renameActorsInAnyValue(vv, subst)
+		}
+		return out
+	case []any:
+		out := make([]any, len(val))
+		for i, vv := range val {
+			out[i] = renameActorsInAnyValue(vv, subst)
+		}
+		return out
+	default:
+		return v
+	}
 }
 
 func renameActorRoleKeys(m map[string][]string, actorMap map[string]string) map[string][]string {
@@ -664,14 +875,21 @@ func renameRelationshipActorKeys(m map[string]exam.RelationshipEntry, actorMap m
 }
 
 // applyIdentifierRenames scrubs residual identifier-shaped substrings (UUIDs,
-// emails, long all-hex runs — e.g. an Azure subscription id) from event/
-// actor-chain targets, baseline relationship keys, and the same prose fields
-// the actor pass touches. Every DISTINCT original substring maps to the SAME
-// deterministic token everywhere in the document (shared caches threaded
-// across every field), so a subscription id mentioned in both a target path
-// and trap_description gets the identical replacement. Returns the distinct
-// renames performed, sorted for a deterministic diff.
-func applyIdentifierRenames(sc *exam.Scenario) []contributeRename {
+// emails, hostnames/FQDNs, IPv4 addresses, long all-hex/digit runs — e.g. an
+// Azure subscription id or an AWS account id) from event/actor-chain targets,
+// baseline relationship keys, the prose fields the actor pass touches, and —
+// the C8 review's CRITICAL fix — EVERY metadata string value and map key at
+// ANY nesting depth (event metadata, finding metadata, connector_tool
+// returns; capture copies event payloads wholesale into metadata). Every
+// DISTINCT original substring maps to the SAME deterministic token everywhere
+// in the document (shared caches threaded across every field), so a
+// subscription id mentioned in a target path, in trap_description, AND in
+// metadata.tenant gets the identical replacement.
+//
+// canonActors is the set of canonical tokens the actor pass emitted — the
+// metadata key-net skips values already carrying an intentional actor token.
+// Returns the distinct renames performed, sorted for a deterministic diff.
+func applyIdentifierRenames(sc *exam.Scenario, canonActors map[string]bool) []contributeRename {
 	hashCache := map[string]string{} // raw identifier -> bare hash8 (no prefix)
 	renameLog := map[string]string{} // full original span -> full canonical token (WITH prefix), for the diff
 
@@ -695,6 +913,29 @@ func applyIdentifierRenames(sc *exam.Scenario) []contributeRename {
 	if sc.Finding != nil {
 		sc.Finding.Title = scrub(sc.Finding.Title)
 	}
+	if sc.ExpectedResolution != nil {
+		for i, m := range sc.ExpectedResolution.ReasoningMustMention {
+			sc.ExpectedResolution.ReasoningMustMention[i] = scrub(m)
+		}
+		for i, m := range sc.ExpectedResolution.ReasoningMustNotMention {
+			sc.ExpectedResolution.ReasoningMustNotMention[i] = scrub(m)
+		}
+	}
+
+	// Metadata walk — values AND keys, any depth.
+	if sc.Finding != nil && len(sc.Finding.Metadata) > 0 {
+		sc.Finding.Metadata = scrubIdentifiersInAnyValue("", map[string]any(sc.Finding.Metadata), hashCache, renameLog, canonActors).(map[string]any)
+	}
+	for i := range sc.Events {
+		if len(sc.Events[i].Metadata) > 0 {
+			sc.Events[i].Metadata = scrubIdentifiersInAnyValue("", map[string]any(sc.Events[i].Metadata), hashCache, renameLog, canonActors).(map[string]any)
+		}
+	}
+	for i := range sc.ConnectorTools {
+		if len(sc.ConnectorTools[i].Returns) > 0 {
+			sc.ConnectorTools[i].Returns = scrubIdentifiersInAnyValue("", map[string]any(sc.ConnectorTools[i].Returns), hashCache, renameLog, canonActors).(map[string]any)
+		}
+	}
 
 	origs := make([]string, 0, len(renameLog))
 	for o := range renameLog {
@@ -708,35 +949,135 @@ func applyIdentifierRenames(sc *exam.Scenario) []contributeRename {
 	return out
 }
 
+// identifierKeyNet reports whether a metadata key names an identifying value
+// (see contributeIdentifierKeyTokens). The key is split into alphanumeric
+// tokens ("src_ip" -> [src ip], "peerEmail" is NOT split — snake/kebab only,
+// matching the corpus's own key style); an exclude token ("peer_count" ->
+// count) always wins, because those keys hold measurements ABOUT an
+// identifier, not the identifier.
+func identifierKeyNet(key string) bool {
+	toks := strings.FieldsFunc(strings.ToLower(key), func(r rune) bool {
+		return !(r >= 'a' && r <= 'z' || r >= '0' && r <= '9')
+	})
+	hit := false
+	for _, tk := range toks {
+		if contributeIdentifierKeyExcludeTokens[tk] {
+			return false
+		}
+		if contributeIdentifierKeyTokens[tk] {
+			hit = true
+		}
+	}
+	return hit
+}
+
+// scrubIdentifiersInAnyValue applies the identifier scrub to every string it
+// can reach in v (values and map keys, any depth), plus the key-net safety
+// net: a value under an identifier-carrying key (identifierKeyNet) that no
+// shape pattern recognized — including NUMERIC values, which shape patterns
+// cannot see at all — is tokenized WHOLESALE with the same deterministic
+// hash, so an account id stored as a bare number still never leaves.
+// Values already carrying a canonical actor token (canonActors) are left
+// alone — the actor pass put them there intentionally.
+func scrubIdentifiersInAnyValue(key string, v any, hashCache, renameLog map[string]string, canonActors map[string]bool) any {
+	switch val := v.(type) {
+	case string:
+		if val == "" || val == captureRedactedPlaceholder || canonActors[val] {
+			return val
+		}
+		scrubbed := scrubIdentifiersInString(val, hashCache, renameLog)
+		if scrubbed != val {
+			return scrubbed
+		}
+		if identifierKeyNet(key) {
+			tok := "id-" + contributeHashFor(val, hashCache)
+			recordContributeRename(renameLog, val, tok)
+			return tok
+		}
+		return val
+	case map[string]any:
+		out := make(map[string]any, len(val))
+		for k, vv := range val {
+			nk := scrubIdentifiersInString(k, hashCache, renameLog)
+			out[nk] = scrubIdentifiersInAnyValue(k, vv, hashCache, renameLog, canonActors)
+		}
+		return out
+	case []any:
+		out := make([]any, len(val))
+		for i, vv := range val {
+			out[i] = scrubIdentifiersInAnyValue(key, vv, hashCache, renameLog, canonActors)
+		}
+		return out
+	case int, int64, uint64, float64:
+		if identifierKeyNet(key) {
+			raw := fmt.Sprint(val)
+			tok := "id-" + contributeHashFor(raw, hashCache)
+			recordContributeRename(renameLog, raw, tok)
+			return tok
+		}
+		return v
+	default:
+		return v
+	}
+}
+
+// contributeHashFor returns the cached hash8 for raw, computing and caching it
+// on first sight — ONE cache per document, so the same raw identifier always
+// yields the same hash everywhere.
+func contributeHashFor(raw string, hashCache map[string]string) string {
+	if tok, ok := hashCache[raw]; ok {
+		return tok
+	}
+	tok := contentHashToken(raw, 8)
+	hashCache[raw] = tok
+	return tok
+}
+
+// recordContributeRename records an original -> canonical replacement in the
+// ledger, first occurrence wins (the mapping is deterministic, so later
+// occurrences are identical anyway).
+func recordContributeRename(renameLog map[string]string, original, canonical string) {
+	if _, ok := renameLog[original]; !ok {
+		renameLog[original] = canonical
+	}
+}
+
 // identMatch is one candidate identifier span found in a string, before
 // overlap resolution.
 type identMatch struct {
 	start, end int
-	kind       string // "uuid" | "email" | "subhex" | "hexrun"
+	kind       string // "uuid" | "email" | "subhex" | "hostname" | "ip" | "hexrun"
 }
 
 // identMatchPriority ranks candidate kinds when two matches start at the SAME
-// position (lower wins): a UUID/an explicit "sub-<hex8>" span is always more
-// specific than the bare hex-run pattern that would otherwise also match part
-// of it, and an email is preferred over a hex-run false-positive on its local
-// part (e.g. "deadbeef@example.com").
-var identMatchPriority = map[string]int{"uuid": 0, "subhex": 1, "email": 2, "hexrun": 3}
+// position (lower wins): a UUID / an explicit "sub-<hex8>" span is more
+// specific than the bare hex-run pattern that would otherwise match part of
+// it; an email beats the hostname match on its own domain and the hex-run
+// false-positive on its local part (e.g. "deadbeef@example.com"); a hostname
+// beats the hex-run match on an all-hex first label ("deadbeef.example.com").
+var identMatchPriority = map[string]int{"uuid": 0, "email": 1, "subhex": 2, "hostname": 3, "ip": 4, "hexrun": 5}
 
 // scrubIdentifiersInString replaces every UUID / email / "sub-<hex8>" /
-// long-all-hex-run match in s with a deterministic token, in a SINGLE pass
-// over the ORIGINAL string (all four patterns are matched against s BEFORE
-// any substitution happens, spans are de-overlapped by identMatchPriority,
-// then the result is built by walking s once). This is deliberately NOT four
-// chained ReplaceAllStringFunc calls: an inserted hash8 token is itself an
-// 8-character hex string, so a later pass in a chain would re-match and
-// re-hash it (turning "sub-<hash>" into "sub-sub-<hash-of-hash>"). Building
-// the output from the ORIGINAL string exactly once makes that impossible.
+// hostname / IPv4 / long-all-hex-run match in s with a deterministic token,
+// in a SINGLE pass over the ORIGINAL string (all patterns are matched against
+// s BEFORE any substitution happens, spans are de-overlapped by start
+// position + identMatchPriority, then the result is built by walking s once).
+// This is deliberately NOT chained ReplaceAllStringFunc calls: an inserted
+// hash8 token is itself an 8-character hex string, so a later pass in a chain
+// would re-match and re-hash it (turning "sub-<hash>" into
+// "sub-sub-<hash-of-hash>"). Building the output from the ORIGINAL string
+// exactly once makes that impossible.
 //
 // hashCache maps a raw matched identifier to its bare hash8 (no prefix) so
 // the SAME raw identifier always gets the SAME hash, however many times or
 // in whatever prefixed/bare form it appears. renameLog maps the FULL original
 // span (prefix included, e.g. "sub-169efd95") to the FULL canonical
-// replacement (e.g. "sub-ec0646c8") for the human-readable diff.
+// replacement (e.g. "sub-ec0646c8") for the ledger/diff.
+//
+// Token shapes: hostnames keep an FQDN-ish shape (host-<hash8>.example, RFC
+// 2606 reserved TLD) and emails keep an email shape
+// (user-<hash8>@example.com) so shape-sensitive detector parsing survives;
+// everything else is sub-<hash8> (8-hex, VA-03's convention) or id-<hash8>.
 func scrubIdentifiersInString(s string, hashCache, renameLog map[string]string) string {
 	var matches []identMatch
 	for _, m := range contributeUUIDRE.FindAllStringIndex(s, -1) {
@@ -747,6 +1088,17 @@ func scrubIdentifiersInString(s string, hashCache, renameLog map[string]string) 
 	}
 	for _, m := range contributeSubPrefixedHexRE.FindAllStringIndex(s, -1) {
 		matches = append(matches, identMatch{m[0], m[1], "subhex"})
+	}
+	for _, m := range contributeHostnameRE.FindAllStringIndex(s, -1) {
+		raw := s[m[0]:m[1]]
+		lastLabel := strings.ToLower(raw[strings.LastIndex(raw, ".")+1:])
+		if contributeFilenameExtensions[lastLabel] {
+			continue // "policy.json" is a filename, not an FQDN
+		}
+		matches = append(matches, identMatch{m[0], m[1], "hostname"})
+	}
+	for _, m := range contributeIPv4RE.FindAllStringIndex(s, -1) {
+		matches = append(matches, identMatch{m[0], m[1], "ip"})
 	}
 	for _, m := range contributeHexRunRE.FindAllStringIndex(s, -1) {
 		matches = append(matches, identMatch{m[0], m[1], "hexrun"})
@@ -761,38 +1113,33 @@ func scrubIdentifiersInString(s string, hashCache, renameLog map[string]string) 
 		return identMatchPriority[matches[i].kind] < identMatchPriority[matches[j].kind]
 	})
 
-	hashFor := func(raw string) string {
-		if tok, ok := hashCache[raw]; ok {
-			return tok
-		}
-		tok := contentHashToken(raw, 8)
-		hashCache[raw] = tok
-		return tok
-	}
-
 	var b strings.Builder
 	cursor, lastEnd := 0, -1
 	for _, m := range matches {
 		if m.start < lastEnd {
-			continue // overlaps an already-chosen, higher-priority match
+			continue // overlaps an already-chosen, earlier/higher-priority match
 		}
 		raw := s[m.start:m.end]
 		var canon string
 		switch m.kind {
 		case "subhex":
-			canon = "sub-" + hashFor(raw[len(raw)-8:]) // strip the literal "sub-"/"SUB-" prefix; hash the hex part only
+			canon = "sub-" + contributeHashFor(raw[len(raw)-8:], hashCache) // strip the literal "sub-"/"SUB-" prefix; hash the hex part only
 		case "hexrun":
 			prefix := "id-"
 			if len(raw) == 8 {
 				prefix = "sub-"
 			}
-			canon = prefix + hashFor(raw)
-		default: // "uuid", "email"
-			canon = "id-" + hashFor(raw)
+			canon = prefix + contributeHashFor(raw, hashCache)
+		case "hostname":
+			canon = "host-" + contributeHashFor(raw, hashCache) + ".example"
+		case "ip":
+			canon = "ip-" + contributeHashFor(raw, hashCache)
+		case "email":
+			canon = "user-" + contributeHashFor(raw, hashCache) + "@example.com"
+		default: // "uuid"
+			canon = "id-" + contributeHashFor(raw, hashCache)
 		}
-		if _, ok := renameLog[raw]; !ok {
-			renameLog[raw] = canon
-		}
+		recordContributeRename(renameLog, raw, canon)
 		b.WriteString(s[cursor:m.start])
 		b.WriteString(canon)
 		cursor = m.end
@@ -876,10 +1223,17 @@ func parseContributeTimestamp(s string) (time.Time, bool) {
 }
 
 // formatContributeTimestamp re-renders t in the SAME layout original was
-// written in (date-only stays date-only, RFC3339 stays RFC3339).
+// written in: date-only stays date-only; RFC3339 stays RFC3339, PRESERVING
+// sub-second precision when present (RFC3339Nano — a 30.5s inter-event delta
+// must survive as 30.5s; timing detectors grade on exact deltas). A value
+// whose fractional part is all zeros re-renders without the fraction — the
+// instant is identical, only the textual form normalizes.
 func formatContributeTimestamp(t time.Time, original string) string {
 	if _, err := time.Parse("2006-01-02", strings.TrimSpace(original)); err == nil {
 		return t.UTC().Format("2006-01-02")
+	}
+	if t.Nanosecond() != 0 {
+		return t.UTC().Format(time.RFC3339Nano)
 	}
 	return t.UTC().Format(time.RFC3339)
 }
@@ -887,14 +1241,15 @@ func formatContributeTimestamp(t time.Time, original string) string {
 // scrubScenarioMetadata REUSES scenariocapture.go's scrubPayloadMap (the C5
 // helper that survived two adversarial review rounds — not forked) over every
 // metadata-shaped block in sc: finding.metadata, each event's metadata, and
-// each connector_tool's canned returns. Returns the number of values that
-// carry the redaction placeholder afterward.
-func scrubScenarioMetadata(sc *exam.Scenario) int {
-	total := 0
+// each connector_tool's canned returns. Returns the sorted document path of
+// every value carrying the redaction placeholder afterward (the ledger
+// entries the consent diff enumerates — paths, never the secret values).
+func scrubScenarioMetadata(sc *exam.Scenario) []string {
+	var paths []string
 	if sc.Finding != nil && sc.Finding.Metadata != nil {
 		scrubbed := scrubPayloadMap(sc.Finding.Metadata)
 		sc.Finding.Metadata = scrubbed
-		total += countRedactedValues(scrubbed)
+		paths = append(paths, redactedValuePaths("finding.metadata", scrubbed)...)
 	}
 	for i := range sc.Events {
 		if sc.Events[i].Metadata == nil {
@@ -902,7 +1257,7 @@ func scrubScenarioMetadata(sc *exam.Scenario) int {
 		}
 		scrubbed := scrubPayloadMap(sc.Events[i].Metadata)
 		sc.Events[i].Metadata = scrubbed
-		total += countRedactedValues(scrubbed)
+		paths = append(paths, redactedValuePaths(fmt.Sprintf("events[%d].metadata", i), scrubbed)...)
 	}
 	for i := range sc.ConnectorTools {
 		if sc.ConnectorTools[i].Returns == nil {
@@ -910,36 +1265,63 @@ func scrubScenarioMetadata(sc *exam.Scenario) int {
 		}
 		scrubbed := scrubPayloadMap(sc.ConnectorTools[i].Returns)
 		sc.ConnectorTools[i].Returns = scrubbed
-		total += countRedactedValues(scrubbed)
+		paths = append(paths, redactedValuePaths(fmt.Sprintf("connector_tools[%d].returns", i), scrubbed)...)
 	}
-	return total
+	sort.Strings(paths)
+	return paths
 }
 
-// countRedactedValues recursively counts string values (at any nesting depth)
-// that carry the C5 redaction placeholder.
-func countRedactedValues(m map[string]any) int {
-	n := 0
-	var walk func(v any)
-	walk = func(v any) {
+// redactedValuePaths returns the document path of every string value (at any
+// nesting depth under prefix) that carries the C5 redaction placeholder —
+// e.g. "events[0].metadata.github_token". Paths only, never the values.
+func redactedValuePaths(prefix string, m map[string]any) []string {
+	var paths []string
+	var walk func(p string, v any)
+	walk = func(p string, v any) {
 		switch val := v.(type) {
 		case string:
 			if strings.Contains(val, captureRedactedPlaceholder) {
-				n++
+				paths = append(paths, p)
 			}
 		case map[string]any:
-			for _, vv := range val {
-				walk(vv)
+			for k, vv := range val {
+				walk(p+"."+k, vv)
 			}
 		case []any:
-			for _, vv := range val {
-				walk(vv)
+			for i, vv := range val {
+				walk(fmt.Sprintf("%s[%d]", p, i), vv)
 			}
 		}
 	}
-	for _, v := range m {
-		walk(v)
+	for k, v := range m {
+		walk(prefix+"."+k, v)
 	}
-	return n
+	return paths
+}
+
+// verifyLedgerResidue is the transmit-time guarantee behind the PR body's
+// "raw values never left" statement: every ORIGINAL value in the redaction
+// ledger must be ABSENT from the artifact bytes. A hit hard-fails plan
+// assembly (fail-closed — nothing is presented as safe, nothing can be
+// sent). Originals shorter than 3 bytes are skipped: they cannot be checked
+// by substring without false-positiving on every coincidental occurrence
+// inside canonical tokens.
+func verifyLedgerResidue(artifact string, data []byte, diff contributeDiff) error {
+	check := func(kind string, renames []contributeRename) error {
+		for _, r := range renames {
+			if len(r.Original) < 3 {
+				continue
+			}
+			if strings.Contains(string(data), r.Original) {
+				return fmt.Errorf("SANITIZE RESIDUE in %s: %s original %q still present after sanitize -- refusing to proceed (fail-closed; nothing has left this machine)", artifact, kind, r.Original)
+			}
+		}
+		return nil
+	}
+	if err := check("actor", diff.ActorRenames); err != nil {
+		return err
+	}
+	return check("identifier", diff.IdentifierRenames)
 }
 
 // --- rendering / PR content ----------------------------------------------------
@@ -955,25 +1337,33 @@ func printContributePlan(p *contributePlan) {
 	fmt.Printf("  Source: %s\n", p.SourcePath)
 	fmt.Printf("  Target: %s (repo %s, branch %s)\n", p.RelPath, p.Repo, p.Branch)
 	fmt.Println()
-	fmt.Println("Redaction diff (local review -- nothing has left this machine):")
+	fmt.Println("Redaction diff (the FULL ledger -- every replacement that will be transmitted; nothing has left this machine yet):")
 	if len(p.Diff.ActorRenames) == 0 {
-		fmt.Println("  Actors: none found")
+		fmt.Println("  Actors renamed: 0")
 	} else {
-		fmt.Println("  Actors renamed:")
+		fmt.Printf("  Actors renamed: %d\n", len(p.Diff.ActorRenames))
 		for _, r := range p.Diff.ActorRenames {
 			fmt.Printf("    %-40s -> %s\n", r.Original, r.Canonical)
 		}
 	}
-	if len(p.Diff.TargetRenames) == 0 {
-		fmt.Println("  Target identifiers: none found")
+	if len(p.Diff.IdentifierRenames) == 0 {
+		fmt.Println("  Identifiers redacted (targets, prose, metadata): 0")
 	} else {
-		fmt.Println("  Target identifiers redacted:")
-		for _, r := range p.Diff.TargetRenames {
+		fmt.Printf("  Identifiers redacted (targets, prose, metadata): %d\n", len(p.Diff.IdentifierRenames))
+		for _, r := range p.Diff.IdentifierRenames {
 			fmt.Printf("    %-40s -> %s\n", r.Original, r.Canonical)
 		}
 	}
-	fmt.Printf("  Secret-shaped metadata values redacted: %d\n", p.Diff.SecretsRedacted)
+	if len(p.Diff.SecretPaths) == 0 {
+		fmt.Println("  Secret-shaped metadata values redacted: 0")
+	} else {
+		fmt.Printf("  Secret-shaped metadata values redacted: %d\n", len(p.Diff.SecretPaths))
+		for _, path := range p.Diff.SecretPaths {
+			fmt.Printf("    %-40s -> %s\n", path, captureRedactedPlaceholder)
+		}
+	}
 	fmt.Printf("  Timestamps shifted: %d field(s), by %s (relative deltas preserved)\n", p.Diff.TimestampsShifted, p.Diff.ShiftDuration)
+	fmt.Println("  Residue check: PASSED -- every original above verified absent from the YAML and PR body below.")
 	fmt.Println()
 	fmt.Println("Sanitized scenario YAML (this is what would be contributed):")
 	fmt.Println("---")
@@ -994,9 +1384,12 @@ func printContributePlan(p *contributePlan) {
 	}
 }
 
-// renderContributePRBody builds the PR body: a SAFE summary that carries only
-// counts derived from the diff, NEVER the original actor/target values (this
-// text leaves the machine the moment a PR opens).
+// renderContributePRBody builds the PR body: a SAFE summary whose every count
+// is derived from the redaction ledger (len of the diff slices — never a
+// separately-maintained number that could drift from what was actually
+// redacted), and NEVER the original values themselves (this text leaves the
+// machine the moment a PR opens; buildContributePlan residue-checks it
+// against the ledger too).
 func renderContributePRBody(newID, family string, isAttack bool, relpath string, diff contributeDiff, pin contributePinDiff) string {
 	label := "must_not_fire (benign twin)"
 	if isAttack {
@@ -1005,11 +1398,12 @@ func renderContributePRBody(newID, family string, isAttack bool, relpath string,
 	var b strings.Builder
 	fmt.Fprintf(&b, "Contributed scenario %s for family %s (%s).\n\n", newID, family, label)
 	fmt.Fprintf(&b, "Placed at %s. provenance: contributed.\n\n", relpath)
-	fmt.Fprintf(&b, "Redaction summary (sanitized on the contributor's machine before this PR was opened -- raw values never left it):\n")
+	fmt.Fprintf(&b, "Redaction summary (counts derived from the sanitizer's redaction ledger on the contributor's machine):\n")
 	fmt.Fprintf(&b, "- %d actor(s) renamed to canonical corpus tokens\n", len(diff.ActorRenames))
-	fmt.Fprintf(&b, "- %d target identifier(s) redacted to sub-/id- tokens\n", len(diff.TargetRenames))
-	fmt.Fprintf(&b, "- %d secret-shaped metadata value(s) redacted\n", diff.SecretsRedacted)
+	fmt.Fprintf(&b, "- %d identifier(s) (targets, prose, metadata values/keys at any depth) redacted to deterministic tokens\n", len(diff.IdentifierRenames))
+	fmt.Fprintf(&b, "- %d secret-shaped metadata value(s) redacted\n", len(diff.SecretPaths))
 	fmt.Fprintf(&b, "- %d timestamp field(s) shifted onto the corpus's 2026-03 window (relative deltas preserved)\n\n", diff.TimestampsShifted)
+	fmt.Fprintf(&b, "Transmit-time residue check: PASSED -- every original value in the redaction ledger was verified absent from the contributed file and from this PR body before anything left the contributor's machine.\n\n")
 	fmt.Fprintf(&b, "corpus.pin regen (exams/scenarios/corpus.pin):\n")
 	fmt.Fprintf(&b, "  count:  %d -> %d\n", pin.OldCount, pin.NewCount)
 	fmt.Fprintf(&b, "  sha256: %s\n", pin.OldSHA)
@@ -1021,19 +1415,71 @@ func renderContributePRBody(newID, family string, isAttack bool, relpath string,
 
 // --- opening the real PR -------------------------------------------------------
 
+// contributeLookupGH resolves the gh binary. A package-level seam so the
+// command-construction test can force the gh-present path without requiring
+// gh on the test machine's PATH.
+var contributeLookupGH = func() (string, error) { return exec.LookPath("gh") }
+
+// contributeRunCommand executes one external command in dir (""" = inherit
+// cwd) and returns its combined output. A package-level seam so the
+// command-construction test can record the EXACT argv sequence without ever
+// executing git/gh or touching the network (the review's MED finding was a
+// misconstructed `gh repo fork` argv that no test could have caught — this
+// seam makes the construction testable while the never-open-a-real-PR safety
+// constraint stands).
+var contributeRunCommand = func(dir, name string, args ...string) ([]byte, error) {
+	cmd := exec.Command(name, args...)
+	cmd.Dir = dir
+	return cmd.CombinedOutput()
+}
+
 // openContributePR is the ONLY function in this file that touches git/gh or
-// the network. It is reachable exclusively from the non-dry-run, --yes branch
-// of runScenarioContribute — tests of this package must never call it
-// directly (see scenariocontribute_test.go's package doc note: opening a real
-// PR against mallcop-app/mallcop from a test would spam the OSS repo).
+// the network (via the contributeRunCommand seam). It is reachable
+// exclusively from the non-dry-run, --yes branch of runScenarioContribute —
+// tests of this package must never call it with the REAL seams (see
+// scenariocontribute_test.go's package doc note: opening a real PR against
+// mallcop-app/mallcop from a test would spam the OSS repo; the construction
+// test swaps both seams for recorders first).
 //
-// If `gh` is not on PATH, this prints exact manual instructions instead of
+// Flow: resolve the caller's GitHub login; when the login is not the target
+// repo's owner, ensure a fork exists (gh repo fork --clone=false — the fork
+// and clone are SEPARATE commands: `gh repo fork <repo> --clone <dir>` does
+// not exist as an argv shape, the review's MED finding) and clone THE FORK;
+// an owner clones the target repo directly (you cannot fork your own repo).
+// Then branch, place the file, regen the pin, commit, push to origin (the
+// clone's origin is whichever repo was cloned), and open the PR with an
+// owner-qualified --head when contributing from a fork.
+//
+// If `gh` is not on PATH, prints exact manual instructions instead of
 // failing — the operator can still contribute by hand.
 func openContributePR(p *contributePlan) error {
-	ghPath, err := exec.LookPath("gh")
+	ghPath, err := contributeLookupGH()
 	if err != nil {
 		printManualContributeInstructions(p)
 		return nil
+	}
+
+	loginOut, err := contributeRunCommand("", ghPath, "api", "user", "--jq", ".login")
+	if err != nil {
+		return fmt.Errorf("gh api user (resolving your GitHub login): %w\n%s", err, loginOut)
+	}
+	login := strings.TrimSpace(string(loginOut))
+	if login == "" {
+		return fmt.Errorf("gh api user returned an empty login -- is gh authenticated? (gh auth status)")
+	}
+
+	owner, repoName, _ := splitOwnerRepo(p.Repo)
+	cloneTarget := p.Repo
+	head := p.Branch
+	if login != owner {
+		// Contributor path: fork (idempotent when the fork already exists),
+		// then clone the FORK — pushes go to the fork, and the PR head names
+		// it explicitly.
+		if out, err := contributeRunCommand("", ghPath, "repo", "fork", p.Repo, "--clone=false"); err != nil {
+			return fmt.Errorf("gh repo fork %s: %w\n%s", p.Repo, err, out)
+		}
+		cloneTarget = login + "/" + repoName
+		head = login + ":" + p.Branch
 	}
 
 	tmpDir, err := os.MkdirTemp("", "mallcop-contribute-*")
@@ -1042,17 +1488,12 @@ func openContributePR(p *contributePlan) error {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	// Fork (idempotent if already forked) + clone with 'origin' -> the fork
-	// and 'upstream' -> the target repo, so a contributor without direct push
-	// access to p.Repo can still push their branch.
-	if out, err := exec.Command(ghPath, "repo", "fork", p.Repo, "--clone=true", "--remote=true", tmpDir).CombinedOutput(); err != nil {
-		return fmt.Errorf("gh repo fork %s: %w\n%s", p.Repo, err, out)
+	if out, err := contributeRunCommand("", ghPath, "repo", "clone", cloneTarget, tmpDir); err != nil {
+		return fmt.Errorf("gh repo clone %s: %w\n%s", cloneTarget, err, out)
 	}
 
 	run := func(name string, args ...string) error {
-		cmd := exec.Command(name, args...)
-		cmd.Dir = tmpDir
-		out, err := cmd.CombinedOutput()
+		out, err := contributeRunCommand(tmpDir, name, args...)
 		if err != nil {
 			return fmt.Errorf("%s %s: %w\n%s", name, strings.Join(args, " "), err, out)
 		}
@@ -1097,9 +1538,7 @@ func openContributePR(p *contributePlan) error {
 		return fmt.Errorf("write PR body: %w", err)
 	}
 
-	cmd := exec.Command(ghPath, "pr", "create", "--repo", p.Repo, "--title", p.PRTitle, "--body-file", bodyFile, "--head", p.Branch)
-	cmd.Dir = tmpDir
-	out, err := cmd.CombinedOutput()
+	out, err := contributeRunCommand(tmpDir, ghPath, "pr", "create", "--repo", p.Repo, "--title", p.PRTitle, "--body-file", bodyFile, "--head", head)
 	if err != nil {
 		return fmt.Errorf("gh pr create: %w\n%s", err, out)
 	}
