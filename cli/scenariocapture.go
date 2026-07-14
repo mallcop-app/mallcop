@@ -53,15 +53,17 @@ import (
 // runFeedback dispatches report-miss internally (cli/feedback.go).
 func runScenario(args []string) error {
 	if len(args) < 1 {
-		return fmt.Errorf("scenario: usage: mallcop scenario capture --store <dir> [--event-ids <ids>] [--actor <a> --window <dur>] --must-fire <family>|--must-not-fire <family> [--reserved]\n       mallcop scenario lint [--scenarios-dir <dir>] [--json]")
+		return fmt.Errorf("scenario: usage: mallcop scenario capture --store <dir> [--event-ids <ids>] [--actor <a> --window <dur>] --must-fire <family>|--must-not-fire <family> [--reserved]\n       mallcop scenario lint [--scenarios-dir <dir>] [--json]\n       mallcop scenario contribute [--yes] [--dry-run] [--allow-authored] [--repo owner/name] <scenarios/file.yaml>")
 	}
 	switch args[0] {
 	case "capture":
 		return runScenarioCapture(args[1:])
 	case "lint":
 		return runScenarioLint(args[1:])
+	case "contribute":
+		return runScenarioContribute(args[1:])
 	default:
-		return fmt.Errorf("scenario: unknown subcommand %q (want capture|lint)", args[0])
+		return fmt.Errorf("scenario: unknown subcommand %q (want capture|lint|contribute)", args[0])
 	}
 }
 

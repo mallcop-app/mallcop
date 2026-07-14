@@ -29,6 +29,7 @@
 //	mallcop feedback    report-miss --store <dir> --source <src> --event-type <type> [--actor <a>] [--window <w>] [--description <text>]
 //	mallcop scenario    capture --store <dir> [--event-ids <ids>] [--actor <a> --window <dur>] --must-fire <family>|--must-not-fire <family> [--reserved] [--scenarios-dir <dir>]
 //	mallcop scenario    lint [--scenarios-dir <dir>] [--json]
+//	mallcop scenario    contribute [--yes] [--dry-run] [--allow-authored] [--repo owner/name] [--reference-repo <path>] <scenarios/file.yaml>
 //	mallcop improve     "<free text>" | --detector-id <id> --event-type <type> [--target-family <f>] [--rail <r>] [--json]
 //	mallcop investigate --question <text> --store <dir> [--baseline <path>] | --serve --inbox <file> --outbox <file> --store <dir>
 package cli
@@ -303,6 +304,30 @@ Commands:
                ANYWHERE in the directory prints a WARNING with the exact family
                and a one-line capture recipe — never a block (authoring-time
                guidance, not a gate).
+
+  scenario contribute  Offer a local scenario to the shared, shipped corpus (opt-in commons)
+    <scenarios/file.yaml> Path to the local scenario to contribute (flags MUST
+                          precede this positional argument)
+    --yes            Confirm: open a PR with the content shown below (required
+                      unless --dry-run)
+    --dry-run        Print the redaction diff + would-be PR content; NEVER
+                      opens a PR or touches the network, regardless of --yes
+    --allow-authored Allow contributing a provenance:authored scenario
+                      (refused by default — author-independence)
+    --repo           Target owner/name (default: mallcop-app/mallcop)
+    --reference-repo Local checkout used as the base corpus for pin regen
+                      (default: this binary's own embedded reference corpus)
+               Sanitizes a copy of the local scenario: actors/identifiers
+               (UUIDs, emails, hostnames, IPs, account ids) canonicalized
+               EVERYWHERE — including every metadata value and key at any
+               nesting depth — secret-shaped metadata redacted, raw payloads
+               stripped, timestamps shifted onto the corpus's 2026-03 window
+               preserving relative deltas. Shows the FULL redaction ledger +
+               would-be PR content, residue-checks every original against the
+               outgoing bytes, then — ONLY on --yes — opens a normal REVIEWED
+               pull request (uses the gh CLI if available, else prints exact
+               manual instructions). Nothing auto-merges. The local scenario
+               file is NEVER modified — contribution is always a copy.
 
   improve  Turn a request into a PROPOSE-ONLY self-extension proposal (gated PR)
     "<free text>"    Free-text mode: ONE inference call structures the request
