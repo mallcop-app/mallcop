@@ -167,7 +167,19 @@ func RunExamDetectExtra(repoRoot, extraScenariosDir string) (ExamDetectReport, e
 	if err != nil {
 		return ExamDetectReport{}, fmt.Errorf("loading extra scenarios dir %s: %w", extraScenariosDir, err)
 	}
+	return RunExamDetectOverCorpus(corpus, extra), nil
+}
 
+// RunExamDetectOverCorpus grades corpus.Scenarios (Extra=false) UNIONED with
+// extraScenarios (Extra=true) through the IDENTICAL core/detect.Detect
+// grading loop RunExamDetectExtra uses — factored out as the corpus-SOURCE-
+// AGNOSTIC seam (mallcoppro-bc2, `mallcop eval`'s C4 build) that lets a
+// caller supply a corpus loaded any way it likes (LoadEmbedded, in
+// particular: the shipped reference corpus baked into a customer deploy-repo
+// binary, mallcop eval's default source) rather than only the on-disk pinned
+// corpus Load(repoRoot) resolves. RunExamDetectExtra is now a thin wrapper:
+// Load(repoRoot) + LoadExtraScenarios(dir), then this.
+func RunExamDetectOverCorpus(corpus Corpus, extraScenarios []LoadedScenario) ExamDetectReport {
 	// Computed once per run — the live detector registration state a Reserved
 	// scenario's must_fire families are checked against (mallcoppro-db0).
 	registered := registeredFamilies()
@@ -241,8 +253,8 @@ func RunExamDetectExtra(repoRoot, extraScenariosDir string) (ExamDetectReport, e
 	for _, ls := range corpus.Scenarios {
 		grade(ls, false)
 	}
-	for _, ls := range extra {
+	for _, ls := range extraScenarios {
 		grade(ls, true)
 	}
-	return report, nil
+	return report
 }

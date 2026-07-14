@@ -205,6 +205,44 @@ type Scenario struct {
 	// worker input. nil when the scenario carries no expected_detection block —
 	// such scenarios are skipped (but counted) by the exam-detect grader.
 	ExpectedDetection *ExpectedDetection `yaml:"expected_detection"`
+
+	// Provenance records who/what authored this scenario (mallcoppro-bc2, the
+	// `mallcop eval` C4 build): one of "reference" (the shipped reference
+	// corpus — the default), "operator" (hand-authored by the customer
+	// running mallcop in their own deploy repo), "captured" (a real event the
+	// operator flagged verbatim via chat's "flag things like this" or
+	// `feedback report-miss`), "authored" (written alongside a new detector
+	// as its own proof scenario), or "contributed" (an operator scenario
+	// proposed back to the shared reference corpus). Purely informational —
+	// no grading logic branches on it; it exists so a local scenarios/
+	// directory's README and any future contribute-back tooling can display
+	// where a scenario came from. An EMPTY value (the common case: every
+	// existing scenario predates this field) means "reference" — see
+	// EffectiveProvenance. Additive yaml-tagged field: scenarios without it
+	// unmarshal exactly as before, so adding it does not change parsing of
+	// any existing file or the corpus digest of any file that doesn't set it.
+	Provenance string `yaml:"provenance"`
+}
+
+// Provenance enum values (see Scenario.Provenance). Never validated as a hard
+// enum by Load — an unrecognized value is accepted and passed through
+// verbatim, since provenance is documentation, not a grading input.
+const (
+	ProvenanceReference   = "reference"
+	ProvenanceOperator    = "operator"
+	ProvenanceCaptured    = "captured"
+	ProvenanceAuthored    = "authored"
+	ProvenanceContributed = "contributed"
+)
+
+// EffectiveProvenance returns s.Provenance, defaulting to ProvenanceReference
+// when the field is unset — the common case for every scenario that predates
+// this field (the entire shipped reference corpus).
+func (s *Scenario) EffectiveProvenance() string {
+	if s.Provenance == "" {
+		return ProvenanceReference
+	}
+	return s.Provenance
 }
 
 // Load reads the YAML file at path, unmarshals it into a Scenario, and
