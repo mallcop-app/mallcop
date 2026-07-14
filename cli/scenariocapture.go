@@ -664,6 +664,9 @@ var captureSecretPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`-----BEGIN [A-Z ]*PRIVATE KEY-----`),                   // PEM private key
 	regexp.MustCompile(`eyJ[a-zA-Z0-9\-_]+\.[a-zA-Z0-9\-_]+\.[a-zA-Z0-9\-_]+`), // JWT
 	regexp.MustCompile(`(?i)bearer\s+[a-zA-Z0-9\-_.]{20,}`),                    // bearer token
+	regexp.MustCompile(`(?i)basic\s+[A-Za-z0-9+/=]{16,}`),                      // HTTP Basic auth (base64 decodes straight to user:password)
+	regexp.MustCompile(`sk_(live|test)_[a-zA-Z0-9]{16,}`),                      // Stripe secret key (underscore form; hyphen sk- covered above)
+	regexp.MustCompile(`rk_(live|test)_[a-zA-Z0-9]{16,}`),                      // Stripe restricted key
 }
 
 // captureURLUserinfoRE strips credentials embedded in a URL's userinfo for ANY
@@ -675,13 +678,39 @@ var captureSecretPatterns = []*regexp.Regexp{
 // keep the username and risking password residue.
 var captureURLUserinfoRE = regexp.MustCompile(`([a-zA-Z][a-zA-Z0-9+.\-]*://)[^\s/@]+@`)
 
+// captureSecretKeyAlt is the credential-key alternation shared by the k=v and
+// colon-delimited value-blanking nets below. Longer forms are listed before
+// their prefixes (password before pass) for leftmost-first matching; the \b
+// in the composed regexes keeps `pass` from matching inside "bypass".
+const captureSecretKeyAlt = `password|passwd|pwd|pass|accountkey|account_key|sharedaccesssignature|shared_access_signature|secret|access[_-]?key|api[_-]?key|apikey|auth[_-]?token|token|sig|credential`
+
 // captureKVSecretRE blanks the VALUE of a credential-shaped KEY inside a
 // delimited key=value connection string: ADO/JDBC ("Server=..;Password=..;"),
 // an Azure storage string ("..;AccountKey=..;"), or a SAS query ("..&sig=..").
 // Case-insensitive; the value is taken up to the next delimiter (';', '&',
 // whitespace, or end of string). Bias: for a LOCAL fixture, over-redaction
 // beats residue — when in doubt whether a value carries a secret, blank it.
-var captureKVSecretRE = regexp.MustCompile(`(?i)\b(password|passwd|pwd|accountkey|account_key|sharedaccesssignature|shared_access_signature|secret|access[_-]?key|api[_-]?key|apikey|auth[_-]?token|token|sig|credential)\s*=\s*[^;&\s]+`)
+var captureKVSecretRE = regexp.MustCompile(`(?i)\b(` + captureSecretKeyAlt + `)\s*=\s*[^;&\s]+`)
+
+// captureColonSecretRE is the colon-delimited sibling of captureKVSecretRE:
+// it blanks credential values in stringified JSON ("password":"hunter2"),
+// YAML fragments and log lines (password: hunter2) that ride along inside a
+// metadata string value. The optional quotes absorb JSON key/value quoting;
+// the value runs to the next quote/delimiter/whitespace. Same over-redaction
+// bias as the k=v net.
+var captureColonSecretRE = regexp.MustCompile(`(?i)["']?\b(` + captureSecretKeyAlt + `)\b["']?\s*:\s*["']?[^"',;&\s]+`)
+
+// captureCLIDBPassRE blanks the value of an inline -p<password> flag on a
+// mysql/psql-family command line captured inside a metadata value (e.g.
+// "mysql -u root -pHUNTER2 db"). Guarded by the command name since a bare
+// `-p\S+` would shred unrelated flags; mangling the rest of a command string
+// is acceptable (over-redaction bias) but this keeps it surgical.
+var captureCLIDBPassRE = regexp.MustCompile(`(?i)\b((?:mysqldump|mysqladmin|mysql|mariadb|psql|pg_dumpall|pg_dump|pg_restore)\b[^\n;|&]*?\s-p)[^\s;|&]+`)
+
+// captureCLIUserPassRE blanks curl-style inline credentials: `-u user:pass`
+// or `--user=user:pass`. The whole user:pass span is blanked (username
+// included) — same never-leak bias as the URL userinfo redactor.
+var captureCLIUserPassRE = regexp.MustCompile(`((?:^|\s)(?:-u|--user)(?:\s+|=))[^\s:]+:[^\s]+`)
 
 // captureSensitiveKeySubstrings: a metadata value whose KEY contains any of
 // these (case-insensitive) is redacted unconditionally, regardless of whether
@@ -731,12 +760,16 @@ func scrubMetadataValue(key string, v any) any {
 			}
 		}
 		// In-string redactors: strip credentials embedded inside an otherwise
-		// non-secret value (a URL's userinfo, or the sensitive fields of a
-		// key=value connection string) without discarding the whole value.
-		// Both deliberately blank the entire matched credential span — for a
-		// LOCAL fixture, over-redaction is always preferable to residue.
+		// non-secret value (a URL's userinfo, k=v or k:v credential pairs in
+		// connection strings / stringified JSON / log lines, and inline CLI
+		// credentials) without discarding the whole value. Each deliberately
+		// blanks the entire matched credential span — for a LOCAL fixture,
+		// over-redaction is always preferable to residue.
 		val = captureURLUserinfoRE.ReplaceAllString(val, "${1}"+captureRedactedPlaceholder+"@")
 		val = captureKVSecretRE.ReplaceAllString(val, "${1}="+captureRedactedPlaceholder)
+		val = captureColonSecretRE.ReplaceAllString(val, "${1}:"+captureRedactedPlaceholder)
+		val = captureCLIDBPassRE.ReplaceAllString(val, "${1}"+captureRedactedPlaceholder)
+		val = captureCLIUserPassRE.ReplaceAllString(val, "${1}"+captureRedactedPlaceholder)
 		return val
 	case map[string]any:
 		out := make(map[string]any, len(val))

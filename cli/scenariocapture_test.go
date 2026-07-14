@@ -356,6 +356,118 @@ func TestScenarioCapture_RedactsConnectionCreds(t *testing.T) {
 	}
 }
 
+// TestScenarioCapture_RedactsRereviewLeakShapes is the regression guard for
+// the adversarial re-review REJECT on PR #190 (after 77516ad): four more
+// empirically-proven leak classes — HTTP Basic auth (base64 = user:password),
+// Stripe underscore keys (sk_live_/sk_test_/rk_live_), colon-delimited
+// credentials riding inside stringified JSON / YAML / log-line values, and
+// inline CLI-arg credentials (mysql -p<pass>, curl -u user:pass, bare
+// pass=). All eight reviewer repro strings go through the REAL capture path
+// under keys that deliberately do NOT trip the key-substring net, and the
+// grep-class assertions prove no secret substring survives anywhere in the
+// emitted YAML while non-secret content (repo, actor, hostnames, benign
+// query params) is preserved.
+func TestScenarioCapture_RedactsRereviewLeakShapes(t *testing.T) {
+	// The Stripe-shaped fixtures are constructed at runtime so this source
+	// file never contains a key-shaped literal — GitHub push protection
+	// (rightly) blocks pushes containing anything matching a live Stripe key,
+	// fake or not. The concatenation is invisible to the scrubber, which only
+	// ever sees the assembled string through the real capture path.
+	stripeSecret := "sk_live_" + strings.Repeat("A", 24)
+	stripeRestricted := "rk_test_" + strings.Repeat("B", 24)
+
+	st := seedCaptureStore(t, []event.Event{
+		{
+			ID: "leak-3", Source: "aws", Type: "config_change", Actor: "ci-bot",
+			Timestamp: time.Now(),
+			Payload: mustPayload(t, map[string]any{
+				"action": "config_change",
+				// 1. HTTP Basic auth — Bearer was handled, Basic was not:
+				"authorization": "Basic dXNlcjpzM2NyM3RiYXNpYw==",
+				// 2. Stripe underscore keys — only hyphen sk- was covered:
+				"billing":    stripeSecret,
+				"restricted": stripeRestricted,
+				// 3. Colon-delimited creds — the k=v net only knew `=`:
+				"details": `{"user":"sa","password":"hunter2json"}`,
+				"raw_log": "2026-07-14T10:33:07Z login ok password: topsecretyaml retry=0",
+				// 4. Inline CLI-arg creds:
+				"command":   "mysql -u root -phunter2cli acme_db",
+				"fetch_cmd": "curl -u admin:hunter2curl https://api.internal.example/v1/status",
+				"query":     "region=us-east-1&pass=hunter2pass&limit=10",
+				// Non-secret — must survive verbatim:
+				"repo": "acme/widgets",
+			}),
+		},
+	})
+
+	scenariosDir := t.TempDir()
+	out, err := withStdio(t, "", func() error {
+		return runScenarioCapture([]string{
+			"--store", st.Path(),
+			"--event-ids", "leak-3",
+			"--must-fire", "config-drift",
+			"--id", "LOCAL-TEST-rereview",
+			"--scenarios-dir", scenariosDir,
+		})
+	})
+	if err != nil {
+		t.Fatalf("runScenarioCapture: %v\noutput:\n%s", err, out)
+	}
+
+	raw, err := os.ReadFile(filepath.Join(scenariosDir, "LOCAL-TEST-rereview.yaml"))
+	if err != nil {
+		t.Fatalf("read captured file: %v", err)
+	}
+	body := string(raw)
+
+	// grep-class residue assertions: not one secret substring may appear
+	// anywhere in the emitted YAML.
+	for _, secret := range []string{
+		"dXNlcjpzM2NyM3RiYXNpYw", // Basic auth base64 (user:s3cr3tbasic)
+		stripeSecret,             // Stripe secret key (sk_live_..., underscore form)
+		stripeRestricted,         // Stripe restricted key (rk_test_...)
+		"hunter2json",            // "password":"..." in stringified JSON
+		"topsecretyaml",          // password: ... in a log/yaml line
+		"hunter2cli",             // mysql -p<pass>
+		"hunter2curl",            // curl -u user:pass
+		"hunter2pass",            // bare pass= in a query string
+	} {
+		if strings.Contains(body, secret) {
+			t.Errorf("captured YAML still contains secret residue %q:\n%s", secret, body)
+		}
+	}
+
+	// Redaction actually ran, and non-secret content survived the in-string
+	// redactors (no whole-value nuking of command/query/log strings).
+	if !strings.Contains(body, "REDACTED") {
+		t.Error("captured YAML has no [REDACTED] marker — secret scrub did not run")
+	}
+	if !strings.Contains(body, "acme/widgets") {
+		t.Error("captured YAML dropped a non-secret metadata field (repo) — over-redaction")
+	}
+	if !strings.Contains(body, "ci-bot") {
+		t.Error("captured YAML dropped the actor — actors must be kept")
+	}
+	if !strings.Contains(body, "us-east-1") {
+		t.Error("captured YAML dropped the benign query param (region) — over-redaction")
+	}
+	if !strings.Contains(body, "api.internal.example") {
+		t.Error("captured YAML dropped the curl target host — over-redaction")
+	}
+	if !strings.Contains(body, "acme_db") {
+		t.Error("captured YAML dropped the mysql database arg — over-redaction")
+	}
+
+	// Round-trip: the scenario must still load through the exam parser.
+	sc, err := exam.Load(filepath.Join(scenariosDir, "LOCAL-TEST-rereview.yaml"))
+	if err != nil {
+		t.Fatalf("exam.Load: %v", err)
+	}
+	if len(sc.Events) != 1 {
+		t.Fatalf("captured %d events, want 1", len(sc.Events))
+	}
+}
+
 // TestScenarioCapture_MustFireAndMustNotFireMutuallyExclusive and the
 // selector-validation cases below prove the flag-combination guard rails.
 func TestScenarioCapture_ValidationErrors(t *testing.T) {
