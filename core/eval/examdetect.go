@@ -109,6 +109,12 @@ type ExamDetectTotals struct {
 type ExamDetectReport struct {
 	Rows   []ExamDetectRow  `json:"rows"`
 	Totals ExamDetectTotals `json:"totals"`
+	// Coverage is the per-detector-family coverage matrix (coverage.go) — a
+	// pure re-aggregation of Rows that surfaces which families are thin
+	// (few labels) or unsatisfied (missed / false_alarms), the corpus-expansion
+	// steering artifact. Additive: populated by RunExamDetectExtra, omitted from
+	// JSON when empty so a zero-row report's wire shape is unchanged.
+	Coverage []FamilyCoverage `json:"coverage,omitempty"`
 }
 
 // normalizeFamilyToken canonicalizes a label/emitted family token for
@@ -256,5 +262,9 @@ func RunExamDetectOverCorpus(corpus Corpus, extraScenarios []LoadedScenario) Exa
 	for _, ls := range extraScenarios {
 		grade(ls, true)
 	}
+	// Roll the graded rows up by detector family — the additive coverage matrix
+	// (coverage.go). Pure re-aggregation, no detector re-run; empty for a
+	// zero-row report so the wire shape is unchanged there.
+	report.Coverage = CoverageMatrix(report)
 	return report
 }

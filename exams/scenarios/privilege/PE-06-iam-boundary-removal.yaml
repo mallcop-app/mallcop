@@ -91,3 +91,6 @@ expected:
   skills_loaded:
   - aws-iam
   skills_not_loaded: []
+expected_detection:
+  must_fire:
+  - priv-escalation

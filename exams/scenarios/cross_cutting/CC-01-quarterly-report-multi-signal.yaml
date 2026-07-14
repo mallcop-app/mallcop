@@ -154,3 +154,8 @@ expected:
   investigate_must_use_tools: false
   min_investigate_iterations: 1
   min_investigation_quality: 4
+expected_detection:
+  must_not_fire:
+  - unusual-timing
+  - volume-anomaly
+  - unusual-resource-access

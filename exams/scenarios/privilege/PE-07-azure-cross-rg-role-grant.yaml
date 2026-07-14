@@ -142,3 +142,6 @@ expected:
   skills_loaded:
   - azure-security
   skills_not_loaded: []
+expected_detection:
+  must_fire:
+  - priv-escalation

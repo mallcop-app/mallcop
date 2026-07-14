@@ -93,3 +93,6 @@ expected:
   investigate_must_use_tools: false
   min_investigate_iterations: 1
   min_investigation_quality: 3
+expected_detection:
+  must_not_fire:
+  - priv-escalation
