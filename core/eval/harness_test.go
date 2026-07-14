@@ -238,6 +238,50 @@ func TestHarness_MergeGate_GreenWithMedianOfN(t *testing.T) {
 	if !strings.Contains(report.Note, "NOT") {
 		t.Fatalf("merge-gate report must say it is NOT the accuracy number; note=%q", report.Note)
 	}
+	// The report must STATE median_pass_rate is blended (mallcoppro C2).
+	if !strings.Contains(report.Note, "BLENDED") {
+		t.Fatalf("merge-gate report must say median_pass_rate is BLENDED; note=%q", report.Note)
+	}
+
+	// RECALL/PRECISION SPLIT (mallcoppro C2): the shipped corpus is 40 attacks
+	// (expected chain_action demands escalate) / 18 benigns (expected resolved).
+	// With floorForcedBenignHard empty, EVERY scenario passes under golden
+	// responses, so both recall and precision must be a clean 1.0 — the split
+	// must never silently collapse the two into one number.
+	const wantAttacks, wantBenigns = 40, 18
+	if wantAttacks+wantBenigns != report.CorpusCount {
+		t.Fatalf("test assumption stale: wantAttacks(%d)+wantBenigns(%d) != corpus count %d — corpus composition changed",
+			wantAttacks, wantBenigns, report.CorpusCount)
+	}
+	for _, rr := range report.Runs {
+		if rr.Attacks != wantAttacks || rr.Benigns != wantBenigns {
+			t.Fatalf("run %d: attacks/benigns split = %d/%d, want %d/%d", rr.Index, rr.Attacks, rr.Benigns, wantAttacks, wantBenigns)
+		}
+		if rr.Attacks+rr.Benigns != rr.Total {
+			t.Fatalf("run %d: attacks(%d)+benigns(%d) != total(%d) — every scenario must land in exactly one bucket", rr.Index, rr.Attacks, rr.Benigns, rr.Total)
+		}
+		if rr.AttacksPassed != wantAttacks {
+			t.Fatalf("run %d: attacks_passed = %d, want %d (no floor-forced attack misses)", rr.Index, rr.AttacksPassed, wantAttacks)
+		}
+		if rr.RecallRate != 1.0 {
+			t.Fatalf("run %d: recall_rate = %.4f, want 1.0 (golden responses catch every attack)", rr.Index, rr.RecallRate)
+		}
+		wantBenignsPassed := wantBenigns - len(floorForcedBenignHard)
+		if rr.BenignsPassed != wantBenignsPassed {
+			t.Fatalf("run %d: benigns_passed = %d, want %d (floor-forced benign-hard set is the only precision cost)", rr.Index, rr.BenignsPassed, wantBenignsPassed)
+		}
+		wantPrecisionRate := float64(wantBenignsPassed) / float64(wantBenigns)
+		if rr.PrecisionRate != wantPrecisionRate {
+			t.Fatalf("run %d: precision_rate = %.4f, want %.4f", rr.Index, rr.PrecisionRate, wantPrecisionRate)
+		}
+	}
+	if report.MedianRecallRate != 1.0 {
+		t.Fatalf("median_recall_rate = %.4f, want 1.0", report.MedianRecallRate)
+	}
+	wantMedianPrecision := float64(wantBenigns-len(floorForcedBenignHard)) / float64(wantBenigns)
+	if report.MedianPrecisionRate != wantMedianPrecision {
+		t.Fatalf("median_precision_rate = %.4f, want %.4f", report.MedianPrecisionRate, wantMedianPrecision)
+	}
 
 	// CLASSIFIER: under golden responses every NON-floor scenario passes the GATING
 	// axis (chain_action) and bins as PASS or R_rubric_axis_fail (a NON-GATING
@@ -432,6 +476,41 @@ func TestRealMode_WiredButRefusesWithoutCreds(t *testing.T) {
 	_, err := Run(context.Background(), RunConfig{Mode: ModeReal, N: 1, RealClient: nil})
 	if err == nil {
 		t.Fatal("ModeReal with a nil client must refuse to run (no creds)")
+	}
+}
+
+// --- 7. splitRecallPrecision: the recall/precision partition is a pure function
+// of ExpectedAction + Pass, independent of any real run (mallcoppro C2). --------
+
+func TestSplitRecallPrecision(t *testing.T) {
+	results := []ScenarioResult{
+		{ScenarioID: "attack-caught", ExpectedAction: "escalated", Pass: true},
+		{ScenarioID: "attack-missed", ExpectedAction: "escalated", Pass: false},
+		{ScenarioID: "attack-or-stronger-caught", ExpectedAction: "escalate-or-stronger", Pass: true},
+		{ScenarioID: "benign-correct", ExpectedAction: "resolved", Pass: true},
+		{ScenarioID: "benign-false-alarm", ExpectedAction: "resolved", Pass: false},
+	}
+	attacks, attacksPassed, benigns, benignsPassed := splitRecallPrecision(results)
+	if attacks != 3 {
+		t.Fatalf("attacks = %d, want 3 (2 escalated + 1 escalate-or-stronger)", attacks)
+	}
+	if attacksPassed != 2 {
+		t.Fatalf("attacksPassed = %d, want 2 (attack-caught + attack-or-stronger-caught)", attacksPassed)
+	}
+	if benigns != 2 {
+		t.Fatalf("benigns = %d, want 2", benigns)
+	}
+	if benignsPassed != 1 {
+		t.Fatalf("benignsPassed = %d, want 1 (benign-correct only)", benignsPassed)
+	}
+
+	// Empty input: both denominators zero, no division-by-zero panic.
+	a, ap, b, bp := splitRecallPrecision(nil)
+	if a != 0 || ap != 0 || b != 0 || bp != 0 {
+		t.Fatalf("splitRecallPrecision(nil) = (%d,%d,%d,%d), want all zero", a, ap, b, bp)
+	}
+	if rate(ap, a) != 0 {
+		t.Fatalf("rate(0,0) = %v, want 0 (no NaN/panic on empty attack set)", rate(ap, a))
 	}
 }
 

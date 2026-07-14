@@ -48,6 +48,28 @@ type RunResult struct {
 	// only for THIS pass (ModeE2E only) — the agent-reasoning number. Zero when no
 	// scenario reproduced.
 	ReproducedPassRate float64 `json:"reproduced_pass_rate,omitempty"`
+
+	// --- recall/precision split (mallcoppro C2) -----------------------------
+	//
+	// PassRate above BLENDS two fundamentally different failure modes into one
+	// number: a MISSED ATTACK (expected chain_action demands escalate, terminal
+	// resolved — a fatal recall failure, the operator is never warned) and a
+	// FALSE ALARM (expected resolved, terminal escalated — a precision failure,
+	// noise). This mirrors recall.go's split of the exam-detect (detect-layer)
+	// report, applied here to the harness's agent-reasoning ScenarioResult.Pass.
+	//
+	// Attacks/Benigns are the recall/precision denominators for THIS pass — a
+	// scenario is an "attack" iff its expected chain_action demands escalate
+	// (actionIsEscalate), else it is a "benign". The corpus is fixed, so these
+	// counts are identical across every pass of a run (40 attacks / 18 benigns on
+	// the shipped corpus) — but they are recorded per-run so a caller never has to
+	// assume the split is constant.
+	Attacks       int     `json:"attacks"`
+	AttacksPassed int     `json:"attacks_passed"`
+	RecallRate    float64 `json:"recall_rate"`
+	Benigns       int     `json:"benigns"`
+	BenignsPassed int     `json:"benigns_passed"`
+	PrecisionRate float64 `json:"precision_rate"`
 }
 
 // HarnessReport is the harness's full output: the corpus integrity facts, every
@@ -71,9 +93,20 @@ type HarnessReport struct {
 	// Computed as the median across runs of (passes among reproduced / reproduced
 	// count). Zero for non-e2e modes.
 	ReproducedPassRate float64 `json:"reproduced_pass_rate,omitempty"`
+	// MedianRecallRate is the median across runs of RunResult.RecallRate — attacks
+	// caught / attacks total. The honest attack-detection number, split out of the
+	// blended MedianPassRate above (mallcoppro C2; mirrors recall.go's exam-detect
+	// split at the agent-reasoning layer).
+	MedianRecallRate float64 `json:"median_recall_rate"`
+	// MedianPrecisionRate is the median across runs of RunResult.PrecisionRate —
+	// benign scenarios correctly resolved / benigns total.
+	MedianPrecisionRate float64 `json:"median_precision_rate"`
 	// Note states, in the report itself, what the number means — so a reader can
 	// never mistake the merge-gate's 100% for the accuracy number (§4.4), nor the
-	// e2e all-scenario rate for the agent-reasoning rate.
+	// e2e all-scenario rate for the agent-reasoning rate. It also states, EXPLICITLY,
+	// that MedianPassRate is BLENDED — the reader must consult MedianRecallRate /
+	// MedianPrecisionRate (and, for e2e, DetectFidelity.E2ERecall/E2EPrecision) for
+	// the honest attack-vs-benign split.
 	Note string `json:"note"`
 }
 
@@ -118,17 +151,20 @@ func Run(ctx context.Context, cfg RunConfig) (HarnessReport, error) {
 		CorpusSHA:   corpus.SHA,
 		NoiseBandPP: noiseBandPP,
 	}
+	const blendedNote = " median_pass_rate is BLENDED (attacks and benign scenarios together); median_recall_rate (attacks caught / attacks) and median_precision_rate (benign correctly resolved / benigns) split it honestly — see RunResult.recall_rate/precision_rate per pass."
 	switch cfg.Mode {
 	case ModeCanned:
-		report.Note = "MERGE-GATE (golden responses): proves the harness+grader pipeline, NOT the model's accuracy. The real accuracy number comes only from ModeReal."
+		report.Note = "MERGE-GATE (golden responses): proves the harness+grader pipeline, NOT the model's accuracy. The real accuracy number comes only from ModeReal." + blendedNote
 	case ModeReal:
-		report.Note = "REAL-MODEL parity run: this IS the accuracy number (the model decided each verdict)."
+		report.Note = "REAL-MODEL parity run: this IS the accuracy number (the model decided each verdict)." + blendedNote
 	case ModeE2E:
-		report.Note = "END-TO-END scan run: raw events → core/detect → cascade → store. The headline is detect_fidelity.reproduction_rate — how many scenario findings the detector fleet even reproduces. reproduced_pass_rate is the agent-reasoning number over REPRODUCED scenarios (comparable to ModeReal); detect_fidelity.end_to_end_pass_rate is the TRUE live-scan number over ALL scenarios (DETECT-MISS/MISMATCH on expected-escalate count as fails). If end_to_end_pass_rate is far below the ModeReal number, the detector fleet — not agent reasoning — is the gap."
+		report.Note = "END-TO-END scan run: raw events → core/detect → cascade → store. The headline is detect_fidelity.reproduction_rate — how many scenario findings the detector fleet even reproduces. reproduced_pass_rate is the agent-reasoning number over REPRODUCED scenarios (comparable to ModeReal); detect_fidelity.end_to_end_pass_rate is the TRUE live-scan number over ALL scenarios (DETECT-MISS/MISMATCH on expected-escalate count as fails). If end_to_end_pass_rate is far below the ModeReal number, the detector fleet — not agent reasoning — is the gap." + blendedNote + " detect_fidelity.e2e_recall/e2e_precision split end_to_end_pass_rate the same way."
 	}
 
 	var passRates []float64
 	var reproducedRates []float64
+	var recallRates []float64
+	var precisionRates []float64
 	for i := 0; i < n; i++ {
 		rr, err := runOnce(ctx, cfg, corpus, i)
 		if err != nil {
@@ -137,9 +173,13 @@ func Run(ctx context.Context, cfg RunConfig) (HarnessReport, error) {
 		report.Runs = append(report.Runs, rr)
 		passRates = append(passRates, rr.PassRate)
 		reproducedRates = append(reproducedRates, rr.ReproducedPassRate)
+		recallRates = append(recallRates, rr.RecallRate)
+		precisionRates = append(precisionRates, rr.PrecisionRate)
 	}
 
 	report.MedianPassRate = median(passRates)
+	report.MedianRecallRate = median(recallRates)
+	report.MedianPrecisionRate = median(precisionRates)
 	report.WithinBand = spread(passRates) <= noiseBandPP/100.0
 	report.Classifier = Classify(report.Runs)
 
@@ -199,13 +239,20 @@ func runOnce(ctx context.Context, cfg RunConfig, corpus Corpus, index int) (RunR
 		transcripts[res.ScenarioID] = run.Transcript
 	}
 
+	attacks, attacksPassed, benigns, benignsPassed := splitRecallPrecision(results)
 	rr := RunResult{
-		Index:       index,
-		Results:     results,
-		Passed:      passed,
-		Total:       len(results),
-		PassRate:    rate(passed, len(results)),
-		Transcripts: transcripts,
+		Index:         index,
+		Results:       results,
+		Passed:        passed,
+		Total:         len(results),
+		PassRate:      rate(passed, len(results)),
+		Transcripts:   transcripts,
+		Attacks:       attacks,
+		AttacksPassed: attacksPassed,
+		RecallRate:    rate(attacksPassed, attacks),
+		Benigns:       benigns,
+		BenignsPassed: benignsPassed,
+		PrecisionRate: rate(benignsPassed, benigns),
 	}
 	return rr, nil
 }
@@ -251,6 +298,7 @@ func runOnceE2E(ctx context.Context, cfg RunConfig, corpus Corpus, index int) (R
 		fidelity = append(fidelity, out.Fidelity)
 	}
 
+	attacks, attacksPassed, benigns, benignsPassed := splitRecallPrecision(results)
 	rr := RunResult{
 		Index:              index,
 		Results:            results,
@@ -260,8 +308,40 @@ func runOnceE2E(ctx context.Context, cfg RunConfig, corpus Corpus, index int) (R
 		Transcripts:        transcripts,
 		Fidelity:           fidelity,
 		ReproducedPassRate: rate(reproducedPassed, reproducedTotal),
+		Attacks:            attacks,
+		AttacksPassed:      attacksPassed,
+		RecallRate:         rate(attacksPassed, attacks),
+		Benigns:            benigns,
+		BenignsPassed:      benignsPassed,
+		PrecisionRate:      rate(benignsPassed, benigns),
 	}
 	return rr, nil
+}
+
+// splitRecallPrecision partitions graded results by expected chain_action into
+// attacks (must-escalate) and benigns (must-resolve, i.e. everything else),
+// counting how many of each PASSED chain_action. This is the harness's
+// agent-reasoning analogue of recall.go's exam-detect split — same idea (recall =
+// attacks caught, precision = benign correctly left alone), applied to
+// ScenarioResult.Pass instead of ExamDetectRow's must_fire/must_not_fire labels.
+// It re-runs no scenario and changes no grading; it only re-partitions the
+// already-graded results by the SAME actionIsEscalate helper detectfidelity.go
+// uses for its own expectEscalate split.
+func splitRecallPrecision(results []ScenarioResult) (attacks, attacksPassed, benigns, benignsPassed int) {
+	for _, r := range results {
+		if actionIsEscalate(r.ExpectedAction) {
+			attacks++
+			if r.Pass {
+				attacksPassed++
+			}
+		} else {
+			benigns++
+			if r.Pass {
+				benignsPassed++
+			}
+		}
+	}
+	return attacks, attacksPassed, benigns, benignsPassed
 }
 
 func rate(passed, total int) float64 {

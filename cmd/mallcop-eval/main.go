@@ -20,8 +20,10 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/mallcop-app/mallcop/core/eval"
@@ -101,12 +103,66 @@ func main() {
 		}
 	}
 
+	// Print the recall/precision split ABOVE the blended report JSON that follows
+	// (report.MedianPassRate mixes attacks and benigns into one number — see
+	// harness.go's Note). Named, honest counts before the blended headline, the
+	// same discipline #180 established for exam-detect's --recall view.
+	printRecallPrecisionSummary(report)
+
 	out, err := json.MarshalIndent(report, "", "  ")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "mallcop-eval: marshal report: %v\n", err)
 		os.Exit(1)
 	}
 	fmt.Println(string(out))
+}
+
+// printRecallPrecisionSummary prints the recall-first split (mallcoppro C2) —
+// named ATTACKS MISSED / BENIGN FALSE-ALARMS counts, median-of-N — mirroring the
+// recall-first report #180 added to exam-detect, applied here to the harness's
+// agent-reasoning ScenarioResult.Pass instead of exam-detect's must_fire/
+// must_not_fire labels. Reads only the already-graded per-run Attacks/
+// AttacksPassed/Benigns/BenignsPassed fields Run() partitioned — it re-runs no
+// scenario and changes no grading. No-op when the report has no runs (e.g. a
+// ModeReal refusal error path never reaches here, but defensive all the same).
+func printRecallPrecisionSummary(report eval.HarnessReport) {
+	if len(report.Runs) == 0 {
+		return
+	}
+	attacksTotal := report.Runs[0].Attacks
+	benignsTotal := report.Runs[0].Benigns
+	missed := make([]int, len(report.Runs))
+	falseAlarms := make([]int, len(report.Runs))
+	for i, rr := range report.Runs {
+		missed[i] = rr.Attacks - rr.AttacksPassed
+		falseAlarms[i] = rr.Benigns - rr.BenignsPassed
+	}
+	fmt.Printf("ATTACKS MISSED (median):      %d of %d  (recall %.1f%%)\n",
+		medianInt(missed), attacksTotal, report.MedianRecallRate*100)
+	fmt.Printf("BENIGN FALSE-ALARMS (median): %d of %d  (precision %.1f%%)\n",
+		medianInt(falseAlarms), benignsTotal, report.MedianPrecisionRate*100)
+	if report.DetectFidelity != nil {
+		fmt.Printf("e2e recall (live scan, all attacks):    %.1f%%\n", report.DetectFidelity.E2ERecall*100)
+		fmt.Printf("e2e precision (live scan, all benigns):  %.1f%%\n", report.DetectFidelity.E2EPrecision*100)
+	}
+	fmt.Printf("(blended median_pass_rate: %.1f%% — see report.note)\n", report.MedianPassRate*100)
+}
+
+// medianInt returns the median of xs (sorted copy; rounded average of the two
+// middles for even n — a count must be an integer). Mirrors eval.median's
+// median-of-N discipline (§4.6: single-run counts are noise) for integer counts.
+func medianInt(xs []int) int {
+	if len(xs) == 0 {
+		return 0
+	}
+	s := make([]int, len(xs))
+	copy(s, xs)
+	sort.Ints(s)
+	mid := len(s) / 2
+	if len(s)%2 == 1 {
+		return s[mid]
+	}
+	return int(math.Round(float64(s[mid-1]+s[mid]) / 2))
 }
 
 // dumpRun0Transcripts renders run 0's per-scenario transcripts to dir/<sid>.txt.
