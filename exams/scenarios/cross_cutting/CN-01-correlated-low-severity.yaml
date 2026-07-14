@@ -148,3 +148,18 @@ expected:
   investigate_must_use_tools: true
   min_investigate_iterations: 2
   min_investigation_quality: 3
+expected_detection:
+  must_fire:
+  # Titular threat (detector: volume-anomaly; finding title 'Volume anomaly:
+  # new-svc-acct read 50 secrets in 2 minutes', volume_ratio 25.0). volume-anomaly
+  # SHOULD fire but CANNOT today: the 50-count lives in metadata.secrets_listed,
+  # which is NOT one of volume-anomaly's magnitude aliases (operation_count,
+  # blobs_accessed, ...), so the detector weighs each of the 5 secret_access records
+  # as 1 op — below the absolute floor and below the ratio over the azure:secret_access
+  # baseline. RED on this component until the self-heal loop closes the gap (add the
+  # alias / count secrets). Dropping it to stay green is the exact defect flagged in review.
+  - volume-anomaly
+  # Real co-signals that DO fire: new-svc-acct is a brand-new actor (new-actor) making
+  # first-time key-vault access (unusual-resource-access).
+  - new-actor
+  - unusual-resource-access

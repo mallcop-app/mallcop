@@ -158,8 +158,43 @@ expected_detection:
 // TestLoad_ExpectedDetectionAbsent verifies a scenario WITHOUT an
 // expected_detection block unmarshals to a nil pointer (the additive-field
 // contract) — such scenarios are skipped by the exam-detect grader.
+//
+// This uses a synthetic in-memory scenario rather than a corpus file: every
+// pinned reference scenario now carries an expected_detection label (selfeval-c7
+// drove the Unlabeled count to 0), so the nil-pointer contract must be pinned
+// against a fixture that is guaranteed to have no block, independent of the
+// corpus's labeling state.
 func TestLoad_ExpectedDetectionAbsent(t *testing.T) {
-	path := scenarioPath(t, "exams/scenarios/identity/ID-01-new-actor-benign-onboarding.yaml")
+	yaml := `id: test-scenario-no-detection
+failure_mode: KA
+detector: volume-anomaly
+category: behavioral
+difficulty: malicious-hard
+finding:
+  id: fnd_001
+  detector: volume-anomaly
+  title: Test finding
+  severity: warn
+events:
+- id: evt_001
+  timestamp: "2026-01-01T00:00:00Z"
+  source: azure
+  event_type: storage_access
+  actor: ci-bot
+  action: read_blob
+  target: sub-1/storageAccounts/foo
+  severity: warn
+baseline:
+  known_entities:
+    actors:
+    - ci-bot
+    sources:
+    - azure
+expected:
+  chain_action: escalated
+  triage_action: escalated
+`
+	path := writeTempYAML(t, yaml)
 	s, err := exam.Load(path)
 	if err != nil {
 		t.Fatalf("Load returned unexpected error: %v", err)

@@ -127,3 +127,14 @@ expected:
   investigate_must_use_tools: true
   min_investigate_iterations: 2
   min_investigation_quality: 3
+expected_detection:
+  must_fire:
+  # Titular threat (detector: unusual-timing; finding title 'Unusual timing:
+  # admin-user active at 02:22 UTC' — the canonical off-hours stolen-credential
+  # pattern). unusual-timing SHOULD fire but CANNOT today: this scenario's baseline
+  # carries no actor-hours profile, and unusual_timing.go returns nil when
+  # !HasActorHours. RED on this component until the self-heal loop closes the gap —
+  # the same situation as the honestly-RED TD-01 (03:22 UTC) and BG-01 (23:58 UTC).
+  - unusual-timing
+  # Real co-signal that DOES fire: the 312-op bulk_read is a genuine volume spike.
+  - volume-anomaly
