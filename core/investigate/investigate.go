@@ -63,6 +63,19 @@ Available tools:
   - github_actor     live GitHub lookup for a login: real profile, account type, and
                      recent public activity — including whether the login is
                      GitHub's reserved 'ghost' deleted-account tombstone
+  - run-eval         run the operator's own recall-first eval (identical to the CLI's
+                     'mallcop eval --json'): reports missed attacks and false alarms
+                     for the operator's OWN scenarios separately from the shipped
+                     reference corpus, never blended. Use this to answer "am I
+                     missing real attacks?" / "what's my miss rate?"
+  - flag-like-this   capture finding/event ids from this conversation into a local
+                     scenario file (identical to the CLI's 'mallcop scenario
+                     capture'), labeled with the operator's stated ground truth (an
+                     attack family that must fire, or a benign family that must not).
+                     Writes only to the operator's own repo and changes no runtime
+                     detection behavior — safe to do at every autonomy setting. Use
+                     this when the operator says something like "flag things like
+                     this as <attack>" or "I've seen this exact shape before".
 
 Call a tool whenever you need to look something up. Never fabricate an event
 ID, actor, timestamp, or finding — only state facts a tool actually returned.
@@ -98,6 +111,16 @@ type Options struct {
 	MaxTurns int
 	// System overrides the default system prompt; "" uses defaultSystemPrompt.
 	System string
+
+	// MallcopBinary optionally pins the executable the run-eval and
+	// flag-like-this tools self-exec (evaltools.go). Empty (the production
+	// default) resolves to os.Executable(): core/investigate only ever runs
+	// AS the `mallcop investigate` subcommand of some mallcop binary, so
+	// self-exec re-runs that SAME binary with a different subcommand --
+	// literally `mallcop eval` / `mallcop scenario capture`, never a
+	// parallel implementation of either. Tests pin this to a binary built
+	// from the checkout under test.
+	MallcopBinary string
 }
 
 // Result is the outcome of one Ask call.
@@ -444,6 +467,49 @@ func ToolDefs() []agent.Tool {
 				"required": []string{"login"},
 			},
 		},
+		{
+			Name: "run-eval",
+			Description: "Run the operator's own recall-first eval locally — a thin adapter over the SAME " +
+				"grading path as the CLI's `mallcop eval --json` (never a separate implementation). Reports " +
+				"missed attacks and false alarms for the OPERATOR'S OWN scenarios/ corpus separately from the " +
+				"shipped reference corpus, never blended, so the answer to 'am I missing real attacks?' is " +
+				"never inflated by the reference corpus's own (already-vetted) numbers. Read-only: it changes " +
+				"no runtime behavior and is safe to run at every autonomy dial setting. If the operator has no " +
+				"scenarios/ corpus yet, or their repo cannot be resolved, this returns an honest error rather " +
+				"than a fabricated report — never invent a miss rate without calling this tool. Takes no input.",
+			InputSchema: map[string]any{
+				"type":       "object",
+				"properties": map[string]any{},
+			},
+		},
+		{
+			Name: "flag-like-this",
+			Description: "Capture finding/event ids from this conversation into a local scenario file — a " +
+				"thin adapter over the SAME code path as the CLI's `mallcop scenario capture` (never a " +
+				"separate implementation). Use this when the operator names an attack shape they saw (or fear) " +
+				"in specific events/findings ('flag things like this as <family>'), or a benign activity that " +
+				"was false-alarmed. Pass must_fire for an attack that MUST be detected (set reserved=true if " +
+				"you know of no registered detector for that family yet — it becomes a tracked gap, not a " +
+				"fabricated pass), or must_not_fire for a benign twin. This WRITES a scenario YAML file, but " +
+				"only into the operator's OWN repo (their scenarios/ directory) — it changes no runtime " +
+				"detection behavior, is graded only the next time `mallcop eval` runs, and is never applied " +
+				"automatically. That makes it propose-safe at every autonomy dial setting, including the most " +
+				"conservative ('non') — there is nothing to escalate for approval.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"event_ids":     map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Finding/event IDs from this conversation to capture (maps to --event-ids). The primary selector for a chat-driven capture."},
+					"actor":         map[string]any{"type": "string", "description": "Alternative selector: capture this actor's own recent activity (requires window)."},
+					"window":        map[string]any{"type": "string", "description": "Duration paired with actor, e.g. \"24h\" (requires actor)."},
+					"must_fire":     map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Detector family token(s) this event set MUST trigger — an attack the operator saw or fears. Mutually exclusive with must_not_fire."},
+					"must_not_fire": map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Detector family token(s) this event set must NOT trigger — a benign activity that was false-alarmed. Mutually exclusive with must_fire."},
+					"reserved":      map[string]any{"type": "boolean", "description": "Mark must_fire as a RESERVED TEST: the operator is naming an attack shape with no registered detector yet. Invalid with must_not_fire."},
+					"title":         map[string]any{"type": "string", "description": "Optional finding title override."},
+					"severity":      map[string]any{"type": "string", "description": "Optional finding severity override (default medium)."},
+					"id":            map[string]any{"type": "string", "description": "Optional scenario id override (default: auto-generated from the family + events)."},
+				},
+			},
+		},
 	}
 }
 
@@ -505,6 +571,20 @@ func ExecuteTool(opts Options, name string, input any) (any, error) {
 		// request timeout internally rather than widening this dispatch
 		// table's signature for one tool.
 		return tools.GithubActor(context.Background(), in)
+
+	case "run-eval":
+		// Takes no input. Implementation in evaltools.go: shells the SAME CLI
+		// path as `mallcop eval --json`, never a parallel implementation.
+		return runEvalTool(opts)
+
+	case "flag-like-this":
+		var in FlagLikeThisInput
+		if err := json.Unmarshal(raw, &in); err != nil {
+			return nil, fmt.Errorf("decode flag-like-this input: %w", err)
+		}
+		// Implementation in evaltools.go: shells the SAME CLI path as
+		// `mallcop scenario capture`, never a parallel implementation.
+		return flagLikeThisTool(opts, in)
 
 	default:
 		return nil, fmt.Errorf("unknown tool %q", name)

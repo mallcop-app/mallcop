@@ -294,6 +294,14 @@ func summarizeToolResult(name string, result any, err error) string {
 		if r, ok := result.(tools.LookupRulesOutput); ok {
 			return fmt.Sprintf("%d rule(s) matched", len(r.Rules))
 		}
+	case "run-eval":
+		if r, ok := result.(RunEvalOutput); ok {
+			return r.Summary
+		}
+	case "flag-like-this":
+		if r, ok := result.(FlagLikeThisOutput); ok {
+			return fmt.Sprintf("captured %s -> %s", r.ScenarioID, r.Path)
+		}
 	}
 	// Generic fallback: marshal and report byte length only (never the
 	// content itself, to honor "the underlying data stays in the runner").
