@@ -29,6 +29,8 @@ import (
 func runExamDetect(args []string) error {
 	fs := flag.NewFlagSet("exam-detect", flag.ContinueOnError)
 	jsonOut := fs.Bool("json", false, "Output the report as JSON")
+	recall := fs.Bool("recall", false, "Print the RECALL-FIRST breakdown instead of the per-scenario pass/fail: RECALL (attacks caught / must-fire, with missed attacks named) and PRECISION (benign kept silent / must-stay-silent, with false alarms named) reported separately — the honest denominator the self-heal loop needs")
+	reportMode := fs.String("report", "", "Report mode. \"recall\" is equivalent to --recall; empty keeps the default per-scenario view")
 	tuningPath := fs.String("tuning", "", "Optional path to a detector tuning YAML (widen-only extra_* knobs)")
 	sidecarSrc := fs.String("sidecar-src", "", "Optional Go package directory to build to a wasip1 .wasm module and grade IN ADDITION to any configured sidecars — the CUSTOMER-TREE exam mode (mallcoppro-cc3e): the detector need not live in this repo's own tree at all, only be a valid Go package implementing core/detect.Detector via pkg/detectorhost")
 	extraScenariosDir := fs.String("extra-scenarios-dir", "", "Optional directory of scenario YAML files to UNION into grading IN ADDITION to the pinned reference corpus (mallcoppro-f95) — e.g. a customer detector's OWN co-located detectors/<name>/scenarios/ efficacy scenarios. UNPINNED: never verified against corpus.pin, never counted in the reference corpus's own digest")
@@ -77,14 +79,30 @@ func runExamDetect(args []string) error {
 		return err
 	}
 
-	if *jsonOut {
+	// --recall / --report=recall selects the recall-first breakdown. It is a
+	// second lens on the SAME graded rows — it re-runs no detector and does not
+	// change grading, so the exit code below (and the whole flag-off path CI /
+	// selfgate parse) is byte-identical whether or not this flag is set.
+	recallMode := *recall || strings.EqualFold(strings.TrimSpace(*reportMode), "recall")
+
+	switch {
+	case recallMode && *jsonOut:
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetEscapeHTML(false)
+		enc.SetIndent("", "  ")
+		if err := enc.Encode(eval.RecallFromReport(report)); err != nil {
+			return fmt.Errorf("encoding recall report: %w", err)
+		}
+	case recallMode:
+		printRecallReport(eval.RecallFromReport(report))
+	case *jsonOut:
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetEscapeHTML(false)
 		enc.SetIndent("", "  ")
 		if err := enc.Encode(report); err != nil {
 			return fmt.Errorf("encoding report: %w", err)
 		}
-	} else {
+	default:
 		printExamDetectReport(report)
 	}
 
@@ -118,4 +136,34 @@ func printExamDetectReport(report eval.ExamDetectReport) {
 	t := report.Totals
 	fmt.Printf("exam-detect: %d labeled (%d passed, %d failed), %d unlabeled (skipped)\n",
 		t.Labeled, t.Passed, t.Failed, t.Unlabeled)
+}
+
+// printRecallReport renders the recall-first breakdown: RECALL (attacks caught)
+// and PRECISION (benign kept silent) separately, with the MISSED attacks — the
+// fatal failures — named prominently and the false alarms named beneath
+// precision.
+func printRecallReport(rr eval.RecallReport) {
+	rc := rr.Recall
+	fmt.Printf("RECALL (attacks caught):        %d/%d = %.1f%%\n",
+		rc.Detected, rc.MustFire, rc.Rate*100)
+	if len(rc.Missed) > 0 {
+		fmt.Printf("  MISSED ATTACKS (%d) — fatal false-negatives, these attacks were NOT detected:\n", len(rc.Missed))
+		for _, m := range rc.Missed {
+			note := ""
+			if m.Reserved {
+				note = " (reserved: detector not authored yet)"
+			}
+			fmt.Printf("    - %-40s missing: %s%s\n", m.ScenarioID, strings.Join(m.Missing, ", "), note)
+		}
+	}
+
+	pr := rr.Precision
+	fmt.Printf("PRECISION (benign kept silent): %d/%d = %.1f%%\n",
+		pr.CorrectSilent, pr.MustStaySilent, pr.Rate*100)
+	if len(pr.FalseAlarms) > 0 {
+		fmt.Printf("  FALSE ALARMS (%d) — benign scenarios that fired:\n", len(pr.FalseAlarms))
+		for _, fa := range pr.FalseAlarms {
+			fmt.Printf("    - %-40s fired: %s\n", fa.ScenarioID, strings.Join(fa.Fired, ", "))
+		}
+	}
 }
