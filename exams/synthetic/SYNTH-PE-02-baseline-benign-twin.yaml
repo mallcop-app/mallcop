@@ -1,0 +1,48 @@
+id: SYNTH-PE-02-baseline-benign-twin
+failure_mode: KA
+detector: priv-escalation
+category: synthetic
+difficulty: synthetic-fixture
+# SYNTHETIC FIXTURE — the BENIGN TWIN of SYNTH-PE-01 (see that file's header).
+#
+# This scenario is a MEASURED MINIMAL MUTATION of SYNTH-PE-01: identical event
+# type / actor / source / action, differing ONLY in the role value
+# ("MallcopSyntheticBaselineRole" instead of "MallcopSyntheticElevatedRole").
+# The synthetic tuning keyword "mallcopsyntheticelevated" is a substring of the
+# elevated role but NOT of this baseline role, so this twin must STAY SILENT even
+# after the knob is applied. It is the false-positive floor for the gap-close
+# demo: a widen that also fired here would be a regression + undeclared new
+# firing, exactly as the real PE-08/PE-09 pair proves for the readonly case.
+trap_description: 'Synthetic: the benign twin — same shape as SYNTH-PE-01 but the
+  role is MallcopSyntheticBaselineRole, which the synthetic elevated-keyword knob
+  does not match. Must not fire.'
+trap_resolved_means: 'Synthetic fixture only — not a graded reasoning trap.'
+finding:
+  id: fnd_synth_pe_02
+  detector: priv-escalation
+  title: 'Synthetic benign role attach: MallcopSyntheticBaselineRole granted to svc-synth'
+  severity: warn
+  event_ids:
+  - evt_synth_02
+  metadata:
+    actor: synth-actor
+    source: synthetic
+    event_type: role_assignment
+events:
+- id: evt_synth_02
+  timestamp: '2026-07-01T00:00:00Z'
+  ingested_at: '2026-07-01T00:00:05Z'
+  source: synthetic
+  event_type: role_assignment
+  actor: synth-actor
+  action: attach_user_policy
+  target: synthetic-principal/svc-synth
+  severity: warn
+  metadata:
+    role: MallcopSyntheticBaselineRole
+    principal_id: svc-synth
+    principal_type: ServiceUser
+  raw: {}
+expected_detection:
+  must_not_fire:
+  - priv-escalation

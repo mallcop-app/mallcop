@@ -2,6 +2,7 @@ package cli
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -126,37 +127,53 @@ func TestRunValidateProposal_RequiresBase(t *testing.T) {
 }
 
 // TestRunValidateProposal_FullFreeTierByDefault proves the CLI runs ALL free
-// stages by default (no --guard-only): over a clone of the REAL repo, a
-// tuning-only widen proposal (base = tuning.yaml without the poweruser
-// keyword, head = the committed state that closes PE-08) passes guard,
-// structural, AND exam-detect, with coverage +1, and exits 0. Also exercises
-// the --head default (HEAD, detached at the real head commit).
+// stages by default (no --guard-only): over a clone of the REAL repo, the
+// SYNTHETIC tuning widen (base = the synthetic gap-close pair injected with the
+// gap OPEN, head = the synthetic elevated keyword added) passes guard,
+// structural, AND exam-detect, with coverage +1, and exits 0. Uses the synthetic
+// pair (exams/synthetic/) so it depends on NO real corpus scenario (rd
+// mallcoppro-a07 / S1).
 func TestRunValidateProposal_FullFreeTierByDefault(t *testing.T) {
 	root := cliRepoUnderTest(t)
 	clone := filepath.Join(t.TempDir(), "clone")
 	gitProposal(t, filepath.Dir(clone), "clone", "-q", "--no-hardlinks", root, clone)
-	head := gitProposal(t, clone, "rev-parse", "HEAD")
 
-	// Fixture base: the committed tuning minus the poweruser keyword — the
-	// PE-08 detection gap re-opens at base and is closed at head.
+	// BASE: inject the synthetic gap-close pair into the pinned corpus (gap OPEN
+	// — SYNTH-PE-01 RED), regenerate the pin, commit.
+	synthDir := filepath.Join(clone, "exams", "scenarios", "synthetic")
+	if err := os.MkdirAll(synthDir, 0o755); err != nil {
+		t.Fatalf("mkdir synthetic: %v", err)
+	}
+	for _, name := range []string{"SYNTH-PE-01-elevated-must-fire.yaml", "SYNTH-PE-02-baseline-benign-twin.yaml"} {
+		data, err := os.ReadFile(filepath.Join(root, "exams", "synthetic", name))
+		if err != nil {
+			t.Fatalf("read synthetic fixture %s: %v", name, err)
+		}
+		if err := os.WriteFile(filepath.Join(synthDir, name), data, 0o644); err != nil {
+			t.Fatalf("inject %s: %v", name, err)
+		}
+	}
+	count, sha := cliRecomputeCorpusPin(t, clone)
+	if err := os.WriteFile(filepath.Join(clone, "exams", "scenarios", "corpus.pin"),
+		[]byte(fmt.Sprintf("# fixture pin (synthetic gap-close injection)\ncount %d\nsha256 %s\n", count, sha)), 0o644); err != nil {
+		t.Fatalf("write pin: %v", err)
+	}
+	base := commitProposal(t, clone, "fixture base: synthetic gap-close pair injected, gap OPEN")
+
+	// HEAD: the widen — append the synthetic elevated keyword to tuning.yaml.
 	tuningPath := filepath.Join(clone, "detectors", "tuning.yaml")
 	tuning, err := os.ReadFile(tuningPath)
 	if err != nil {
 		t.Fatalf("read tuning.yaml: %v", err)
 	}
-	const anchor = "\n    - poweruser"
-	if n := strings.Count(string(tuning), anchor); n != 1 {
-		t.Fatalf("expected exactly 1 occurrence of %q in the real tuning.yaml, found %d — update the fixture", anchor, n)
-	}
-	if err := os.WriteFile(tuningPath, []byte(strings.Replace(string(tuning), anchor, "", 1)), 0o644); err != nil {
+	if err := os.WriteFile(tuningPath, []byte(string(tuning)+"    - mallcopsyntheticelevated\n"), 0o644); err != nil {
 		t.Fatalf("write tuning.yaml: %v", err)
 	}
-	base := commitProposal(t, clone, "fixture base: reopen the PE-08 gap")
-	gitProposal(t, clone, "checkout", "-q", head) // --head defaults to HEAD
+	head := commitProposal(t, clone, "proposal: synthetic tuning widen closes SYNTH-PE-01")
 
 	t.Chdir(clone)
 	out, err := withStdio(t, "", func() error {
-		return runValidateProposal([]string{"--base", base, "--json"})
+		return runValidateProposal([]string{"--base", base, "--head", head, "--json"})
 	})
 	if err != nil {
 		t.Fatalf("expected the full free tier to pass, got %v\n%s", err, out)
@@ -175,7 +192,7 @@ func TestRunValidateProposal_FullFreeTierByDefault(t *testing.T) {
 		t.Fatalf("expected all three free stages to run by default, got %+v", result.Stages)
 	}
 	if result.CoveragePlus != 1 {
-		t.Fatalf("CoveragePlus = %d, want 1 (the PE-08 close)\n%s", result.CoveragePlus, out)
+		t.Fatalf("CoveragePlus = %d, want 1 (the SYNTH-PE-01 close)\n%s", result.CoveragePlus, out)
 	}
 	if result.BaseSHA != base || result.HeadSHA != head {
 		t.Fatalf("SHAs not carried: base %s (want %s), head %s (want %s)", result.BaseSHA, base, result.HeadSHA, head)
