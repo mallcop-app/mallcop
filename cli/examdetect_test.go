@@ -28,30 +28,46 @@ func repoRootForExamTest(t *testing.T) string {
 
 // TestRunExamDetect_RemainingGapExitsRed proves the CLI surfaces a
 // labeled-and-unfixed detection gap as the errFindings sentinel (exit code 1).
-// Two labeled gaps that used to anchor this test are now CLOSED — VA-03 (the
-// volume field/unit contract, mallcoppro-3c9) and IP-01 (the SQLi-in-User-Agent
-// injection probe, now caught by the injection-probe family's classic-injection
-// signatures) both show PASS. PE-08 (the AWS PowerUserAccess grant) remains a
-// real labeled false negative with no default detector or tuning, so the exam
-// still exits red and the human report shows both closed and open rows.
 //
-// PE-08 is closable by a priv-escalation tuning overlay that a sibling test
-// (TestRunExamDetect_ConfigTuningClosesPE) publishes into the process-global
-// detector state, so this test first calls detect.ResetTuning to restore the
-// pristine (untuned) snapshot — making PE-08 reliably RED regardless of test
-// run order.
+// Every labeled gap that used to anchor this test is now CLOSED — VA-03 (the
+// volume field/unit contract, mallcoppro-3c9), IP-01 (the SQLi-in-User-Agent
+// injection probe, injection-probe's classic-injection signatures), and PE-08
+// (the AWS PowerUserAccess grant, now a built-in priv-escalation keyword,
+// mallcoppro-a07) all show PASS out of the box — the REAL pinned corpus has
+// ZERO remaining labeled gaps. That is the fix landing, not a regression: an
+// always-green corpus can no longer demonstrate "the CLI surfaces a gap as
+// exit 1" at all, so this test injects the PURPOSE-BUILT synthetic pair
+// (SYNTH-PE-01 must-fire + SYNTH-PE-02 benign twin, exams/synthetic/) into a
+// throwaway clone of the pinned corpus via injectSyntheticCorpus (same helper
+// TestRunExamDetect_ConfigTuningClosesPE uses, cli/detect_config_test.go) — a
+// gap that is UNCLOSABLE without tuning BY CONSTRUCTION
+// (core/detect/synthdemo_invariant_test.go), so this regression can never
+// again be invalidated by a future promotion into the builtin vocabulary.
+//
+// detect.ResetTuning restores the pristine (untuned) snapshot first, so
+// SYNTH-PE-01 is reliably RED regardless of test run order (a sibling test,
+// TestRunExamDetect_ConfigTuningClosesPE, publishes a tuning overlay into the
+// same process-global detector state).
 func TestRunExamDetect_RemainingGapExitsRed(t *testing.T) {
 	detect.ResetTuning()
 	t.Cleanup(detect.ResetTuning)
-	t.Setenv("MALLCOP_REPO_ROOT", repoRootForExamTest(t))
+	root := injectSyntheticCorpus(t)
+	t.Setenv("MALLCOP_REPO_ROOT", root)
 
 	out, err := withStdio(t, "", func() error { return runExamDetect(nil) })
 
 	// Detection gaps present → errFindings sentinel (exit code 1), not a real error.
 	if !isFindingsError(err) {
-		t.Fatalf("expected findings sentinel error while PE-08 is labeled-and-unfixed, got %v\noutput:\n%s", err, out)
+		t.Fatalf("expected findings sentinel error while %s is labeled-and-unfixed, got %v\noutput:\n%s", synthMustFireID, err, out)
 	}
-	for _, want := range []string{"FAIL PE-08-aws-poweruser-grant", "PASS IP-01-sqli-user-agent", "PASS VA-03-data-exfil", "PASS AC-01-external-access-stolen-cred", "exam-detect:"} {
+	for _, want := range []string{
+		"FAIL " + synthMustFireID,
+		"PASS PE-08-aws-poweruser-grant",
+		"PASS IP-01-sqli-user-agent",
+		"PASS VA-03-data-exfil",
+		"PASS AC-01-external-access-stolen-cred",
+		"exam-detect:",
+	} {
 		if !containsLine(out, want) {
 			t.Errorf("human output missing %q; got:\n%s", want, out)
 		}
@@ -88,10 +104,15 @@ func splitLines(s string) []string {
 // {scenario_id, must_fire, must_not_fire, emitted, pass} and totals with
 // {labeled, unlabeled, passed, failed} — the machine contract the self-extension
 // loop reads.
+//
+// Uses the injected synthetic gap (see TestRunExamDetect_RemainingGapExitsRed's
+// doc comment) as its "still failing" row: the real pinned corpus has zero
+// labeled gaps on its own now that PE-08 is a built-in (mallcoppro-a07).
 func TestRunExamDetect_JSONShape(t *testing.T) {
 	detect.ResetTuning()
 	t.Cleanup(detect.ResetTuning)
-	t.Setenv("MALLCOP_REPO_ROOT", repoRootForExamTest(t))
+	root := injectSyntheticCorpus(t)
+	t.Setenv("MALLCOP_REPO_ROOT", root)
 
 	out, err := withStdio(t, "", func() error { return runExamDetect([]string{"--json"}) })
 	if !isFindingsError(err) {
@@ -124,7 +145,7 @@ func TestRunExamDetect_JSONShape(t *testing.T) {
 		t.Errorf("passed(%d) + failed(%d) != labeled(%d)", report.Totals.Passed, report.Totals.Failed, report.Totals.Labeled)
 	}
 	if report.Totals.Failed < 1 {
-		t.Errorf("totals.failed = %d, want >= 1 while PE-08 is labeled-and-unfixed", report.Totals.Failed)
+		t.Errorf("totals.failed = %d, want >= 1 while %s is labeled-and-unfixed", report.Totals.Failed, synthMustFireID)
 	}
 
 	var va03Found bool

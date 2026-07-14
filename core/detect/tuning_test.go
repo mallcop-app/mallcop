@@ -31,14 +31,28 @@ func restoreKnobs(s knobSnapshot) {
 	activePrivEscalationTuning.Store(s.pt.clone())
 }
 
+// nonBuiltinTuningTestRole/Keyword are a purpose-built, non-builtin pair used
+// ONLY to exercise the tuning add-only mechanism in this package's tests
+// (TestTuningAddWidensOnly, tuning_race_test.go). "poweruser" was promoted into
+// builtinElevatedKeywords (mallcoppro-a07) so it can no longer stand in for a
+// tuning-only widen — these tests need a role/keyword pair that carries none of
+// priv-escalation's built-in vocabulary, same shape as the exams/synthetic/
+// demo pair but scoped locally (this is the internal `detect` test package;
+// the demo pair's constants live in the external `detect_test` package and
+// cannot be imported here without a cycle).
+const (
+	nonBuiltinTuningTestRole    = "MallcopTuningTestElevatedRole"
+	nonBuiltinTuningTestKeyword = "mallcoptuningtestelevated"
+)
+
 // tuningFixture returns a real events+baseline fixture spanning the
 // priv-escalation surface: firing grants (bare, GCP, Okta, M365 formats), an
 // admin_action, a boundary delete, and non-firing shapes (viewer grant, the
-// PowerUserAccess grant the built-in keywords miss). Distinct actors so the
-// (actor, role) dedup never hides a finding.
+// nonBuiltinTuningTestRole grant the built-in keywords miss by construction).
+// Distinct actors so the (actor, role) dedup never hides a finding.
 func tuningFixture(t *testing.T) ([]event.Event, *baseline.Baseline) {
 	t.Helper()
-	actors := []string{"a-owner", "b-gcp", "c-okta", "d-m365", "e-admin", "f-boundary", "g-viewer", "h-poweruser"}
+	actors := []string{"a-owner", "b-gcp", "c-okta", "d-m365", "e-admin", "f-boundary", "g-viewer", "h-nonbuiltin"}
 	bl := &baseline.Baseline{
 		KnownActors: actors,
 		ActorRoles:  map[string][]string{},
@@ -62,7 +76,7 @@ func tuningFixture(t *testing.T) ([]event.Event, *baseline.Baseline) {
 		{ID: "tf-6", Source: "aws", Type: "iam_change", Actor: "f-boundary", Timestamp: ts(15, 6),
 			Payload: raw(t, map[string]string{"action": "DeleteRolePermissionsBoundary"})},
 		roleEvent("tf-7", "g-viewer", "roles/viewer"),
-		roleEvent("tf-8", "h-poweruser", "PowerUserAccess"),
+		roleEvent("tf-8", "h-nonbuiltin", nonBuiltinTuningTestRole),
 	}
 	return events, bl
 }
@@ -137,14 +151,14 @@ func TestTuningAddWidensOnly(t *testing.T) {
 
 	events, bl := tuningFixture(t)
 
-	// Precondition: no CURRENT keyword matches the poweruser role — otherwise
-	// this test proves nothing.
-	if containsElevatedKeyword("PowerUserAccess", loadPrivEscalationTuning()) {
-		t.Fatal("precondition broken: a built-in keyword already matches PowerUserAccess — pick a different missed role for this test")
+	// Precondition: no CURRENT keyword matches the non-builtin test role —
+	// otherwise this test proves nothing.
+	if containsElevatedKeyword(nonBuiltinTuningTestRole, loadPrivEscalationTuning()) {
+		t.Fatalf("precondition broken: a built-in keyword already matches %s — pick a different non-builtin role for this test", nonBuiltinTuningTestRole)
 	}
 	before := privEscActors(events, bl)
-	if before["h-poweruser"] {
-		t.Fatal("precondition broken: PowerUserAccess grant already fires without tuning")
+	if before["h-nonbuiltin"] {
+		t.Fatalf("precondition broken: %s grant already fires without tuning", nonBuiltinTuningTestRole)
 	}
 	if before["g-viewer"] {
 		t.Fatal("precondition broken: viewer grant fires without tuning")
@@ -157,7 +171,7 @@ func TestTuningAddWidensOnly(t *testing.T) {
 	}
 
 	path := filepath.Join(t.TempDir(), "tuning.yaml")
-	if err := os.WriteFile(path, []byte("priv_escalation:\n  extra_elevated_keywords:\n    - poweruser\n"), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte("priv_escalation:\n  extra_elevated_keywords:\n    - "+nonBuiltinTuningTestKeyword+"\n"), 0o644); err != nil {
 		t.Fatalf("write tuning: %v", err)
 	}
 	tn, err := LoadTuningFile(path)
@@ -168,8 +182,8 @@ func TestTuningAddWidensOnly(t *testing.T) {
 
 	after := privEscActors(events, bl)
 	// WIDENED: the missed grant now fires through the REAL Detect path.
-	if !after["h-poweruser"] {
-		t.Fatalf("PowerUserAccess grant did NOT fire after tuning (fired: %v)", after)
+	if !after["h-nonbuiltin"] {
+		t.Fatalf("%s grant did NOT fire after tuning (fired: %v)", nonBuiltinTuningTestRole, after)
 	}
 	// NO NARROWING: everything that fired before still fires.
 	for _, a := range wantFiring {

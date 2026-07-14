@@ -112,6 +112,11 @@ var builtinElevatedKeywords = map[string]bool{
 	"maintainer":  true,
 	"editor":      true, // GCP primitive role roles/editor: broad project-wide write
 	"fullcontrol": true, // M365 Graph app role, e.g. Sites.FullControl.All
+	// AWS managed policy PowerUserAccess grants full access to everything except
+	// IAM/Organizations management — a general elevated-role name, promoted from
+	// the (now-redundant) detectors/tuning.yaml FN-close entry (PE-08,
+	// mallcoppro-a07) so the grant fires out of the box, no tuning knob needed.
+	"poweruser": true,
 }
 
 // defaultPrivEscalationTuning returns a fresh snapshot seeded from the built-in

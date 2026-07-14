@@ -43,8 +43,12 @@ func TestPrivEscalationTuningNoRace(t *testing.T) {
 			for i := 0; i < iters; i++ {
 				// Each ApplyTuning clones + widens + atomically swaps a fresh
 				// snapshot; it must never mutate a map a reader is iterating.
+				// nonBuiltinTuningTestKeyword (tuning_test.go) is used rather than
+				// "poweruser" — that keyword was promoted into
+				// builtinElevatedKeywords (mallcoppro-a07), so it no longer
+				// exercises a non-builtin add.
 				ApplyTuning(Tuning{PrivEscalation: PrivEscalationTuning{
-					ExtraElevatedKeywords:       []string{"poweruser"},
+					ExtraElevatedKeywords:       []string{nonBuiltinTuningTestKeyword},
 					ExtraElevatedActionKeywords: []string{"attachrolepolicy"},
 					ExtraElevationEventTypes:    []string{"custom_grant"},
 				}})
@@ -87,7 +91,7 @@ func TestApplyTuningDoesNotMutatePublishedSnapshot(t *testing.T) {
 	kwLen, etLen, actLen := len(before.elevatedKeywords), len(before.elevationEventTypes), len(before.elevatedActionKeywords)
 
 	ApplyTuning(Tuning{PrivEscalation: PrivEscalationTuning{
-		ExtraElevatedKeywords:       []string{"poweruser"},
+		ExtraElevatedKeywords:       []string{nonBuiltinTuningTestKeyword},
 		ExtraElevatedActionKeywords: []string{"attachrolepolicy"},
 		ExtraElevationEventTypes:    []string{"custom_grant"},
 	}})
@@ -98,7 +102,7 @@ func TestApplyTuningDoesNotMutatePublishedSnapshot(t *testing.T) {
 	}
 	// And the NEW published snapshot did pick up the widening.
 	after := loadPrivEscalationTuning()
-	if !after.elevatedKeywords["poweruser"] {
+	if !after.elevatedKeywords[nonBuiltinTuningTestKeyword] {
 		t.Fatal("ApplyTuning did not publish the widened snapshot")
 	}
 }
