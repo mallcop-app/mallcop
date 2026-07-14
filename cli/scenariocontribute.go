@@ -26,16 +26,20 @@
 //     VA-03-data-exfil.yaml), in FIRST-SEEN document order so the mapping is
 //     reproducible. The rename also runs as a substring pass over prose
 //     fields (trap_description, trap_resolved_means, finding.title,
-//     reasoning_must_mention/not_mention, event targets) AND over EVERY
+//     reasoning_must_mention/not_mention), event ids/actions/targets,
+//     finding.event_ids, actor_chain actions/targets, tags, connector_tool
+//     names/descriptions, frequency-table actor segments, AND over EVERY
 //     metadata string value and map key at ANY nesting depth (event metadata,
 //     finding metadata, connector_tool returns) — capture copies event
 //     payloads WHOLESALE into metadata, so an actor name inside a payload
 //     field must not survive just because it wasn't in a structured field.
 //  2. IDENTIFIER pass: residual identifier-shaped substrings — UUIDs, email
 //     addresses, hostnames/FQDNs, IPv4 addresses, and long all-hex/digit
-//     runs (subscription ids, cloud account ids) — in event/actor-chain
-//     targets, baseline relationship keys, prose fields, and EVERY metadata
-//     string value (and map key) at ANY nesting depth are replaced with a
+//     runs (subscription ids, cloud account ids) — in the SAME surfaces the
+//     identity pass covers (event ids/actions/targets, finding.event_ids,
+//     actor_chain, tags, connector_tool names/descriptions, baseline
+//     relationship + frequency-table keys, prose fields, and EVERY metadata
+//     string value/map key at ANY nesting depth) are replaced with a
 //     deterministic content-hash token (sub-<hash8>, id-<hash8>,
 //     host-<hash8>.example, ip-<hash8>, user-<hash8>@example.com). ONE hash
 //     cache spans the whole document, so the SAME original identifier always
@@ -171,16 +175,26 @@ var (
 // is one of these is a dotted filename, not an FQDN — skipped so metadata like
 // "policy.json" or "backup.tar.gz" isn't shredded. Anything not listed here
 // still gets scrubbed (over-redaction bias — an exotic real TLD beats a leak).
+//
+// DELIBERATELY ABSENT (review round 2, MED-2): extensions that are ALSO real
+// TLDs — sh (St. Helena; every *.sh docs/status domain), md (Moldova), rs
+// (Serbia), py (Paraguay), zip (Google gTLD). "status.realcorp.sh" was
+// transmitted verbatim because "sh" sat in this list. A shell script named
+// deploy.sh in metadata now gets hostname-tokenized instead — over-redaction
+// bias: a mangled filename beats a leaked real domain, and the ledger shows
+// the operator exactly what was replaced. Single-letter c/h are also out:
+// the hostname RE's {2,24} final-label floor means they can never match, so
+// listing them only suggested a protection that never existed.
 var contributeFilenameExtensions = map[string]bool{
-	"json": true, "yaml": true, "yml": true, "txt": true, "log": true, "md": true,
+	"json": true, "yaml": true, "yml": true, "txt": true, "log": true,
 	"csv": true, "xml": true, "html": true, "htm": true, "js": true, "mjs": true,
-	"ts": true, "tsx": true, "jsx": true, "py": true, "go": true, "rb": true,
-	"sh": true, "exe": true, "dll": true, "gz": true, "tar": true, "zip": true,
+	"ts": true, "tsx": true, "jsx": true, "go": true, "rb": true,
+	"exe": true, "dll": true, "gz": true, "tar": true,
 	"tgz": true, "pdf": true, "png": true, "jpg": true, "jpeg": true, "gif": true,
 	"svg": true, "ico": true, "css": true, "lock": true, "toml": true, "ini": true,
 	"cfg": true, "conf": true, "bak": true, "tmp": true, "sql": true, "db": true,
 	"pem": true, "crt": true, "key": true, "pub": true, "jar": true, "war": true,
-	"sock": true, "service": true, "timer": true, "rs": true, "c": true, "h": true,
+	"sock": true, "service": true, "timer": true,
 	"cpp": true, "java": true, "php": true, "wasm": true, "bin": true,
 }
 
@@ -690,6 +704,24 @@ func collectContributeActors(sc *exam.Scenario) []string {
 				add(actor)
 			}
 		}
+
+		// frequency_tables keys carry the actor as the THIRD colon segment:
+		// "source:event_type:actor" and the extended
+		// "source:event_type:actor:N:period" (pkg/baseline/baseline.go's
+		// ActorTypeCount key construction; VA-03's baseline shows both forms).
+		// An actor that appears ONLY here (aged out of events but still
+		// baselined) must still be collected, or its freq-key occurrences
+		// would never be renamed (review round 2, HIGH-2).
+		var freqKeys []string
+		for k := range sc.Baseline.FrequencyTables {
+			freqKeys = append(freqKeys, k)
+		}
+		sort.Strings(freqKeys)
+		for _, k := range freqKeys {
+			if segs := strings.Split(k, ":"); len(segs) >= 3 {
+				add(segs[2])
+			}
+		}
 	}
 	return order
 }
@@ -697,15 +729,53 @@ func collectContributeActors(sc *exam.Scenario) []string {
 // buildContributeActorMap assigns each distinct actor a canonical token from
 // contributeCanonicalActorPool, in first-seen order; overflow beyond the pool
 // falls back to a deterministic content-hash token.
+//
+// COLLISION AVOIDANCE (review round 2, MED-1): a pool token that contains —
+// or is contained by — any collected actor original is skipped. Without this,
+// an actor literally named "admin" could land another actor on the pool token
+// "admin-user"; the transmitted YAML would then contain the substring "admin"
+// inside a CANONICAL token, and the fail-closed residue gate would hard-abort
+// a perfectly sanitized contribution (a false positive, with a message
+// misdiagnosing it as a leak). Skipping conflicted tokens keeps the gate's
+// simple substring check sound. Originals shorter than 3 bytes are ignored,
+// matching the gate's own skip. The hash fallback salts until conflict-free
+// (deterministic: same actor set -> same tokens).
 func buildContributeActorMap(sc *exam.Scenario) map[string]string {
 	actors := collectContributeActors(sc)
-	m := make(map[string]string, len(actors))
-	for i, a := range actors {
-		if i < len(contributeCanonicalActorPool) {
-			m[a] = contributeCanonicalActorPool[i]
-		} else {
-			m[a] = "actor-" + contentHashToken(a, 6)
+	conflicts := func(tok string) bool {
+		for _, o := range actors {
+			if len(o) < 3 {
+				continue
+			}
+			if strings.Contains(tok, o) || strings.Contains(o, tok) {
+				return true
+			}
 		}
+		return false
+	}
+
+	m := make(map[string]string, len(actors))
+	poolIdx := 0
+	for _, a := range actors {
+		tok := ""
+		for poolIdx < len(contributeCanonicalActorPool) {
+			cand := contributeCanonicalActorPool[poolIdx]
+			poolIdx++
+			if !conflicts(cand) {
+				tok = cand
+				break
+			}
+		}
+		if tok == "" {
+			for salt := 0; ; salt++ {
+				cand := "actor-" + contentHashToken(fmt.Sprintf("%s#%d", a, salt), 6)
+				if !conflicts(cand) {
+					tok = cand
+					break
+				}
+			}
+		}
+		m[a] = tok
 	}
 	return m
 }
@@ -739,6 +809,7 @@ func applyActorRenames(sc *exam.Scenario, actorMap map[string]string) {
 		sc.Baseline.KnownEntities.ActorRoles = renameActorRoleKeys(sc.Baseline.KnownEntities.ActorRoles, actorMap)
 		sc.Baseline.KnownEntities.ActorHours = renameActorHourKeys(sc.Baseline.KnownEntities.ActorHours, actorMap)
 		sc.Baseline.Relationships = renameRelationshipActorKeys(sc.Baseline.Relationships, actorMap)
+		sc.Baseline.FrequencyTables = renameFrequencyTableActorSegments(sc.Baseline.FrequencyTables, actorMap)
 	}
 
 	// Longest-original-first substring pass: prevents a short actor value
@@ -773,9 +844,29 @@ func applyActorRenames(sc *exam.Scenario, actorMap map[string]string) {
 	}
 	for i := range sc.Events {
 		sc.Events[i].Target = substProse(sc.Events[i].Target)
+		// Event ids and actions transmit too (review round 2, HIGH-1): capture
+		// PROMOTES action straight from the payload ("grant-to <email>"), and
+		// connector event ids routinely embed identifying content. finding.
+		// event_ids gets the IDENTICAL deterministic transform below, so the
+		// cross-reference stays intact.
+		sc.Events[i].ID = substProse(sc.Events[i].ID)
+		sc.Events[i].Action = substProse(sc.Events[i].Action)
 	}
 	for i := range sc.ActorChain {
 		sc.ActorChain[i].Target = substProse(sc.ActorChain[i].Target)
+		sc.ActorChain[i].Action = substProse(sc.ActorChain[i].Action)
+	}
+	if sc.Finding != nil {
+		for i, id := range sc.Finding.EventIDs {
+			sc.Finding.EventIDs[i] = substProse(id)
+		}
+	}
+	for i, tag := range sc.Tags {
+		sc.Tags[i] = substProse(tag)
+	}
+	for i := range sc.ConnectorTools {
+		sc.ConnectorTools[i].Name = substProse(sc.ConnectorTools[i].Name)
+		sc.ConnectorTools[i].Description = substProse(sc.ConnectorTools[i].Description)
 	}
 
 	// Metadata walk: capture copies event payloads WHOLESALE into metadata, so
@@ -852,6 +943,32 @@ func renameActorHourKeys(m map[string][]int, actorMap map[string]string) map[str
 	return out
 }
 
+// renameFrequencyTableActorSegments rewrites every colon segment of every
+// frequency_tables key that EXACTLY matches a collected actor original
+// (review round 2, HIGH-2 — freq keys are "source:event_type:actor" or
+// "source:event_type:actor:N:period", so every captured-with-baseline
+// scenario carries the actor in these keys). Exact per-segment matching is
+// position-independent — it renames the actor wherever the key format puts
+// it — and cannot corrupt source/event_type segments, which are never in the
+// actor map. The COUNT VALUES are never touched: they are exactly the
+// baseline data volume/timing detectors grade on.
+func renameFrequencyTableActorSegments(m map[string]int, actorMap map[string]string) map[string]int {
+	if m == nil {
+		return nil
+	}
+	out := make(map[string]int, len(m))
+	for k, v := range m {
+		segs := strings.Split(k, ":")
+		for i, seg := range segs {
+			if canon, ok := actorMap[seg]; ok {
+				segs[i] = canon
+			}
+		}
+		out[strings.Join(segs, ":")] = v
+	}
+	return out
+}
+
 // renameRelationshipActorKeys rewrites the ACTOR half of every
 // "actor:target" relationship key (strings.Cut splits on the FIRST ':' only —
 // actor tokens never contain a colon, so this always isolates the actor
@@ -897,9 +1014,19 @@ func applyIdentifierRenames(sc *exam.Scenario, canonActors map[string]bool) []co
 
 	for i := range sc.Events {
 		sc.Events[i].Target = scrub(sc.Events[i].Target)
+		// Event ids and actions transmit too (review round 2, HIGH-1): azure
+		// activity-log ids embed UUIDs; capture promotes action from the raw
+		// payload. The scrub is span-based (only identifier-shaped substrings
+		// are replaced) and deterministic through the shared hash cache, so
+		// event-id ORDERING and UNIQUENESS survive — distinct originals yield
+		// distinct tokens, and finding.event_ids (scrubbed identically below)
+		// keeps referencing the right events.
+		sc.Events[i].ID = scrub(sc.Events[i].ID)
+		sc.Events[i].Action = scrub(sc.Events[i].Action)
 	}
 	for i := range sc.ActorChain {
 		sc.ActorChain[i].Target = scrub(sc.ActorChain[i].Target)
+		sc.ActorChain[i].Action = scrub(sc.ActorChain[i].Action)
 	}
 	if sc.Baseline != nil && sc.Baseline.Relationships != nil {
 		renamed := make(map[string]exam.RelationshipEntry, len(sc.Baseline.Relationships))
@@ -908,10 +1035,27 @@ func applyIdentifierRenames(sc *exam.Scenario, canonActors map[string]bool) []co
 		}
 		sc.Baseline.Relationships = renamed
 	}
+	if sc.Baseline != nil && sc.Baseline.FrequencyTables != nil {
+		renamed := make(map[string]int, len(sc.Baseline.FrequencyTables))
+		for k, v := range sc.Baseline.FrequencyTables {
+			renamed[scrub(k)] = v
+		}
+		sc.Baseline.FrequencyTables = renamed
+	}
 	sc.TrapDescription = scrub(sc.TrapDescription)
 	sc.TrapResolvedMeans = scrub(sc.TrapResolvedMeans)
 	if sc.Finding != nil {
 		sc.Finding.Title = scrub(sc.Finding.Title)
+		for i, id := range sc.Finding.EventIDs {
+			sc.Finding.EventIDs[i] = scrub(id)
+		}
+	}
+	for i, tag := range sc.Tags {
+		sc.Tags[i] = scrub(tag)
+	}
+	for i := range sc.ConnectorTools {
+		sc.ConnectorTools[i].Name = scrub(sc.ConnectorTools[i].Name)
+		sc.ConnectorTools[i].Description = scrub(sc.ConnectorTools[i].Description)
 	}
 	if sc.ExpectedResolution != nil {
 		for i, m := range sc.ExpectedResolution.ReasoningMustMention {
@@ -1313,7 +1457,7 @@ func verifyLedgerResidue(artifact string, data []byte, diff contributeDiff) erro
 				continue
 			}
 			if strings.Contains(string(data), r.Original) {
-				return fmt.Errorf("SANITIZE RESIDUE in %s: %s original %q still present after sanitize -- refusing to proceed (fail-closed; nothing has left this machine)", artifact, kind, r.Original)
+				return fmt.Errorf("SANITIZE RESIDUE in %s: %s original %q still present after sanitize -- refusing to proceed (fail-closed; nothing has left this machine). If every visible occurrence of this value was in fact replaced, the residue is inside a CANONICAL token that happens to contain it -- a tokenizer collision, not a leak; please report it (buildContributeActorMap's collision avoidance should make this unreachable)", artifact, kind, r.Original)
 			}
 		}
 		return nil

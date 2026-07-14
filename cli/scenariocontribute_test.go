@@ -914,3 +914,362 @@ func TestOpenContributePR_CommandConstruction_OwnerPath(t *testing.T) {
 	}
 	_ = cloneDir
 }
+
+// --- adversarial-review regressions (PR #192 REVISE round 2) -------------------
+
+// contributeAuxFieldLeakFixtureYAML reproduces the round-2 HIGH-1 fixture
+// shapes: identifying values in fields the round-1 sanitizer never walked —
+// event ids (azure activity-log style, UUID embedded), event action (capture
+// PROMOTES action straight from the payload), actor_chain action,
+// connector_tools name/description, and tags (including a real-ccTLD .sh
+// hostname, the MED-2 shape). None of these are metadata, so the round-1
+// metadata walk cannot save any of them.
+const contributeAuxFieldLeakFixtureYAML = `id: LOCAL-aux-repro
+category: captured
+detector: volume-anomaly
+provenance: captured
+tags:
+- prod-db.realcorp.internal
+- status.realcorp.sh
+- contractor.eve@realcorp.com
+finding:
+  id: LOCAL-aux-repro-finding
+  detector: volume-anomaly
+  title: 'Bulk grant activity'
+  severity: medium
+  event_ids:
+  - azure-169efd95-3a5e-4b2d-9c1e-8f7a6b5c4d3e-000123
+  - azure-169efd95-3a5e-4b2d-9c1e-8f7a6b5c4d3e-000124
+events:
+- id: azure-169efd95-3a5e-4b2d-9c1e-8f7a6b5c4d3e-000123
+  timestamp: '2025-11-04T10:00:00Z'
+  source: azure
+  event_type: role_grant
+  actor: victim-user
+  action: grant-to bob.smith@realcorp.com
+  target: rg/prod
+- id: azure-169efd95-3a5e-4b2d-9c1e-8f7a6b5c4d3e-000124
+  timestamp: '2025-11-04T10:05:00Z'
+  source: azure
+  event_type: role_grant
+  actor: victim-user
+  action: grant-to bob.smith@realcorp.com
+  target: rg/prod
+actor_chain:
+- actor: victim-user
+  action: notify ops-lead@realcorp.com
+  target: sub-169efd95/rg
+connector_tools:
+- name: lookup_victim-user_history
+  description: Queries audit-api.realcorp.internal for recent grant events
+  returns:
+    events: []
+expected_detection:
+  must_fire: [volume-anomaly]
+`
+
+// TestScenarioContribute_AuxiliaryFieldLeaks_Scrubbed is the round-2 HIGH-1 +
+// MED-2 regression: every identifying value in the previously sanitizer-blind
+// fields (event id/action, actor_chain action, connector_tools
+// name/description, tags — incl. a .sh real-TLD hostname) must be scrubbed
+// from both transmit-bound artifacts, enumerated in the ledger, and event-id
+// integrity (uniqueness + finding.event_ids cross-reference) must survive the
+// shape-preserving tokenization. Runs through the REAL dry-run path first
+// (proves the residue gate passes on this input), then asserts on the plan.
+func TestScenarioContribute_AuxiliaryFieldLeaks_Scrubbed(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "aux-repro.yaml")
+	if err := os.WriteFile(src, []byte(contributeAuxFieldLeakFixtureYAML), 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+
+	// Real dry-run path: must succeed (round-1 code would transmit the leaks;
+	// this asserts the fixed pipeline sanitizes AND self-verifies).
+	out, err := withStdio(t, "", func() error {
+		return runScenarioContribute([]string{"--dry-run", src})
+	})
+	if err != nil {
+		t.Fatalf("runScenarioContribute --dry-run: %v\noutput:\n%s", err, out)
+	}
+
+	sc, err := exam.Load(src)
+	if err != nil {
+		t.Fatalf("exam.Load(fixture): %v", err)
+	}
+	plan, err := buildContributePlan(sc, src, "mallcop-app/mallcop", "")
+	if err != nil {
+		t.Fatalf("buildContributePlan: %v", err)
+	}
+	body := string(plan.SanitizedYAML)
+
+	// Grep-class: no private identifier from ANY auxiliary field may survive
+	// in either transmit-bound artifact.
+	leaks := []string{
+		"realcorp", // covers every hostname/email/domain fragment above
+		"169efd95-3a5e-4b2d-9c1e-8f7a6b5c4d3e",
+		"bob.smith@realcorp.com",
+		"ops-lead@realcorp.com",
+		"contractor.eve@realcorp.com",
+		"prod-db.realcorp.internal",
+		"status.realcorp.sh", // MED-2: .sh is a real ccTLD, not a filename
+		"victim-user",
+	}
+	for _, leak := range leaks {
+		if strings.Contains(body, leak) {
+			t.Errorf("sanitized YAML still contains auxiliary-field residue %q:\n%s", leak, body)
+		}
+		if strings.Contains(plan.PRBody, leak) {
+			t.Errorf("PR body contains residue %q:\n%s", leak, plan.PRBody)
+		}
+	}
+
+	// Ledger enumeration (the consent surface must list every replacement).
+	ledger := map[string]bool{}
+	for _, r := range plan.Diff.IdentifierRenames {
+		ledger[r.Original] = true
+	}
+	for _, want := range []string{
+		"169efd95-3a5e-4b2d-9c1e-8f7a6b5c4d3e",
+		"bob.smith@realcorp.com",
+		"ops-lead@realcorp.com",
+		"contractor.eve@realcorp.com",
+		"prod-db.realcorp.internal",
+		"status.realcorp.sh",
+	} {
+		if !ledger[want] {
+			t.Errorf("identifier ledger does not enumerate %q\nledger: %+v", want, plan.Diff.IdentifierRenames)
+		}
+	}
+	actorLedger := map[string]bool{}
+	for _, r := range plan.Diff.ActorRenames {
+		actorLedger[r.Original] = true
+	}
+	if !actorLedger["victim-user"] {
+		t.Errorf("actor ledger does not enumerate victim-user: %+v", plan.Diff.ActorRenames)
+	}
+
+	// Event-id integrity through the shape-preserving tokenization: ids
+	// changed, stayed DISTINCT, and finding.event_ids still references them
+	// exactly (same deterministic transform on both sides).
+	sanitized, _, err := sanitizeScenarioForContribution(sc)
+	if err != nil {
+		t.Fatalf("sanitizeScenarioForContribution: %v", err)
+	}
+	if len(sanitized.Events) != 2 {
+		t.Fatalf("expected 2 events, got %d", len(sanitized.Events))
+	}
+	id0, id1 := sanitized.Events[0].ID, sanitized.Events[1].ID
+	if id0 == sc.Events[0].ID || id1 == sc.Events[1].ID {
+		t.Errorf("event ids were not tokenized: %q, %q", id0, id1)
+	}
+	if id0 == id1 {
+		t.Errorf("event-id uniqueness lost: both events carry %q", id0)
+	}
+	if sanitized.Finding == nil || len(sanitized.Finding.EventIDs) != 2 {
+		t.Fatalf("finding.event_ids malformed after sanitize: %+v", sanitized.Finding)
+	}
+	if sanitized.Finding.EventIDs[0] != id0 || sanitized.Finding.EventIDs[1] != id1 {
+		t.Errorf("finding.event_ids cross-reference broken: %v vs event ids [%s %s]", sanitized.Finding.EventIDs, id0, id1)
+	}
+	// Shape preserved: the non-identifying prefix/suffix of the azure
+	// activity-log id survive around the tokenized UUID.
+	if !strings.HasPrefix(id0, "azure-") || !strings.HasSuffix(id0, "-000123") {
+		t.Errorf("event id shape not preserved: %q", id0)
+	}
+
+	// Connector tool: the actor fragment in the name is renamed to the same
+	// canonical token as the actor everywhere else; the hostname in the
+	// description is tokenized.
+	if len(sanitized.ConnectorTools) != 1 {
+		t.Fatalf("expected 1 connector tool, got %d", len(sanitized.ConnectorTools))
+	}
+	canonActor := sanitized.Events[0].Actor
+	if !strings.Contains(sanitized.ConnectorTools[0].Name, canonActor) {
+		t.Errorf("connector tool name %q does not carry the canonical actor token %q", sanitized.ConnectorTools[0].Name, canonActor)
+	}
+	if !strings.Contains(sanitized.ConnectorTools[0].Description, "host-") {
+		t.Errorf("connector tool description not hostname-tokenized: %q", sanitized.ConnectorTools[0].Description)
+	}
+
+	// The sanitized output still parses via the real loader.
+	outPath := filepath.Join(dir, "sanitized.yaml")
+	if err := os.WriteFile(outPath, plan.SanitizedYAML, 0o644); err != nil {
+		t.Fatalf("write sanitized: %v", err)
+	}
+	if _, err := exam.Load(outPath); err != nil {
+		t.Fatalf("sanitized output failed exam.Load: %v", err)
+	}
+}
+
+// TestScenarioContribute_FrequencyTables_ActorRenamed is the round-2 HIGH-2
+// regression: a captured-with-baseline scenario (the feature's PRIMARY
+// feedstock) whose frequency_tables keys carry the actor must CONTRIBUTE
+// successfully — pre-fix, the un-renamed actor segment tripped the residue
+// gate and hard-aborted every such contribution. Keys must carry the SAME
+// canonical actor token as the events, counts must be untouched, and the
+// result must still parse via internal/exam.Load.
+func TestScenarioContribute_FrequencyTables_ActorRenamed(t *testing.T) {
+	fixture := `id: LOCAL-freq-repro
+category: captured
+detector: volume-anomaly
+provenance: captured
+finding:
+  id: LOCAL-freq-repro-finding
+  detector: volume-anomaly
+  title: 'Bulk reads'
+  severity: medium
+  event_ids: [evt-1]
+events:
+- id: evt-1
+  timestamp: '2025-11-04T10:00:00Z'
+  source: azure
+  event_type: storage_access
+  actor: jane.doe@realcorp.com
+  target: rg/prod
+baseline:
+  known_entities:
+    actors: [jane.doe@realcorp.com]
+  frequency_tables:
+    'azure:login': 50
+    'azure:storage_access:jane.doe@realcorp.com': 10
+    'azure:login:jane.doe@realcorp.com:0:afternoon': 198
+    'azure:push:ghost-svc': 7
+expected_detection:
+  must_fire: [volume-anomaly]
+`
+	dir := t.TempDir()
+	src := filepath.Join(dir, "freq-repro.yaml")
+	if err := os.WriteFile(src, []byte(fixture), 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+
+	// The REAL dry-run path must succeed — this exact input hard-aborted on
+	// the residue gate pre-fix.
+	out, err := withStdio(t, "", func() error {
+		return runScenarioContribute([]string{"--dry-run", src})
+	})
+	if err != nil {
+		t.Fatalf("captured-with-baseline contribution aborted (the feature's primary feedstock must work): %v\noutput:\n%s", err, out)
+	}
+
+	sc, err := exam.Load(src)
+	if err != nil {
+		t.Fatalf("exam.Load(fixture): %v", err)
+	}
+	plan, err := buildContributePlan(sc, src, "mallcop-app/mallcop", "")
+	if err != nil {
+		t.Fatalf("buildContributePlan: %v", err)
+	}
+	body := string(plan.SanitizedYAML)
+	for _, leak := range []string{"jane.doe@realcorp.com", "realcorp", "ghost-svc"} {
+		if strings.Contains(body, leak) {
+			t.Errorf("frequency-table residue %q in sanitized YAML:\n%s", leak, body)
+		}
+	}
+
+	sanitized, _, err := sanitizeScenarioForContribution(sc)
+	if err != nil {
+		t.Fatalf("sanitizeScenarioForContribution: %v", err)
+	}
+	canon := sanitized.Events[0].Actor // jane's canonical token
+	ft := sanitized.Baseline.FrequencyTables
+	wantKeys := map[string]int{
+		"azure:login":                           50,
+		"azure:storage_access:" + canon:         10,
+		"azure:login:" + canon + ":0:afternoon": 198,
+	}
+	for k, v := range wantKeys {
+		if got, ok := ft[k]; !ok || got != v {
+			t.Errorf("frequency_tables[%q] = %d (present=%v), want %d\nfull tables: %+v", k, got, ok, v, ft)
+		}
+	}
+	// ghost-svc appears ONLY in a freq key — it must still have been
+	// collected and renamed, with its count preserved.
+	foundGhost := false
+	for k, v := range ft {
+		if strings.HasPrefix(k, "azure:push:") {
+			foundGhost = true
+			if v != 7 {
+				t.Errorf("azure:push count corrupted: %d, want 7", v)
+			}
+			if strings.Contains(k, "ghost-svc") {
+				t.Errorf("freq-only actor ghost-svc not renamed: %q", k)
+			}
+		}
+	}
+	if !foundGhost {
+		t.Errorf("azure:push:* key missing after rename: %+v", ft)
+	}
+
+	// Round-trip: the contributed file parses via the real loader.
+	outPath := filepath.Join(dir, "sanitized.yaml")
+	if err := os.WriteFile(outPath, plan.SanitizedYAML, 0o644); err != nil {
+		t.Fatalf("write sanitized: %v", err)
+	}
+	if _, err := exam.Load(outPath); err != nil {
+		t.Fatalf("sanitized output failed exam.Load: %v", err)
+	}
+}
+
+// TestScenarioContribute_ActorNamedAdmin_NoFalseAbort is the round-2 MED-1
+// regression: an actor literally named "admin" must not land any actor on a
+// pool token containing that original ("admin-user", "infra-admin") — pre-fix
+// the residue gate then hard-aborted a perfectly sanitized contribution with
+// a message misdiagnosing the collision as a leak.
+func TestScenarioContribute_ActorNamedAdmin_NoFalseAbort(t *testing.T) {
+	fixture := `id: LOCAL-admin-repro
+category: captured
+detector: volume-anomaly
+provenance: captured
+finding:
+  id: LOCAL-admin-repro-finding
+  detector: volume-anomaly
+  title: 'Grant burst'
+  severity: medium
+  event_ids: [evt-1, evt-2]
+events:
+- id: evt-1
+  timestamp: '2025-11-04T10:00:00Z'
+  source: azure
+  event_type: role_grant
+  actor: build-svc
+  target: rg/prod
+- id: evt-2
+  timestamp: '2025-11-04T10:05:00Z'
+  source: azure
+  event_type: role_grant
+  actor: admin
+  target: rg/prod
+expected_detection:
+  must_fire: [volume-anomaly]
+`
+	dir := t.TempDir()
+	src := filepath.Join(dir, "admin-repro.yaml")
+	if err := os.WriteFile(src, []byte(fixture), 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+
+	out, err := withStdio(t, "", func() error {
+		return runScenarioContribute([]string{"--dry-run", src})
+	})
+	if err != nil {
+		t.Fatalf("actor named 'admin' caused a false abort: %v\noutput:\n%s", err, out)
+	}
+
+	sc, err := exam.Load(src)
+	if err != nil {
+		t.Fatalf("exam.Load: %v", err)
+	}
+	plan, err := buildContributePlan(sc, src, "mallcop-app/mallcop", "")
+	if err != nil {
+		t.Fatalf("buildContributePlan: %v", err)
+	}
+	if strings.Contains(string(plan.SanitizedYAML), "admin") {
+		t.Errorf("'admin' survives in the sanitized YAML (as an original or inside a conflicted pool token):\n%s", plan.SanitizedYAML)
+	}
+	for _, r := range plan.Diff.ActorRenames {
+		if strings.Contains(r.Canonical, "admin") {
+			t.Errorf("canonical token %q contains the actor original 'admin' -- pool collision avoidance failed", r.Canonical)
+		}
+	}
+}
