@@ -506,7 +506,7 @@ func ToolDefs() []agent.Tool {
 					"reserved":      map[string]any{"type": "boolean", "description": "Mark must_fire as a RESERVED TEST: the operator is naming an attack shape with no registered detector yet. Invalid with must_not_fire."},
 					"title":         map[string]any{"type": "string", "description": "Optional finding title override."},
 					"severity":      map[string]any{"type": "string", "description": "Optional finding severity override (default medium)."},
-					"id":            map[string]any{"type": "string", "description": "Optional scenario id override (default: auto-generated from the family + events)."},
+					"id":            map[string]any{"type": "string", "description": "Optional scenario id override (default: auto-generated from the family + events). Must be a plain slug — starts with a letter/digit, then only letters, digits, '-' and '_' — because it becomes a filename under scenarios/."},
 				},
 			},
 		},

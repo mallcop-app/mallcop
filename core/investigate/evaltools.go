@@ -46,6 +46,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -151,9 +152,14 @@ func isDir(path string) bool {
 //   - repoRoot != "" and the scenarios/ dir does NOT exist yet: an explicit
 //     --scenarios-dir pointing at a missing directory is a LOUD error by
 //     cli/eval.go's own contract ("the operator pointed somewhere on
-//     purpose") — so instead this sets MALLCOP_REPO_ROOT, the CLI's own
-//     last-resort env override, keeping the "no scenarios/ yet is an empty
-//     union, not an error" default path intact and pinned to the right root.
+//     purpose") — so instead this sets MALLCOP_REPO_ROOT, the CLI's explicit
+//     env pin, keeping the "no scenarios/ yet is an empty union, not an
+//     error" default path intact and pinned to the right root. The pin is
+//     RELIABLE: eval.RepoRoot checks MALLCOP_REPO_ROOT BEFORE its
+//     binary-location walk (explicit config beats discovery), so the
+//     subprocess cannot silently resolve a different marker-bearing root and
+//     grade the wrong repo — proven end-to-end by
+//     TestChatTools_RunEval_EnvPinBeatsWalk_ShadowingTopology.
 func evalArgs(repoRoot string, scenariosDirExists bool) (args, extraEnv []string) {
 	args = []string{"eval", "--json"}
 	repoRoot = strings.TrimSpace(repoRoot)
@@ -250,9 +256,12 @@ func runEvalTool(opts Options) (any, error) {
 // FlagLikeThisInput is the "flag-like-this" tool_use input: an event
 // selector (event_ids, or actor+window) plus the operator's stated ground
 // truth (must_fire XOR must_not_fire, optionally reserved). Every field
-// passes straight through to `mallcop scenario capture`'s own flags — ALL
-// validation (mutually-exclusive selectors/labels, required combinations) is
-// the real command's own; nothing here duplicates it.
+// passes straight through to `mallcop scenario capture`'s own flags —
+// SEMANTIC validation (mutually-exclusive selectors/labels, required
+// combinations) is the real command's own; nothing here duplicates it. The
+// one exception is the SECURITY check on ID (flagLikeThisIDRE): the id
+// shapes a filesystem path, so this adapter confines it independently
+// before shelling out, in addition to the CLI's own authoritative check.
 type FlagLikeThisInput struct {
 	EventIDs    []string `json:"event_ids,omitempty"`
 	Actor       string   `json:"actor,omitempty"`
@@ -264,6 +273,18 @@ type FlagLikeThisInput struct {
 	Severity    string   `json:"severity,omitempty"`
 	ID          string   `json:"id,omitempty"`
 }
+
+// flagLikeThisIDRE is the safe-slug rule for a chat-supplied scenario id:
+// starts alphanumeric, then only [A-Za-z0-9_-], max 128 chars. It mirrors
+// cli/scenariocapture.go's validateScenarioID — the CLI's own check is
+// authoritative, but this adapter validates INDEPENDENTLY before shelling
+// out, because the id here can be influenced by attacker-controlled
+// conversation content (indirect prompt injection): a traversal id like
+// "../../elsewhere/evil" would otherwise ride into `--id` and, absent the
+// CLI check, write OUTSIDE the operator's scenarios/ directory — falsifying
+// this tool's propose-safe claim. Defending the claim at this layer keeps it
+// true even if the CLI-side check ever regresses.
+var flagLikeThisIDRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$`)
 
 // flagLikeThisRuntimeImpact is surfaced verbatim in every successful
 // FlagLikeThisOutput so the chat answer always states the propose-safety
@@ -357,6 +378,9 @@ func parseCaptureOutput(stdout string) (scenarioID, path string) {
 func flagLikeThisTool(opts Options, in FlagLikeThisInput) (any, error) {
 	if opts.Store == nil {
 		return nil, errors.New("flag-like-this: nil Store")
+	}
+	if in.ID != "" && !flagLikeThisIDRE.MatchString(in.ID) {
+		return nil, fmt.Errorf("flag-like-this: invalid scenario id %q: must start with a letter or digit and contain only letters, digits, '-' and '_' (max 128 chars) — it becomes a filename under scenarios/ and must not be able to escape that directory", in.ID)
 	}
 	args := captureArgs(opts.Store.Path(), opts.RepoRoot, in)
 

@@ -2,12 +2,15 @@
 // (portable-agent-architecture.md §3.5, §4 determinism via SetRepoRootForTest).
 //
 // The harness reads the scenario corpus from exams/scenarios/ under the repo
-// root. To find that directory it walks UP from the binary's own location to a
-// project marker — NOT from CWD (the runner relocates CWD) and NOT from an env
-// var that "should be set". A test-only override (SetRepoRootForTest) pins the
-// root DETERMINISTICALLY so `go test -count=N -race` always resolves the same
-// corpus regardless of where the toolchain places the test binary — the same
-// flake-closing seam core/agent uses.
+// root. When nothing pins the root explicitly it walks UP from the binary's
+// own location to a project marker — NOT from CWD (the runner relocates CWD).
+// An EXPLICITLY-set MALLCOP_REPO_ROOT is an operator/orchestrator decision and
+// takes precedence over that heuristic walk (explicit config beats discovery
+// — see RepoRoot's doc for why the old walk-first order was a bug). A
+// test-only override (SetRepoRootForTest) pins the root DETERMINISTICALLY so
+// `go test -count=N -race` always resolves the same corpus regardless of
+// where the toolchain places the test binary — the same flake-closing seam
+// core/agent uses.
 package eval
 
 import (
@@ -27,8 +30,8 @@ var (
 // contain exams/scenarios, so a typo fails loudly instead of silently resolving
 // an empty corpus. Tests defer SetRepoRootForTest("") to clear it.
 //
-// Production never calls this; the walk + MALLCOP_REPO_ROOT fallback cover real
-// deployments. Pinning the override (checked FIRST in RepoRoot) removes the
+// Production never calls this; the MALLCOP_REPO_ROOT env pin + the walk cover
+// real deployments. Pinning the override (checked FIRST in RepoRoot) removes the
 // non-determinism where the resolved root depends on binary placement — the
 // reason the determinism harness (-count=10 + -race) needs an explicit seam.
 func SetRepoRootForTest(dir string) {
@@ -44,17 +47,33 @@ func SetRepoRootForTest(dir string) {
 
 // RepoRoot returns the project root that holds exams/scenarios.
 //
-// Resolution order (§3.5):
+// Resolution order (§3.5, revised per PR #191 review):
 //  1. SetRepoRootForTest override (test-only seam, deterministic).
-//  2. The walk up from os.Executable() — the PRIMARY production path.
-//  3. MALLCOP_REPO_ROOT env override — last resort, checked AFTER the walk so a
-//     stale env var cannot shadow a correct walk result.
+//  2. MALLCOP_REPO_ROOT env override — an EXPLICIT pin set by a person or an
+//     orchestrating process (e.g. core/selfgate's runTreeExam, or
+//     core/investigate's run-eval self-exec) wins over the heuristic walk:
+//     explicit config beats discovery. The old walk-first order made the pin
+//     silently ignorable — whenever the binary happened to sit under ANY
+//     marker-bearing directory, the walk's answer shadowed the caller's
+//     explicit choice and eval graded the WRONG root (e.g. a silently-empty
+//     local scenarios/ union) with no error anywhere.
+//  3. The walk up from os.Executable() — the production default when nothing
+//     pins the root explicitly (the scaffolded GHA runtime path: no env var
+//     is set there, the pinned release binary is installed inside the deploy
+//     repo checkout, and the walk resolves it).
 func RepoRoot() (string, error) {
 	repoRootMu.RLock()
 	override := repoRootOverride
 	repoRootMu.RUnlock()
 	if override != "" {
 		return override, nil
+	}
+
+	if v := os.Getenv("MALLCOP_REPO_ROOT"); v != "" {
+		if abs, err := filepath.Abs(v); err == nil {
+			return abs, nil
+		}
+		return v, nil
 	}
 
 	if exe, err := os.Executable(); err == nil {
@@ -71,14 +90,7 @@ func RepoRoot() (string, error) {
 		}
 	}
 
-	if v := os.Getenv("MALLCOP_REPO_ROOT"); v != "" {
-		if abs, err := filepath.Abs(v); err == nil {
-			return abs, nil
-		}
-		return v, nil
-	}
-
-	return "", errors.New("eval.RepoRoot: no project marker (exams/scenarios, go.mod, or .git) found walking up from binary, and MALLCOP_REPO_ROOT unset")
+	return "", errors.New("eval.RepoRoot: MALLCOP_REPO_ROOT unset and no project marker (exams/scenarios, go.mod, or .git) found walking up from binary")
 }
 
 // hasRepoMarker reports whether dir carries a repo-root marker: the scenario

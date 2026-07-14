@@ -537,3 +537,135 @@ func TestChatTools_RunEval_ExplicitRepoRootOverridesSelfWalk(t *testing.T) {
 		t.Fatalf("expected scenario file at %s: %v", wantPath, err)
 	}
 }
+
+// TestFlagLikeThis_RejectsPathTraversalID_AdapterLayer pins the ADAPTER's own
+// independent copy of the safe-slug check (PR #191 review, HIGH): a traversal
+// id must be rejected HERE, before any subprocess spawns — the asserted
+// message is the adapter's own, so this test still fails if the adapter check
+// is removed even though the CLI's authoritative check would also block the
+// write (MallcopBinary deliberately points at a nonexistent file: if the
+// adapter check regressed, the failure mode would be "spawn failed", not the
+// message asserted below).
+func TestFlagLikeThis_RejectsPathTraversalID_AdapterLayer(t *testing.T) {
+	st := seedStore(t)
+	opts := Options{Store: st, MallcopBinary: filepath.Join(t.TempDir(), "never-spawned")}
+
+	for _, id := range []string{"../../outside/evil-poc", "..", "a/b", "/etc/evil", "-leading-dash"} {
+		_, err := ExecuteTool(opts, "flag-like-this", map[string]any{
+			"event_ids": []string{"evt-ghost-001"},
+			"must_fire": []string{"poc-family"},
+			"id":        id,
+		})
+		if err == nil {
+			t.Errorf("flag-like-this with id %q: expected an error, got nil", id)
+			continue
+		}
+		if !strings.Contains(err.Error(), "invalid scenario id") {
+			t.Errorf("flag-like-this with id %q: error %q is not the adapter's own validation message (did the adapter-layer check regress to relying on the CLI?)", id, err.Error())
+		}
+	}
+}
+
+// TestChatTools_SpawnFailureIsHonestError reaches runMallcopSelf's
+// spawn-failed branch for REAL (PR #191 review, MED): a MallcopBinary that
+// does not exist, with input that survives decode/validation, must surface as
+// an honest structured error naming the spawn failure — never a fabricated
+// report or a silent success.
+func TestChatTools_SpawnFailureIsHonestError(t *testing.T) {
+	st := seedStore(t)
+	opts := Options{Store: st, MallcopBinary: filepath.Join(t.TempDir(), "missing-binary")}
+
+	if _, err := ExecuteTool(opts, "run-eval", map[string]any{}); err == nil {
+		t.Error("run-eval with a nonexistent binary: expected an error, got nil")
+	} else if !strings.Contains(err.Error(), "spawn failed") {
+		t.Errorf("run-eval spawn error = %q, want it to name the spawn failure", err.Error())
+	}
+
+	if _, err := ExecuteTool(opts, "flag-like-this", map[string]any{
+		"event_ids": []string{"evt-ghost-001"},
+		"must_fire": []string{"poc-family"},
+	}); err == nil {
+		t.Error("flag-like-this with a nonexistent binary: expected an error, got nil")
+	} else if !strings.Contains(err.Error(), "spawn failed") {
+		t.Errorf("flag-like-this spawn error = %q, want it to name the spawn failure", err.Error())
+	}
+}
+
+// decoyShadowScenario is a reserved must-fire scenario for a family with NO
+// registered detector — planted in the WALK-resolvable root of the shadowing-
+// topology test below. If the subprocess ignores the explicit repo-root pin
+// and self-resolves via its binary-location walk instead, this decoy shows up
+// as a local recall row and the test fails.
+const decoyShadowScenario = `id: DECOY-shadow-01
+detector: decoy-shadow-family
+provenance: operator
+finding:
+  id: fnd_decoy_001
+  detector: decoy-shadow-family
+  title: 'Decoy scenario in the walk-resolvable root'
+  severity: high
+  event_ids: [evt_d1]
+events:
+  - id: evt_d1
+    timestamp: '2026-07-01T00:05:00Z'
+    source: edr
+    event_type: network_connection
+    actor: workstation-9
+    action: outbound_connect
+    target: 203.0.113.9
+    severity: high
+expected_detection:
+  must_fire: [decoy-shadow-family]
+  reserved: true
+`
+
+// TestChatTools_RunEval_EnvPinBeatsWalk_ShadowingTopology is the PR #191
+// review's (MED) required proof that run-eval's MALLCOP_REPO_ROOT pin is
+// actually honored by the subprocess — not silently shadowed by the binary-
+// location walk (eval.RepoRoot resolution order). Topology: the binary lives
+// inside a marker-bearing decoy repo whose scenarios/ contains a decoy
+// scenario, while Options.RepoRoot pins a DIFFERENT root with no scenarios/
+// at all.
+//
+// Phase 1 (positive control, no pin): the walk resolves the decoy repo and
+// the decoy scenario appears in the local split — proving the decoy is
+// genuinely discoverable, so phase 2 cannot pass vacuously.
+// Phase 2 (explicit pin): the pinned root must win — the local split must be
+// EMPTY. Before the env-beats-walk precedence fix in core/eval/reporoot.go,
+// the subprocess's walk won and the decoy leaked in (this phase failed).
+func TestChatTools_RunEval_EnvPinBeatsWalk_ShadowingTopology(t *testing.T) {
+	decoyRoot, st, bin := newDeployRepoFixture(t)
+	scenariosDir := filepath.Join(decoyRoot, "scenarios")
+	if err := os.MkdirAll(scenariosDir, 0o755); err != nil {
+		t.Fatalf("mkdir decoy scenarios/: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(scenariosDir, "decoy.yaml"), []byte(decoyShadowScenario), 0o644); err != nil {
+		t.Fatalf("write decoy scenario: %v", err)
+	}
+
+	// Phase 1 — positive control: with NO pin, the subprocess self-resolves
+	// the decoy repo (the binary sits inside it) and the decoy is graded.
+	out, err := ExecuteTool(Options{Store: st, MallcopBinary: bin}, "run-eval", map[string]any{})
+	if err != nil {
+		t.Fatalf("run-eval (no pin): %v", err)
+	}
+	unpinned := out.(RunEvalOutput)
+	if unpinned.Local.Recall.MustFire != 1 {
+		t.Fatalf("positive control: local.recall.must_fire = %d, want 1 (the decoy must be discoverable via the walk, or phase 2 proves nothing)", unpinned.Local.Recall.MustFire)
+	}
+
+	// Phase 2 — the explicit pin names a root with NO scenarios/ directory:
+	// the local split must be EMPTY, never the decoy repo's.
+	pinnedRoot := t.TempDir()
+	out, err = ExecuteTool(Options{Store: st, MallcopBinary: bin, RepoRoot: pinnedRoot}, "run-eval", map[string]any{})
+	if err != nil {
+		t.Fatalf("run-eval (pinned): %v", err)
+	}
+	pinned := out.(RunEvalOutput)
+	if pinned.Local.Recall.MustFire != 0 {
+		t.Fatalf("local.recall.must_fire = %d, want 0 — the subprocess IGNORED the explicit repo-root pin and graded the walk-resolved decoy root instead (missed: %+v)", pinned.Local.Recall.MustFire, pinned.Local.Recall.Missed)
+	}
+	if pinned.Local.Precision.MustStaySilent != 0 {
+		t.Errorf("local.precision.must_stay_silent = %d, want 0 (pinned root has no scenarios at all)", pinned.Local.Precision.MustStaySilent)
+	}
+}
