@@ -99,6 +99,18 @@ func LoadTuningFile(path string) (Tuning, error) {
 // A zero-value Tuning publishes a clone equal to the current snapshot (detection
 // stays byte-identical). Empty/whitespace-only entries are ignored. The CLI
 // calls it once at startup, before any Detect run.
+// ResetTuning restores the built-in default priv-escalation snapshot,
+// discarding every widening a prior ApplyTuning published. It is the pristine
+// counterpart to ApplyTuning: because tuning lives in process-global state and
+// ApplyTuning is cumulative, a caller that needs a known-clean detector baseline
+// (a test asserting the UNTUNED grade, a harness re-running the exam without a
+// leaked overlay) calls ResetTuning first. It publishes a fresh immutable
+// snapshot via the same atomic swap ApplyTuning uses, so it is safe to call at
+// any time relative to a running Detect.
+func ResetTuning() {
+	activePrivEscalationTuning.Store(defaultPrivEscalationTuning())
+}
+
 func ApplyTuning(t Tuning) {
 	next := loadPrivEscalationTuning().clone()
 	for _, kw := range t.PrivEscalation.ExtraElevatedKeywords {

@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"github.com/mallcop-app/mallcop/core/detect"
 	"os"
 	"path/filepath"
 	"sort"
@@ -278,6 +279,10 @@ func TestResolveBaselinePath_Precedence(t *testing.T) {
 // the self-extension loop's tuning proposal grade through the exam-detect stage,
 // driven by config instead of the flag, and decoupled from every real scenario.
 func TestRunExamDetect_ConfigTuningClosesPE(t *testing.T) {
+	// This test publishes a priv-escalation widening into process-global detector
+	// state; restore the pristine snapshot afterward so it cannot leak into a
+	// sibling test that asserts an untuned grade (e.g. the free-tier default proof).
+	t.Cleanup(detect.ResetTuning)
 	root := injectSyntheticCorpus(t)
 	t.Setenv("MALLCOP_REPO_ROOT", root)
 

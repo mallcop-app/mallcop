@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"testing"
+
+	"github.com/mallcop-app/mallcop/core/detect"
 )
 
 // repoRootForExamTest resolves the repo root from this test file's location
@@ -26,21 +28,30 @@ func repoRootForExamTest(t *testing.T) string {
 
 // TestRunExamDetect_RemainingGapExitsRed proves the CLI surfaces a
 // labeled-and-unfixed detection gap as the errFindings sentinel (exit code 1).
-// The VA-03 volume gap is now CLOSED (mallcoppro-3c9 — it shows PASS), but IP-01
-// (injection-probe) remains a real labeled false negative, so the exam still exits
-// red and the human report shows both the closed and the open row. IP-01 is chosen
-// over PE-08 because the committed priv-escalation tuning another test applies to
-// the process-global detector state can close PE-08 depending on run order.
+// Two labeled gaps that used to anchor this test are now CLOSED — VA-03 (the
+// volume field/unit contract, mallcoppro-3c9) and IP-01 (the SQLi-in-User-Agent
+// injection probe, now caught by the injection-probe family's classic-injection
+// signatures) both show PASS. PE-08 (the AWS PowerUserAccess grant) remains a
+// real labeled false negative with no default detector or tuning, so the exam
+// still exits red and the human report shows both closed and open rows.
+//
+// PE-08 is closable by a priv-escalation tuning overlay that a sibling test
+// (TestRunExamDetect_ConfigTuningClosesPE) publishes into the process-global
+// detector state, so this test first calls detect.ResetTuning to restore the
+// pristine (untuned) snapshot — making PE-08 reliably RED regardless of test
+// run order.
 func TestRunExamDetect_RemainingGapExitsRed(t *testing.T) {
+	detect.ResetTuning()
+	t.Cleanup(detect.ResetTuning)
 	t.Setenv("MALLCOP_REPO_ROOT", repoRootForExamTest(t))
 
 	out, err := withStdio(t, "", func() error { return runExamDetect(nil) })
 
 	// Detection gaps present → errFindings sentinel (exit code 1), not a real error.
 	if !isFindingsError(err) {
-		t.Fatalf("expected findings sentinel error while IP-01 is labeled-and-unfixed, got %v\noutput:\n%s", err, out)
+		t.Fatalf("expected findings sentinel error while PE-08 is labeled-and-unfixed, got %v\noutput:\n%s", err, out)
 	}
-	for _, want := range []string{"FAIL IP-01-sqli-user-agent", "PASS VA-03-data-exfil", "PASS AC-01-external-access-stolen-cred", "exam-detect:"} {
+	for _, want := range []string{"FAIL PE-08-aws-poweruser-grant", "PASS IP-01-sqli-user-agent", "PASS VA-03-data-exfil", "PASS AC-01-external-access-stolen-cred", "exam-detect:"} {
 		if !containsLine(out, want) {
 			t.Errorf("human output missing %q; got:\n%s", want, out)
 		}
@@ -78,6 +89,8 @@ func splitLines(s string) []string {
 // {labeled, unlabeled, passed, failed} — the machine contract the self-extension
 // loop reads.
 func TestRunExamDetect_JSONShape(t *testing.T) {
+	detect.ResetTuning()
+	t.Cleanup(detect.ResetTuning)
 	t.Setenv("MALLCOP_REPO_ROOT", repoRootForExamTest(t))
 
 	out, err := withStdio(t, "", func() error { return runExamDetect([]string{"--json"}) })
@@ -111,7 +124,7 @@ func TestRunExamDetect_JSONShape(t *testing.T) {
 		t.Errorf("passed(%d) + failed(%d) != labeled(%d)", report.Totals.Passed, report.Totals.Failed, report.Totals.Labeled)
 	}
 	if report.Totals.Failed < 1 {
-		t.Errorf("totals.failed = %d, want >= 1 while IP-01 is labeled-and-unfixed", report.Totals.Failed)
+		t.Errorf("totals.failed = %d, want >= 1 while PE-08 is labeled-and-unfixed", report.Totals.Failed)
 	}
 
 	var va03Found bool
