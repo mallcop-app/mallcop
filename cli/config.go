@@ -72,8 +72,13 @@ func runConfig(args []string) error {
 
 	fmt.Printf("  Builtin detectors:    enabled=%t disabled=%v\n", cfg.Detectors.Builtin.Enabled, cfg.Detectors.Builtin.Disable)
 	fmt.Printf("  Sidecar detectors:    dir=%s\n", cfg.Detectors.Sidecars.Dir)
-	fmt.Printf("  Learning dir:         %s (autonomy=%s, enforce_pin=%t)\n", cfg.Learning.Dir, cfg.Learning.Autonomy, cfg.Learning.EnforcePin)
-	fmt.Printf("  Sovereignty:          tier=%s contribute_back=%t\n", cfg.Sovereignty.Tier, cfg.Sovereignty.ContributeBack)
+	// contribute_back is reported on the Learning line because Learning.ContributeBack
+	// is the LIVE knob — the one `mallcop config set contribute_back` writes and the
+	// CODE-lane consent gate reads. The summary previously printed Sovereignty's
+	// identically-named field, which nothing gates on, so an operator would set that
+	// dead knob and see no effect (mallcoppro-559).
+	fmt.Printf("  Learning dir:         %s (autonomy=%s, enforce_pin=%t, contribute_back=%t)\n", cfg.Learning.Dir, cfg.Learning.Autonomy, cfg.Learning.EnforcePin, cfg.Learning.ContributeBack)
+	fmt.Printf("  Sovereignty:          tier=%s\n", cfg.Sovereignty.Tier)
 	fmt.Printf("  Budgets:              max_findings=%d scan_timeout=%s selfext_spend_cap_usd=%.0f\n",
 		cfg.Budgets.MaxFindings, cfg.Budgets.ScanTimeout, cfg.Budgets.SelfextSpendCapUSD)
 	return nil
