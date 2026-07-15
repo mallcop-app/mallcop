@@ -119,12 +119,19 @@ func (o ServeOptions) heartbeatPeriod() time.Duration {
 
 // inboxRecord is the subset of inbox.jsonl fields Serve reads. Extra fields
 // present on the wire (per the protocol doc) are ignored, not rejected.
+//
+// Findings carries the on-screen finding(s) the browser attached to a question
+// (mallcoppro-010): the exact finding row the operator is asking about, so the
+// runner seeds the analyst's initial context with it instead of starting blind
+// and reverse-engineering a filter from the operator's prose. Absent on older
+// browsers / the CLI path, in which case the loop behaves exactly as before.
 type inboxRecord struct {
-	Type string `json:"type"`
-	Seq  int    `json:"seq"`
-	ID   string `json:"id"`
-	Text string `json:"text"`
-	Cmd  string `json:"cmd"`
+	Type     string          `json:"type"`
+	Seq      int             `json:"seq"`
+	ID       string          `json:"id"`
+	Text     string          `json:"text"`
+	Cmd      string          `json:"cmd"`
+	Findings []SeededFinding `json:"findings"`
 }
 
 // Serve runs the --serve loop until: a control:shutdown record arrives, the
@@ -254,7 +261,13 @@ func handleQuestion(ctx context.Context, opts ServeOptions, ob *outboxWriter, re
 		},
 	}
 
-	res, err := askCore(ctx, opts.Options, rec.Text, hook)
+	// Seed THIS question's loop with the on-screen finding(s) the browser attached
+	// (mallcoppro-010). opts.Options is a value copy, so per-question seeding does
+	// not leak across questions in a warm runner.
+	askOpts := opts.Options
+	askOpts.SeedFindings = rec.Findings
+
+	res, err := askCore(ctx, askOpts, rec.Text, hook)
 	if err != nil {
 		logServeErr(fmt.Sprintf("askCore error for question %s", rec.ID), err)
 		_ = emit(ob, opts.Mailbox, map[string]any{"type": "answer", "q": rec.ID, "text": "investigation failed: " + genericServeErrMessage, "citations": []Citation{}}, true)

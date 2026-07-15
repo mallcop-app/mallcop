@@ -399,6 +399,28 @@ func TestSearchEvents(t *testing.T) {
 			wantIDs:     []string{"e1", "e4"},
 			wantFellBck: true,
 		},
+		{
+			// mallcoppro-010: the "chain a finding's event_ids to events" filter.
+			name:    "ids filter selects the exact event set",
+			input:   SearchEventsInput{IDs: []string{"e2", "e4"}},
+			wantIDs: []string{"e2", "e4"},
+		},
+		{
+			name:    "ids filter is case-insensitive",
+			input:   SearchEventsInput{IDs: []string{"E1"}},
+			wantIDs: []string{"e1"},
+		},
+		{
+			name:    "ids combines conjunctively with type",
+			input:   SearchEventsInput{IDs: []string{"e1", "e2", "e4"}, Type: "push"},
+			wantIDs: []string{"e1", "e2"},
+		},
+		{
+			// A model that echoes an empty id must not empty the whole result.
+			name:    "blank id entries are ignored",
+			input:   SearchEventsInput{IDs: []string{"", "e3"}},
+			wantIDs: []string{"e3"},
+		},
 	}
 
 	for _, tc := range cases {
