@@ -1,0 +1,41 @@
+id: authored-deploy-flood-benign-twin
+detector: authored-deploy-flood
+category: authored
+difficulty: authored-easy
+finding:
+  id: fnd_authored_deployflood_benign_001
+  detector: authored-deploy-flood
+  title: 'a single legitimate github.deployment does not fire'
+  severity: info
+  event_ids:
+    - evt_deployflood_benign_001
+  metadata:
+    actor: burst-actor
+    source: github
+    event_type: github.deployment
+events:
+  - id: evt_deployflood_benign_001
+    timestamp: '2026-03-10T11:22:00Z'
+    ingested_at: '2026-03-10T11:23:00Z'
+    source: github
+    event_type: github.deployment
+    actor: burst-actor
+    action: deployment_create
+    target: org/repo
+    severity: info
+    metadata: {}
+    raw: {}
+baseline:
+  known_entities:
+    actors:
+      - burst-actor
+    sources:
+      - github
+  frequency_tables:
+    github:github.deployment:burst-actor: 5
+expected:
+  chain_action: resolved
+expected_detection:
+  must_fire: []
+  must_not_fire:
+    - authored-deploy-flood

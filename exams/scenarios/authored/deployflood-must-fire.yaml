@@ -1,0 +1,148 @@
+id: authored-deploy-flood-must-fire
+detector: authored-deploy-flood
+category: authored
+difficulty: authored-easy
+finding:
+  id: fnd_authored_deployflood_001
+  detector: authored-deploy-flood
+  title: 'authored-deploy-flood fired on a genuine github.deployment burst'
+  severity: high
+  event_ids:
+    - evt_deployflood_001
+    - evt_deployflood_002
+    - evt_deployflood_003
+    - evt_deployflood_004
+    - evt_deployflood_005
+    - evt_deployflood_006
+    - evt_deployflood_007
+    - evt_deployflood_008
+    - evt_deployflood_009
+    - evt_deployflood_010
+  metadata:
+    actor: burst-actor
+    source: github
+    event_type: github.deployment
+events:
+  - id: evt_deployflood_001
+    timestamp: '2026-03-10T11:22:00Z'
+    ingested_at: '2026-03-10T11:23:00Z'
+    source: github
+    event_type: github.deployment
+    actor: burst-actor
+    action: deployment_create
+    target: org/repo
+    severity: high
+    metadata: {}
+    raw: {}
+  - id: evt_deployflood_002
+    timestamp: '2026-03-10T11:22:30Z'
+    ingested_at: '2026-03-10T11:23:30Z'
+    source: github
+    event_type: github.deployment
+    actor: burst-actor
+    action: deployment_create
+    target: org/repo
+    severity: high
+    metadata: {}
+    raw: {}
+  - id: evt_deployflood_003
+    timestamp: '2026-03-10T11:23:00Z'
+    ingested_at: '2026-03-10T11:24:00Z'
+    source: github
+    event_type: github.deployment
+    actor: burst-actor
+    action: deployment_create
+    target: org/repo
+    severity: high
+    metadata: {}
+    raw: {}
+  - id: evt_deployflood_004
+    timestamp: '2026-03-10T11:23:30Z'
+    ingested_at: '2026-03-10T11:24:30Z'
+    source: github
+    event_type: github.deployment
+    actor: burst-actor
+    action: deployment_create
+    target: org/repo
+    severity: high
+    metadata: {}
+    raw: {}
+  - id: evt_deployflood_005
+    timestamp: '2026-03-10T11:24:00Z'
+    ingested_at: '2026-03-10T11:25:00Z'
+    source: github
+    event_type: github.deployment
+    actor: burst-actor
+    action: deployment_create
+    target: org/repo
+    severity: high
+    metadata: {}
+    raw: {}
+  - id: evt_deployflood_006
+    timestamp: '2026-03-10T11:24:30Z'
+    ingested_at: '2026-03-10T11:25:30Z'
+    source: github
+    event_type: github.deployment
+    actor: burst-actor
+    action: deployment_create
+    target: org/repo
+    severity: high
+    metadata: {}
+    raw: {}
+  - id: evt_deployflood_007
+    timestamp: '2026-03-10T11:25:00Z'
+    ingested_at: '2026-03-10T11:26:00Z'
+    source: github
+    event_type: github.deployment
+    actor: burst-actor
+    action: deployment_create
+    target: org/repo
+    severity: high
+    metadata: {}
+    raw: {}
+  - id: evt_deployflood_008
+    timestamp: '2026-03-10T11:25:30Z'
+    ingested_at: '2026-03-10T11:26:30Z'
+    source: github
+    event_type: github.deployment
+    actor: burst-actor
+    action: deployment_create
+    target: org/repo
+    severity: high
+    metadata: {}
+    raw: {}
+  - id: evt_deployflood_009
+    timestamp: '2026-03-10T11:26:00Z'
+    ingested_at: '2026-03-10T11:27:00Z'
+    source: github
+    event_type: github.deployment
+    actor: burst-actor
+    action: deployment_create
+    target: org/repo
+    severity: high
+    metadata: {}
+    raw: {}
+  - id: evt_deployflood_010
+    timestamp: '2026-03-10T11:26:30Z'
+    ingested_at: '2026-03-10T11:27:30Z'
+    source: github
+    event_type: github.deployment
+    actor: burst-actor
+    action: deployment_create
+    target: org/repo
+    severity: high
+    metadata: {}
+    raw: {}
+baseline:
+  known_entities:
+    actors:
+      - burst-actor
+    sources:
+      - github
+  frequency_tables: {}
+expected:
+  chain_action: escalated
+expected_detection:
+  must_fire:
+    - authored-deploy-flood
+  must_not_fire: []
