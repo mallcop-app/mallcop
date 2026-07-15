@@ -5,22 +5,22 @@ difficulty: authored-easy
 finding:
   id: fnd_authored_deployflood_benign_001
   detector: authored-deploy-flood
-  title: 'benign look-alike does not fire'
+  title: 'a single legitimate github.deployment does not fire'
   severity: info
   event_ids:
-    - evt_deployflood_001
+    - evt_deployflood_benign_001
   metadata:
-    actor: example-actor
+    actor: burst-actor
     source: github
-    event_type: github.push
+    event_type: github.deployment
 events:
-  - id: evt_deployflood_001
+  - id: evt_deployflood_benign_001
     timestamp: '2026-03-10T11:22:00Z'
     ingested_at: '2026-03-10T11:23:00Z'
     source: github
-    event_type: github.push
-    actor: example-actor
-    action: push
+    event_type: github.deployment
+    actor: burst-actor
+    action: deployment_create
     target: org/repo
     severity: info
     metadata: {}
@@ -28,10 +28,11 @@ events:
 baseline:
   known_entities:
     actors:
-      - example-actor
+      - burst-actor
     sources:
       - github
-  frequency_tables: {}
+  frequency_tables:
+    github:github.deployment:burst-actor: 5
 expected:
   chain_action: resolved
 expected_detection:
