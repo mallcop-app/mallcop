@@ -1,4 +1,0 @@
-glm-4.7-flash
-glm-4.7
-glm-5
-qwen3-32b

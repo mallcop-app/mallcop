@@ -1,4 +1,4 @@
-# Held-out red-team corpus — design note (rd mallcoppro-71c)
+# Held-out red-team corpus — design note
 
 > Design + rationale only. The actual held-out corpus is a **closed mallcop-pro
 > asset** and is deliberately NOT in this repo. This note records how it plugs
