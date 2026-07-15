@@ -24,10 +24,18 @@ import (
 // Actor / Source / Type are case-insensitive equality filters on the matching
 // event field. Since / Until bound the event timestamp (inclusive). A zero time
 // means "unbounded on that side".
+//
+// IDs, when non-empty, restricts the result to events whose ID is in the set
+// (case-insensitive). It is the "chain to a finding's event_ids" filter
+// (mallcoppro-010): when the analyst has grounded on a finding it knows the exact
+// event IDs that finding was built from, so it can pull those events directly
+// rather than reverse-engineering an actor/source guess from the operator's
+// prose. Combines conjunctively with the other filters.
 type SearchEventsInput struct {
 	Actor  string    `json:"actor,omitempty"`
 	Source string    `json:"source,omitempty"`
 	Type   string    `json:"type,omitempty"`
+	IDs    []string  `json:"ids,omitempty"`
 	Since  time.Time `json:"since,omitempty"`
 	Until  time.Time `json:"until,omitempty"`
 }
@@ -66,6 +74,16 @@ func SearchEvents(s *store.Store, in SearchEventsInput) (events []event.Event, t
 		all = append(all, ev)
 	}
 
+	// An empty-string entry in IDs would otherwise match no event and, being the
+	// only filter, wrongly empty the result; build a normalized lookup set that
+	// skips blanks so a model that echoes an "" id is tolerated.
+	idSet := map[string]struct{}{}
+	for _, id := range in.IDs {
+		if id != "" {
+			idSet[strings.ToLower(id)] = struct{}{}
+		}
+	}
+
 	// Pass 1: non-time filters (always applied).
 	preTime := make([]event.Event, 0, len(all))
 	for _, ev := range all {
@@ -77,6 +95,11 @@ func SearchEvents(s *store.Store, in SearchEventsInput) (events []event.Event, t
 		}
 		if in.Type != "" && !strings.EqualFold(ev.Type, in.Type) {
 			continue
+		}
+		if len(idSet) > 0 {
+			if _, ok := idSet[strings.ToLower(ev.ID)]; !ok {
+				continue
+			}
 		}
 		preTime = append(preTime, ev)
 	}
