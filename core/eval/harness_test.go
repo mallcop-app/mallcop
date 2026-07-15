@@ -243,12 +243,13 @@ func TestHarness_MergeGate_GreenWithMedianOfN(t *testing.T) {
 		t.Fatalf("merge-gate report must say median_pass_rate is BLENDED; note=%q", report.Note)
 	}
 
-	// RECALL/PRECISION SPLIT (mallcoppro C2): the shipped corpus is 40 attacks
-	// (expected chain_action demands escalate) / 18 benigns (expected resolved).
-	// With floorForcedBenignHard empty, EVERY scenario passes under golden
-	// responses, so both recall and precision must be a clean 1.0 — the split
-	// must never silently collapse the two into one number.
-	const wantAttacks, wantBenigns = 40, 18
+	// RECALL/PRECISION SPLIT (mallcoppro C2): the shipped corpus is 41 attacks
+	// (expected chain_action demands escalate) / 19 benigns (expected resolved) —
+	// 40/18 plus the authored deployflood must-fire (attack) and benign-twin
+	// (benign) pair. With floorForcedBenignHard empty, EVERY scenario passes under
+	// golden responses, so both recall and precision must be a clean 1.0 — the
+	// split must never silently collapse the two into one number.
+	const wantAttacks, wantBenigns = 41, 19
 	if wantAttacks+wantBenigns != report.CorpusCount {
 		t.Fatalf("test assumption stale: wantAttacks(%d)+wantBenigns(%d) != corpus count %d — corpus composition changed",
 			wantAttacks, wantBenigns, report.CorpusCount)

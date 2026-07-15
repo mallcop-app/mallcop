@@ -33,7 +33,7 @@ baseline:
       - github
   frequency_tables: {}
 expected:
-  chain_action: resolve
+  chain_action: resolved
 expected_detection:
   must_fire: []
   must_not_fire:

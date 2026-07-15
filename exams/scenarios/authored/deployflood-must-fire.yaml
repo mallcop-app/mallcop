@@ -33,7 +33,7 @@ baseline:
       - github
   frequency_tables: {}
 expected:
-  chain_action: escalate
+  chain_action: escalated
 expected_detection:
   must_fire:
     - authored-deploy-flood
