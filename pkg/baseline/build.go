@@ -33,12 +33,15 @@ import (
 //     volume-anomaly (FreqCountActor) and surfaced by check-baseline.
 //   - ActorHours      — actor → sorted distinct UTC hours seen. Read by
 //     unusual-timing (HasActorHours / ActorHours / KnownHour).
-//   - ActorRoles      — actor → sorted distinct role keys the priv-escalation
-//     detector would actually FIRE (and gate) on: the event type is an elevation
-//     type, the event isElevated (with the removal guard), and the role key came
-//     from an EXPLICIT role/permission field. Recorded only when the detector would
-//     genuinely investigate it — never off a non-firing event. Read by
-//     priv-escalation (IsKnownRole). See the SECURITY note below.
+//   - ActorRoles      — actor → sorted distinct "role:target" composite keys the
+//     priv-escalation detector would actually FIRE (and gate) on: the event type
+//     is an elevation type, the event isElevated (with the removal guard), and
+//     the role key came from an EXPLICIT role/permission field. Recorded only
+//     when the detector would genuinely investigate it — never off a non-firing
+//     event. The target segment (mallcoppro-9af, ruled by Baron 2026-07-15) is
+//     the grant's target-principal field (target_user/principal_id), empty when
+//     absent — see buildPrivRoleTargetKey. Read by priv-escalation (IsKnownRole).
+//     See the SECURITY note below.
 //   - KnownUsers      — actor → UserProfile{KnownIPs, KnownGeos, LastSeen} built
 //     from the actor's LOGIN events that carried at least one ip or geo (so
 //     HasLoginProfile stays meaningful). Read by unusual-login (HasUser /
@@ -129,15 +132,18 @@ func Build(events []event.Event) *Baseline {
 		//   (3) the role key came from an EXPLICIT role/permission field (never the
 		//       event-type fallback — field-less escalations must fail SAFE and
 		//       re-fire, per the SECURITY note above).
-		// buildPriv* mirror core/detect/priv_escalation.go; TestBuild_ActorRoles_
-		// MirrorsPrivEscalationFiring drives the REAL detector to prove no drift.
+		// The recorded key is "role:target" (mallcoppro-9af), not role alone — see
+		// buildPrivRoleTargetKey. buildPriv* mirror core/detect/priv_escalation.go;
+		// TestBuild_ActorRoles_MirrorsPrivEscalationFiring drives the REAL detector
+		// to prove no drift.
 		meta := buildMetaBlock(ev.Payload)
 		if buildElevationEventTypes[ev.Type] {
 			roleName := buildFirstNonEmpty(meta, "role", "role_name")
 			perm := buildFirstNonEmpty(meta, "permission", "permission_level")
 			action := buildTopAction(ev.Payload)
 			if buildPrivIsElevated(ev.Type, roleName, perm, action) && (roleName != "" || perm != "") {
-				addBuildSet(roleSet, actor, buildPrivRoleKey(roleName, perm))
+				targetUser := buildFirstNonEmpty(meta, "target_user", "principal_id")
+				addBuildSet(roleSet, actor, buildPrivRoleTargetKey(roleName, perm, targetUser))
 			}
 		}
 
@@ -513,6 +519,19 @@ func buildPrivRoleKey(roleName, permissionLevel string) string {
 		return strings.ToLower(roleName)
 	}
 	return strings.ToLower(permissionLevel)
+}
+
+// buildPrivRoleTargetKey mirrors priv_escalation.go's roleTargetKey: composes
+// the grant's (role, target) pair into the same "role:target" composite string
+// the detector's baseline gate is keyed on (mallcoppro-9af, ruled by Baron
+// 2026-07-15 — the gate/dedup key must be target-aware, not actor+role only, so
+// a known admin re-granting the same role to a NEW principal still fires). The
+// target segment is lower-cased with NO trim — byte-faithful to
+// priv_escalation.go's targetKey, for the same false-negative reason
+// buildPrivRoleKey's no-trim note documents for the role segment: trimming here
+// would key a whitespace-padded target differently than the detector does.
+func buildPrivRoleTargetKey(roleName, permissionLevel, targetUser string) string {
+	return buildPrivRoleKey(roleName, permissionLevel) + ":" + strings.ToLower(targetUser)
 }
 
 // buildTopAction reads the TOP-LEVEL "action" string from an event payload,

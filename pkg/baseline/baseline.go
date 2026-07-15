@@ -297,6 +297,10 @@ func cloneStrings(s []string) []string {
 }
 
 // IsKnownRole returns true when actor+role is in the actor roles baseline.
+// Since mallcoppro-9af, priv-escalation's gate passes a composite "role:target"
+// string as role (see core/detect/priv_escalation.go's roleTargetKey) so the
+// gate is aware of WHO received the grant, not just the role — this method
+// itself is unchanged, it just compares whatever string the caller passes.
 func (b *Baseline) IsKnownRole(actor, role string) bool {
 	roles, ok := b.ActorRoles[actor]
 	if !ok {

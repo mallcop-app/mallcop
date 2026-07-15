@@ -202,6 +202,69 @@ func TestPipeline_KnownActorNewIncidentStillFires(t *testing.T) {
 	}
 }
 
+// TestPipeline_PrivEscalationTargetAwareGate — mallcoppro-9af (ruled by Baron
+// 2026-07-15): the priv-escalation baseline gate/dedup key is (actor, role,
+// target), not (actor, role) alone. Before this fix, once admin-user's "admin"
+// grant was baselined via ANY target, admin-user granting "admin" to a NEW
+// principal in a later scan was silently gated forever — a compromised known
+// admin re-granting privileges to a fresh attacker principal never re-fired.
+// This drives the fix through the REAL derived-baseline path (pipeline.Run →
+// baseline.Build → detect.Detect), proving both halves of the change agree:
+//   - scan 2 grants "admin" to a NEW target (attacker) → MUST fire, where the
+//     pre-fix (actor,role)-only gate would have suppressed it (the sabotage
+//     check this test distinguishes).
+//   - scan 3 repeats scan 2's exact grant → gated (idempotent, no churn).
+func TestPipeline_PrivEscalationTargetAwareGate(t *testing.T) {
+	ts := time.Date(2026, 6, 18, 14, 0, 0, 0, time.UTC)
+
+	// Scan 1: admin-user grants "admin" to "victim" — a real escalation, fires
+	// and baselines (admin-user, admin, victim).
+	grant1 := []event.Event{
+		benignEvent("v1", "github", "role_assignment", "admin-user", ts, map[string]any{
+			"role": "admin", "action": "add_role_assignment", "target_user": "victim",
+		}),
+	}
+	// Scan 2: the SAME admin-user grants the SAME "admin" role to a DIFFERENT,
+	// NEW target — a distinct incident (e.g. a compromised admin credential
+	// handing privileges to a fresh attacker principal) that must reach the
+	// human even though (actor, role) alone was already baselined.
+	grant2 := []event.Event{
+		benignEvent("v2", "github", "role_assignment", "admin-user", ts, map[string]any{
+			"role": "admin", "action": "add_role_assignment", "target_user": "attacker",
+		}),
+	}
+	pGrant1 := writeEventsFile(t, grant1)
+	pGrant2 := writeEventsFile(t, grant2)
+	st := newGitStore(t)
+
+	if _, err := pipeline.Run(context.Background(), baseCfg(t, st, pGrant1)); err != nil {
+		t.Fatalf("scan 1: %v", err)
+	}
+
+	sum2, err := pipeline.Run(context.Background(), baseCfg(t, st, pGrant2))
+	if err != nil {
+		t.Fatalf("scan 2: %v", err)
+	}
+	if sum2.FindingsDetected != 1 {
+		t.Fatalf("scan 2 FindingsDetected = %d, want 1 — the SAME role granted to a NEW target must fire, not be suppressed by the (actor,role)-only gate", sum2.FindingsDetected)
+	}
+	got := loadFindings(t, st)
+	last := got[len(got)-1]
+	if last.Type != "priv-escalation" || last.Actor != "admin-user" {
+		t.Fatalf("scan 2 finding = {actor=%q type=%q}, want {admin-user priv-escalation}", last.Actor, last.Type)
+	}
+
+	// Scan 3: repeat scan 2's IDENTICAL grant (same actor, role, AND target).
+	// The (actor, role, target) triple is now baselined → gated, no churn.
+	sum3, err := pipeline.Run(context.Background(), baseCfg(t, st, pGrant2))
+	if err != nil {
+		t.Fatalf("scan 3: %v", err)
+	}
+	if sum3.FindingsDetected != 0 {
+		t.Errorf("scan 3 FindingsDetected = %d, want 0 — the identical (actor,role,target) grant must be idempotent across re-scans", sum3.FindingsDetected)
+	}
+}
+
 // TestPipeline_ExplicitBaselineHonored proves an explicit Config.Baseline takes
 // precedence over the derived one AND is NOT persisted. Over a FRESH store (the
 // derived baseline would be empty → new-actor would fire), the explicit baseline

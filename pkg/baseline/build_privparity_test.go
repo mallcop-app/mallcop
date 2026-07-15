@@ -52,25 +52,27 @@ func privEscalationFires(t *testing.T, ev event.Event) *finding.Finding {
 // the detector's real behavior. Each case uses a DISTINCT actor so Build's per-
 // actor aggregation is unambiguous. wantFire is asserted against the REAL detector
 // (so a detector predicate change breaks this test first), and wantRole records
-// what Build must baseline: the explicit role key when the detector fires on an
-// explicit field, or "" when Build must record NOTHING (non-firing, or a field-
-// less/event-type-fallback firing that fails safe).
+// what Build must baseline: the explicit "role:target" composite key
+// (mallcoppro-9af) when the detector fires on an explicit field — target is the
+// empty string (trailing ":") when the event carries no target_user/principal_id
+// — or "" when Build must record NOTHING (non-firing, or a field-less/event-
+// type-fallback firing that fails safe).
 func TestBuild_ActorRoles_MirrorsPrivEscalationFiring(t *testing.T) {
 	cases := []struct {
 		name     string
 		ev       event.Event
 		wantFire bool   // does the REAL priv-escalation detector fire?
-		wantRole string // role Build MUST baseline for this actor ("" = none)
+		wantRole string // "role:target" key Build MUST baseline for this actor ("" = none)
 	}{
 		{
 			name:     "explicit admin grant fires and is baselined",
 			ev:       parityEvent("a1", "role_assignment", "a1", map[string]any{"role": "admin", "action": "add_role_assignment", "target_user": "t"}),
-			wantFire: true, wantRole: "admin",
+			wantFire: true, wantRole: "admin:t",
 		},
 		{
 			name:     "explicit write permission fires and is baselined",
 			ev:       parityEvent("a2", "permission_change", "a2", map[string]any{"permission": "write", "action": "grant"}),
-			wantFire: true, wantRole: "write",
+			wantFire: true, wantRole: "write:",
 		},
 		{
 			name:     "role REMOVAL is not elevation → not fired, not baselined",
@@ -100,17 +102,17 @@ func TestBuild_ActorRoles_MirrorsPrivEscalationFiring(t *testing.T) {
 		{
 			name:     "collaborator_added maintainer → fires and is baselined",
 			ev:       parityEvent("a8", "collaborator_added", "a8", map[string]any{"role": "maintainer"}),
-			wantFire: true, wantRole: "maintainer",
+			wantFire: true, wantRole: "maintainer:",
 		},
 		{
 			name:     "permission_level owner → fires and is baselined",
 			ev:       parityEvent("a9", "permission_change", "a9", map[string]any{"permission_level": "owner"}),
-			wantFire: true, wantRole: "owner",
+			wantFire: true, wantRole: "owner:",
 		},
 		{
 			name:     "member_added mixed-case Admin → fires and is baselined lower-cased",
 			ev:       parityEvent("a10", "member_added", "a10", map[string]any{"role": "Admin"}),
-			wantFire: true, wantRole: "admin",
+			wantFire: true, wantRole: "admin:",
 		},
 		{
 			// The detector's roleKey lower-cases the RAW value with NO trim, so Build
@@ -119,7 +121,7 @@ func TestBuild_ActorRoles_MirrorsPrivEscalationFiring(t *testing.T) {
 			// (false negative). wantRole carries the surrounding spaces deliberately.
 			name:     "whitespace-padded admin role → fires and is baselined UNTRIMMED (byte-faithful roleKey)",
 			ev:       parityEvent("a11", "role_assignment", "a11", map[string]any{"role": " admin ", "action": "add_role_assignment", "target_user": "t"}),
-			wantFire: true, wantRole: " admin ",
+			wantFire: true, wantRole: " admin :t",
 		},
 	}
 

@@ -22,9 +22,9 @@ type privEscalationDetector struct{}
 
 func (privEscalationDetector) Name() string { return "priv-escalation" }
 
-// Detect emits one finding per (actor, role) escalation not in the baseline.
-// The emitted dedup map is local to this call, mirroring the standalone
-// binary's per-process dedup.
+// Detect emits one finding per (actor, role, target) escalation not in the
+// baseline. The emitted dedup map is local to this call, mirroring the
+// standalone binary's per-process dedup.
 //
 // K7 TUNING ISOLATION: the priv-escalation knob sets are read from an IMMUTABLE
 // snapshot loaded ONCE here (loadPrivEscalationTuning) and threaded down to the
@@ -252,9 +252,34 @@ func roleKey(ev event.Event, pp privPayload) string {
 	return ev.Type
 }
 
+// targetKey derives a stable identifier for the principal RECEIVING the
+// granted role/permission (pp.TargetUser, itself resolved from the payload's
+// target_user/principal_id fields — see readPrivPayload). Lower-cased, no
+// trim, mirroring roleKey's normalization convention exactly. Empty when the
+// event carries no explicit target-principal field.
+func targetKey(pp privPayload) string {
+	return strings.ToLower(pp.TargetUser)
+}
+
+// roleTargetKey composes the (role, target) pair into the single string the
+// baseline gate and in-scan dedup key are keyed on (mallcoppro-9af, ruled by
+// Baron 2026-07-15). Before this the gate/dedup key was actor+role ONLY: once
+// (actor, role) was investigated once and baselined, that actor granting the
+// SAME role to ANY NEW principal was suppressed forever — a compromised known
+// admin re-granting privileges to a fresh attacker principal never re-fired.
+// Folding the target in makes the SAME grant (actor, role, target) idempotent
+// across re-scans, while a grant of the same role to a NEW target re-fires:
+// every admin action deserves scrutiny, because legitimate admin credentials
+// get stolen and reused constantly. An event with no explicit target field
+// keys as role+":" — unchanged from the pre-9af per-role-only shape for that
+// case, since there is no target identity available to distinguish on.
+func roleTargetKey(rk, tk string) string {
+	return rk + ":" + tk
+}
+
 // privEscalationEvaluate returns a Finding if the event represents a new
 // privilege escalation not already in the baseline. emitted tracks
-// (actor:role) pairs already reported.
+// (actor:role:target) triples already reported.
 // This is a pure function with respect to state mutation (emitted is caller-owned).
 func privEscalationEvaluate(ev event.Event, bl *baseline.Baseline, emitted map[string]bool, tuning *privEscalationTuning) *finding.Finding {
 	if !tuning.elevationEventTypes[ev.Type] {
@@ -268,12 +293,14 @@ func privEscalationEvaluate(ev event.Event, bl *baseline.Baseline, emitted map[s
 	}
 
 	rk := roleKey(ev, pp)
+	tk := targetKey(pp)
+	gk := roleTargetKey(rk, tk)
 
-	if bl.IsKnownRole(ev.Actor, rk) {
+	if bl.IsKnownRole(ev.Actor, gk) {
 		return nil
 	}
 
-	dedupKey := ev.Actor + ":" + rk
+	dedupKey := ev.Actor + ":" + gk
 	if emitted[dedupKey] {
 		return nil
 	}

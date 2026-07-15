@@ -80,3 +80,85 @@ func TestPrivEscalationFiresOnCloudRoles(t *testing.T) {
 		})
 	}
 }
+
+// TestPrivEscalationGateIsTargetAware proves the baseline gate + in-scan dedup
+// key is (actor, role, target) — not (actor, role) alone (mallcoppro-9af, ruled
+// by Baron 2026-07-15). Before this fix, once (actor, role) was baselined, that
+// actor granting the SAME role to ANY NEW principal was silently suppressed
+// forever: a compromised known admin re-granting privileges to a fresh attacker
+// principal never re-fired. This pins the three load-bearing behaviors the
+// ruling requires:
+//   - the SAME grant (actor, role, target) stays idempotent across a re-scan,
+//   - the SAME role granted to a NEW target re-fires,
+//   - a DIFFERENT role granted to the SAME target re-fires.
+func TestPrivEscalationGateIsTargetAware(t *testing.T) {
+	grant := func(id, actor, role, target string) event.Event {
+		return event.Event{
+			ID: id, Source: "github", Type: "role_assignment",
+			Actor: actor, Timestamp: ts(17, 0),
+			Payload: raw(t, map[string]string{
+				"role_name":   role,
+				"target_user": target,
+			}),
+		}
+	}
+	fires := func(bl *baseline.Baseline, ev event.Event) bool {
+		for _, f := range Detect([]event.Event{ev}, bl) {
+			if f.Type == "priv-escalation" {
+				return true
+			}
+		}
+		return false
+	}
+
+	t.Run("same actor+role+target is idempotent across re-scan", func(t *testing.T) {
+		bl := &baseline.Baseline{
+			KnownActors: []string{"admin-user"},
+			ActorRoles:  map[string][]string{"admin-user": {"admin:victim"}},
+		}
+		ev := grant("g1", "admin-user", "admin", "victim")
+		if fires(bl, ev) {
+			t.Errorf("re-scan of the SAME (actor, role, target) re-fired — the gate must be idempotent for a repeated grant")
+		}
+	})
+
+	t.Run("same actor+role to a NEW target re-fires", func(t *testing.T) {
+		bl := &baseline.Baseline{
+			KnownActors: []string{"admin-user"},
+			ActorRoles:  map[string][]string{"admin-user": {"admin:victim"}},
+		}
+		ev := grant("g2", "admin-user", "admin", "attacker")
+		if !fires(bl, ev) {
+			t.Errorf("granting the SAME role to a NEW target did not fire — a compromised known admin re-granting to a fresh principal must always surface")
+		}
+	})
+
+	t.Run("different role, same actor+target re-fires", func(t *testing.T) {
+		bl := &baseline.Baseline{
+			KnownActors: []string{"admin-user"},
+			ActorRoles:  map[string][]string{"admin-user": {"contributor:victim"}},
+		}
+		ev := grant("g3", "admin-user", "admin", "victim")
+		if !fires(bl, ev) {
+			t.Errorf("granting a DIFFERENT role to the same known target did not fire")
+		}
+	})
+
+	t.Run("in-scan dedup within one Detect call is also target-aware", func(t *testing.T) {
+		bl := &baseline.Baseline{KnownActors: []string{"admin-user"}}
+		events := []event.Event{
+			grant("g4", "admin-user", "admin", "victim"),
+			grant("g5", "admin-user", "admin", "victim"),   // repeat, same triple → deduped
+			grant("g6", "admin-user", "admin", "attacker"), // new target → distinct finding
+		}
+		var privCount int
+		for _, f := range Detect(events, bl) {
+			if f.Type == "priv-escalation" {
+				privCount++
+			}
+		}
+		if privCount != 2 {
+			t.Errorf("Detect emitted %d priv-escalation findings, want 2 (victim once, attacker once; the repeat g5 must dedup against g4)", privCount)
+		}
+	})
+}

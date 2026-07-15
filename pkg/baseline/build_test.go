@@ -70,13 +70,15 @@ func TestBuild_PopulatesDetectorFields(t *testing.T) {
 			b.HasActorHours(), b.KnownHour("alice", 9), b.KnownHour("alice", 3))
 	}
 
-	// ActorRoles — lower-cased, sorted, EXPLICIT role + permission only.
-	if got, want := b.ActorRoles["alice"], []string{"admin", "write"}; !reflect.DeepEqual(got, want) {
+	// ActorRoles — lower-cased, sorted, EXPLICIT role + permission only, keyed as
+	// "role:target" (mallcoppro-9af). Neither e3 nor e4 carries a target_user/
+	// principal_id field, so both keys have an empty target segment.
+	if got, want := b.ActorRoles["alice"], []string{"admin:", "write:"}; !reflect.DeepEqual(got, want) {
 		t.Errorf("ActorRoles[alice] = %v, want %v", got, want)
 	}
-	if !b.IsKnownRole("alice", "admin") || b.IsKnownRole("alice", "owner") {
-		t.Errorf("IsKnownRole reader disagrees: admin=%v owner=%v",
-			b.IsKnownRole("alice", "admin"), b.IsKnownRole("alice", "owner"))
+	if !b.IsKnownRole("alice", "admin:") || b.IsKnownRole("alice", "owner:") {
+		t.Errorf("IsKnownRole reader disagrees: admin:=%v owner:=%v",
+			b.IsKnownRole("alice", "admin:"), b.IsKnownRole("alice", "owner:"))
 	}
 
 	// KnownUsers — built from the login; ip/geo captured; last-seen set.
