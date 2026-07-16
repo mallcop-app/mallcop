@@ -153,12 +153,20 @@ func Serve(ctx context.Context, opts ServeOptions) error {
 		return fmt.Errorf("investigate: serve requires both InboxPath and OutboxPath")
 	}
 
-	ob := &outboxWriter{path: opts.OutboxPath}
+	// A re-dispatched runner (asleep→rewake, mallcoppro-ebef) appends to the
+	// SAME sessions/<id>/ files its predecessor used, so both cursors must
+	// resume from the files, not restart at zero: a restarted outbox seq is
+	// silently dropped by the browser's `rec.seq <= live.outboxSeq` cursor,
+	// and a restarted inbox cursor re-runs inference for every
+	// already-answered question in the session.
+	resumedOutboxSeq, resumedInboxSeq := resumeState(opts.InboxPath, opts.OutboxPath)
+
+	ob := &outboxWriter{path: opts.OutboxPath, lastSeq: resumedOutboxSeq}
 	if err := emit(ob, opts.Mailbox, map[string]any{"type": "ready", "runner": opts.runnerID(), "ts": nowRFC3339()}, true); err != nil {
 		return err
 	}
 
-	lastSeq := 0
+	lastSeq := resumedInboxSeq
 	lastActivity := time.Now()
 	lastHeartbeat := time.Time{}
 
@@ -320,6 +328,70 @@ func summarizeToolResult(name string, result any, err error) string {
 	// content itself, to honor "the underlying data stays in the runner").
 	b, _ := json.Marshal(result)
 	return fmt.Sprintf("%s returned %d bytes", name, len(b))
+}
+
+// resumeState scans a session's existing outbox/inbox files and returns the
+// cursors a resumed runner must continue from:
+//
+//   - outboxSeq: the max outbox seq already written, so this runner's records
+//     extend the file's single monotonic seq line (protocol §4). The browser
+//     keys its dedup cursor on that line; a counter restarting at 1 makes
+//     every record of the resumed runner invisible to it (mallcoppro-ebef).
+//   - inboxSeq: the highest inbox seq whose question already has a "done"
+//     record. Questions at or below it are answered and must not re-run
+//     inference; a question acked but never done'd (predecessor died
+//     mid-answer) stays above the cursor and IS re-processed.
+//
+// The join is by question id (done.q -> inbox record ID), not by the ack's
+// seq field: outboxWriter.append overwrites every record's "seq" with the
+// outbox counter, so an inbox seq can never be recovered from the outbox.
+// A fresh session (no outbox file yet) resumes from (0, 0), which is exactly
+// the old fixed behavior.
+func resumeState(inboxPath, outboxPath string) (outboxSeq, inboxSeq int) {
+	f, err := os.Open(outboxPath)
+	if err != nil {
+		return 0, 0
+	}
+	defer f.Close()
+
+	type outboxRecord struct {
+		Type string `json:"type"`
+		Q    string `json:"q"`
+		Seq  int    `json:"seq"`
+	}
+	done := map[string]bool{}
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
+	for sc.Scan() {
+		line := sc.Bytes()
+		if len(line) == 0 {
+			continue
+		}
+		var rec outboxRecord
+		if err := json.Unmarshal(line, &rec); err != nil {
+			continue
+		}
+		if rec.Seq > outboxSeq {
+			outboxSeq = rec.Seq
+		}
+		if rec.Type == "done" && rec.Q != "" {
+			done[rec.Q] = true
+		}
+	}
+
+	if len(done) == 0 {
+		return outboxSeq, 0
+	}
+	records, err := readInbox(inboxPath)
+	if err != nil {
+		return outboxSeq, 0
+	}
+	for _, rec := range records {
+		if rec.Type == "question" && done[rec.ID] && rec.Seq > inboxSeq {
+			inboxSeq = rec.Seq
+		}
+	}
+	return outboxSeq, inboxSeq
 }
 
 // readInbox reads and parses every well-formed line of path. A missing file
