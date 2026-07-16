@@ -94,6 +94,7 @@ func runSelfext(args []string) error {
 	noJail := fs.Bool("no-jail", false, "DISABLE the OS-enforced Landlock authoring jail (accepted risk; jail is ON by default)")
 	opencodeBin := fs.String("opencode-bin", "", "path to the opencode binary (default: opencode on PATH)")
 	maxOutputTokens := fs.Int("max-output-tokens", 0, "per-request output-token ceiling requested of the authoring model (0 = default 32768; reasoning models bill thinking against it — set lower only if your BYOK endpoint rejects large max_tokens)")
+	maxAuthoringAttempts := fs.Int("max-authoring-attempts", 0, "max times to re-drive opencode as a FRESH session when an attempt exits 0 having written NOTHING (the narrate-then-die shape; 0 = default 3). Distinct from the adapter's transient non-zero-exit retry")
 	validateBin := fs.String("validate-bin", "", "path to the mallcop binary that runs validate-proposal (default: mallcop on PATH)")
 	examRepo := fs.String("exam-repo", "", "path to a REFERENCE mallcop tree used to grade a CUSTOMER-SHAPED target repo (one with no cmd/mallcop of its own)")
 
@@ -163,27 +164,28 @@ func runSelfext(args []string) error {
 	}
 
 	return runSelfextRun(runArgs{
-		inferenceURL:    *inferenceURL,
-		inferenceKeyEnv: *inferenceKeyEnv,
-		targetRepo:      *targetRepo,
-		baseRef:         *baseRef,
-		lane:            *lane,
-		codeModel:       *codeModel,
-		sovereignty:     *sovereignty,
-		artifactDir:     *artifactDir,
-		opencodeBin:     *opencodeBin,
-		maxOutputTokens: *maxOutputTokens,
-		validateBin:     *validateBin,
-		examRepo:        *examRepo,
-		budgetUSD:       *budgetUSD,
-		autonomy:        autonomyDial,
-		noJail:          *noJail,
-		detectorID:      *detectorID,
-		eventType:       *eventType,
-		targetFamily:    *targetFamily,
-		severity:        *severity,
-		actor:           *actor,
-		source:          *source,
+		inferenceURL:         *inferenceURL,
+		inferenceKeyEnv:      *inferenceKeyEnv,
+		targetRepo:           *targetRepo,
+		baseRef:              *baseRef,
+		lane:                 *lane,
+		codeModel:            *codeModel,
+		sovereignty:          *sovereignty,
+		artifactDir:          *artifactDir,
+		opencodeBin:          *opencodeBin,
+		maxOutputTokens:      *maxOutputTokens,
+		maxAuthoringAttempts: *maxAuthoringAttempts,
+		validateBin:          *validateBin,
+		examRepo:             *examRepo,
+		budgetUSD:            *budgetUSD,
+		autonomy:             autonomyDial,
+		noJail:               *noJail,
+		detectorID:           *detectorID,
+		eventType:            *eventType,
+		targetFamily:         *targetFamily,
+		severity:             *severity,
+		actor:                *actor,
+		source:               *source,
 	})
 }
 
@@ -212,27 +214,28 @@ func resolveBYOK(inferenceURL, inferenceKeyEnv string, getenv func(string) strin
 
 // runArgs bundles the resolved flags the BYOK authoring (--run) loop needs.
 type runArgs struct {
-	inferenceURL    string
-	inferenceKeyEnv string
-	targetRepo      string
-	baseRef         string
-	lane            string
-	codeModel       string
-	sovereignty     string
-	artifactDir     string
-	opencodeBin     string
-	maxOutputTokens int
-	validateBin     string
-	examRepo        string
-	budgetUSD       float64
-	autonomy        autonomy.Dial
-	noJail          bool
-	detectorID      string
-	eventType       string
-	targetFamily    string
-	severity        string
-	actor           string
-	source          string
+	inferenceURL         string
+	inferenceKeyEnv      string
+	targetRepo           string
+	baseRef              string
+	lane                 string
+	codeModel            string
+	sovereignty          string
+	artifactDir          string
+	opencodeBin          string
+	maxOutputTokens      int
+	maxAuthoringAttempts int
+	validateBin          string
+	examRepo             string
+	budgetUSD            float64
+	autonomy             autonomy.Dial
+	noJail               bool
+	detectorID           string
+	eventType            string
+	targetFamily         string
+	severity             string
+	actor                string
+	source               string
 }
 
 // runSelfextRun assembles the engine on the BYOK rail and executes ONE authoring
@@ -280,16 +283,17 @@ func runSelfextRun(a runArgs) error {
 			MaxOutputTokens: a.maxOutputTokens,
 			Logger:          log,
 		},
-		Fingerprints:  rejects,
-		ValidateBin:   a.validateBin,
-		ExamRepo:      a.examRepo,
-		ArtifactDir:   a.artifactDir,
-		Class:         selfextAuthorClass,
-		AuthoringLane: a.lane,
-		Sovereignty:   a.sovereignty,
-		BudgetUSD:     a.budgetUSD,
-		Autonomy:      a.autonomy,
-		Logger:        log,
+		Fingerprints:         rejects,
+		ValidateBin:          a.validateBin,
+		ExamRepo:             a.examRepo,
+		ArtifactDir:          a.artifactDir,
+		Class:                selfextAuthorClass,
+		AuthoringLane:        a.lane,
+		Sovereignty:          a.sovereignty,
+		BudgetUSD:            a.budgetUSD,
+		MaxAuthoringAttempts: a.maxAuthoringAttempts,
+		Autonomy:             a.autonomy,
+		Logger:               log,
 	}
 
 	gap := opencode.TrustedGap{
