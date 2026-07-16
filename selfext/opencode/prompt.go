@@ -217,16 +217,50 @@ REQUIRED FILES (all three, or the merge gate rejects the proposal):
    - Name() MUST return a single compile-time STRING LITERAL directly (the
      detector id in double quotes) — NOT a const/var reference, concatenation,
      or any computation. The structural gate rejects a non-literal Name().
-   - Detect MUST fire (emit exactly one finding with Type == %q) only on
-     events whose Type == %q, and stay SILENT on everything else. Keep the
-     trigger tight so a benign look-alike does NOT fire.
-   Model it on this reference detector (adapt names/logic, keep the shape):
+   - Detect emits findings whose Type == %q — this EXACT string is the token
+     the merge gate matches your scenarios' must_fire/must_not_fire labels
+     against (it is finding.Type, i.e. the detector name — NOT the finding
+     "family"). It keys on events of Type == %q, but keying on the event type is
+     NOT the trigger: the trigger MUST be TIGHT — a threshold / burst /
+     baseline-aware condition that fires ONLY on the genuine anomaly, never on
+     the mere PRESENCE of such an event. A detector that fires on every event of
+     this type is the #1 rejection cause (see the WIDEN CONTRACT below).
+     Model the tight trigger on the reference detector
+     core/detect/authored/deployflood/deployflood.go: it counts per-actor volume
+     within the event window and compares it against the actor's baseline
+     (baseline.Baseline.FreqCountActor), firing only on a genuine burst; a single
+     event, or a volume the baseline already explains, never fires.
+
+   WIDEN CONTRACT (the merge gate enforces this — it is the exact reason a naive
+   detector is rejected): the gate runs the FULL exam corpus at BASE (without
+   your detector) and at HEAD (with it) and diffs them. Your detector must NOT
+   newly fire on ANY pre-existing corpus scenario — only on the must-fire
+   scenario you add below. Pre-existing scenarios ALREADY contain events of Type
+   %q (e.g. exams/scenarios/behavioral/VA-01-deploy-burst.yaml), so a trigger
+   that fires on the mere presence of such an event WILL also fire there and be
+   REJECTED as an undeclared new firing ("family ... fires at head but not at
+   base ... widens must be monotonic and intentional"). Tune the trigger so it
+   stays SILENT on every pre-existing scenario.
+
+   Model the FILE SHAPE (own package, import allow-list, init()+detect.Register,
+   compile-time-literal Name(), Detect signature) on the reference detector
+   below — but NOTE its trigger fires on EVERY event of a synthetic marker type,
+   which is acceptable ONLY because no other corpus scenario contains that
+   synthetic type. Your detector keys on a REAL event type that pre-existing
+   scenarios DO contain, so you MUST use a TIGHT trigger (per the WIDEN CONTRACT
+   and the deployflood reference above), NOT this exemplar's fire-on-every-event
+   shape:
 
 %s
 
 2) exams/scenarios/authored/%s-must-fire.yaml
-   - A labeled scenario carrying at least one event of Type %q that triggers
-     your detector, with an expected_detection.must_fire entry naming family %q.
+   - A labeled scenario whose events TRIP your tight trigger (enough events of
+     Type %q, at the anomaly shape your detector keys on — not just one bare
+     event), with an expected_detection.must_fire entry naming the DETECTOR NAME
+     %q. That label MUST be the detector name (== finding.Type): the gate matches
+     must_fire labels against the EMITTED finding's Type, which is the detector
+     name — a label naming anything else (the finding "family", the event type,
+     etc.) will NOT match and the scenario fails.
    Every scenario MUST carry ALL of these top-level fields, or exam.Load rejects
    it (this is the exact shape — adapt the values, keep every key). Note
    baseline.known_entities.actors and .sources are REQUIRED (a baseline without
@@ -235,8 +269,10 @@ REQUIRED FILES (all three, or the merge gate rejects the proposal):
 %s
 
 3) exams/scenarios/authored/%s-benign-twin.yaml
-   - A labeled BENIGN look-alike (similar shape, event Type NOT %q or lacking the
-     trigger) with expected_detection.must_not_fire naming family %q, proving the
+   - A labeled BENIGN look-alike that does NOT trip your trigger — either events
+     of Type %q at a normal, sub-threshold volume, or a near-miss lacking the
+     anomaly — with expected_detection.must_not_fire naming the DETECTOR NAME %q
+     (again the detector name == finding.Type, NOT the family), proving the
      detector STAYS SILENT on a benign neighbor. SAME full shape as above,
      including baseline.known_entities:
 
@@ -252,11 +288,11 @@ Do NOT modify go.mod, cmd/mallcop/main.go, or any existing detector. Author the
 three files above and stop.`,
 		name, pkg, gap.EventType, family, severity, gap.Actor, gap.Source,
 		pkg, pkg, pkg,
-		name, gap.EventType,
+		name, gap.EventType, gap.EventType,
 		synthmarkerExemplar,
-		pkg, gap.EventType, family,
+		pkg, gap.EventType, name,
 		mustFireScenarioExemplar,
-		pkg, gap.EventType, family,
+		pkg, gap.EventType, name,
 		benignTwinScenarioExemplar,
 	)
 	return b.String()
@@ -397,7 +433,7 @@ const sidecarLocalTypeName = "detector"
 const sidecarScenarioMustFireExemplar = `id: SIDECAR-EXAMPLE-01-must-fire
 finding:
   id: fnd_example_01
-  detector: example-family
+  detector: authored-synthetic-marker
   title: 'example: target event observed'
   severity: medium
 events:
@@ -409,13 +445,13 @@ events:
   action: target-action
 expected_detection:
   must_fire:
-  - example-family
+  - authored-synthetic-marker
 `
 
 const sidecarScenarioBenignTwinExemplar = `id: SIDECAR-EXAMPLE-02-benign-twin
 finding:
   id: fnd_example_02
-  detector: example-family
+  detector: authored-synthetic-marker
   title: 'example: benign look-alike (measured minimal mutation: same event_type/actor/source, action differs)'
   severity: low
 events:
@@ -427,7 +463,7 @@ events:
   action: routine-action
 expected_detection:
   must_not_fire:
-  - example-family
+  - authored-synthetic-marker
 `
 
 // buildSidecarTaskPrompt is BuildTaskPrompt's CUSTOMER-SHAPED branch.
@@ -507,17 +543,21 @@ REQUIRED FILES (all three, or the merge gate rejects the proposal):
      stdlib (fmt, strings, strconv, time, regexp, sort, encoding/json,
      encoding/base64, ...) is allowed for parsing event.Event.Payload. net,
      net/*, os/exec, syscall, unsafe, and cgo are all hard-forbidden.
-   - Detect MUST fire (emit exactly one finding with Type == %q) only on
-     events whose Type == %q, and stay SILENT on everything else. Keep the
-     trigger tight so a benign look-alike does NOT fire. IMPORTANT: the merge
-     gate's benign-twin scenario (below) now REQUIRES the twin event to share
-     this SAME event_type (see item 3b) — so matching event_type ALONE can no
-     longer be the whole trigger once a same-type benign twin exists. Detect
-     must also inspect a substantive field on event.Event.Payload (a JSON
-     object carrying action/target/severity/metadata — see pkg/event.Event's
-     doc) that genuinely distinguishes the attack condition from the benign
-     near-miss, and fire only when BOTH the event type matches AND that
-     condition holds.
+   - Detect emits findings whose Type == %q — this EXACT string is finding.Type
+     (the detector name), the token the merge gate matches your scenarios'
+     must_fire/must_not_fire labels against. It is NOT the event type and NOT the
+     finding "family". Detect keys on events of Type == %q, but matching the
+     event type is NOT enough: the merge gate's benign-twin scenario (below)
+     REQUIRES the twin event to share this SAME event_type (see item 3b), so
+     matching event_type ALONE can no longer be the whole trigger once a
+     same-type benign twin exists. Detect must ALSO inspect a substantive field
+     on event.Event.Payload (a JSON object carrying action/target/severity/
+     metadata — see pkg/event.Event's doc) that genuinely distinguishes the
+     attack condition from the benign near-miss, and fire only when BOTH the
+     event type matches AND that condition holds. The merge gate ALSO runs the
+     reference tree's own exam corpus at base and head: your detector must NOT
+     newly fire on ANY pre-existing reference scenario — keep the trigger tight
+     enough to stay silent on everything except your own must-fire scenario.
 
 %s
 
@@ -530,9 +570,10 @@ REQUIRED FILES (all three, or the merge gate rejects the proposal):
 2) detectors/%s/main_test.go
    - A normal Go test (package main) calling %s{}.Detect(...) directly with
      two synthetic []event.Event slices: one containing an event of Type %q
-     (assert exactly one finding with Type %q comes back) and one BENIGN
-     look-alike slice that does NOT contain that event Type (assert Detect
-     returns no findings). This is the human-reviewable "fires on target,
+     that trips the trigger (assert exactly one finding with Type %q — the
+     DETECTOR NAME, i.e. finding.Type — comes back) and one BENIGN look-alike
+     slice that does NOT trip the trigger (assert Detect returns no findings).
+     This is the human-reviewable "fires on target,
      silent on a neighbor" evidence, alongside the machine-graded scenario
      pair below.
 
@@ -547,7 +588,9 @@ REQUIRED FILES (all three, or the merge gate rejects the proposal):
         whatever action/target/severity/metadata value makes this event the
         ATTACK condition (the substantive field Detect checks, per item 1
         above).
-      - expected_detection.must_fire: [%s]
+      - expected_detection.must_fire: [%s]   (the DETECTOR NAME == finding.Type,
+        NOT the event type and NOT the family — the gate matches this label
+        against the EMITTED finding's Type, which is the detector name)
       - This is the machine-graded proof the detector fires on its target —
         the merge gate REJECTS the proposal if this scenario does not pass
         through the real .wasm run.
@@ -574,14 +617,17 @@ REQUIRED FILES (all three, or the merge gate rejects the proposal):
           * NEVER just delete the triggering event, swap in an unrelated
             scenario, or pick a different event_type — those are exactly the
             rejected carve-out shapes above.
-      - expected_detection.must_not_fire: [%s]
-      - The merge gate REJECTS the proposal if this scenario's family fires
-        (over-broad detection), if it is missing entirely (unproven
+      - expected_detection.must_not_fire: [%s]   (again the DETECTOR NAME ==
+        finding.Type, same token as the must-fire label)
+      - The merge gate REJECTS the proposal if the detector fires here
+        (over-broad detection), if this scenario is missing entirely (unproven
         false-positive floor), or if it fails the measured-minimal-mutation
         check above (an unproven near-miss).
 
-   Reference shape (adapt the id/event_type/actor/source/family to THIS
-   detector's identity above; keep every other field name and structure
+   Reference shape (adapt the id/event_type/actor/source to THIS detector's
+   identity above, and set BOTH must_fire and must_not_fire to the DETECTOR
+   NAME == finding.Type from the identity block — the exemplar below already
+   uses that token, not the family; keep every other field name and structure
    EXACTLY as shown):
 
 %s
@@ -599,13 +645,13 @@ Do NOT modify go.mod, go.sum, or any existing detector. Author the three files
 above and stop.`,
 		name, pkg, gap.EventType, family, severity, gap.Actor, gap.Source,
 		pkg, sidecarLocalTypeName,
-		gap.EventType, gap.EventType,
+		name, gap.EventType,
 		eventAPIGuidance,
 		sidecarExemplar,
-		pkg, sidecarLocalTypeName, gap.EventType, gap.EventType,
+		pkg, sidecarLocalTypeName, gap.EventType, name,
 		pkg,
-		pkg, gap.EventType, gap.Actor, gap.Source, family,
-		pkg, gap.EventType, gap.Actor, gap.Source, family,
+		pkg, gap.EventType, gap.Actor, gap.Source, name,
+		pkg, gap.EventType, gap.Actor, gap.Source, name,
 		sidecarScenarioMustFireExemplar, sidecarScenarioBenignTwinExemplar,
 		pkg,
 		pkg,

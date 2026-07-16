@@ -54,7 +54,11 @@ import (
 //	   --inference-url https://api.mallcop.app --inference-key-env MALLCOP_API_KEY \
 //	   --target-repo ~/checkouts/mallcop --lane heal --code-model coding \
 //	   --detector-id authored-deploy-burst --event-type github.deployment \
-//	   --target-family deploy-burst --artifact-dir ./selfext-proposals --budget-usd 2.00
+//	   --artifact-dir ./selfext-proposals --budget-usd 2.00
+//	   # --target-family is OPTIONAL and defaults to --detector-id; the emitted
+//	   # finding.Type (and the scenarios' must_fire/must_not_fire labels the gate
+//	   # matches against) are ALWAYS the detector id, so a family that differs
+//	   # from it is a metadata-only tag — do NOT expect it in the labels.
 //
 //	mallcop collect --store <scan-store> --json > gaps.json
 //	mallcop selfext --propose \
@@ -96,7 +100,7 @@ func runSelfext(args []string) error {
 	// --run gap description.
 	detectorID := fs.String("detector-id", "", "proposed authored detector id (--run; e.g. authored-deploy-burst)")
 	eventType := fs.String("event-type", "", "connector event type the detector keys on (--run)")
-	targetFamily := fs.String("target-family", "", "finding family the detector emits (--run; default: detector id)")
+	targetFamily := fs.String("target-family", "", "OPTIONAL finding-metadata family tag (--run; default: detector id). The emitted finding.Type — and the must_fire/must_not_fire labels the gate matches against — are ALWAYS the detector id, so the default is almost always right; a value differing from --detector-id only tags metadata, it does NOT become the label the gate checks")
 	severity := fs.String("severity", "medium", "structural severity of the gap exemplar (--run)")
 	actor := fs.String("actor", "", "structural actor field of the gap exemplar (--run)")
 	source := fs.String("source", "", "structural source field of the gap exemplar (--run)")
