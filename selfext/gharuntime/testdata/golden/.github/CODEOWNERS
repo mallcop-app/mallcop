@@ -1,7 +1,7 @@
 # CODEOWNERS — mallcop self-extension frozen paths
 #
 # Written into the operator's fork by `mallcop init --pro` (or
-# `mallcop-ops selfext --scaffold-gha`). This is a BELT to the in-runner guard
+# `mallcop selfext --scaffold-gha`). This is a BELT to the in-runner guard
 # stage (core/selfgate/guard.go), which already HARD-REJECTS any authored diff
 # touching these prefixes. Even a malicious .github/ PR needs the operator's own
 # review; the committee/grader/corpus stay maintainer-only upstream.

@@ -1,40 +1,64 @@
 # mallcop self-extension (CODE lane) — setup
 
-`mallcop-ops selfext --scaffold-gha` wrote the CODE-lane workflows into this repo
+`mallcop selfext --scaffold-gha` wrote the CODE-lane workflows into this repo
 (`.github/workflows/mallcop-selfext-code.yml`, the pinned reusable workflow, and a
-`CODEOWNERS` belt). The steps below are the ones GitHub will not let a scaffold do
-for you — repo secrets and branch protection. Do them once.
+`CODEOWNERS` belt). This is a **BYOK (Bring-Your-Own-Key)** lane: the workflow
+downloads the public OSS `mallcop` release binary and runs `mallcop selfext --run`
+on **your own** inference endpoint + key — no donut/commercial rail, no `mallcop-ops`
+download. The steps below are the ones GitHub will not let a scaffold do for you —
+repo secrets/variables and branch protection. Do them once.
 
 **This file is your durable copy — commit it.** The scaffolder also prints these
 steps, but that output scrolls away; this file does not.
 
-## 1. Inference secret (required)
+## 1. Inference endpoint + key (required — BYOK)
 
-Your **own** donut key, never an admin key:
+The lane authors on **your own** inference. Set two things:
 
-```bash
-gh secret set MALLCOP_SK        # paste your mallcop-sk-... key
-```
-
-Bring-your-own-inference (BYOI) rail: also set your provider endpoint (store the
-provider key as `MALLCOP_SK`):
+Your inference **key** as a secret (never an admin key — the key reaches the binary
+only via `--inference-key-env`, never argv):
 
 ```bash
-gh secret set INFERENCE_URL     # your provider base URL
+gh secret set INFERENCE_KEY      # paste your provider/inference API key
 ```
 
-## 2. CODEOWNERS
+Your inference **endpoint** base URL as a repo variable (a base URL is not a
+credential; the egress jail resolves its host to allowlist it):
+
+```bash
+gh variable set MALLCOP_INFERENCE_URL   # e.g. https://api.anthropic.com or your gateway
+```
+
+The endpoint must be a **natively streaming** Anthropic/OpenAI-compatible inference
+endpoint: the OSS `mallcop selfext` binary carries no stream-shim (unlike the retired
+donut rail), and `opencode` streams unconditionally.
+
+## 2. Author model (optional — never hardcoded)
+
+Which model your endpoint authors with. It is **never hardcoded** — you name the model
+YOUR endpoint recognizes. Set a standing default as a repo variable:
+
+```bash
+gh variable set MALLCOP_CODE_MODEL      # e.g. claude-sonnet-4, or your catalog id
+```
+
+Or override it per run via the `code_model` workflow-dispatch input (step 6). If both
+are empty, the run sends the bare authoring lane and lets your endpoint pick.
+
+## 3. CODEOWNERS
 
 Edit `.github/CODEOWNERS`: replace `@operator` with your GitHub handle. This freezes
 the committee, grader, guard, and `.github/` paths behind your review.
 
-## 3. Pin the reusable workflow
+## 4. Pin the reusable workflow
 
 Replace the all-zero placeholder SHA in `.github/workflows/mallcop-selfext-code.yml`
-with a real `mallcop-app/selfext` release commit SHA. Dependabot (github-actions)
-can keep it current — each bump still hits your CODEOWNERS review.
+with a real `mallcop-app/selfext` release commit SHA (the caller and the reusable
+workflow are a matched pair — pin a SHA where both carry this BYOK contract).
+Dependabot (github-actions) can keep it current — each bump still hits your CODEOWNERS
+review.
 
-## 4. Branch protection (required — this IS the gate)
+## 5. Branch protection (required — this IS the gate)
 
 The whole safety model rests on: authored code lands as a PR that a human reviews,
 and the exam check must pass before merge. Require both:
@@ -54,7 +78,7 @@ gh api -X PUT repos/OWNER/REPO/branches/main/protection --input - <<'JSON'
 JSON
 ```
 
-## 5. Autonomy dial (optional)
+## 6. Autonomy dial (optional)
 
 Auto-merge a clean **GREEN** authored detector. This is **config-file-only** — set it
 in `mallcop.yaml`, never as a workflow input, so a web dispatch can never escalate
@@ -71,23 +95,27 @@ Then let GitHub honor an auto-merge request:
 gh api -X PATCH repos/OWNER/REPO -f allow_auto_merge=true
 ```
 
-Auto-merge still waits for step 4's required exam check, so it never bypasses the
+Auto-merge still waits for step 5's required exam check, so it never bypasses the
 gate. A novel-gap proposal (a finding family with no labeled coverage) always waits
 for human review regardless of the dial. `semi` / `non` leave every PR for you.
 
-## 6. Trigger an authoring run
+## 7. Trigger an authoring run
 
 Name the gap — the detector id and the connector event type it keys on:
 
 ```bash
 gh workflow run mallcop-selfext-code.yml \
-  -f detector_id=authored-deploy-burst -f event_type=github.deployment -f rail=donut-byoi
+  -f detector_id=authored-deploy-burst -f event_type=github.deployment
+  # optional: -f code_model=claude-sonnet-4  (override the MALLCOP_CODE_MODEL default)
 ```
 
-`opencode` authors the detector on your secret's inference, the in-runner gate runs,
-and on **GREEN** a review PR opens in your fork under your own identity.
+`opencode` authors the detector on **your** endpoint + key, under an OS-enforced
+Landlock jail plus a self-enforced egress firewall; the in-runner gate runs; and on
+**GREEN** a review PR opens in your fork under your own identity. The workflow never
+pushes to main and never merges (except the dial-gated auto-merge in step 6, which
+still waits for the required exam check).
 
-## 7. Contribute-back — share a detector upstream (optional)
+## 8. Contribute-back — share a detector upstream (optional)
 
 After one of *your* authored detectors merges, you can propose it into the shared
 open-source corpus. It needs **two** things, set once.
