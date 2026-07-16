@@ -1,0 +1,21 @@
+# CODEOWNERS — mallcop self-extension frozen paths
+#
+# Written into the operator's fork by `mallcop init --pro` (or
+# `mallcop-ops selfext --scaffold-gha`). This is a BELT to the in-runner guard
+# stage (core/selfgate/guard.go), which already HARD-REJECTS any authored diff
+# touching these prefixes. Even a malicious .github/ PR needs the operator's own
+# review; the committee/grader/corpus stay maintainer-only upstream.
+#
+# Replace @operator with the fork owner's GitHub handle before you enable branch
+# protection (see the scaffold checklist).
+
+# The CI / workflow surface — an authored PR must never touch the gate that judges it.
+/.github/                @operator
+
+# The committee (consensus-not-rules floor), the eval grader, and the self-ext guard.
+/core/agent/             @operator
+/core/eval/              @operator
+/core/selfgate/          @operator
+
+# The held-out exam scenarios that exam-detect grades against.
+/exams/scenarios/        @operator
