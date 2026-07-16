@@ -495,9 +495,17 @@ func ToolDefs() []agent.Tool {
 			Description: "Search the detector-finding stream. All filters are optional and case-insensitive.",
 			InputSchema: map[string]any{
 				"type": "object",
+				// These property keys MUST stay in sync with tools.SearchFindingsInput's
+				// json tags (core/tools/search_findings.go): ExecuteTool unmarshals this
+				// raw input straight into that struct, so a filter the model never sees in
+				// the schema is a scoping it can never apply — and, worse, an UNKNOWN key
+				// (e.g. {"type":"forge"} before "type" existed) is silently dropped by the
+				// decoder and the analyst gets the whole stream back (mallcoppro-a8b).
 				"properties": map[string]any{
 					"actor":  map[string]any{"type": "string", "description": "Filter by actor (case-insensitive)."},
 					"source": map[string]any{"type": "string", "description": "Filter by finding source (case-insensitive)."},
+					"type":   map[string]any{"type": "string", "description": "Filter by finding type, e.g. \"new-external-access\" (case-insensitive)."},
+					"ids":    map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Restrict to findings with these exact IDs (case-insensitive). Use this to confirm the on-screen finding the operator is asking about."},
 					"since":  map[string]any{"type": "string", "description": "RFC3339 lower time bound (inclusive). Omit if unknown."},
 				},
 			},

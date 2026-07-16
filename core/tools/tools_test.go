@@ -499,6 +499,44 @@ func TestSearchFindings(t *testing.T) {
 			wantIDs: []string{"f2"},
 		},
 		{
+			name:    "type filter case-insensitive",
+			input:   SearchFindingsInput{Type: "UNUSUAL-LOGIN"},
+			wantIDs: []string{"f1", "f3"},
+		},
+		{
+			// mallcoppro-a8b: a type filter that matches ONE family must scope to it,
+			// not silently return the whole stream (the pre-fix behaviour when the
+			// unknown "type" key was dropped by the decoder).
+			name:    "type filter scopes to one family",
+			input:   SearchFindingsInput{Type: "new-actor"},
+			wantIDs: []string{"f2"},
+		},
+		{
+			name:    "ids filter exact, case-insensitive",
+			input:   SearchFindingsInput{IDs: []string{"F2"}},
+			wantIDs: []string{"f2"},
+		},
+		{
+			name:    "ids filter multiple preserves stream order",
+			input:   SearchFindingsInput{IDs: []string{"f3", "f1"}},
+			wantIDs: []string{"f1", "f3"},
+		},
+		{
+			name:    "ids filter tolerates blank entry",
+			input:   SearchFindingsInput{IDs: []string{"", "f2"}},
+			wantIDs: []string{"f2"},
+		},
+		{
+			name:    "type and ids combined",
+			input:   SearchFindingsInput{Type: "unusual-login", IDs: []string{"f3"}},
+			wantIDs: []string{"f3"},
+		},
+		{
+			name:    "type mismatch yields empty, not everything",
+			input:   SearchFindingsInput{Type: "forge"},
+			wantIDs: []string{},
+		},
+		{
 			name:    "since lower bound inclusive",
 			input:   SearchFindingsInput{Since: base.Add(1 * time.Hour)},
 			wantIDs: []string{"f2", "f3"},
