@@ -1,55 +1,48 @@
 // Package opencode is the headless code-authoring adapter for mallcop's
 // self-extension loop. It drives the opencode CLI (MIT,
 // github.com/sst/opencode) HEADLESS to author a net-new security-monitoring
-// DETECTOR inside a sandboxed git worktree, on metered donut inference routed
-// through Forge's OpenAI-compatible endpoint.
+// DETECTOR inside a sandboxed git worktree, on metered inference routed through
+// the configured OpenAI-compatible inference endpoint.
 //
 // # Provider wiring
 //
-// opencode talks to Forge as an OpenAI-compatible provider. The provider
-// config is delivered ONLY through the OPENCODE_CONFIG_CONTENT subprocess env
-// var (never a file committed to the worktree), and carries the short-lived
-// subkey as the provider apiKey. The authoring model is referenced as
-// "<provider>/<lane>" (e.g. "forge/heal"): opencode sends model="<lane>" to
-// Forge, which resolves the lane to a real Bedrock model — a raw catalog id
-// 404s on Forge, so we "send a lane" (mallcop-pro commit 2cd40d3). The subkey's
+// opencode talks to the inference endpoint as an OpenAI-compatible provider.
+// The provider config is delivered ONLY through the OPENCODE_CONFIG_CONTENT
+// subprocess env var (never a file committed to the worktree), and carries the
+// short-lived run key as the provider apiKey. The authoring model is referenced
+// as "<provider>/<lane>": opencode sends model="<lane>" to the endpoint, which
+// resolves the lane to a concrete backing model — a raw catalog id may 404, so
+// the request sends a lane name. On the metered rail the run key's
 // allowed_models is scoped to that one lane's catalog ids (see engine).
 //
 // # Code-authoring model override
 //
-// Round-6 LIVE evidence (7ee7): sending the bare "heal" lane resolves — on the
-// self-ext build account (provisioned "open" sovereignty, see
-// provisioning.SelfExtAccountExternalRef) — to lane_defaults.heal.open in
-// config/lanes.yaml, a flash-tier model. That model authored a
-// correctly-STRUCTURED customer-tree sidecar detector but HALLUCINATED the
-// pkg/event API (called Payload as a method instead of reading the
-// json.RawMessage FIELD), failing go build/go vet at the sound gate.
+// LIVE evidence: sending the bare "heal" lane resolves to a flash-tier model.
+// That model authored a correctly-STRUCTURED customer-tree sidecar detector but
+// HALLUCINATED the pkg/event API (called Payload as a method instead of reading
+// the json.RawMessage FIELD), failing go build/go vet at the sound gate.
 // Adapter.Model (below) lets the CALLER override the model string opencode
 // requests, independent of Lane, so the CODE-authoring path sends the OPAQUE
-// alias CodeAuthoringModel ("coding") — which Forge resolves server-side to a
-// stronger Go-capable coder through the account's "coding" alias (the raw
-// model id never leaves the server, so it never ships
-// in the public binary). Lane still scopes the subkey mint
-// (config.AllowedModelsForLane(Lane) unions in lane_defaults.heal.us_only,
-// which is the same strong coder the "coding" alias resolves to, so the aliased
-// request spends against a grant that already exists; see
-// cmd/mallcop-ops/selfext.go's codeAuthoringModel, which resolves the alias
-// locally and verifies that grant BEFORE setting Model — never overrides
-// silently if the pool doesn't actually carry it). The model the alias resolves
-// to must NEVER be Fable 5 (it refuses security-adjacent authoring like detector
-// code); that choice lives in config/lanes.yaml. The override must never be
-// forced onto the BYOI rail: a user's own arbitrary inference endpoint may not
-// recognize the alias, so BYOI leaves Model empty and keeps sending the bare
-// lane string (Lane), unchanged from before this fix. This invariant does NOT
-// touch customer-facing lane routing at all — the heal.open/heal.allied/
-// heal.us_only sovereignty mapping customers actually get inference through
-// (internal/server's handleMessages) is untouched.
+// alias CodeAuthoringModel ("coding") — which the inference endpoint resolves
+// server-side to a stronger Go-capable coder through the account's "coding"
+// alias (the raw model id never leaves the server, so it never ships in the
+// public binary). Lane still scopes the run-key mint (the aliased request
+// spends against a lane grant that already covers the stronger coder, so no
+// extra grant is needed); the caller resolves the alias locally and verifies
+// that grant BEFORE setting Model — never overrides silently if the pool does
+// not actually carry it. The model the alias resolves to must NEVER be a Fable
+// model (it refuses security-adjacent authoring like detector code); that
+// choice lives in the endpoint's lane configuration, not here. The override
+// must never be forced onto the BYOI rail: a user's own arbitrary inference
+// endpoint may not recognize the alias, so BYOI leaves Model empty and keeps
+// sending the bare lane string (Lane). This invariant does NOT touch the
+// customer-facing lane routing customers actually get inference through.
 //
 // # Secret hygiene
 //
-// The subkey is embedded only inside the in-memory provider config (never a
+// The run key is embedded only inside the in-memory provider config (never a
 // bare env var, never logged). Every transcript is run through redact.Redact
-// BEFORE it is returned for persistence, scrubbing the exact subkey and any
+// BEFORE it is returned for persistence, scrubbing the exact run key and any
 // mallcop-sk-* token to a fixed marker.
 //
 // # Trusted signals only
@@ -93,22 +86,21 @@ const defaultProvider = sandbox.ProviderName
 // the model string when the caller overrides the bare lane-name routing via
 // Adapter.Model (see the package doc's
 // "Code-authoring model override" section). It is NOT a raw catalog id: the
-// server (Forge) resolves this alias to the real, stronger Go-capable coder
-// through the calling account's model alias (set by ProvisionTree from
-// lane_defaults.coding), exactly the way the scan lanes resolve. Keeping the
-// raw model id server-side is deliberate: this constant ships in the PUBLIC
-// self-extension binary, so it must name only the opaque alias — never the model
-// the product exists to obscure.
+// inference endpoint resolves this alias to the real, stronger Go-capable coder
+// through the calling account's model alias, exactly the way the scan lanes
+// resolve. Keeping the raw model id server-side is deliberate: this constant
+// ships in the PUBLIC self-extension binary, so it must name only the opaque
+// alias — never the model the product exists to obscure.
 //
-// It equals laneroute.LaneCoding by construction (the alias name IS the lane
-// name); the two consts are declared independently to avoid layering this
-// low-level adapter on internal/laneroute, and MUST agree.
+// The alias name IS the lane name by construction; it is declared here as its
+// own const to avoid layering this low-level adapter on a higher-level routing
+// package.
 //
-// The model it resolves to MUST NEVER be a Fable model (Fable 5 refuses
+// The model it resolves to MUST NEVER be a Fable model (Fable models refuse
 // security-adjacent authoring tasks like detector code) and MUST NOT be the
-// "heal" open/allied default (a flash-tier model that plans a detector but fails
-// to execute the file writes — observed live); that choice lives in
-// config/lanes.yaml's coding lane, not here.
+// "heal" default (a flash-tier model that plans a detector but fails to execute
+// the file writes — observed live); that choice lives in the endpoint's
+// coding-lane configuration, not here.
 const CodeAuthoringModel = "coding"
 
 // defaultBin is the opencode executable resolved from PATH when Adapter.Bin is
@@ -199,27 +191,26 @@ type Adapter struct {
 	// Bin is the opencode executable path. Empty → "opencode" on PATH.
 	Bin string
 	// Lane is the authoring lane (the opencode model key AND, when Model is
-	// empty, the model string Forge receives), e.g. "heal". Required. Lane ALSO
-	// still scopes the subkey mint (see donut.DonutSession.AllowedModels) even
+	// empty, the model string the inference endpoint receives), e.g. "heal".
+	// Required. Lane ALSO still scopes the run-key mint on the metered rail even
 	// when Model overrides what literal model string is requested — see Model.
 	Lane string
 	// Model, when non-empty, is the model string opencode requests INSTEAD of the
 	// bare Lane string (see the package doc's
 	// "Code-authoring model override" section). It is normally an OPAQUE lane
-	// alias (CodeAuthoringModel, "coding") that Forge resolves server-side to the
-	// real coder; on a BYOI endpoint that recognizes a literal catalog id, the
-	// caller may pass that id verbatim instead. Empty preserves the
-	// pre-behavior: send Lane itself as the model and let Forge's
-	// own lane resolution pick a model. The caller (cmd/mallcop-ops's
-	// codeAuthoringModel) is responsible for only ever setting this to an
-	// alias/model the subkey's allowed_models for Lane actually grants after
-	// server-side resolution — this package has no Forge catalog visibility to
-	// verify that itself.
+	// alias (CodeAuthoringModel, "coding") that the inference endpoint resolves
+	// server-side to the real coder; on a BYOI endpoint that recognizes a literal
+	// catalog id, the caller may pass that id verbatim instead. Empty preserves
+	// the base behavior: send Lane itself as the model and let the endpoint's
+	// own lane resolution pick a model. The caller is responsible for only ever
+	// setting this to an alias/model the run key's allowed_models for Lane
+	// actually grants after server-side resolution — this package has no endpoint
+	// catalog visibility to verify that itself.
 	Model string
-	// Provider is the opencode provider key. Empty → "forge".
+	// Provider is the opencode provider key. Empty → sandbox.ProviderName.
 	Provider string
-	// ForgeBaseURL is the Forge base URL; the OpenAI-compatible "/v1" suffix is
-	// appended when building the provider config. Required.
+	// ForgeBaseURL is the inference endpoint base URL; the OpenAI-compatible "/v1"
+	// suffix is appended when building the provider config. Required.
 	ForgeBaseURL string
 	// MaxAttempts caps opencode invocations for one authoring run: the initial
 	// run plus retries of a TRANSIENT, no-op fast-fail (opencode exiting non-zero
@@ -241,12 +232,12 @@ type Adapter struct {
 	// times out on its own.
 	Timeout time.Duration
 	// Confine, when true, runs the opencode child under OS-enforced Landlock
-	// confinement (internal/selfext/jail): no filesystem writes outside the
+	// confinement (the jail package): no filesystem writes outside the
 	// worktree's authoring/scratch tree, and no TCP egress except the port of the
 	// configured inference endpoint. It is FAIL-CLOSED — if the kernel cannot
 	// establish the jail, Invoke returns an error and authors nothing. The
 	// production runner sets it; adapter unit tests leave it off (the re-exec
-	// launcher needs the real mallcop-ops binary as /proc/self/exe).
+	// launcher needs the real operator binary as /proc/self/exe).
 	Confine bool
 	// MaxOutputTokens caps the authoring model's output tokens in the opencode
 	// provider config. opencode has no registry metadata for our custom
@@ -281,15 +272,16 @@ type Adapter struct {
 
 // defaultMaxOutputTokens is the conservative output-token ceiling declared in the
 // opencode model config when Adapter.MaxOutputTokens is unset. It must not exceed the
-// smallest output cap across the lane models Forge routes to (4096 for the flash-tier
-// triage/heal models), so an authoring request is never rejected for over-requesting.
+// smallest output cap across the lane models the inference endpoint routes to (4096
+// for the flash-tier triage/heal models), so an authoring request is never rejected
+// for over-requesting.
 const defaultMaxOutputTokens = 4096
 
 // defaultMaxContextTokens is the context-window size declared alongside the output cap.
 // opencode's config schema REJECTS a model whose limit block sets output without context
 // ("Missing key provider.<p>.models.<m>.limit.context"), so both must be present or
 // opencode fails config validation before it ever calls inference. 128k is safe for the
-// lane models Forge routes to. Overridable via Adapter.MaxContextTokens.
+// lane models the inference endpoint routes to. Overridable via Adapter.MaxContextTokens.
 const defaultMaxContextTokens = 128000
 
 func (a *Adapter) bin() string {
@@ -334,7 +326,7 @@ func (a *Adapter) model() string {
 // literal model actually requested/billed, not just the lane it was requested
 // under. overridden is true when Adapter.Model (the
 // code-authoring override) is in effect, so the caller can distinguish "the
-// resolved literal catalog id" from "the bare lane, Forge resolves it".
+// resolved literal catalog id" from "the bare lane, the inference endpoint resolves it".
 func (a *Adapter) RequestedModel() (model string, overridden bool) {
 	if a.Model != "" {
 		return a.Model, true
@@ -397,7 +389,7 @@ type Result struct {
 // ProviderConfig marshals the opencode OpenAI-compatible provider config as a
 // STRING for OPENCODE_CONFIG_CONTENT. It declares the authoring lane under the
 // provider's models map so opencode will accept "-m <provider>/<lane>", and
-// embeds the subkey as the provider apiKey. It is never written to a file.
+// embeds the run key as the provider apiKey. It is never written to a file.
 func (a *Adapter) ProviderConfig(apiKey, forgeBaseURL string) (string, error) {
 	if a.Lane == "" {
 		return "", errors.New("opencode: Adapter.Lane is empty")
@@ -417,12 +409,12 @@ func (a *Adapter) ProviderConfig(apiKey, forgeBaseURL string) (string, error) {
 				},
 				"models": map[string]any{
 					// Declare the lane model's output cap so opencode never requests
-					// max_tokens above the model's hard limit (Forge 400s otherwise,
-					// and opencode then fast-fails having authored nothing).
+					// max_tokens above the model's hard limit (the endpoint 400s
+					// otherwise, and opencode then fast-fails having authored nothing).
 					a.model(): map[string]any{
 						// opencode requires BOTH context and output in a limit block
 						// (it fails config validation on output-without-context), and
-						// output must not exceed the lane model's hard cap or Forge 400s.
+						// output must not exceed the lane model's hard cap or the endpoint 400s.
 						"limit": map[string]any{
 							"context": a.maxContextTokens(),
 							"output":  a.maxOutputTokens(),
@@ -563,9 +555,9 @@ func (a *Adapter) runOnce(ctx context.Context, wt *sandbox.Worktree, env []strin
 	args = append(args, a.extraRunArgs...)
 
 	// Build the command. When Confine is set, spawn opencode under OS-enforced
-	// Landlock confinement via the mallcop-ops re-exec launcher (jail.WrapCommand
-	// runs /proc/self/exe, whose main() calls jail.MaybeReexec to apply the jail
-	// and then exec opencode). FAIL-CLOSED: if the kernel cannot establish the
+	// Landlock confinement via the operator binary's re-exec launcher
+	// (jail.WrapCommand runs /proc/self/exe, whose main() calls jail.MaybeReexec
+	// to apply the jail and then exec opencode). FAIL-CLOSED: if the kernel cannot establish the
 	// jail, refuse to author rather than spawn opencode unconfined.
 	var cmd *exec.Cmd
 	if a.Confine {
@@ -728,7 +720,7 @@ func withConfigContent(env []string, cfg string) []string {
 //   - read+write ONLY the worktree's authoring/scratch tree and the git metadata
 //     dir it writes through (sandbox.Worktree.JailWritePaths), read-only elsewhere; and
 //   - connect(2) ONLY to the TCP port of the inference endpoint (the loopback
-//     stream-shim port on the donut rail, or 443 for a direct BYOI endpoint).
+//     stream-shim port on the metered rail, or 443 for a direct BYOI endpoint).
 //
 // A missing write tree or an unparseable endpoint is a fail-closed error: the
 // caller refuses to author rather than run under a meaningless jail.
@@ -851,10 +843,10 @@ func looksLikePath(s string) bool {
 	return strings.Contains(s, "/") || strings.Contains(s, ".")
 }
 
-// openAIBaseURL derives the OpenAI-compatible base URL (Forge serves POST
-// /v1/chat/completions) from the Forge base URL, appending /v1 unless already
-// present. Mirrors sandbox.openAIBaseURL (kept local to avoid coupling the
-// packages on an unexported helper).
+// openAIBaseURL derives the OpenAI-compatible base URL (the inference endpoint
+// serves POST /v1/chat/completions) from the endpoint base URL, appending /v1
+// unless already present. Mirrors sandbox.openAIBaseURL (kept local to avoid
+// coupling the packages on an unexported helper).
 func openAIBaseURL(forgeBaseURL string) string {
 	b := strings.TrimRight(forgeBaseURL, "/")
 	if strings.HasSuffix(b, "/v1") {

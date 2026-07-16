@@ -156,7 +156,7 @@ expected_detection:
 //     core/detect/authored/ tree at all): the prompt targets the SIDECAR shape
 //     (detectors/<name>/main.go, package main, detectorhost.Run) that
 //     core/selfgate's sidecarshape.go grades instead.
-//     Authoring the in-tree shape here is the exact 7ee7 live-leg bug: the
+//     Authoring the in-tree shape here is the exact live-leg bug: the
 //     engine's registry-linkage step then tries to restore a
 //     core/detect/authored/registry.go that never existed in this repo's
 //     history and fails loud. See engine.Run's customerShaped branch, which

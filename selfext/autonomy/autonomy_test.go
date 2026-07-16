@@ -59,16 +59,16 @@ func TestAutoAppliesData(t *testing.T) {
 }
 
 // TestAutonomyVocabularyPinnedAcrossRepoBoundary is a CONTRACT test: this
-// package is a mallcop-pro-LOCAL DUPLICATE of mallcop's
-// core/config.Learning.Autonomy enum (see this file's package doc) — mallcop-pro
-// does not import the mallcop module, so the two vocabularies are two
-// independent spellings with NO shared code. See mallcop's
+// package is an engine-side DUPLICATE of mallcop's
+// core/config.Learning.Autonomy enum (see this file's package doc) — this engine
+// keeps a local copy rather than importing the collector, so the two vocabularies
+// are two independent spellings with NO shared code. See mallcop's
 // core/config/config_test.go: TestAutonomyVocabularyPinnedAcrossRepoBoundary
-// (same name, other repo). Keep the accepted set literal here (not derived
+// (same name, other package). Keep the accepted set literal here (not derived
 // from Parse's switch) so a spelling added/removed on ONE side without the
 // other is a visible one-line diff a reviewer catches by diffing this literal
-// against the mallcop-side literal — not a shared import that would silently
-// keep both in sync (and defeat the module-boundary rule this package's doc
+// against the collector-side literal — not a shared import that would silently
+// keep both in sync (and defeat the process-boundary rule this package's doc
 // comment exists to enforce).
 func TestAutonomyVocabularyPinnedAcrossRepoBoundary(t *testing.T) {
 	want := map[string]bool{"non": true, "semi": true, "fully": true}

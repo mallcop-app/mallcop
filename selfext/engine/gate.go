@@ -13,10 +13,11 @@ import (
 )
 
 // GateResult mirrors mallcop core/selfgate.GateResult over the PROCESS
-// BOUNDARY. mallcop-pro does not import the mallcop module: the free-tier gate
-// is a separate trusted binary, and its versioned JSON is the seam (exactly as
-// selfgate itself decodes exam-detect's JSON locally rather than importing
-// core/eval). SchemaVersion lets us reject a report shape we do not understand.
+// BOUNDARY. This engine does not import the gate package: the gate is a separate
+// trusted binary (`mallcop validate-proposal`), and its versioned JSON is the
+// seam (exactly as selfgate itself decodes exam-detect's JSON locally rather
+// than importing core/eval). SchemaVersion lets us reject a report shape we do
+// not understand.
 type GateResult struct {
 	SchemaVersion int         `json:"schema_version"`
 	Tier          string      `json:"tier"`
@@ -108,9 +109,9 @@ func RunValidateProposal(ctx context.Context, bin, workdir, baseSHA, examRepo st
 // directory — the discriminator between a full mallcop checkout (the gate's
 // default in-tree lane builds its own binary from it) and a customer-shaped
 // THIN-EMBED target repo (go.mod pins mallcop; no cmd/mallcop of its own).
-// Mirrors core/selfgate.hasCmdMallcop on the mallcop side of the process
-// boundary — mallcop-pro does not import that package, so the check is
-// duplicated here rather than shared.
+// Mirrors core/selfgate.hasCmdMallcop on the gate side of the process
+// boundary — this engine execs the gate as a separate binary rather than
+// importing it, so the check is duplicated here rather than shared.
 func hasCmdMallcop(dir string) bool {
 	info, err := os.Stat(filepath.Join(dir, "cmd", "mallcop"))
 	return err == nil && info.IsDir()
@@ -185,8 +186,9 @@ func runValidateProposal(ctx context.Context, bin, workdir, baseSHA, examRepo st
 	}
 }
 
-// validateBinProbeArg is a subcommand name reserved by mallcop-pro — never a
-// real mallcop CLI verb (see cli/main.go's Commands: list) — used solely to
+// validateBinProbeArg is a subcommand name reserved by this engine's
+// version-probe — never a real mallcop CLI verb (see cli/main.go's Commands:
+// list) — used solely to
 // elicit the Go CLI's deterministic "unknown command" usage-error shape as a
 // version-probe fingerprint (see probeGoMallcopBinary).
 const validateBinProbeArg = "__selfext_validate_bin_probe__"
@@ -236,7 +238,8 @@ func probeGoMallcopBinary(ctx context.Context, bin string) error {
 // subprocess (`mallcop validate-proposal`) is permitted to inherit. Only vars
 // in this set (case-sensitive, no prefix matching) survive into the
 // subprocess environment — everything else in the parent process's env
-// (Forge admin key, 1Password session, AWS_*, GitHub tokens, CF_HOME, ...) is
+// (the inference provider's admin key, credential-manager sessions, AWS_*,
+// GitHub tokens, CF_HOME, ...) is
 // dropped by construction, not by name. It is deliberately the standard Go
 // toolchain env (the gate builds the proposal trees it evaluates) plus PATH
 // and locale/temp-dir plumbing — nothing credential-shaped.

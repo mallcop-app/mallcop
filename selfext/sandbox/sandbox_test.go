@@ -184,7 +184,7 @@ func TestScrubbedEnvOmitsOperatorCredentials(t *testing.T) {
 		t.Errorf("TMPDIR is not a throwaway jail dir: %q", keys["TMPDIR"])
 	}
 
-	// The subkey is delivered ONLY inside the provider config, with the /v1 base URL.
+	// The run key is delivered ONLY inside the provider config, with the /v1 base URL.
 	cfg := keys["OPENCODE_CONFIG_CONTENT"]
 	if !strings.Contains(cfg, subkey) {
 		t.Errorf("provider config missing subkey")
@@ -192,7 +192,7 @@ func TestScrubbedEnvOmitsOperatorCredentials(t *testing.T) {
 	if !strings.Contains(cfg, "https://forge.example.com/v1") {
 		t.Errorf("provider config missing /v1 base URL: %s", cfg)
 	}
-	// The subkey must not appear as a bare env var (only inside the config blob).
+	// The run key must not appear as a bare env var (only inside the config blob).
 	for _, kv := range env {
 		if strings.HasPrefix(kv, "OPENCODE_CONFIG_CONTENT=") {
 			continue

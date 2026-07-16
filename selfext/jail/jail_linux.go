@@ -78,8 +78,8 @@ func Apply(p Policy) error {
 // to establish the jail it prints the reason and exits non-zero WITHOUT execing
 // opencode — so a confinement failure can never degrade into an unconfined run.
 //
-// When argv[1] is not the marker (the normal mallcop-ops invocation) it returns
-// immediately and main() proceeds as usual. Call it at the very top of main().
+// When argv[1] is not the marker (the normal operator-binary invocation) it
+// returns immediately and main() proceeds as usual. Call it at the very top of main().
 func MaybeReexec() {
 	if len(os.Args) < 2 || os.Args[1] != ReexecMarker {
 		return
@@ -119,7 +119,7 @@ func MaybeReexec() {
 }
 
 // WrapCommand builds an *exec.Cmd that launches (name, args...) inside the jail
-// described by p. It re-execs self (normally "/proc/self/exe", the mallcop-ops
+// described by p. It re-execs self (normally "/proc/self/exe", the operator
 // binary) with ReexecMarker as argv[1] so MaybeReexec in that process applies p
 // and then execs the real command. The caller MUST set cmd.Env to include the
 // PolicyEnv(p) entry (Apply reads the policy from the environment) and may set

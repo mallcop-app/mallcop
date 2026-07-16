@@ -1,5 +1,5 @@
-// Package router is the K8 AUTONOMY ROUTER for mallcop's self-extension loop.
-// Given a strict-parsed add-only proposal (from internal/selfext/proposer) and
+// Package router is the AUTONOMY ROUTER for mallcop's self-extension loop.
+// Given a strict-parsed add-only proposal (from the proposer package) and
 // the merged gate's verdict, it decides WHERE the proposal goes, enforcing the
 // autonomy tiers (invariant 11) and the contribute-back consent rule (invariant
 // 6):
@@ -34,7 +34,7 @@
 //
 // # Autonomy dial
 //
-// Router.Autonomy (internal/selfext/autonomy.Dial) decides ONLY whether an
+// Router.Autonomy (autonomy.Dial) decides ONLY whether an
 // otherwise-clean widen (FORBIDDEN/HUMAN-GATE-exempt, gate-GREEN) auto-applies
 // to the tenant overlay: "non" holds it at PENDING-APPROVAL, "semi"/"fully"
 // write it straight to TENANT-OVERLAY. It never affects FORBIDDEN, HUMAN-GATE,

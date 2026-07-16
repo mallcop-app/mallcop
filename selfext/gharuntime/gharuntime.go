@@ -2,7 +2,7 @@
 // mallcop self-extension CODE-lane runtime, plus the scaffolder that writes them
 // into an operator's fork of mallcop-app/mallcop.
 //
-// The CODE-lane runtime is deliberately thin: it is the `mallcop-ops selfext`
+// The CODE-lane runtime is deliberately thin: it is the operator's selfext
 // binary run inside an ephemeral GitHub Actions job (see docs/gha-selfext-runtime.md).
 // This package owns only the three static files that turn a fork into a runtime:
 //

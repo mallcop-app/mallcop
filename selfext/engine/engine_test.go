@@ -17,34 +17,34 @@ import (
 	"github.com/mallcop-app/mallcop/selfext/session"
 )
 
-// The engine graph is the forge-free BYOK surface slated to relocate to the public
-// MIT mallcop repo, so its TEST layer — like
-// its production code — must reach NEITHER internal/forge NOR internal/donut NOR
-// internal/selfext/subkey NOR internal/spendcap NOR internal/config. These tests
+// The engine graph is the BYOK-pure surface of the public MIT mallcop repo, so its
+// TEST layer — like
+// its production code — must reach NO commercial billing internals. These tests
 // therefore drive the engine through its OWN seam (session.Session +
 // session.SpendController) using the library-pure fakeSession below. The genuinely
-// commercial assertions that used to live inline here — authorize-before-mint
-// ordering, subkey revoke-by-sha256, the real Forge usage-delta, and a REAL
-// over-cap spendcap refusal — are RELOCATED to internal/selfext/integration, where
-// importing the commercial layer is legitimate.
+// commercial assertions — authorize-before-mint ordering, run-key
+// revoke-by-sha256, the real provider usage-delta, and a REAL over-cap spend-cap
+// refusal — live with the commercial layer, where importing the billing internals
+// is legitimate.
 
 // ---- library-pure fake session ----------------------------------------------
 
-// fakeSession is a library-pure session.Session that models the donut credential/
-// billing lifecycle's OBSERVABLE behavior WITHOUT importing internal/forge,
-// internal/donut, internal/selfext/subkey or internal/spendcap:
+// fakeSession is a library-pure session.Session that models the metered credential/
+// billing lifecycle's OBSERVABLE behavior WITHOUT importing any commercial billing
+// internals:
 //
 //   - Authorize delegates to a plain session.SpendController spy and, on success,
-//     counts a "mint" (the donut rail mints its capped subkey iff the gate grants).
-//     A gate denial is wrapped in *session.RefusalError exactly as DonutSession does.
-//   - Credentials hands back the run's (baseURL, key) — the minted-subkey analogue
+//     counts a "mint" (the metered rail mints its capped run key iff the gate grants).
+//     A gate denial is wrapped in *session.RefusalError exactly as a commercial
+//     billing session does.
+//   - Credentials hands back the run's (baseURL, key) — the minted-run-key analogue
 //     the engine flows into the adapter and records as the provenance endpoint.
 //   - Record delegates the ledger fold to the spy gate and returns the canned cost
-//     (the Forge usage-delta analogue).
-//   - Close counts the teardown (the subkey-revoke analogue).
+//     (the provider usage-delta analogue).
+//   - Close counts the teardown (the run-key-revoke analogue).
 //
-// The REAL forge/DonutSession wiring (mint, revoke-by-hash, usage-delta) is proven
-// in internal/selfext/integration.
+// The REAL commercial billing wiring (mint, revoke-by-hash, usage-delta) is proven
+// with the commercial layer.
 type fakeSession struct {
 	gate    SpendController
 	class   string
@@ -294,7 +294,7 @@ func writeScript(t *testing.T, name, body string) string {
 
 type harness struct {
 	session   *fakeSession // set by engine(); the run's credential/billing seam
-	usageCost float64      // the "Forge usage delta" the fake session Records
+	usageCost float64      // the "provider usage delta" the fake session Records
 	repo      string
 	rejects   *RejectSet
 	artifacts string
@@ -316,10 +316,10 @@ func newHarness(t *testing.T, usageCostUSD float64) *harness {
 
 // engine drives the engine through a library-pure fakeSession that delegates the
 // spend-cap surface to the injected spy gate — the same seam the commercial
-// DonutSession sits behind, minus the Forge/subkey guts. These tests assert the
+// billing session sits behind, minus the billing/run-key guts. These tests assert the
 // ENGINE's behavior (refusal, GREEN→artifact, teardown, autonomy routing) through
-// that seam; the real DonutSession wiring (authorize-before-mint, revoke-by-hash,
-// usage-delta) is proven in internal/selfext/integration.
+// that seam; the real commercial billing wiring (authorize-before-mint, revoke-by-hash,
+// usage-delta) is proven with the commercial layer.
 func (h *harness) engine(gate SpendController, adapter Authorer, validateBin string) *Engine {
 	h.session = &fakeSession{
 		gate:    gate,
@@ -377,7 +377,7 @@ func (c *countingAuthorer) Invoke(context.Context, *sandbox.Worktree, string, st
 // keyCapturingAuthorer records the apiKey it was handed and authors a clean,
 // allow-list-safe detector into the worktree so there is something committable
 // to gate. It stands in for a real opencode run on the BYOI rail and lets a test
-// assert the USER's key (not a minted subkey) flowed through Invoke.
+// assert the USER's key (not a minted run key) flowed through Invoke.
 type keyCapturingAuthorer struct {
 	gotKey  string
 	invoked int
@@ -471,14 +471,14 @@ func TestRunFailedRunPersistsTranscript(t *testing.T) {
 	if out.ArtifactPath != "" {
 		t.Errorf("a FAILED run emitted a proposal artifact %q", out.ArtifactPath)
 	}
-	// The subkey was still revoked on teardown.
+	// The run key was still revoked on teardown.
 	assertRevoked(t, h)
 }
 
 // ---- tests -------------------------------------------------------------------
 
 // TestRunPositive: a clean stub authors an allow-list-clean detector, the gate
-// GREENLIGHTs, an artifact is written, the subkey is revoked, and Record logs
+// GREENLIGHTs, an artifact is written, the run key is revoked, and Record logs
 // success with the measured cost.
 func TestRunPositive(t *testing.T) {
 	h := newHarness(t, 0.02)
@@ -496,8 +496,8 @@ func TestRunPositive(t *testing.T) {
 	if out.Gate == nil || !out.Gate.Passed {
 		t.Fatalf("expected GREEN GateResult, got %+v", out.Gate)
 	}
-	// (Authorize-strictly-before-CreateKey ordering is a DonutSession property,
-	// proven against the real Forge in internal/selfext/integration.)
+	// (Authorize-strictly-before-CreateKey ordering is a commercial billing session
+	// property, proven with the commercial layer.)
 	// Artifact written with the reviewable patch.
 	if out.ArtifactPath == "" {
 		t.Fatalf("no artifact path on GREEN")
@@ -508,7 +508,7 @@ func TestRunPositive(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(out.ArtifactPath, "gate.json")); err != nil {
 		t.Errorf("gate.json missing: %v", err)
 	}
-	// Subkey revoked by full sha256 hash.
+	// Run key revoked by full sha256 hash.
 	assertRevoked(t, h)
 	// Cost recorded with success=true.
 	rec := gate.lastRecord(t)
@@ -530,9 +530,9 @@ func TestRunPositive(t *testing.T) {
 // TestRunProvenanceRecordsResolvedOverrideModel is the regression for rd
 // when Adapter.Model overrides Lane (the
 // code-authoring override), provenance.json's "model" field must record the
-// resolved literal catalog model id actually requested/billed — e.g.
-// claude-haiku-4-5 — NOT the bare "<provider>/<lane>" string (e.g.
-// "forge/heal"). Without this, a qwen3-32b run and a claude-haiku-4-5 run are
+// resolved literal catalog model id actually requested/billed —
+// NOT the bare "<provider>/<lane>" string. Without this, an
+// unoverridden-lane run and an overridden run are
 // indistinguishable in provenance without cross-checking /v1/usage by
 // timestamp.
 func TestRunProvenanceRecordsResolvedOverrideModel(t *testing.T) {
@@ -569,8 +569,8 @@ func TestRunProvenanceRecordsResolvedOverrideModel(t *testing.T) {
 // TestRunProvenanceRecordsProviderLaneWhenNoOverride proves the unoverridden
 // path is unchanged by the fix: with no Adapter.Model override,
 // provenance.json's "model" field still records "<provider>/<lane>" — the bare
-// lane is genuinely all that was requested (Forge resolves it internally), so
-// there is no more specific literal id to record.
+// lane is genuinely all that was requested (the inference endpoint resolves it
+// internally), so there is no more specific literal id to record.
 func TestRunProvenanceRecordsProviderLaneWhenNoOverride(t *testing.T) {
 	h := newHarness(t, 0.02)
 	gate := &spySpendGate{}
@@ -659,7 +659,7 @@ func TestRunFailsLoudlyOnCustomerShapedTargetRepoWithoutExamRepo(t *testing.T) {
 }
 
 // TestRunNegative: a narrowing stub authors a detector importing os/exec, the
-// gate REJECTS, NO artifact is emitted, the fingerprint is poisoned, the subkey
+// gate REJECTS, NO artifact is emitted, the fingerprint is poisoned, the run key
 // is STILL revoked, and Record logs failure.
 func TestRunNegative(t *testing.T) {
 	h := newHarness(t, 0.05)
@@ -691,7 +691,7 @@ func TestRunNegative(t *testing.T) {
 	if !h.rejects.Has(testGap().Fingerprint()) {
 		t.Errorf("RED run did not poison the reject set")
 	}
-	// Subkey STILL revoked (defer proven under a RED verdict).
+	// Run key STILL revoked (defer proven under a RED verdict).
 	assertRevoked(t, h)
 	// Record logged failure.
 	if rec := gate.lastRecord(t); rec.success {
@@ -700,7 +700,7 @@ func TestRunNegative(t *testing.T) {
 }
 
 // TestRunRevokeOnPanic: an adapter that panics mid-Invoke must not leave a live
-// subkey — the deferred revoke still fires.
+// run key — the deferred revoke still fires.
 func TestRunRevokeOnPanic(t *testing.T) {
 	h := newHarness(t, 0.0)
 	gate := &spySpendGate{}
@@ -721,7 +721,7 @@ func TestRunRevokeOnPanic(t *testing.T) {
 }
 
 // TestRunAntiThrash: a pre-seeded reject fingerprint short-circuits BEFORE any
-// spend or Forge call.
+// spend or billing call.
 func TestRunAntiThrash(t *testing.T) {
 	h := newHarness(t, 0.0)
 	fp := testGap().Fingerprint()
@@ -752,13 +752,13 @@ func TestRunAntiThrash(t *testing.T) {
 }
 
 // TestRunRefusalSpendGateDenies: when the Session's Authorize refuses (a benign
-// *session.RefusalError — on the donut rail a spend-cap denial), the engine
+// *session.RefusalError — on the metered rail a spend-cap denial), the engine
 // produces Outcome{Refused}, mints nothing, never invokes opencode, and — since
 // teardown is deferred only AFTER a successful Authorize — never calls Close. The
-// REAL spendcap over-cap wiring that PRODUCES this refusal (a $5-over-$1-cap gate
-// wrapped by DonutSession) is exercised end to end in internal/selfext/integration
-// (TestEngineRun_RealSpendGate_Refuses); here we prove the engine's OWN refusal
-// handling through the fake seam.
+// REAL spend-cap over-cap wiring that PRODUCES this refusal (a $5-over-$1-cap gate
+// wrapped by a commercial billing session) is exercised end to end with the
+// commercial layer; here we prove the engine's OWN refusal handling through the
+// fake seam.
 func TestRunRefusalSpendGateDenies(t *testing.T) {
 	h := newHarness(t, 0.0)
 	gate := &spySpendGate{denyErr: errors.New("cap exceeded ($5 spent > $1 cap)")}
@@ -785,11 +785,11 @@ func TestRunRefusalSpendGateDenies(t *testing.T) {
 
 // TestRunBYOIEndToEndStubGate proves the BYOI rail keeps EVERY safety rail while
 // dropping only billing: the worktree jail is opened and cleaned up, the USER's
-// own key (not a minted subkey) flows through the adapter, the validate-proposal
+// own key (not a minted run key) flows through the adapter, the validate-proposal
 // gate runs, a GREEN verdict yields a REVIEWABLE artifact (code is NEVER
 // auto-merged), provenance records the endpoint but NEVER the key, and CostUSD is
-// 0. A BYOISession holds no Gate/Minter/Forge handle, so there is no Forge server
-// in this test at all — zero Forge billing calls is structural.
+// 0. A BYOISession holds no Gate/Minter/billing handle, so there is no billing
+// server in this test at all — zero billing calls is structural.
 //
 // NAME NOTE (from the b2d veracity audit): this is "EndToEnd"
 // for the BYOI billing/credential rail ONLY — ValidateBin here is
@@ -835,7 +835,7 @@ func TestRunBYOIEndToEndStubGate(t *testing.T) {
 	if out.CostUSD != 0 {
 		t.Errorf("BYOI CostUSD = %v, want 0 (no donut ledger decrement)", out.CostUSD)
 	}
-	// The user's OWN key flowed to the adapter — not a minted subkey.
+	// The user's OWN key flowed to the adapter — not a minted run key.
 	if authorer.gotKey != userKey {
 		t.Errorf("adapter got key %q, want the BYOI user key", authorer.gotKey)
 	}
@@ -883,7 +883,7 @@ func assertNoLeftoverWorktrees(t *testing.T, repo string) {
 
 // plantedTokenAuthorer authors a clean, allow-list-safe detector but plants an
 // UNRELATED sk-ant-* style token in the authored source — simulating opencode
-// echoing a leaked SIBLING key (not the run's own subkey) into a worktree
+// echoing a leaked SIBLING key (not the run's own key) into a worktree
 // file. It proves the GREEN proposal.patch artifact is redacted, not just the
 // transcript.
 const plantedToken = "sk-ant-PLANTEDSIBLINGTOKEN0123456789ABCDEF"
@@ -937,8 +937,8 @@ func TestRunProposalArtifactRedacted(t *testing.T) {
 // TestRunValidateProposalEnvIsAllowlisted proves the validate-proposal gate
 // subprocess sees ONLY the explicit env allowlist (gateEnvAllowlist), not the
 // parent process's full environment. Credentials set in the test process
-// (Forge admin key, a GitHub token, an AWS key, and a var no denylist would
-// know to strip) must never reach the subprocess.
+// (the inference provider's admin key, a GitHub token, an AWS key, and a var no
+// denylist would know to strip) must never reach the subprocess.
 func TestRunValidateProposalEnvIsAllowlisted(t *testing.T) {
 	t.Setenv("FORGE_API_KEY", "leak-me-not-forge")
 	t.Setenv("GH_TOKEN", "leak-me-not-gh")
@@ -985,10 +985,10 @@ func TestRunValidateProposalEnvIsAllowlisted(t *testing.T) {
 	}
 }
 
-// assertRevoked confirms the engine's teardown fired: Session.Close (on the donut
-// rail, the subkey revoke) was called exactly once. The forge-free engine can only
-// observe that Close was driven; the REAL revoke-by-exact-sha256-hash of the minted
-// subkey is proven in internal/selfext/integration (recordingForge.assertRevoked).
+// assertRevoked confirms the engine's teardown fired: Session.Close (on the
+// metered rail, the run-key revoke) was called exactly once. The BYOK-pure engine
+// can only observe that Close was driven; the REAL revoke-by-exact-sha256-hash of
+// the minted run key is proven with the commercial layer.
 func assertRevoked(t *testing.T, h *harness) {
 	t.Helper()
 	if h.session.closeCalls != 1 {
@@ -1097,7 +1097,7 @@ func TestRunAutonomySemiRejectsMergeAutomation(t *testing.T) {
 // TestE2E_SemiDial_CodeWaitsEvidence is the e2e proof of the
 // CODE half of the SEMI-autonomy contrast: the REAL Engine.Run() pipeline
 // (real sandbox.Jail/Worktree against a real target git repo, real spend-gate
-// authorize/record round trip against an httptest Forge, real opencode.Adapter
+// authorize/record round trip against an httptest inference endpoint, real opencode.Adapter
 // Go orchestration; only the two subprocess BOUNDARIES — the opencode CLI and
 // `mallcop validate-proposal` binaries — are deterministic stub scripts
 // standing in for the external processes Engine always shells out to) is run
@@ -1238,7 +1238,7 @@ func TestRunAutonomyFullyRejectsMergeAutomationOnRedGate(t *testing.T) {
 // (hasCmdMallcop is the SAME signal the gate already uses) and — critically —
 // NO core/detect/authored/ tree and NO registry.go anywhere in its history
 // (cli/deployrepo.go's real scaffold never creates one). This is the exact
-// repro shape of the 7ee7 live-leg bug: the OLD unconditional registry step
+// repro shape of the live-leg bug: the OLD unconditional registry step
 // tried `git checkout <base> -- core/detect/authored/registry.go` against a
 // repo where that pathspec never existed, and failed loud.
 func initThinCustomerRepo(t *testing.T) string {
@@ -1334,7 +1334,7 @@ func (sidecarStubAuthorer) Invoke(_ context.Context, wt *sandbox.Worktree, _, _ 
 //   - (b) the registry-linkage step is NEVER invoked. Before this fix, Run
 //     would try `git checkout <base> -- core/detect/authored/registry.go`
 //     against a repo where that pathspec never existed and fail loud with
-//     the EXACT 7ee7 live-leg error ("pathspec ... did not match any
+//     the EXACT live-leg error ("pathspec ... did not match any
 //     file(s) known to git"). This fixture repo has NO such path anywhere in
 //     its history, so a regression here reproduces that exact Failed
 //     outcome — a GREEN Proposed outcome is only reachable if that step

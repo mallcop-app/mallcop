@@ -1,14 +1,14 @@
 package proposer
 
 // The Anthropic /v1/messages wire structs the proposer speaks. They are a
-// mallcop-pro-LOCAL DUPLICATE of mallcop core/agent.MessagesRequest / Response /
-// Message / ContentBlock / Tool (anthropic.go:45/93) — mallcop-pro must NOT
-// import the mallcop module, and it only needs the minimal fields to advertise
-// one add-only tool and read back one tool_use / text block.
+// self-contained DUPLICATE of mallcop core/agent.MessagesRequest / Response /
+// Message / ContentBlock / Tool (anthropic.go:45/93) — kept local so this engine
+// stays decoupled from the collector's own module, and it only needs the minimal
+// fields to advertise one add-only tool and read back one tool_use / text block.
 
 // MessagesRequest is the minimal Anthropic-compatible request the proposer builds.
-// Model carries the LANE (not a raw catalog id): Forge resolves the lane to a
-// real Bedrock model, and a raw catalog id 404s (mallcop-pro commit 2cd40d3).
+// Model carries the LANE (not a raw catalog id): the inference endpoint resolves
+// the lane to a concrete backing model, and a raw catalog id 404s.
 type MessagesRequest struct {
 	Model     string    `json:"model"`
 	MaxTokens int       `json:"max_tokens"`

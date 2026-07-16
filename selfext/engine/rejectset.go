@@ -11,11 +11,11 @@ import (
 )
 
 // rejectSetFile is the anti-thrash ledger filename, co-located with the
-// spendcap state under MALLCOP_SPEND_DIR so it survives across runs.
+// spend-ledger state under MALLCOP_SPEND_DIR so it survives across runs.
 const rejectSetFile = "selfext-rejects.json"
 
-// envSpendDir mirrors spendcap's MALLCOP_SPEND_DIR — the reject set lives in the
-// same directory as the spend ledger.
+// envSpendDir names the spend-cap state directory (MALLCOP_SPEND_DIR) — the
+// reject set lives in the same directory as the spend ledger.
 const envSpendDir = "MALLCOP_SPEND_DIR"
 
 // RejectSet is the persisted set of gap fingerprints the gate has already
@@ -33,8 +33,8 @@ type rejectFile struct {
 	Fingerprints []string `json:"fingerprints"`
 }
 
-// resolveSpendDir resolves the state directory the same way spendcap.New does:
-// explicit dir → $MALLCOP_SPEND_DIR → ~/.cache/mallcop.
+// resolveSpendDir resolves the state directory the same way the spend-cap state
+// resolver does: explicit dir → $MALLCOP_SPEND_DIR → ~/.cache/mallcop.
 func resolveSpendDir(dir string) (string, error) {
 	if dir == "" {
 		dir = os.Getenv(envSpendDir)

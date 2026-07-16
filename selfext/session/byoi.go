@@ -7,12 +7,13 @@ import (
 )
 
 // BYOISession is the Bring-Your-Own-Inference rail: the OSS user runs the
-// automated generative lanes against THEIR OWN endpoint + key, off the Forge
-// donut rail entirely. Per an explicit, accepted-risk decision, BYOI has NO
-// spend cap and NO subkey — the user's own key is the user's own blast radius.
+// automated generative lanes against THEIR OWN endpoint + key, off the metered
+// commercial rail entirely. Per an explicit, accepted-risk decision, BYOI has NO
+// spend cap and NO minted run key — the user's own key is the user's own blast
+// radius.
 //
-// The struct STRUCTURALLY holds no Gate, Minter, or Forge handle, so
-// "BYOI never touches the Forge billing rails" is guaranteed by construction:
+// The struct STRUCTURALLY holds no Gate, Minter, or billing handle, so
+// "BYOI never touches the metered billing rails" is guaranteed by construction:
 //   - Authorize is a no-op (no cap check, no mint) — it cannot refuse.
 //   - Credentials returns the user's (URL, key) verbatim.
 //   - Record is $0 and NEVER decrements any ledger; it only optionally emits a
@@ -21,9 +22,9 @@ import (
 //
 // Every safety rail OUTSIDE billing — anti-thrash, strict add-only parse, the
 // trusted-signal prompt, the jail, human review of code, provenance, and the
-// transcript/key redaction — runs identically to the donut rail.
+// transcript/key redaction — runs identically to the metered rail.
 type BYOISession struct {
-	// BaseURL is the user's inference endpoint (e.g. their own Forge, an
+	// BaseURL is the user's inference endpoint (e.g. their own gateway, an
 	// Anthropic-compatible gateway, a local proxy). Not a secret.
 	BaseURL string
 	// Key is the user's inference API key. Held in memory only, flowed into the
@@ -36,7 +37,7 @@ type BYOISession struct {
 
 var _ Session = (*BYOISession)(nil)
 
-// Authorize is a no-op: BYOI has no spend cap and mints no subkey. It always
+// Authorize is a no-op: BYOI has no spend cap and mints no run key. It always
 // succeeds — a BYOI run is never Refused on cost grounds.
 func (s *BYOISession) Authorize(_ context.Context, _ float64) error { return nil }
 
@@ -65,5 +66,5 @@ func (s *BYOISession) Record(_ context.Context, success bool, _ float64) (float6
 	return 0, nil
 }
 
-// Close is a no-op: there is no subkey to revoke and no pool to drain.
+// Close is a no-op: there is no run key to revoke and no pool to drain.
 func (s *BYOISession) Close() error { return nil }

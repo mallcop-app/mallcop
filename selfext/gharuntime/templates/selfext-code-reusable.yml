@@ -77,7 +77,7 @@
 # a workflow input — same fail-safe parse as the autonomy dial); (2) the detector
 # must actually be present on the default branch (proof its PR merged); (3) the
 # upstream PR is opened under the OPERATOR's OWN token (secrets.oss_contrib_token) —
-# mallcop-pro holds no OSS write credential — and the job calls NO `gh pr merge`
+# the operator holds no OSS write credential — and the job calls NO `gh pr merge`
 # at any dial: the OSS repo's own exam.yml + CODEOWNERS review gate the merge.
 #
 # The operator-identity PR opener scripts (infra/open-proposal-pr.sh,
@@ -115,7 +115,7 @@ on:
     secrets:
       inference_key: { required: true }
       byoi_url: { required: false }
-      # The OPERATOR's OWN token for the upstream OSS PR (mallcop-pro holds no
+      # The OPERATOR's OWN token for the upstream OSS PR (the operator holds no
       # OSS write credential). Absent => contribute-back cannot open a PR (fail-safe
       # skip). NEVER a merge credential — the job calls no `gh pr merge`.
       oss_contrib_token: { required: false }
@@ -366,11 +366,12 @@ jobs:
           else
             # donut-byoi: base_url is mallcop.app (non-streaming), so
             # --stream-shim bridges opencode's unconditional streaming; and it
-            # forwards to Forge, which resolves the OPAQUE "coding" lane alias
-            # server-side to the strong Go-capable coder — so we pin the alias, never
-            # a raw model id (the bare heal lane resolves to a flash model that plans
-            # but never writes). The mallcop inference endpoint resolves the opaque
-            # "coding" lane server-side, so the real model never leaves the server.
+            # forwards to the mallcop inference endpoint, which resolves the OPAQUE
+            # "coding" lane alias server-side to the strong Go-capable coder — so we
+            # pin the alias, never a raw model id (the bare heal lane resolves to a
+            # flash model that plans but never writes). The mallcop inference endpoint
+            # resolves the opaque "coding" lane server-side, so the real model never
+            # leaves the server.
             RAIL_ARGS=(--inference-url "${{ inputs.base_url }}" --inference-key-env INFERENCE_KEY --stream-shim --code-model coding)
           fi
           # --exam-repo grades a customer-shaped target (no in-tree cmd/mallcop)
@@ -500,9 +501,9 @@ jobs:
     #      autonomy dial (absent file / absent key / any non-"true" value => off). It
     #      is DELIBERATELY not a workflow input, so a web-lane dispatch can never turn
     #      it on. promote_detector selects WHICH detector, never consent.
-    #   2. OPERATOR CREDENTIAL, NOT MALLCOP-PRO'S: the upstream PR is opened under the
+    #   2. OPERATOR CREDENTIAL, NOT THE SERVER'S: the upstream PR is opened under the
     #      operator's OWN token (secrets.oss_contrib_token, a secret THEY set in THEIR
-    #      repo). mallcop-pro's server holds NO OSS write credential, ever. Absent
+    #      repo). The operator's server holds NO OSS write credential, ever. Absent
     #      token => fail-safe skip.
     #   3. NEVER MERGES: this job calls NO `gh pr merge` of any kind — the shared OSS
     #      repo's OWN exam.yml + CODEOWNERS review gate the merge, categorically outside
@@ -641,9 +642,9 @@ jobs:
           DETECTOR: ${{ inputs.promote_detector }}
         run: |
           set -euo pipefail
-          # mallcop-pro's SERVER holds no OSS write credential. This PR is opened
+          # The operator's SERVER holds no OSS write credential. This PR is opened
           # under the OPERATOR's OWN token — a secret THEY set in THEIR repo. Absent
-          # token => fail-safe skip (mallcop-pro never supplies one).
+          # token => fail-safe skip (the server never supplies one).
           if [ -z "${GH_TOKEN:-}" ]; then
             # The operator EXPLICITLY opted in (learning.contribute_back: true) AND named a
             # detector to promote — but no OSS_CONTRIB_TOKEN secret is set, so there is no

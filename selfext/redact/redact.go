@@ -1,11 +1,11 @@
-// Package redact scrubs secret-bearing key tokens (donut subkeys and BYOI
+// Package redact scrubs secret-bearing key tokens (metered run keys and BYOI
 // vendor keys) from transcripts and diffs before they are persisted to disk.
 //
-// It is a pure, dependency-free helper — it holds no Forge handle and imports
-// nothing from the commercial account layer — so the self-extension authoring
-// packages (engine, opencode, proposer, router) can run their untrusted
-// authoring output through it without pulling the Forge subkey lifecycle into
-// their dependency graph.
+// It is a pure, dependency-free helper — it holds no inference-provider handle
+// and imports nothing from the commercial billing layer — so the self-extension
+// authoring packages (engine, opencode, proposer, router) can run their
+// untrusted authoring output through it without pulling the commercial
+// credential lifecycle into their dependency graph.
 package redact
 
 import (
@@ -20,7 +20,7 @@ const redactedMarker = "***REDACTED***"
 // not the exact one handed to it (e.g. a SIBLING key emitted by nested tooling
 // output). Three alternatives, most specific first:
 //
-//   - mallcop-sk-*   — our own donut subkeys.
+//   - mallcop-sk-*   — the product's own short-lived run keys.
 //   - sk-ant-*       — Anthropic-style vendor keys (the common BYOI shape).
 //   - sk-<20+ alnum> — a conservative catch for other "sk-"-prefixed vendor
 //     keys. It requires 20+ unbroken alphanumerics (no space/hyphen), so it

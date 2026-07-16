@@ -14,24 +14,23 @@ import (
 	"github.com/mallcop-app/mallcop/selfext/session"
 )
 
-// The proposer is part of the forge-free BYOK surface slated to relocate to the
-// public MIT mallcop repo, so its TEST layer — like its
-// production code — must reach NEITHER internal/forge NOR internal/donut NOR
-// internal/selfext/subkey NOR internal/spendcap NOR internal/config. These tests
+// The proposer is part of the BYOK-pure surface of the public MIT mallcop repo,
+// so its TEST layer — like its
+// production code — must reach NO commercial billing internals. These tests
 // drive the proposer through its OWN seam (session.Session + session.SpendController)
-// using the library-pure fakeSession below; the real DonutSession wiring (cost via
-// the Forge usage delta, subkey revoke, endpoint stamping) is proven in
-// internal/selfext/integration (TestProposerPropose_DonutIntegration).
+// using the library-pure fakeSession below; the real commercial billing wiring (cost via
+// the provider usage delta, run-key revoke, endpoint stamping) is proven with the
+// commercial layer.
 
 // ---- library-pure fake session ----------------------------------------------
 
-// fakeSession is a library-pure session.Session that models the donut credential/
-// billing lifecycle's OBSERVABLE behavior WITHOUT importing internal/forge,
-// internal/donut, internal/selfext/subkey or internal/spendcap. Authorize delegates
+// fakeSession is a library-pure session.Session that models the metered credential/
+// billing lifecycle's OBSERVABLE behavior WITHOUT importing any commercial billing
+// internals. Authorize delegates
 // to the spy gate (and counts a "mint" on success, wrapping a denial as
-// *session.RefusalError exactly as DonutSession does); Credentials hands back the
+// *session.RefusalError exactly as a commercial billing session does); Credentials hands back the
 // run's (baseURL, key); Record delegates the ledger fold to the gate and returns the
-// canned cost (the Forge usage-delta analogue); Close counts the revoke.
+// canned cost (the provider usage-delta analogue); Close counts the revoke.
 type fakeSession struct {
 	gate    engine.SpendController
 	class   string
@@ -154,10 +153,10 @@ func newHarness(t *testing.T, fake *fakeInference, gate *spySpendGate, usageCost
 		t.Fatalf("LoadRejectSet: %v", err)
 	}
 
-	// DONUT rail behind a library-pure fakeSession: the spy gate is the spend-cap
-	// surface, usageCost is the Forge usage-delta the session Records, and Close
-	// counts the subkey revoke. The REAL DonutSession over a Forge server is proven
-	// in internal/selfext/integration (TestProposerPropose_DonutIntegration).
+	// METERED rail behind a library-pure fakeSession: the spy gate is the spend-cap
+	// surface, usageCost is the provider usage-delta the session Records, and Close
+	// counts the run-key revoke. The REAL commercial billing session over a live
+	// inference endpoint is proven with the commercial layer.
 	sess := &fakeSession{
 		gate:    gate,
 		class:   "selfext-propose",
@@ -201,7 +200,7 @@ func mappingResponse(source, rawAction, eventType string) MessagesResponse {
 
 // TestProposeValidMapping: a valid mapping tool_use yields Proposed, cost is
 // Recorded via the usage delta, exactly ONE inference call is made, and the
-// subkey is revoked on teardown.
+// run key is revoked on teardown.
 func TestProposeValidMapping(t *testing.T) {
 	fake := &fakeInference{resp: mappingResponse("github", "repo.rename", "config_change")}
 	h := newHarness(t, fake, &spySpendGate{}, 0.0123)
@@ -309,10 +308,11 @@ func TestProposeRejectMultiBlock(t *testing.T) {
 	}
 }
 
-// TestProposeOverCap: when Authorize denies (the donut session wraps the spend-cap
-// denial in *session.RefusalError), the run is Refused with ZERO inference calls and
-// ZERO mint (the subkey never exists). The REAL spendcap.DenialError → Refused path
-// over a Forge server is proven in internal/selfext/integration.
+// TestProposeOverCap: when Authorize denies (the commercial billing session wraps
+// the spend-cap denial in *session.RefusalError), the run is Refused with ZERO
+// inference calls and ZERO mint (the run key never exists). The REAL spend-cap
+// denial → Refused path over a live inference endpoint is proven with the
+// commercial layer.
 func TestProposeOverCap(t *testing.T) {
 	fake := &fakeInference{resp: mappingResponse("github", "repo.rename", "config_change")}
 	gate := &spySpendGate{denyErr: errors.New("cap exceeded")}
@@ -367,7 +367,7 @@ func TestProposeKnownReject(t *testing.T) {
 }
 
 // TestProposeRevokeOnPanic: a panicking inference client is converted to a Failed
-// outcome while the deferred subkey revoke still fires.
+// outcome while the deferred run-key revoke still fires.
 func TestProposeRevokeOnPanic(t *testing.T) {
 	fake := &fakeInference{panicMsg: "boom in the fake client"}
 	h := newHarness(t, fake, &spySpendGate{}, 0.0)
@@ -397,9 +397,9 @@ func freshRejects(t *testing.T) *engine.RejectSet {
 
 // TestProposeBYOIEndToEnd: on the BYOI rail the SAME anti-thrash → Credentials →
 // strict add-only parse runs, but inference is billed to the USER's endpoint+key
-// (no Forge). The fake client must receive the user's (url, key); the outcome is
-// Proposed with CostUSD == 0. There is no Forge server in this test at all — a
-// BYOISession holds no Gate/Minter/Forge handle, so Authorize/Mint/Revoke/
+// (no metered billing). The fake client must receive the user's (url, key); the outcome is
+// Proposed with CostUSD == 0. There is no billing server in this test at all — a
+// BYOISession holds no Gate/Minter/billing handle, so Authorize/Mint/Revoke/
 // GetUsage cannot be called by construction.
 func TestProposeBYOIEndToEnd(t *testing.T) {
 	fake := &fakeInference{resp: mappingResponse("github", "repo.rename", "config_change")}

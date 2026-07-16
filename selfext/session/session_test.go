@@ -14,7 +14,7 @@ import (
 // TestBYOISessionNeverBills proves the BYOI rail drops ONLY billing: Authorize
 // never refuses (no cap), Credentials returns the user's own endpoint+key,
 // Record is $0 and touches no ledger, Close is a no-op. The struct holds no
-// Gate/Minter/Forge handle, so "no Forge billing call" is structural.
+// Gate/Minter/billing handle, so "no billing call" is structural.
 func TestBYOISessionNeverBills(t *testing.T) {
 	var buf bytes.Buffer
 	log := slog.New(slog.NewTextHandler(&buf, nil))
@@ -53,8 +53,8 @@ func TestBYOISessionNeverBills(t *testing.T) {
 // TestBYOISessionSatisfiesSessionInterface pins the BYOK seam: a *BYOISession is
 // usable ANYWHERE a Session is expected AND, driven strictly through the
 // interface handle, it authorizes without a cap, records $0, and never touches a
-// ledger (no Gate/Minter/Forge is even held). This is the property the whole
-// forge-free engine graph relies on.
+// ledger (no Gate/Minter/billing handle is even held). This is the property the
+// whole BYOK-pure engine graph relies on.
 func TestBYOISessionSatisfiesSessionInterface(t *testing.T) {
 	// Compile-time: BYOISession IS a Session.
 	var sess Session = &BYOISession{BaseURL: "https://user.example/v1", Key: "sk-user-abc"}

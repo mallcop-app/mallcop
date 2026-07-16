@@ -1,10 +1,10 @@
-// Package autonomy is the mallcop-pro-side DUPLICATE of mallcop's
+// Package autonomy is the engine-side DUPLICATE of mallcop's
 // core/config.Learning.Autonomy enum, over the PROCESS
-// BOUNDARY: mallcop-pro does not import the mallcop module (see
-// internal/selfext/engine/gate.go), so the operator-owned dial value crosses
-// as a plain string (a CLI flag on `mallcop-ops selfext`, mirrored from
-// mallcop.yaml's learning.autonomy) and this package is the single place that
-// string is parsed and interpreted.
+// BOUNDARY: this engine keeps a local copy rather than importing the collector
+// (see engine/gate.go), so the operator-owned dial value crosses
+// as a plain string (a CLI flag on the operator binary's selfext command,
+// mirrored from mallcop.yaml's learning.autonomy) and this package is the single
+// place that string is parsed and interpreted.
 //
 // Dial is the SHARED autonomy policy both the router (DATA lane: learned
 // mappings / tuning overlays) and the engine (CODE lane: opencode-authored

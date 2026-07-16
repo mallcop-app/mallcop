@@ -11,23 +11,23 @@
 // # Two rails, one safety surface
 //
 // The session seam hides exactly ONE axis of variation: where inference is
-// billed. A donut.DonutSession (commercial, in internal/donut) runs the Forge
-// spend-cap + subkey lifecycle (authorize → mint → usage-delta → revoke); a
-// session.BYOISession points at
-// an OSS user's OWN endpoint+key with NO cap and NO subkey. The seam is the
+// billed. A commercial billing session (provided by the commercial layer) runs
+// the spend-cap + run-key lifecycle (authorize → mint → usage-delta → revoke);
+// a session.BYOISession points at
+// an OSS user's OWN endpoint+key with NO cap and NO minted key. The seam is the
 // ONLY difference between the rails — EVERY safety rail below is byte-identical
-// on both, and a BYOISession holds no Gate/Minter/Forge handle so a BYOI build
-// makes zero Forge billing calls by construction.
+// on both, and a BYOISession holds no Gate/Minter/billing handle so a BYOI build
+// makes zero billing calls by construction.
 //
 // # Safety invariants (identical on both rails)
 //
 //   - A known-reject fingerprint is SKIPPED before the session is even
 //     consulted — zero Authorize, zero mint, zero inference, on EITHER rail.
-//   - On the donut rail the spend gate is consulted BEFORE a subkey exists; a
+//   - On the metered rail the spend gate is consulted BEFORE a run key exists; a
 //     refusal spends nothing (no network call to inference is possible without
 //     a key). session.Close is deferred immediately after Authorize and fires
-//     regardless of success, gate verdict, or a panic — on the donut rail this
-//     revokes the per-build subkey (the load-bearing teardown step).
+//     regardless of success, gate verdict, or a panic — on the metered rail this
+//     revokes the per-build run key (the load-bearing teardown step).
 //   - The engine NEVER pushes to a remote or opens a PR, at ANY autonomy
 //     setting — that requires operator credentials the worktree's scrubbed env
 //     never carries (see sandbox's package doc). A GREEN gate always produces a
@@ -53,8 +53,8 @@
 // # Process boundary
 //
 // The gate runs as a separate trusted binary (`mallcop validate-proposal`);
-// its versioned JSON GateResult is the seam (see gate.go). mallcop-pro does not
-// import the mallcop module.
+// its versioned JSON GateResult is the seam (see gate.go). This engine execs
+// that binary rather than importing the gate package.
 package engine
 
 import (
@@ -84,16 +84,17 @@ import (
 )
 
 // SpendController is the spend-cap surface the engine needs. It is a type ALIAS
-// to session.SpendController so the donut session, the engine, and the proposer
-// all share ONE definition (a reviewer confirms the spend-cap surface in a
-// single place). *spendcap.SpendGate satisfies it; tests inject a spy.
+// to session.SpendController so the commercial billing session, the engine, and
+// the proposer all share ONE definition (a reviewer confirms the spend-cap
+// surface in a single place). The commercial layer's spend-cap implementation
+// satisfies it; tests inject a spy.
 type SpendController = session.SpendController
 
 // Authorer is the code-authoring surface the engine needs. *opencode.Adapter
 // satisfies it; tests inject a fake stub (including one that panics, to prove
 // deferred teardown still fires). The Adapter's inference endpoint is bound at
-// CLI wiring (donut: the Forge URL; BYOI: the user's URL); only the run's key
-// flows through Invoke — the donut subkey OR the BYOI user key, from
+// CLI wiring (metered: the provider URL; BYOI: the user's URL); only the run's
+// key flows through Invoke — the minted run key OR the BYOI user key, from
 // session.Credentials.
 type Authorer interface {
 	Invoke(ctx context.Context, wt *sandbox.Worktree, apiKey, task string) (opencode.Result, error)
@@ -116,11 +117,11 @@ type jailOpener interface {
 // Run is serialized by the caller (one build at a time).
 type Engine struct {
 	// Session is the runtime seam that supplies inference credentials and, on the
-	// donut rail, the spend-cap + subkey lifecycle. A donut.DonutSession
-	// reproduces the Forge billing preamble (authorize → mint → usage-delta →
-	// revoke); a session.BYOISession points at the user's OWN endpoint+key with
-	// NO cap and NO subkey. Required. It is the ONLY place billing differs between
-	// the two rails — every safety rail below is identical.
+	// metered rail, the spend-cap + run-key lifecycle. A commercial billing
+	// session reproduces the metered billing preamble (authorize → mint →
+	// usage-delta → revoke); a session.BYOISession points at the user's OWN
+	// endpoint+key with NO cap and NO minted key. Required. It is the ONLY place
+	// billing differs between the two rails — every safety rail below is identical.
 	Session session.Session
 	// Jail opens the target-repo worktree write jail. Required.
 	Jail jailOpener
@@ -157,17 +158,17 @@ type Engine struct {
 	// ArtifactDir is the human-review lane directory GREEN proposals land in.
 	// Required.
 	ArtifactDir string
-	// Class is the stable spendcap class string recorded in provenance for
+	// Class is the stable spend-cap class string recorded in provenance for
 	// self-ext authoring. Empty → "selfext-author". The spend attribution class
-	// itself lives on the DonutSession.
+	// itself lives on the commercial billing session.
 	Class string
-	// AuthoringLane is the lane the subkey is scoped to and opencode authors
+	// AuthoringLane is the lane the run key is scoped to and opencode authors
 	// under (e.g. "heal"). Required.
 	AuthoringLane string
-	// Sovereignty is recorded in provenance (the account's sovereignty tier).
+	// Sovereignty is recorded in provenance (a caller-supplied account tier label).
 	Sovereignty string
 	// BudgetUSD is the per-build spend estimate handed to session.Authorize.
-	// On the donut rail it is the spend-cap estimate and pool ceiling; BYOI
+	// On the metered rail it is the spend-cap estimate and pool ceiling; BYOI
 	// ignores it. Required (> 0).
 	BudgetUSD float64
 
@@ -188,7 +189,7 @@ type Engine struct {
 	Now func() time.Time
 }
 
-// defaultClass is the spendcap class for self-ext authoring runs.
+// defaultClass is the spend-cap class for self-ext authoring runs.
 const defaultClass = "selfext-author"
 
 // defaultValidateBin is the gate binary name resolved from PATH when
@@ -229,8 +230,8 @@ type Provenance struct {
 	EventType   string `json:"event_type"`
 	Lane        string `json:"lane"`
 	Model       string `json:"model"`
-	// Endpoint is the inference base URL this build was billed to (the Forge URL
-	// on the donut rail, the user's URL on BYOI). It is recorded from
+	// Endpoint is the inference base URL this build was billed to (the provider
+	// URL on the metered rail, the user's URL on BYOI). It is recorded from
 	// session.Credentials for an auditable "billed-to" record. It is the base URL
 	// only — NEVER the key.
 	Endpoint    string    `json:"endpoint"`
@@ -266,7 +267,7 @@ func (e *Engine) class() string {
 // operational failure unrelated to the actual gate outcome. A resolution or
 // probe failure here is a configuration error, not a gap-specific outcome, so
 // Run surfaces it as a hard error BEFORE the spend gate is consulted or any
-// subkey is minted (see Run's ordering: resolved right after the anti-thrash
+// run key is minted (see Run's ordering: resolved right after the anti-thrash
 // skip, before Authorize).
 func (e *Engine) resolveValidateBin(ctx context.Context) (string, error) {
 	if e.ValidateBin != "" {
@@ -319,9 +320,9 @@ func (e *Engine) autoApplyBranch(detectorID string) string {
 }
 
 // validate checks the required fields are set before a run touches inference.
-// The billing preconditions (spend gate, minter, account id, Forge URL) now
-// live inside the donut Session, so the Engine only guards its rail-agnostic
-// invariants.
+// The billing preconditions (spend gate, minter, account id, provider URL) now
+// live inside the commercial billing session, so the Engine only guards its
+// rail-agnostic invariants.
 func (e *Engine) validate() error {
 	switch {
 	case e.Session == nil:
@@ -360,7 +361,7 @@ func (e *Engine) Run(ctx context.Context, gap opencode.TrustedGap) (out Outcome,
 	log := e.logger().With("fingerprint", fp, "detector_id", gap.DetectorID)
 
 	// 1) Anti-thrash: a known reject is skipped BEFORE anything is spent or
-	//    minted. Zero Forge calls.
+	//    minted. Zero billing calls.
 	if e.Fingerprints.Has(fp) {
 		log.Info("selfext: skipping known-reject gap")
 		return Outcome{Skipped: true, Reason: "known-reject fingerprint", Fingerprint: fp}, nil
@@ -369,15 +370,15 @@ func (e *Engine) Run(ctx context.Context, gap opencode.TrustedGap) (out Outcome,
 	// 1.5) Resolve + version-probe the gate binary. This is a configuration
 	//      precondition (like validate() above), not a gap-specific outcome, so
 	//      it fails loudly here — BEFORE the spend gate is consulted or a
-	//      subkey minted — rather than surfacing as an opaque exec failure
+	//      run key minted — rather than surfacing as an opaque exec failure
 	//      deep inside the gate step after money has already moved.
 	validateBin, vberr := e.resolveValidateBin(ctx)
 	if vberr != nil {
 		return Outcome{}, vberr
 	}
 
-	// 2) Authorize. Donut: spend gate (consulted BEFORE any subkey exists — a
-	//    refusal spends nothing) + mint the capped, lane-scoped subkey. BYOI: a
+	// 2) Authorize. Metered: spend gate (consulted BEFORE any run key exists — a
+	//    refusal spends nothing) + mint the capped, lane-scoped run key. BYOI: a
 	//    no-op that always succeeds. A benign cap refusal is a *RefusalError
 	//    (Refused, spent nothing); a mint/resolver failure surfaces as a hard error.
 	if aerr := e.Session.Authorize(ctx, e.BudgetUSD); aerr != nil {
@@ -388,8 +389,8 @@ func (e *Engine) Run(ctx context.Context, gap opencode.TrustedGap) (out Outcome,
 		return Outcome{}, aerr
 	}
 
-	// 3) Teardown is unconditional (defer) — success, failure, or panic. Donut:
-	//    revoke the subkey + drain the pool. BYOI: a no-op.
+	// 3) Teardown is unconditional (defer) — success, failure, or panic. Metered:
+	//    revoke the run key + drain the pool. BYOI: a no-op.
 	defer func() {
 		if cerr := e.Session.Close(); cerr != nil {
 			log.Error("selfext: session close failed (teardown)", "err", cerr)
@@ -432,11 +433,11 @@ func (e *Engine) Run(ctx context.Context, gap opencode.TrustedGap) (out Outcome,
 	// grades it always agree on which shape is in play.
 	customerShaped := !hasCmdMallcop(wt.Dir)
 
-	// 5) Resolve inference credentials (donut subkey OR BYOI user key) and author
+	// 5) Resolve inference credentials (minted run key OR BYOI user key) and author
 	//    with opencode. Credentials marks the usage-measurement window start (the
 	//    moment just before inference) and returns the base URL for provenance —
-	//    never the key. The Adapter's endpoint was bound at wiring (donut: Forge
-	//    URL; BYOI: user URL); only the key flows through Invoke.
+	//    never the key. The Adapter's endpoint was bound at wiring (metered:
+	//    provider URL; BYOI: user URL); only the key flows through Invoke.
 	baseURL, key, credErr := e.Session.Credentials(ctx)
 	if credErr != nil {
 		return Outcome{}, fmt.Errorf("selfext: resolve inference credentials: %w", credErr)
@@ -457,7 +458,7 @@ func (e *Engine) Run(ctx context.Context, gap opencode.TrustedGap) (out Outcome,
 	//    tree and NO registry.go at all (cli/deployrepo.go's scaffold never
 	//    creates one) — under the sidecar model the detectors/<name>/ directory
 	//    IS the registration, so this step must never run for it. Before this
-	//    fix it ran unconditionally and reproduced the exact 7ee7 live-leg bug:
+	//    fix it ran unconditionally and reproduced the exact live-leg bug:
 	//    `git checkout <base> -- core/detect/authored/registry.go` fails with
 	//    "pathspec ... did not match any file(s) known to git" because that path
 	//    never existed in the repo's history. Skipped (in either lane) when the
@@ -500,7 +501,7 @@ func (e *Engine) Run(ctx context.Context, gap opencode.TrustedGap) (out Outcome,
 	}
 	out.Gate = &gate
 
-	// 8) Measure real spend (donut: Forge usage delta + ledger; BYOI: $0) and
+	// 8) Measure real spend (metered: provider usage delta + ledger; BYOI: $0) and
 	//    record it.
 	cost := e.record(ctx, log, gate.Passed)
 	out.CostUSD = cost
@@ -546,7 +547,7 @@ func (e *Engine) Run(ctx context.Context, gap opencode.TrustedGap) (out Outcome,
 			// NovelGap FORCES a human review regardless of the autonomy dial
 			// (BOTH ruling, part B) — mirroring the existing
 			// dial-independent hard line already applied to OSS
-			// contribute-back (see internal/selfext/autonomy's package doc).
+			// contribute-back (see package autonomy's doc).
 			// The gate-GREEN proposal is still emitted as a reviewable
 			// artifact below; it is simply never merge-automated.
 			log.Info("selfext: autonomy=fully but NovelGap=true — merge automation withheld, human review required",
@@ -579,7 +580,7 @@ func (e *Engine) Run(ctx context.Context, gap opencode.TrustedGap) (out Outcome,
 }
 
 // record folds the run's measured spend into the Session ledger and returns the
-// cost. On the donut rail the Session sums the Forge usage delta since
+// cost. On the metered rail the Session sums the provider usage delta since
 // Credentials and calls Gate.Record; on the BYOI rail it returns 0 and records
 // nothing (never a ledger decrement). A record failure is non-fatal (logged,
 // not returned) so the attempt/freeze machinery still advances.
@@ -662,7 +663,7 @@ func registerAuthoredPackage(ctx context.Context, wt *sandbox.Worktree, pkg stri
 // and returns its path. This is the engine's ONLY output — a human reviews it;
 // nothing is pushed or merged.
 //
-// key is the run's inference credential (donut subkey OR BYOI user key,
+// key is the run's inference credential (minted run key OR BYOI user key,
 // resolved via session.Credentials). The diff is a raw `git diff` of whatever
 // opencode authored in the worktree — untrusted output — so it is run through
 // redact.Redact BEFORE it is written to disk, exactly like the transcript
@@ -800,10 +801,10 @@ func rejectionReason(gate GateResult) string {
 // providerLaneModel returns the model string recorded in provenance.json's
 // "model" field. Ordinarily (no code-authoring override)
 // that is "<provider>/<lane>": the bare lane is all that was actually
-// requested, Forge resolves it internally. But when Adapter.Model overrides
-// the lane, providerLaneModel records THAT literal resolved catalog model id
-// verbatim instead — otherwise a qwen3-32b run (unoverridden
-// "heal" lane) and a claude-haiku-4-5 run (overridden) are indistinguishable in
+// requested, the inference endpoint resolves it internally. But when
+// Adapter.Model overrides the lane, providerLaneModel records THAT literal
+// resolved catalog model id verbatim instead — otherwise an unoverridden
+// "heal"-lane run and an overridden run are indistinguishable in
 // provenance without cross-checking /v1/usage by timestamp. Non-opencode
 // adapters (e.g. test doubles) record the lane alone.
 func providerLaneModel(a Authorer, lane string) string {

@@ -78,8 +78,8 @@ type Proposal struct {
 	SampleEventIDs []string `json:"sample_event_ids,omitempty"`
 	// Model is the lane/model the proposal was generated on (provenance).
 	Model string `json:"model,omitempty"`
-	// Endpoint is the inference base URL this proposal was billed to (the Forge
-	// URL on the donut rail, the user's URL on BYOI). Provenance only — NEVER
+	// Endpoint is the inference base URL this proposal was billed to (the provider
+	// URL on the metered rail, the user's URL on BYOI). Provenance only — NEVER
 	// the key. Mirrors engine.Provenance.Endpoint (engine.go).
 	Endpoint string `json:"endpoint,omitempty"`
 }

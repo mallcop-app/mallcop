@@ -8,12 +8,12 @@ import (
 
 // collectSchemaVersion is the collect-envelope wire-format version this proposer
 // was written against. It MIRRORS mallcop's cmd/mallcop.CollectSchemaVersion
-// (and selfgate.GateSchemaVersion) over the PROCESS BOUNDARY: mallcop-pro must
-// NOT import the mallcop module, so it duplicates the envelope shape and refuses
-// a report whose schema_version is newer than it understands.
+// (and selfgate.GateSchemaVersion) over the PROCESS BOUNDARY: this engine keeps
+// a local duplicate of the envelope shape rather than importing the collector,
+// and refuses a report whose schema_version is newer than it understands.
 const collectSchemaVersion = 1
 
-// MappingGap is the mallcop-pro-side DUPLICATE of mallcop core/collect.MappingGap
+// MappingGap is the engine-side DUPLICATE of mallcop core/collect.MappingGap
 // (mapping.go:49). Plain data with matching json tags — it crosses the module
 // boundary unchanged via `mallcop collect --json`. The proposer maps RawAction
 // onto one member of SuggestedVocabulary (the CLOSED enum the mallcop side
@@ -27,7 +27,7 @@ type MappingGap struct {
 	SuggestedVocabulary []string `json:"suggested_vocabulary"`
 }
 
-// GapEvidence is the mallcop-pro-side DUPLICATE of mallcop core/collect.GapEvidence
+// GapEvidence is the engine-side DUPLICATE of mallcop core/collect.GapEvidence
 // (gaps.go:49). It carries only STRUCTURED, classifier-controlled fields — never
 // raw untrusted free text — so a proposal built from it cannot smuggle
 // attacker-influenced content into the prompt.
@@ -41,7 +41,7 @@ type GapEvidence struct {
 	DissentMarker    string   `json:"dissent_marker,omitempty"`
 }
 
-// GapCandidate is the mallcop-pro-side DUPLICATE of mallcop core/collect.GapCandidate
+// GapCandidate is the engine-side DUPLICATE of mallcop core/collect.GapCandidate
 // (gaps.go:66). Plain data with matching json tags. Consumed by the tuning lane
 // (a detector's additive extra_* keyword list); it carries no raw untrusted free
 // text — all evidence is structured.
@@ -56,7 +56,7 @@ type GapCandidate struct {
 	Evidence       GapEvidence `json:"evidence"`
 }
 
-// CollectEnvelope is the mallcop-pro-side DUPLICATE of mallcop's collectReport —
+// CollectEnvelope is the engine-side DUPLICATE of mallcop's collectReport —
 // the single versioned JSON envelope `mallcop collect --json` emits. Arrays are
 // always non-null on the wire, so the consumer never special-cases JSON null.
 type CollectEnvelope struct {

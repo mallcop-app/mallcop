@@ -1,22 +1,23 @@
 // Package sandbox provides a git-worktree write jail and an env-scrubbed
 // subprocess environment for mallcop's self-extension code-authoring engine.
 //
-// The jail is a detached git worktree of the TARGET repo (mallcop), NOT the
-// mallcop-pro session repo. The code-authoring subprocess (opencode) is
-// confined to the worktree via its --dir flag; the safety gate later runs with
-// the worktree as its cwd. On teardown the worktree is force-removed.
+// The jail is a detached git worktree of the TARGET repo (the repository being
+// extended), NOT the caller's own working repo. The code-authoring subprocess
+// (opencode) is confined to the worktree via its --dir flag; the safety gate
+// later runs with the worktree as its cwd. On teardown the worktree is
+// force-removed.
 //
 // # Egress / isolation — HONEST LIMIT
 //
 // ScrubbedEnv builds a minimal env allowlist and deliberately omits every
-// operator credential (the Forge RoleTenant admin key, 1Password/op session,
-// AWS_*, GitHub tokens, CF_HOME). That prevents CREDENTIAL INHERITANCE and
-// points the child at Forge — but it is NOT an OS-level egress jail. Without a
-// netns/Landlock/seccomp sandbox the child process retains raw network +
-// filesystem syscall capability; process-env scrubbing cannot truly confine
-// egress. The real OS-level jail (an ephemeral GHA runner + network policy) is
-// tracked separately and is the required follow-on before
-// this engine runs authored code with real spend outside review.
+// operator credential (the inference provider's admin key, credential-manager
+// sessions, cloud keys, VCS tokens). That prevents CREDENTIAL INHERITANCE and
+// points the child at the inference endpoint — but it is NOT an OS-level egress
+// jail. Without a netns/Landlock/seccomp sandbox the child process retains raw
+// network + filesystem syscall capability; process-env scrubbing cannot truly
+// confine egress. The real OS-level jail (an ephemeral GHA runner + network
+// policy) is tracked separately and is the required follow-on before this engine
+// runs authored code with real spend outside review.
 package sandbox
 
 import (
@@ -35,15 +36,15 @@ import (
 const defaultBaseRef = "origin/main"
 
 // ProviderName is the opencode provider key the subprocess config declares.
-// The authoring model is referenced as "<ProviderName>/<lane>" (e.g.
-// "forge/heal") — an OpenAI-compatible provider pointed at Forge.
+// The authoring model is referenced as "<ProviderName>/<lane>" — an
+// OpenAI-compatible provider pointed at the inference endpoint.
 const ProviderName = "forge"
 
 // Jail creates detached git worktrees of a target repository.
 type Jail struct {
-	// TargetRepo is the path to the target git repository (e.g. ~/projects/mallcop).
-	// It MUST be a real git repo, validated by Open before use. It is NOT the
-	// mallcop-pro session repo.
+	// TargetRepo is the path to the target git repository (the repo being
+	// extended). It MUST be a real git repo, validated by Open before use. It is
+	// NOT the caller's own working repo.
 	TargetRepo string
 	// BaseRef is the ref the worktree is checked out from. Empty → "origin/main".
 	BaseRef string
@@ -119,12 +120,14 @@ func (j *Jail) Open(ctx context.Context) (*Worktree, error) {
 // ScrubbedEnv builds the minimal environment for the code-authoring subprocess.
 // It exposes ONLY: PATH (so node/opencode resolve), a throwaway HOME and
 // TMPDIR inside the jail, and OPENCODE_CONFIG_CONTENT carrying an
-// OpenAI-compatible provider config with the Forge base URL and the subkey.
+// OpenAI-compatible provider config with the inference endpoint base URL and the
+// run key.
 //
 // It NEVER copies os.Environ() wholesale and deliberately omits operator
-// credentials (FORGE_API_KEY, OP_*, AWS_*, GITHUB_TOKEN, GH_TOKEN, CF_HOME).
-// The subkey is embedded only inside the provider config — never as a bare env
-// var. See the package doc for the honest egress-isolation limit.
+// credentials (the inference provider's API key, credential-manager sessions,
+// cloud keys, VCS tokens). The run key is embedded only inside the provider
+// config — never as a bare env var. See the package doc for the honest
+// egress-isolation limit.
 func (w *Worktree) ScrubbedEnv(subkey, forgeBaseURL string) []string {
 	cfg := opencodeConfig{
 		Schema: "https://opencode.ai/config.json",
@@ -231,7 +234,7 @@ func (w *Worktree) Close() error {
 }
 
 // JailWritePaths is the exact set of directories the OS-enforced authoring jail
-// (internal/selfext/jail) must grant the opencode child READ+WRITE access to —
+// (the jail package) must grant the opencode child READ+WRITE access to —
 // everything else on the filesystem is read-only. It is:
 //
 //   - tmpRoot: the parent of the worktree, throwaway HOME, and TMPDIR, so the
@@ -261,7 +264,7 @@ func (w *Worktree) JailWritePaths() []string {
 }
 
 // opencodeConfig is the subset of the opencode config schema we emit: a single
-// OpenAI-compatible provider pointed at Forge.
+// OpenAI-compatible provider pointed at the inference endpoint.
 type opencodeConfig struct {
 	Schema   string                      `json:"$schema"`
 	Provider map[string]opencodeProvider `json:"provider"`
@@ -278,9 +281,9 @@ type opencodeProviderOptions struct {
 	APIKey  string `json:"apiKey"`
 }
 
-// openAIBaseURL derives the OpenAI-compatible base URL (Forge serves POST
-// /v1/chat/completions) from the Forge base URL, appending /v1 unless already
-// present.
+// openAIBaseURL derives the OpenAI-compatible base URL (the inference endpoint
+// serves POST /v1/chat/completions) from the endpoint base URL, appending /v1
+// unless already present.
 func openAIBaseURL(forgeBaseURL string) string {
 	b := strings.TrimRight(forgeBaseURL, "/")
 	if strings.HasSuffix(b, "/v1") {

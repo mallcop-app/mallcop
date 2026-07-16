@@ -1,10 +1,10 @@
 // Package streamshim bridges a streaming-only inference client (opencode, which
-// always sends `stream: true`) to a NON-streaming upstream (Forge, which
-// hard-501s streaming: "Reject streaming — 501"). It listens on loopback,
-// rewrites each request to be non-streaming (and caps max_tokens to the Forge
-// ceiling), forwards it to the real endpoint verbatim otherwise, and replays the
-// single JSON response back to the client as a minimal Server-Sent Events stream
-// when the client asked to stream.
+// always sends `stream: true`) to a NON-streaming upstream (an inference
+// endpoint that hard-501s streaming: "Reject streaming — 501"). It listens on
+// loopback, rewrites each request to be non-streaming (and caps max_tokens to
+// the endpoint's ceiling), forwards it to the real endpoint verbatim otherwise,
+// and replays the single JSON response back to the client as a minimal
+// Server-Sent Events stream when the client asked to stream.
 //
 // It is a pure transport bridge on the credential path: the caller's own
 // Authorization header is forwarded UNCHANGED and never logged. The shim adds no
@@ -12,8 +12,8 @@
 // 127.0.0.1 only.
 //
 // This exists because every agentic coding tool streams unconditionally; the
-// durable fix is Forge implementing SSE passthrough, after
-// which the engine drops the shim and points opencode straight at Forge.
+// durable fix is the endpoint implementing SSE passthrough, after
+// which the engine drops the shim and points opencode straight at the endpoint.
 package streamshim
 
 import (
@@ -30,8 +30,8 @@ import (
 	"time"
 )
 
-// MaxTokensCap is Forge's hard per-request output ceiling (it 400s above this).
-// opencode requests far more, so the shim clamps down to it.
+// MaxTokensCap is the inference endpoint's hard per-request output ceiling (it
+// 400s above this). opencode requests far more, so the shim clamps down to it.
 const MaxTokensCap = 4096
 
 // Shim is a running loopback stream→non-stream bridge. Zero value is not usable;
@@ -48,7 +48,7 @@ type Shim struct {
 // Start binds a loopback listener and begins serving. targetBaseURL is the real
 // upstream base URL WITH its /v1 suffix (the same string the adapter would
 // otherwise give opencode). clampMaxTokens caps each request's max_tokens (use
-// MaxTokensCap for the Forge donut rail; pass <=0 to leave max_tokens untouched,
+// MaxTokensCap for the metered rail; pass <=0 to leave max_tokens untouched,
 // e.g. for a BYOI endpoint with its own limits). The returned Shim serves until
 // Close.
 func Start(targetBaseURL string, clampMaxTokens int, logger *slog.Logger) (*Shim, error) {

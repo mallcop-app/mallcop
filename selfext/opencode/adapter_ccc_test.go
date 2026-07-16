@@ -9,8 +9,9 @@ import (
 // TestCodeAuthoringModelIsOpaqueAlias pins the leak-prevention contract: the
 // CODE-authoring model string the PUBLIC binary sends must
 // be the OPAQUE lane alias "coding" — never a raw catalog id (the model the
-// product exists to obscure) and never a reseller name. Forge resolves the alias
-// server-side to the real coder. It must also never be a bare weak/Fable token.
+// product exists to obscure) and never a reseller name. The inference endpoint
+// resolves the alias server-side to the real coder. It must also never be a bare
+// weak/Fable token.
 func TestCodeAuthoringModelIsOpaqueAlias(t *testing.T) {
 	if CodeAuthoringModel == "" {
 		t.Fatal("CodeAuthoringModel must not be empty")
@@ -32,8 +33,8 @@ func TestCodeAuthoringModelIsOpaqueAlias(t *testing.T) {
 // TestAdapterModelOverridesLaneInRequestAndProviderConfig proves the
 // CODE-authoring lane resolves to the stronger coder end to end: when Model
 // is set, it is what opencode is told to request (the ProviderConfig models
-// map key) — NOT the bare Lane string ("heal", which round-6 evidence showed
-// resolving to qwen3-32b on the self-ext build account).
+// map key) — NOT the bare Lane string ("heal", which live evidence showed
+// resolving to a weak flash-tier model on the build account).
 func TestAdapterModelOverridesLaneInRequestAndProviderConfig(t *testing.T) {
 	a := &Adapter{Lane: "heal", Model: CodeAuthoringModel, Provider: "forge"}
 
@@ -68,7 +69,7 @@ func TestAdapterModelOverridesLaneInRequestAndProviderConfig(t *testing.T) {
 // TestAdapterModelEmptyFallsBackToLane proves the pre-behavior
 // is preserved when Model is unset (e.g. the BYOI rail, which must never have
 // an Anthropic catalog id forced onto a user's own arbitrary endpoint — see
-// cmd/mallcop-ops's codeAuthoringModel doc).
+// the operator binary's codeAuthoringModel doc).
 func TestAdapterModelEmptyFallsBackToLane(t *testing.T) {
 	a := &Adapter{Lane: "heal"}
 	if got := a.model(); got != "heal" {

@@ -33,7 +33,7 @@ package engine
 // (the standard dev layout — see CLAUDE.md's Repos table), and in CI via
 // .github/workflows/selfimprove-offline.yml, which checks out mallcop-app/
 // mallcop as a sibling directory and points MALLCOP_SRC at it before running
-// `go test ./internal/selfext/...` (e2e/selfimprove/uc7b-selfext-tests.sh) —
+// `go test ./selfext/...` (e2e/selfimprove/uc7b-selfext-tests.sh) —
 // exactly the env-var convention e2e/selfimprove/lib.sh's build_mallcop()
 // uses, deliberately mirrored here so this test and the offline harness agree
 // on where the sibling checkout lives without any CI wiring beyond what
@@ -160,7 +160,7 @@ func TestRunValidateProposal_RealGate_RejectsProtectedPath(t *testing.T) {
 
 	// ---- the REAL selfgate.GateResult wire shape, round-tripped through the
 	//      engine's OWN, independently-maintained struct definition
-	//      (mallcop-pro deliberately does not import core/selfgate — see
+	//      (this engine deliberately does not import core/selfgate — see
 	//      gate.go's package doc). This is the process-boundary contract
 	//      flagged as circular/vacuous under the shell stub. ----
 	if gate.SchemaVersion != expectedGateSchemaVersion {
@@ -191,8 +191,8 @@ func TestRunValidateProposal_RealGate_RejectsProtectedPath(t *testing.T) {
 	found := false
 	for _, f := range stage.Findings {
 		// "protected-path" mirrors core/selfgate.RuleProtectedPath — hardcoded
-		// here (not imported) since mallcop-pro deliberately does not depend on
-		// core/selfgate; this string literal IS the cross-repo contract test.
+		// here (not imported) since this engine deliberately does not depend on
+		// core/selfgate; this string literal IS the cross-boundary contract test.
 		if f.Rule == "protected-path" && f.Path == "core/agent/committee.go" {
 			found = true
 		}

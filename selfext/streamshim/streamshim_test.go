@@ -10,9 +10,9 @@ import (
 	"testing"
 )
 
-// fakeUpstream stands in for Forge: it 501s any streaming request (exactly as
-// real Forge does) and 400s max_tokens over the cap, otherwise returns a normal
-// completion. It records the last request it saw.
+// fakeUpstream stands in for the inference endpoint: it 501s any streaming request
+// (exactly as a non-streaming endpoint does) and 400s max_tokens over the cap,
+// otherwise returns a normal completion. It records the last request it saw.
 type fakeUpstream struct {
 	sawStream    bool
 	sawMaxTokens float64

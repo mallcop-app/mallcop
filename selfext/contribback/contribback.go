@@ -2,7 +2,7 @@
 // loop. After a customer's OWN gated PR merges into their thin-embed repo, an
 // OPTIONALLY-consented, universally-applicable widen may be proposed BACK to the
 // shared OSS corpus (mallcop-app/mallcop) as a pull request the OSS project's own
-// CI (exam.yml) and CODEOWNERS review gate. The router (internal/selfext/router)
+// CI (exam.yml) and CODEOWNERS review gate. The router (the router package)
 // already decides WHICH widens are OSS-eligible and emits a reviewable OSS-PR
 // artifact for each; this package is the step that (opt-in) turns that artifact
 // into an actual pull request.
@@ -16,8 +16,8 @@
 //
 //  2. OPERATOR IDENTITY, NO STANDING CREDENTIAL (design ruling R8). The PR is
 //     opened under the OPERATOR's own gh credential, resolved at call time from
-//     their ambient environment. mallcop-pro stores no machine-bot token and
-//     holds no standing write credential to the shared repo. The Opener never
+//     their ambient environment. The operator binary stores no machine-bot token
+//     and holds no standing write credential to the shared repo. The Opener never
 //     accepts, persists, or logs a token; PROpener implementations authenticate
 //     entirely out-of-band (the operator's `gh auth`).
 //
@@ -45,7 +45,7 @@ import (
 // ZERO VALUE is DISABLED (Enabled == false): contribute-back is off until the
 // operator turns it on. This is distinct from a customer's per-widen consent
 // (which the router already enforces before it ever emits an OSS artifact) —
-// Config.Enabled is the operator's standing opt-in for THIS mallcop-pro
+// Config.Enabled is the operator's standing opt-in for THIS operator
 // deployment to open shared-OSS PRs at all.
 type Config struct {
 	// Enabled is the opt-in switch. False (the zero value) = contribute-back

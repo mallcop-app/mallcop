@@ -443,7 +443,7 @@ func TestOverlayAppendOnlyRefusesRetarget(t *testing.T) {
 
 // ---- autonomy dial matrix --------------------------------
 //
-// Router.Autonomy (internal/selfext/autonomy.Dial) decides ONLY whether an
+// Router.Autonomy (autonomy.Dial) decides ONLY whether an
 // otherwise-clean widen auto-applies to the tenant overlay. Below: for EACH of
 // the three dial positions, one test proving what the dial ALLOWS to
 // auto-apply and one proving what it still REJECTS (never auto-applies) —

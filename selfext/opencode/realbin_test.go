@@ -10,7 +10,7 @@ package opencode
 //
 // These tests drive the REAL opencode binary against a LOCAL fake
 // OpenAI-compatible SSE endpoint (a hermetic httptest.Server — no network, no
-// Forge, no Bedrock, $0 spend) and prove two things the shell-stub suite
+// metered inference provider, $0 spend) and prove two things the shell-stub suite
 // cannot:
 //
 //   - TestRealOpencode_OutputCapReachesWire: the `models.<model>.limit.output`

@@ -1,6 +1,6 @@
-// Package proposer is the K8 add-only coverage PROPOSER for mallcop's
-// self-extension loop — the DATA-lane sibling of the K7 opencode code-authoring
-// engine (internal/selfext/engine). Where the engine authors Go detector code
+// Package proposer is the add-only coverage PROPOSER for mallcop's
+// self-extension loop — the DATA-lane sibling of the opencode code-authoring
+// engine (the engine package). Where the engine authors Go detector code
 // and gates it, the proposer runs ONE metered inference call to turn a
 // STORE-MINED coverage gap into an add-only DATA delta:
 //
@@ -18,11 +18,12 @@
 // Inference credentials and the billing lifecycle are supplied by a
 // session.Session so the proposer runs identically on two rails:
 //
-//   - DONUT: a donut.DonutSession consults the spend cap, mints a capped,
-//     lane-scoped subkey, measures the Forge usage delta, and revokes on Close.
+//   - METERED: a commercial billing session consults the spend cap, mints a
+//     capped, lane-scoped run key, measures the provider's usage delta, and
+//     revokes on Close.
 //   - BYOI: a session.BYOISession points at the OSS user's OWN endpoint+key —
-//     NO cap, NO subkey, $0 recorded. It holds no Forge handle, so a BYOI run
-//     makes zero Forge billing calls by construction.
+//     NO cap, NO minted key, $0 recorded. It holds no billing handle, so a BYOI
+//     run makes zero billing calls by construction.
 //
 // The seam is the ONLY difference between the rails. Every safety invariant
 // below runs byte-identically on both.
@@ -31,25 +32,25 @@
 //
 //   - A known-reject gap fingerprint is SKIPPED before the session is even
 //     consulted — zero Authorize, zero mint, zero inference, on EITHER rail.
-//   - On the donut rail the spend gate is consulted BEFORE a subkey exists; a
+//   - On the metered rail the spend gate is consulted BEFORE a run key exists; a
 //     refusal spends nothing (no inference is possible without a key).
 //   - session.Close is deferred immediately after Authorize and fires regardless
 //     of success, parse verdict, or a panic in the inference client — on the
-//     donut rail this revokes the per-run subkey (the load-bearing teardown).
+//     metered rail this revokes the per-run run key (the load-bearing teardown).
 //   - The prompt is built from TRUSTED STRUCTURAL gap fields only; raw sample
 //     payloads are never interpolated (see prompt.go).
 //   - The reply is STRICT-parsed against the closed vocabulary. Any non-add-only
 //     shape, unknown vocab, or narrowing verb is REJECTED with NO retry, and the
 //     gap fingerprint is poisoned into the SHARED anti-thrash reject set.
-//   - A surfaced inference error is redacted with the run's key (donut subkey OR
-//     BYOI user key) before it is logged or returned.
+//   - A surfaced inference error is redacted with the run's key (minted run key
+//     OR BYOI user key) before it is logged or returned.
 //
-// # Module boundary
+// # Process boundary
 //
-// mallcop-pro does NOT import the mallcop module (separate Go modules). The
-// coverage gaps cross as JSON over `mallcop collect --json`; this package
-// duplicates the small MappingGap / GapCandidate / GapEvidence structs with
-// matching json tags (see collect.go) and decodes the versioned envelope.
+// The proposer consumes coverage gaps as JSON over the `mallcop collect --json`
+// process boundary rather than importing the collector: this package duplicates
+// the small MappingGap / GapCandidate / GapEvidence structs with matching json
+// tags (see collect.go) and decodes the versioned envelope.
 package proposer
 
 import (
@@ -78,7 +79,7 @@ const defaultMaxTokens = 1024
 
 // InferenceClient is the ONE metered/billed call a propose run makes. The real
 // impl (AnthropicClient, client.go) POSTs the Anthropic /v1/messages wire shape
-// to the resolved endpoint with the run's key (a donut subkey OR a BYOI user
+// to the resolved endpoint with the run's key (a minted run key OR a BYOI user
 // key); tests inject a FAKE returning canned JSON.
 type InferenceClient interface {
 	Messages(ctx context.Context, req MessagesRequest) (MessagesResponse, error)
@@ -89,18 +90,18 @@ type InferenceClient interface {
 // reject set with the engine).
 type Proposer struct {
 	// Session is the runtime seam that supplies inference credentials and, on the
-	// donut rail, the spend-cap + subkey lifecycle. A DonutSession reproduces the
-	// Forge billing preamble (authorize → mint → usage-delta → revoke); a
-	// BYOISession points at the user's OWN endpoint + key with NO cap and NO
-	// subkey. Required. It is the ONLY place billing differs between the two rails
-	// — every safety rail below is identical. Required.
+	// metered rail, the spend-cap + run-key lifecycle. A commercial billing
+	// session reproduces the metered billing preamble (authorize → mint →
+	// usage-delta → revoke); a BYOISession points at the user's OWN endpoint +
+	// key with NO cap and NO minted key. Required. It is the ONLY place billing
+	// differs between the two rails — every safety rail below is identical.
 	Session session.Session
 	// Fingerprints is the SHARED anti-thrash reject set (engine.RejectSet). The
 	// proposer consults it FIRST and poisons rejected gaps into it, so a known
 	// dead end is never re-proposed — on either rail. Required.
 	Fingerprints *engine.RejectSet
 	// NewClient builds the inference client from the resolved base URL and the
-	// run's key (donut subkey OR BYOI user key). Nil → the real AnthropicClient.
+	// run's key (minted run key OR BYOI user key). Nil → the real AnthropicClient.
 	// Tests inject a FAKE.
 	NewClient func(baseURL, key string) InferenceClient
 
@@ -108,7 +109,7 @@ type Proposer struct {
 	// → "investigate".
 	Lane string
 	// BudgetUSD is the per-run spend ESTIMATE handed to Session.Authorize. On the
-	// donut rail it is the spend-cap estimate and pool ceiling; BYOI ignores it.
+	// metered rail it is the spend-cap estimate and pool ceiling; BYOI ignores it.
 	// Required (> 0).
 	BudgetUSD float64
 
@@ -155,8 +156,9 @@ func (p *Proposer) newClient(baseURL, key string) InferenceClient {
 }
 
 // validate checks required fields before a run touches inference. The billing
-// preconditions (spend gate, minter, account id, forge URL) now live inside the
-// donut Session, so the Proposer only guards its rail-agnostic invariants.
+// preconditions (spend gate, minter, account id, provider URL) now live inside
+// the commercial billing session, so the Proposer only guards its rail-agnostic
+// invariants.
 func (p *Proposer) validate() error {
 	switch {
 	case p.Session == nil:
@@ -180,16 +182,16 @@ func mappingFingerprint(g MappingGap) string {
 
 // Propose runs ONE add-only coverage proposal for a mapping gap, copying the
 // engine.Run ordering exactly and routing every billing step through the
-// Session so the DONUT and BYOI rails share ONE code path:
+// Session so the METERED and BYOI rails share ONE code path:
 //
 //	anti-thrash → session.Authorize → (defer) session.Close → session.Credentials
 //	→ ONE inference call → strict parse → session.Record — ALWAYS.
 //
-// On the donut rail Authorize mints a capped subkey and Close revokes it; on the
-// BYOI rail both are no-ops and Credentials returns the user's own endpoint+key.
-// Everything between anti-thrash and Record — the trusted-signal prompt, the
-// strict add-only parse, the fingerprint poisoning, the redaction — is identical
-// on both rails; only WHERE inference is billed differs.
+// On the metered rail Authorize mints a capped run key and Close revokes it; on
+// the BYOI rail both are no-ops and Credentials returns the user's own
+// endpoint+key. Everything between anti-thrash and Record — the trusted-signal
+// prompt, the strict add-only parse, the fingerprint poisoning, the redaction —
+// is identical on both rails; only WHERE inference is billed differs.
 //
 // It returns an Outcome describing the terminal state; the error return is
 // reserved for infrastructure failures (bad config, mint/resolver error) —
@@ -197,7 +199,7 @@ func mappingFingerprint(g MappingGap) string {
 //
 // Named returns let the deferred panic-guard convert a panic in the inference
 // client into Outcome{Failed} while the deferred session Close still fires
-// (revoking the donut subkey).
+// (revoking the minted run key).
 func (p *Proposer) Propose(ctx context.Context, gap MappingGap) (Outcome, error) {
 	if verr := p.validate(); verr != nil {
 		return Outcome{}, verr
@@ -212,7 +214,7 @@ func (p *Proposer) Propose(ctx context.Context, gap MappingGap) (Outcome, error)
 }
 
 // runLoop is the SHARED add-only proposal lifecycle Propose (mapping/tuning)
-// runs — the single place the DONUT/BYOI session seam and every safety rail
+// runs — the single place the METERED/BYOI session seam and every safety rail
 // live. The ordering copies engine.Run exactly:
 //
 //	anti-thrash → session.Authorize → (defer) session.Close → session.Credentials
@@ -226,7 +228,7 @@ func (p *Proposer) Propose(ctx context.Context, gap MappingGap) (Outcome, error)
 //
 // Named returns let the deferred panic-guard convert a panic in the inference
 // client into Outcome{Failed} while the deferred session Close still fires
-// (revoking the donut subkey).
+// (revoking the minted run key).
 func (p *Proposer) runLoop(
 	ctx context.Context,
 	fp string,
@@ -246,8 +248,8 @@ func (p *Proposer) runLoop(
 		return Outcome{Skipped: true, Reason: "known-reject fingerprint", Fingerprint: fp, Model: out.Model}, nil
 	}
 
-	// 2) Authorize. Donut: spend gate (BEFORE mint — a refusal spends nothing) +
-	//    mint the capped, lane-scoped subkey. BYOI: a no-op that always succeeds.
+	// 2) Authorize. Metered: spend gate (BEFORE mint — a refusal spends nothing) +
+	//    mint the capped, lane-scoped run key. BYOI: a no-op that always succeeds.
 	//    A benign cap refusal is a *RefusalError (Refused, spent nothing); a
 	//    mint/resolver failure surfaces as a hard error.
 	if aerr := p.Session.Authorize(ctx, p.BudgetUSD); aerr != nil {
@@ -258,8 +260,8 @@ func (p *Proposer) runLoop(
 		return Outcome{}, aerr
 	}
 
-	// 3) Teardown is unconditional (defer) — success, failure, or panic. Donut:
-	//    revoke the subkey + drain the pool. BYOI: a no-op.
+	// 3) Teardown is unconditional (defer) — success, failure, or panic. Metered:
+	//    revoke the run key + drain the pool. BYOI: a no-op.
 	defer func() {
 		if cerr := p.Session.Close(); cerr != nil {
 			log.Error("proposer: session close failed (teardown)", "err", cerr)
@@ -268,7 +270,7 @@ func (p *Proposer) runLoop(
 
 	// Panic guard registered LAST → runs FIRST during unwind, converting a panic
 	// in the inference client into a Failed outcome; the Close defer (registered
-	// earlier) then still runs, so the donut subkey revoke always fires.
+	// earlier) then still runs, so the run-key revoke always fires.
 	defer func() {
 		if r := recover(); r != nil {
 			err = nil
@@ -277,7 +279,7 @@ func (p *Proposer) runLoop(
 		}
 	}()
 
-	// 4) Resolve inference credentials (donut subkey OR BYOI user key) and make
+	// 4) Resolve inference credentials (minted run key OR BYOI user key) and make
 	//    the ONE billed inference call. Credentials marks the usage-window start.
 	baseURL, key, cerr := p.Session.Credentials(ctx)
 	if cerr != nil {
@@ -287,7 +289,7 @@ func (p *Proposer) runLoop(
 	resp, ierr := client.Messages(ctx, buildReq())
 	if ierr != nil {
 		cost := p.record(ctx, log, false)
-		// Redact the run's key (donut subkey OR the BYOI user key) from the
+		// Redact the run's key (minted run key OR the BYOI user key) from the
 		// surfaced error. redact.Redact scrubs the exact key handed to it plus any
 		// mallcop-sk-*/vendor-prefixed sibling, so a BYOI "sk-ant-..." key is
 		// scrubbed even though it is not a mallcop key.
@@ -310,7 +312,7 @@ func (p *Proposer) runLoop(
 		return Outcome{Rejected: true, Reason: perr.Error(), Fingerprint: fp, CostUSD: cost, Model: p.lane()}, nil
 	}
 
-	// 6) Record spend (donut: Forge usage delta + ledger; BYOI: $0).
+	// 6) Record spend (metered: provider usage delta + ledger; BYOI: $0).
 	cost := p.record(ctx, log, true)
 	prop.Fingerprint = fp
 	prop.Model = p.lane()
@@ -326,7 +328,7 @@ func (p *Proposer) runLoop(
 }
 
 // record folds the run's measured spend into the Session ledger and returns the
-// cost. On the donut rail the Session sums the Forge usage delta since
+// cost. On the metered rail the Session sums the provider usage delta since
 // Credentials and calls Gate.Record; on the BYOI rail it returns 0 and records
 // nothing. A record failure is non-fatal (logged, not returned).
 func (p *Proposer) record(ctx context.Context, log *slog.Logger, success bool) float64 {

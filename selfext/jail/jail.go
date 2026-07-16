@@ -5,7 +5,7 @@
 //
 // The authoring subprocess (opencode, run with --dangerously-skip-permissions)
 // executes model-influenced shell inside the runner. Even though the prompt is
-// built only from TRUSTED structural signals (see internal/selfext/opencode),
+// built only from TRUSTED structural signals (see the opencode package),
 // defense-in-depth demands that the *process itself* cannot:
 //
 //   - reach the network for anything other than its one inference endpoint, and
@@ -24,7 +24,7 @@
 //
 // This is the OS layer BELOW the runner-level controls (step-security/
 // harden-runner egress-policy:block host allowlist, ephemeral runner, worthless
-// short-lived subkey, agent-unreachable exam gate, human PR review). Landlock
+// short-lived run key, agent-unreachable exam gate, human PR review). Landlock
 // binds the child to exactly the TCP port of its configured inference endpoint
 // and a read-only rootfs with a single writable scratch tree; harden-runner
 // binds which hosts are reachable on that port. Together they are a real jail,
@@ -40,10 +40,11 @@
 // # Launcher pattern
 //
 // Landlock restricts the WHOLE calling process, so the unjailed parent
-// (mallcop-ops, which still needs full filesystem/network to run the gate, git,
-// and the stream shim) cannot apply it to itself. Instead the adapter builds a
-// command that re-execs the mallcop-ops binary itself (/proc/self/exe) with the
-// reexec marker as argv[1] and the policy in the environment. MaybeReexec, called
+// (the operator binary, which still needs full filesystem/network to run the
+// gate, git, and the stream shim) cannot apply it to itself. Instead the adapter
+// builds a command that re-execs the operator binary itself (/proc/self/exe)
+// with the reexec marker as argv[1] and the policy in the environment.
+// MaybeReexec, called
 // at the very top of main(), intercepts that marker, applies the jail, then execs
 // the real opencode argv — so only the child is confined.
 package jail
@@ -57,7 +58,7 @@ import (
 
 // ReexecMarker is the argv[1] sentinel that tells MaybeReexec this process was
 // spawned to become the jailed opencode child. It is deliberately unlikely to
-// collide with any real mallcop-ops subcommand.
+// collide with any real operator-binary subcommand.
 const ReexecMarker = "__selfext_jail_exec__"
 
 // policyEnvKey is the environment variable carrying the JSON-encoded Policy from
@@ -85,7 +86,7 @@ type Policy struct {
 	ReadPaths []string `json:"read_paths"`
 	// AllowTCPPorts are the only TCP ports the child may connect(2) to. It must
 	// be exactly the port of the configured inference endpoint (the loopback
-	// stream-shim port on the donut rail, or 443 for a direct BYOI endpoint).
+	// stream-shim port on the metered rail, or 443 for a direct BYOI endpoint).
 	AllowTCPPorts []uint16 `json:"allow_tcp_ports"`
 }
 

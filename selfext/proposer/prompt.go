@@ -33,7 +33,7 @@ const maxRawActionPromptLen = 200
 // carriage returns, tabs, ESC, and other C0/C1 codes — the bytes an attacker
 // would use to forge fake turn boundaries or hidden instructions into the
 // prompt) and caps the result's length. This is anti prompt-injection-SHAPING:
-// a connector's raw_action is untrusted external data (mallcop-pro never
+// a connector's raw_action is untrusted external data (the engine never
 // controls what a scanned source calls its own actions), and BuildPrompt is the
 // one place it is interpolated as free text rather than carried as structured
 // JSON.

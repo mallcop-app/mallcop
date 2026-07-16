@@ -13,13 +13,12 @@ import (
 	"github.com/mallcop-app/mallcop/selfext/session"
 )
 
-// The router is part of the forge-free BYOK surface slated to relocate to the
-// public MIT mallcop repo, so its TEST layer must reach NEITHER
-// internal/forge NOR internal/donut NOR internal/selfext/subkey NOR internal/spendcap.
+// The router is part of the BYOK-pure surface of the public MIT mallcop repo,
+// so its TEST layer must reach NO commercial billing internals.
 // This deterministic collect→propose→route e2e drives the proposer through a
-// library-pure fakeSession (below); the real DonutSession over a Forge server is
-// out of scope here (the e2e proves ROUTING, not billing) and is covered in
-// internal/selfext/integration.
+// library-pure fakeSession (below); the real commercial billing session over a
+// live inference endpoint is out of scope here (the e2e proves ROUTING, not
+// billing) and is covered with the commercial layer.
 
 // goldenCollectJSON is a `mallcop collect --json` envelope: one high-count
 // unmapped github repo.rename gap whose closed vocabulary includes config_change
@@ -64,11 +63,11 @@ func (g *e2eGate) CapUSD() float64                                  { return 25.
 
 // fakeSession is a library-pure session.Session backing the proposer in this e2e:
 // it wraps the e2eGate spend-cap surface, counts "mints" (a successful Authorize —
-// the donut rail mints its subkey iff the gate grants), wraps a denial in
-// *session.RefusalError exactly as DonutSession does, and hands back a fixed
-// (baseURL, key). No Forge server, no subkey, no ledger — the router e2e asserts
-// ROUTING; the real DonutSession billing lifecycle is proven in
-// internal/selfext/integration.
+// the metered rail mints its run key iff the gate grants), wraps a denial in
+// *session.RefusalError exactly as a commercial billing session does, and hands back a fixed
+// (baseURL, key). No billing server, no run key, no ledger — the router e2e asserts
+// ROUTING; the real commercial billing lifecycle is proven with the commercial
+// layer.
 type fakeSession struct {
 	gate    *e2eGate
 	baseURL string
@@ -292,7 +291,7 @@ func TestE2E_KnownRejectSkips(t *testing.T) {
 }
 
 // TestE2E_OverCapRefuses (case vi): a denying spend gate refuses the proposer
-// before any subkey exists — ZERO inference, ZERO mint.
+// before any run key exists — ZERO inference, ZERO mint.
 func TestE2E_OverCapRefuses(t *testing.T) {
 	fake := &e2eFake{resp: e2eMappingReply()}
 	gate := &e2eGate{denyErr: errors.New("cap exceeded")}

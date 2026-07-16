@@ -19,8 +19,8 @@ type RoutedRecord struct {
 	Fingerprint    string   `json:"fingerprint"`
 	SampleEventIDs []string `json:"sample_event_ids,omitempty"`
 	ProposerModel  string   `json:"proposer_model"`
-	// Endpoint is the inference base URL the proposal was billed to (the Forge
-	// URL on the donut rail, the user's URL on BYOI). Mirrors
+	// Endpoint is the inference base URL the proposal was billed to (the provider
+	// URL on the metered rail, the user's URL on BYOI). Mirrors
 	// engine.Provenance.Endpoint (engine.go) — provenance only, NEVER the key.
 	Endpoint    string    `json:"endpoint,omitempty"`
 	BaseSHA     string    `json:"base_sha"`

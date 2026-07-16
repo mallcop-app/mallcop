@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-// TestRedact proves the exact subkey and any other mallcop-sk-* token is
+// TestRedact proves the exact run key and any other mallcop-sk-* token is
 // scrubbed from a transcript.
 func TestRedact(t *testing.T) {
 	sk := "mallcop-sk-abc123_-XYZ"
@@ -26,7 +26,7 @@ func TestRedact(t *testing.T) {
 		t.Errorf("Redact did not insert the marker: %q", out)
 	}
 
-	// Empty subkey still scrubs the pattern.
+	// Empty run key still scrubs the pattern.
 	out2 := Redact("token "+other+" here", "")
 	if strings.Contains(out2, "mallcop-sk") {
 		t.Errorf("Redact with empty subkey left a token: %q", out2)

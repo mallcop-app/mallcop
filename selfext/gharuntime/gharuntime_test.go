@@ -12,7 +12,7 @@ import (
 )
 
 // update regenerates the golden testdata from the emitted templates. Run
-// `go test ./internal/selfext/gharuntime/ -update` after an intentional template
+// `go test ./selfext/gharuntime/ -update` after an intentional template
 // change, then commit the regenerated testdata/golden tree.
 var update = flag.Bool("update", false, "regenerate golden testdata from the emitted templates")
 

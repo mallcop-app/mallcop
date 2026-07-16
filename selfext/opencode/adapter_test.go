@@ -84,7 +84,7 @@ func TestProviderConfigShape(t *testing.T) {
 		`"apiKey":"mallcop-sk-secret123"`,
 		`"@ai-sdk/openai-compatible"`,
 		`"heal":{"limit":{"context":128000,"output":4096}}`, // lane declared with context+output caps
-		`"forge":`,                         // provider key
+		`"forge":`, // provider key
 	} {
 		if !strings.Contains(cfg, want) {
 			t.Errorf("provider config missing %q:\n%s", want, cfg)
@@ -222,7 +222,7 @@ func TestBuildTaskPromptCustomerShapedTargetsSidecar(t *testing.T) {
 	// This branch must NEVER instruct opencode to WRITE the in-tree own-package
 	// shape (detect.Register, an own-package dir, in-tree scenario files) — a
 	// customer deployment repo has no such tree, and the registry the old
-	// unconditional step tried to restore does not exist (the exact 7ee7
+	// unconditional step tried to restore does not exist (the exact
 	// live-leg bug). It DOES explicitly forbid touching core/detect/authored/
 	// by name (defense in depth), so that substring alone is expected.
 	for _, mustNotContain := range []string{
@@ -251,7 +251,7 @@ func TestBuildTaskPromptCustomerShapedTargetsSidecar(t *testing.T) {
 
 // TestInvokeRunsStubExtractsFilesAndRedacts drives Invoke against a FAKE
 // opencode stub script. The stub deliberately leaks OPENCODE_CONFIG_CONTENT
-// (which carries the subkey) to stdout; the adapter MUST redact it before
+// (which carries the run key) to stdout; the adapter MUST redact it before
 // returning the transcript.
 func TestInvokeRunsStubExtractsFilesAndRedacts(t *testing.T) {
 	repo := initFixtureRepo(t)
@@ -280,7 +280,7 @@ func TestInvokeRunsStubExtractsFilesAndRedacts(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(wt.Dir, "authored-by-stub.txt")); err != nil {
 		t.Errorf("stub did not write into the worktree: %v", err)
 	}
-	// The subkey (leaked to stdout by the stub) MUST be redacted.
+	// The run key (leaked to stdout by the stub) MUST be redacted.
 	transcript := string(res.TranscriptRedacted)
 	if strings.Contains(transcript, subkey) {
 		t.Errorf("transcript leaked the raw subkey")
@@ -674,7 +674,7 @@ func readCount(t *testing.T, countFile string) int {
 }
 
 // writeInvokeStub writes a fake opencode that finds --dir, writes one file into
-// the worktree, echoes its own OPENCODE_CONFIG_CONTENT (leaking the subkey to
+// the worktree, echoes its own OPENCODE_CONFIG_CONTENT (leaking the run key to
 // stdout on purpose), emits canned JSON events, and exits 0.
 func writeInvokeStub(t *testing.T) string {
 	t.Helper()

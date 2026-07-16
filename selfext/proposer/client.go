@@ -11,18 +11,19 @@ import (
 )
 
 // AnthropicClient is the real InferenceClient: it POSTs the Anthropic
-// /v1/messages wire shape to {BaseURL}/v1/messages with the per-run subkey as
-// BOTH Bearer and x-api-key, then decodes the response. It is a mallcop-pro-local
-// re-implementation of mallcop core/inference.DirectClient.Messages (direct.go:60)
-// — mallcop-pro cannot import the mallcop module, and the wire mapping IS the
+// /v1/messages wire shape to {BaseURL}/v1/messages with the per-run key as
+// BOTH Bearer and x-api-key, then decodes the response. It is a self-contained
+// re-implementation of the Anthropic /v1/messages wire mapping — this engine
+// does not depend on an external inference SDK, and the wire mapping IS the
 // implementation (no SDK, no framework).
 type AnthropicClient struct {
-	// BaseURL is the Forge base URL; "/v1/messages" is appended (a trailing slash
-	// is tolerated). Required.
+	// BaseURL is the inference endpoint base URL; "/v1/messages" is appended (a
+	// trailing slash is tolerated). Required.
 	BaseURL string
-	// Key is the per-run mallcop-sk-* subkey. Sent as both "Authorization: Bearer"
-	// and "x-api-key" so an Anthropic-native and a Forge/OpenAI-style endpoint
-	// both authenticate from the same field. Empty Key sends neither header.
+	// Key is the per-run key (a mallcop-sk-* run key or a BYOI provider key). Sent
+	// as both "Authorization: Bearer" and "x-api-key" so an Anthropic-native and
+	// an OpenAI-style endpoint both authenticate from the same field. Empty Key
+	// sends neither header.
 	Key string
 	// HTTPClient, if nil, defaults to http.DefaultClient.
 	HTTPClient *http.Client

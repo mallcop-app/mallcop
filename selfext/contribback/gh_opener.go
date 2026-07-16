@@ -15,8 +15,8 @@ func execRun(ctx context.Context, name string, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, name, args...)
 	// IMPORTANT (design ruling R8): we do NOT set GH_TOKEN, GITHUB_TOKEN, or any
 	// credential into the child environment. gh authenticates as the OPERATOR
-	// from their ambient `gh auth` state. mallcop-pro holds no standing write
-	// credential to the shared repo — the operator's own identity opens the PR.
+	// from their ambient `gh auth` state. The operator binary holds no standing
+	// write credential to the shared repo — the operator's own identity opens the PR.
 	// cmd.Env stays nil so the child inherits the operator's environment verbatim.
 	out, err := cmd.CombinedOutput()
 	return string(out), err
