@@ -3,9 +3,13 @@
 # mallcop self-extension — CODE lane (thin caller).
 #
 # Written into the OPERATOR's fork of mallcop-app/mallcop by `mallcop init --pro`
-# (or `mallcop-ops selfext --scaffold-gha`). This file is INTENTIONALLY thin: it
+# (or `mallcop selfext --scaffold-gha`). This file is INTENTIONALLY thin: it
 # carries zero orchestration logic. All logic lives in the pinned, mallcop-owned
 # reusable workflow it calls, so an upgrade is a one-line SHA bump on `uses:`.
+#
+# This is a pure BYOK (Bring-Your-Own-Key) lane: it runs the public OSS `mallcop
+# selfext` binary on YOUR OWN inference endpoint + key. No donut/commercial rail,
+# no mallcop-ops download.
 #
 # mallcop-selfext-template: v1
 name: mallcop self-extension (code lane)
@@ -22,10 +26,10 @@ on:
       target_family:
         description: finding family the detector emits (default = detector id)
         required: false
-      rail:
-        description: "billing rail: donut-byoi | byoi | donut-broker (v1.1)"
+      code_model:
+        description: "BYOK model id YOUR endpoint should author with (e.g. claude-sonnet-4, a provider catalog id). Empty = send the bare lane and let your endpoint pick. Overrides the repo-var default (MALLCOP_CODE_MODEL)."
         required: false
-        default: donut-byoi
+        default: ""
       promote_detector:
         description: "CODE-lane contribute-back: name an ALREADY-MERGED authored detector to propose upstream (opens a reviewed OSS PR, never merges). Empty = normal authoring run."
         required: false
@@ -34,7 +38,7 @@ on:
 
 # The ONLY elevated scopes: push the selfext/proposal-* branch in THIS fork and
 # open the review PR. NEVER main (branch protection — see the scaffold checklist).
-# No id-token in v1; the v1.1 broker OIDC lease will add `id-token: write`.
+# No id-token — BYOK needs no OIDC broker lease.
 permissions:
   contents: write
   pull-requests: write
@@ -47,19 +51,20 @@ jobs:
   selfext:
     # Pinned to the mallcop-app/selfext reusable-workflow commit.
     # An upgrade is a one-line SHA bump here (or a Dependabot github-actions PR that
-    # itself hits CODEOWNERS review). The reusable workflow in turn pins the runner
-    # image by @sha256 digest, so the whole supply chain is SHA-locked end to end.
+    # itself hits CODEOWNERS review). The reusable workflow pins its toolchain by
+    # pinned version + checksum (fail-closed), so the whole supply chain is SHA-locked
+    # end to end.
     uses: mallcop-app/selfext/.github/workflows/selfext-code-reusable.yml@d9d51da47376025fe6033afa414a1298a841d2d8
     secrets:
-      inference_key: ${{ secrets.MALLCOP_SK }}     # the customer's OWN donut key, or a BYOI provider key — never an admin key
-      byoi_url: ${{ secrets.INFERENCE_URL }}       # BYOI rail only
+      inference_key: ${{ secrets.INFERENCE_KEY }}   # BYOK: your OWN inference API key — never an admin key. Reaches the binary only via --inference-key-env.
       oss_contrib_token: ${{ secrets.OSS_CONTRIB_TOKEN }}   # operator's OWN token for the upstream OSS PR; absent => contribute-back skips
     with:
       detector_id: ${{ inputs.detector_id }}
       event_type: ${{ inputs.event_type }}
       target_family: ${{ inputs.target_family }}
-      rail: ${{ inputs.rail }}
+      # BYOK: a per-dispatch model input overrides the standing repo-var config default; empty sends the bare lane.
+      code_model: ${{ inputs.code_model || vars.MALLCOP_CODE_MODEL }}
       promote_detector: ${{ inputs.promote_detector }}   # CODE-lane contribute-back selector (NOT the consent knob — that lives in mallcop.yaml)
       budget_usd: ${{ vars.MALLCOP_BUDGET_USD || '2.00' }}
-      base_url: ${{ vars.MALLCOP_BASE_URL || 'https://mallcop.app' }}
+      inference_url: ${{ vars.MALLCOP_INFERENCE_URL }}   # BYOK: your OWN inference endpoint base URL (repo variable)
       consent: ${{ vars.MALLCOP_OSS_CONSENT || 'false' }}   # invariant #6: OSS contribute-back is opt-in only

@@ -4,10 +4,11 @@
 #
 # All orchestration logic for the CODE lane lives here so it can be upgraded
 # centrally (one SHA bump in every fork's thin caller). It runs the SAME
-# `mallcop-ops selfext --run` binary the operator runs locally, on an ephemeral
-# GitHub-hosted runner. It authors ONE add-only detector, runs the in-runner
-# gate, and on GREEN opens a review PR under the operator's identity. It NEVER
-# pushes to main directly. It merges ONLY by ENABLING GitHub auto-merge — and
+# `mallcop selfext --run` binary the operator runs locally — the public OSS
+# mallcop release, on the operator's OWN inference endpoint + key (BYOK, no
+# donut/commercial rail) — on an ephemeral GitHub-hosted runner. It authors ONE
+# add-only detector, runs the in-runner gate, and on GREEN opens a review PR
+# under the operator's identity. It NEVER pushes to main directly. It merges ONLY by ENABLING GitHub auto-merge — and
 # only when the operator's OWN mallcop.yaml sets learning.autonomy: fully AND the
 # gate reported no novel-gap family — which still requires the repo's required
 # exam check + branch protection to pass, so the gate is never bypassed. The
@@ -25,10 +26,11 @@
 #
 # We still reproduce the runner image's toolchain PRE-JAIL, on the bare host, from the
 # SAME PUBLIC, PINNED, checksum-verified downloads the image bakes (infra/Dockerfile) —
-# opencode (pinned, --ignore-scripts, autoupdate/telemetry off), mallcop + mallcop-ops
-# from their SHA-256-verified public release tarballs, the bundled config, and a
-# SHA-pinned Go toolchain. Integrity comes from the pinned versions + checksums
-# (fail-closed on mismatch), not an image digest.
+# opencode (pinned, --ignore-scripts, autoupdate/telemetry off), the single public
+# `mallcop` release binary (which now carries `mallcop selfext` — S3) from its
+# SHA-256-verified public release tarball, and a SHA-pinned Go toolchain. Integrity
+# comes from the pinned versions + checksums (fail-closed on mismatch), not an image
+# digest.
 #
 # THE JAIL (self-enforced, applied as one boundary step after all pinned setup + go mod
 # download, before anything model-driven): resolve the allowlist to IPs while DNS is
@@ -45,9 +47,10 @@
 # DEFENSE IN DEPTH / residual: this coarse IP jail cannot distinguish processes, so the
 # runner-control-plane allowance (e) is broad (GitHub-owned Azure ranges). The genuinely
 # UNTRUSTED process — the opencode child — is separately confined by the FINE per-process
-# Landlock network jail mallcop-ops applies to it, which restricts it to
-# the inference endpoint. So model-driven code cannot use (e); the coarse layer only has
-# to default-deny + keep the trusted toolchain/git and the runner agent working.
+# Landlock network jail `mallcop selfext` applies to it (selfext/jail, ON by default),
+# which restricts it to the inference endpoint. So model-driven code cannot use (e); the
+# coarse layer only has to default-deny + keep the trusted toolchain/git and the runner
+# agent working.
 #
 # HARD INVARIANT (the whole point of the jail): the egress jail must be PROVABLY CLOSED
 # before any model-driven or otherwise-untrusted execution. The pre-jail steps ONLY
@@ -57,15 +60,15 @@
 # the authored-code gate subprocess) runs strictly AFTER the jail is applied AND proven
 # (planted curl blocked + inference reachable + sudo dead).
 #
-# EXAM-REPO: `mallcop-ops selfext --run` grades the authored
+# EXAM-REPO: `mallcop selfext --run` grades the authored
 # detector against a REFERENCE mallcop tree when --target-repo is customer-shaped
 # (no cmd/mallcop of its own — the common case: an operator's thin-embed repo or
 # the mallcop-e2e dogfood repo). Without it the guard stage rejects every authored
 # detectors/<name>/ sidecar (code-frozen rule). We check out mallcop-app/mallcop
-# at the SAME tag as the pinned `mallcop` gate binary (v0.9.3 → cmd/mallcop +
+# at the SAME tag as the pinned `mallcop` binary (v0.9.3 → cmd/mallcop +
 # exams/scenarios/corpus.pin) and pass it via --exam-repo. When the caller repo
-# DOES ship cmd/mallcop, mallcop-ops ignores --exam-repo, so passing it is always
-# safe.
+# DOES ship cmd/mallcop, `mallcop selfext` ignores --exam-repo, so passing it is
+# always safe.
 #
 # CODE-lane contribute-back: a SEPARATE, follow-up dispatch
 # (promote_detector != '') proposes an ALREADY-MERGED customer authored detector
@@ -102,9 +105,20 @@ on:
       detector_id: { type: string, required: true }
       event_type: { type: string, required: true }
       target_family: { type: string, required: false }
-      rail: { type: string, required: false, default: donut-byoi }
+      # BYOK: the operator's OWN inference endpoint base URL. There is NO donut/
+      # commercial rail on this OSS lane — the endpoint + key are the operator's
+      # own accepted blast radius. It is a plain (non-secret) input: a base URL is
+      # not a credential (the KEY is the secret), and the egress jail must resolve
+      # its host to allowlist it.
+      inference_url: { type: string, required: true }
+      # BYOK: the literal model id the operator's endpoint should author with,
+      # forwarded verbatim to `mallcop selfext --run --code-model`. Empty (the
+      # default) sends the bare authoring lane and lets the endpoint pick — the
+      # donut-only opaque "coding" alias does NOT apply here (a BYOK endpoint won't
+      # resolve it), so nothing is hardcoded. The caller defaults this from a repo
+      # variable (config default) and lets a workflow_dispatch input override it.
+      code_model: { type: string, required: false, default: "" }
       budget_usd: { type: string, required: false, default: "2.00" }
-      base_url: { type: string, required: true }
       consent: { type: string, required: false, default: "false" }
       # CODE-lane contribute-back: name an already-merged authored detector to
       # propose upstream. Empty (the default) => the normal authoring run; the
@@ -113,8 +127,9 @@ on:
       promote_detector: { type: string, required: false, default: "" }
       oss_repo: { type: string, required: false, default: mallcop-app/mallcop }
     secrets:
+      # BYOK: the operator's OWN inference API key. It reaches the binary ONLY via
+      # --inference-key-env (never argv). No donut key, no admin key.
       inference_key: { required: true }
-      byoi_url: { required: false }
       # The OPERATOR's OWN token for the upstream OSS PR (the operator holds no
       # OSS write credential). Absent => contribute-back cannot open a PR (fail-safe
       # skip). NEVER a merge credential — the job calls no `gh pr merge`.
@@ -133,7 +148,10 @@ env:
   GO_VERSION: "1.25"
   NODE_VERSION: "24"
   OPENCODE_VERSION: "1.17.11"
-  MALLCOP_OPS_VERSION: "ops-v0.1.0"
+  # The SINGLE public `mallcop` release: it carries BOTH `mallcop selfext --run`
+  # (the BYOK authoring driver — S3) AND the trusted gate binary
+  # (`--validate-bin mallcop`). One binary, one pinned tag — no separate
+  # mallcop-ops download on the BYOK lane.
   MALLCOP_VERSION: "v0.9.3"
 
 jobs:
@@ -146,7 +164,7 @@ jobs:
     timeout-minutes: 25            # HARD wall-clock money/egress backstop (pre-jail toolchain install adds a few min)
     defaults:
       run:
-        shell: bash               # `set -o pipefail` + the RAIL_ARGS bash array need bash
+        shell: bash               # `set -o pipefail` + the CODE_MODEL_ARGS bash array need bash
     env:
       OPENCODE_DISABLE_AUTOUPDATE: "1"
       OPENCODE_TELEMETRY_DISABLED: "1"
@@ -196,31 +214,26 @@ jobs:
           npm install -g --ignore-scripts "opencode-ai@${OPENCODE_VERSION}"
           node "$(npm root -g)/opencode-ai/postinstall.mjs"
           opencode --version
-      - name: install mallcop-ops + mallcop from checksum-verified public release tarballs (mirrors Dockerfile)
+      - name: install the public mallcop release binary from its checksum-verified tarball (mirrors Dockerfile)
         run: |
           set -euo pipefail
-          # SHA-256-verified public downloads, fail-closed on mismatch — the integrity
-          # guarantee that replaces the image digest. mallcop-ops is the self-extension
-          # engine; mallcop is the trusted gate binary (`--validate-bin mallcop`). Install
-          # to a workspace-independent bin dir added to $GITHUB_PATH so later steps resolve
-          # them on PATH (as /usr/local/bin did in the image).
+          # ONE binary: the public OSS `mallcop` release carries BOTH the BYOK
+          # self-extension driver (`mallcop selfext --run` — S3) AND the trusted gate
+          # (`--validate-bin mallcop`). No separate mallcop-ops download on the BYOK
+          # lane. SHA-256-verified public download, fail-closed on mismatch — the
+          # integrity guarantee that replaces the image digest. Install to a
+          # workspace-independent bin dir added to $GITHUB_PATH so later steps resolve
+          # it on PATH (as /usr/local/bin did in the image). Same tag as the exam tree.
           BIN="$RUNNER_TEMP/mallcop-bin"
           mkdir -p "$BIN"
           cd "$RUNNER_TEMP"
-          # mallcop-ops (this repo's public release) — the self-extension binary.
-          curl -fsSLO "https://github.com/mallcop-app/selfext/releases/download/${MALLCOP_OPS_VERSION}/mallcop-ops-linux-amd64.tar.gz"
-          curl -fsSLO "https://github.com/mallcop-app/selfext/releases/download/${MALLCOP_OPS_VERSION}/mallcop-ops-linux-amd64.tar.gz.sha256"
-          sha256sum -c mallcop-ops-linux-amd64.tar.gz.sha256
-          tar -xzf mallcop-ops-linux-amd64.tar.gz
-          install -m0755 mallcop-ops-linux-amd64/bin/mallcop-ops "$BIN/mallcop-ops"
-          # mallcop gate binary (public OSS release) — same tag as the exam tree.
           curl -fsSLO "https://github.com/mallcop-app/mallcop/releases/download/${MALLCOP_VERSION}/mallcop-linux-amd64.tar.gz"
           curl -fsSLO "https://github.com/mallcop-app/mallcop/releases/download/${MALLCOP_VERSION}/mallcop-linux-amd64.tar.gz.sha256"
           sha256sum -c mallcop-linux-amd64.tar.gz.sha256
           tar -xzf mallcop-linux-amd64.tar.gz
           install -m0755 bin/mallcop "$BIN/mallcop"
           echo "$BIN" >> "$GITHUB_PATH"
-          "$BIN/mallcop-ops" selfext -h >/dev/null 2>&1 || true
+          "$BIN/mallcop" selfext -h >/dev/null 2>&1 || true
           "$BIN/mallcop" --version 2>/dev/null || true
           command -v jq >/dev/null || { echo "FATAL: jq missing from the runner" >&2; exit 1; }
       - name: pre-fetch Go modules so the jailed gate needs no module egress
@@ -243,6 +256,8 @@ jobs:
       # Everything ABOVE is pinned, checksum-verified setup (no model code). Everything
       # BELOW runs under a default-DENY egress jail that authored/model code cannot lift.
       - name: apply self-enforced egress jail + destroy sudo (THE boundary)
+        env:
+          INFERENCE_URL: ${{ inputs.inference_url }}
         run: |
           set -euo pipefail
           # Hand-rolled iptables default-DENY egress — no harden-runner / StepSecurity
@@ -251,9 +266,16 @@ jobs:
           # proven live).
           #
           # 1) Resolve the allowlist to IPs while DNS is still open (pin, don't trust
-          #    later re-resolution). Author-job allowlist: the inference endpoint +
-          #    GitHub (proposal push/PR open) + the Go module proxy (gate build fallback).
-          ALLOW_DOMAINS="mallcop.app api.mallcop.app github.com api.github.com objects.githubusercontent.com proxy.golang.org sum.golang.org"
+          #    later re-resolution). Author-job allowlist: the operator's OWN BYOK
+          #    inference endpoint (host derived from inference_url — no mallcop.app
+          #    hardcoded; this is a pure BYOK lane) + GitHub (proposal push/PR open) +
+          #    the Go module proxy (gate build fallback).
+          ENDPOINT_HOST=$(printf '%s' "$INFERENCE_URL" | sed -E 's#^[a-zA-Z]+://##; s#[:/].*$##')
+          if [ -z "$ENDPOINT_HOST" ]; then
+            echo "FATAL: could not derive an inference host from inference_url — refusing to author under an unknown-egress jail" >&2
+            exit 1
+          fi
+          ALLOW_DOMAINS="$ENDPOINT_HOST github.com api.github.com objects.githubusercontent.com proxy.golang.org sum.golang.org"
           APP_IPS=""
           for d in $ALLOW_DOMAINS; do
             for _ in 1 2 3; do APP_IPS="$APP_IPS $(getent ahostsv4 "$d" | awk '{print $1}')"; done
@@ -310,25 +332,25 @@ jobs:
           echo "jail: applied (default-deny egress) + sudo destroyed."
       - name: verify egress jail (fail-closed live proof — blocked + reachable + sudo dead)
         env:
-          BASE_URL: ${{ inputs.base_url }}
+          INFERENCE_URL: ${{ inputs.inference_url }}
         run: |
           set -euo pipefail
           # LIVE proof that the self-enforced jail (1) DROPS a planted call to a host
-          # outside the allowlist, (2) still reaches the inference endpoint, and (3) has
-          # DESTROYED sudo so the jail cannot be lifted from within. This is the coarse
-          # HOST layer; the fine, OS-enforced per-process layer is the Landlock jail
-          # mallcop-ops applies to the opencode child. FAIL-CLOSED: if
-          # ANY of the three assertions fails we exit non-zero and author NOTHING rather
-          # than run under a jail we could not prove.
+          # outside the allowlist, (2) still reaches the operator's OWN BYOK inference
+          # endpoint, and (3) has DESTROYED sudo so the jail cannot be lifted from
+          # within. This is the coarse HOST layer; the fine, OS-enforced per-process
+          # layer is the Landlock jail `mallcop selfext` applies to the opencode child.
+          # FAIL-CLOSED: if ANY of the three assertions fails we exit non-zero and
+          # author NOTHING rather than run under a jail we could not prove.
           echo "egress-jail: planting a disallowed call to https://example.com ..."
           if curl -sS --max-time 8 -o /dev/null https://example.com; then
             echo "FATAL: egress to a non-allowlisted host SUCCEEDED — egress jail not enforced" >&2
             exit 1
           fi
           echo "egress-jail: OK — disallowed egress was blocked"
-          echo "egress-jail: confirming the inference endpoint is reachable: $BASE_URL"
-          if ! curl -sS --max-time 10 -o /dev/null "$BASE_URL"; then
-            echo "FATAL: inference endpoint $BASE_URL is unreachable through the egress jail" >&2
+          echo "egress-jail: confirming the inference endpoint is reachable: $INFERENCE_URL"
+          if ! curl -sS --max-time 10 -o /dev/null "$INFERENCE_URL"; then
+            echo "FATAL: inference endpoint $INFERENCE_URL is unreachable through the egress jail" >&2
             exit 1
           fi
           echo "egress-jail: OK — inference endpoint reachable"
@@ -341,52 +363,52 @@ jobs:
       - name: author + in-runner gate (never merges)
         id: drive
         env:
+          # BYOK: the operator's OWN endpoint + key. The KEY reaches the binary ONLY
+          # via --inference-key-env (never argv); the URL is a plain input.
           INFERENCE_KEY: ${{ secrets.inference_key }}
-          INFERENCE_URL: ${{ secrets.byoi_url }}
+          INFERENCE_URL: ${{ inputs.inference_url }}
+          CODE_MODEL: ${{ inputs.code_model }}
         run: |
           set -euo pipefail
           # Mark the checkouts as safe git dirs (defensive; the gate does git ops —
           # worktree jail + gate diff — on the target, and may read the exam tree).
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           git config --global --add safe.directory "$GITHUB_WORKSPACE/_exam"
-          # The whole drive IS the binary you already ship. The inference key reaches
-          # the binary ONLY as $INFERENCE_KEY (read via --inference-key-env), so it
-          # never appears in argv. resolveInferenceMode is a hard XOR — you cannot
-          # half-configure into an uncapped run.
+          # The whole drive IS the OSS `mallcop selfext` binary you already ship — pure
+          # BYOK (no donut/commercial rail): it authors on YOUR endpoint + YOUR key.
+          # The inference key reaches the binary ONLY as $INFERENCE_KEY (read via
+          # --inference-key-env), so it never appears in argv. resolveBYOK is a hard
+          # requirement — both --inference-url and --inference-key-env must be present,
+          # so you cannot half-configure into an unauthenticated run.
           #
-          # Both rails run through BYOI mode (endpoint+key), which SKIPS the stream
-          # shim by default. The donut-byoi endpoint is mallcop.app, which hard-501s
-          # opencode's unconditional streaming. --stream-shim fronts
-          # it with the loopback stream→non-stream bridge. A true byoi endpoint (real
-          # Anthropic) streams natively, so it leaves the shim off.
-          if [ "${{ inputs.rail }}" = "byoi" ]; then
-            # A true BYOI endpoint (e.g. real Anthropic) streams natively and its
-            # own strong model authors; leave the shim off and don't override.
-            RAIL_ARGS=(--inference-url "$INFERENCE_URL" --inference-key-env INFERENCE_KEY)
-          else
-            # donut-byoi: base_url is mallcop.app (non-streaming), so
-            # --stream-shim bridges opencode's unconditional streaming; and it
-            # forwards to the mallcop inference endpoint, which resolves the OPAQUE
-            # "coding" lane alias server-side to the strong Go-capable coder — so we
-            # pin the alias, never a raw model id (the bare heal lane resolves to a
-            # flash model that plans but never writes). The mallcop inference endpoint
-            # resolves the opaque "coding" lane server-side, so the real model never
-            # leaves the server.
-            RAIL_ARGS=(--inference-url "${{ inputs.base_url }}" --inference-key-env INFERENCE_KEY --stream-shim --code-model coding)
+          # --code-model is the model id YOUR endpoint recognizes, forwarded verbatim
+          # (BYOK: the donut-only opaque "coding" alias is NOT sent here — a BYOK
+          # endpoint won't resolve it). Empty (the default) sends the bare authoring
+          # lane and lets your endpoint pick, so nothing is hardcoded. Build the arg
+          # conditionally so an empty value never passes an empty --code-model.
+          CODE_MODEL_ARGS=()
+          if [ -n "${CODE_MODEL:-}" ]; then
+            CODE_MODEL_ARGS=(--code-model "$CODE_MODEL")
           fi
+          # The Landlock jail confines the opencode child to the inference endpoint;
+          # it is ON by default (no --no-jail here). A native-streaming BYOK endpoint
+          # is assumed — the OSS binary carries no stream-shim, unlike the retired
+          # donut rail.
+          #
           # --exam-repo grades a customer-shaped target (no in-tree cmd/mallcop)
           # against the reference tree checked out at _exam. It is
           # ignored when the target ships its own cmd/mallcop, so it is always safe.
           # Capture stdout+stderr so the exam-repo/gate outcome is recoverable even if
           # the runner's blob log upload is throttled by the jail (the evidence step
           # below surfaces it to the job summary); pipefail preserves the real exit code.
-          mallcop-ops selfext --run \
+          mallcop selfext --run \
             --target-repo "$GITHUB_WORKSPACE" --base-ref HEAD \
             --exam-repo "$GITHUB_WORKSPACE/_exam" \
             --detector-id "${{ inputs.detector_id }}" \
             --event-type "${{ inputs.event_type }}" \
             --target-family "${{ inputs.target_family }}" \
-            "${RAIL_ARGS[@]}" \
+            --inference-url "$INFERENCE_URL" --inference-key-env INFERENCE_KEY \
+            "${CODE_MODEL_ARGS[@]}" \
             --artifact-dir "$RUNNER_TEMP/proposals" \
             --budget-usd "${{ inputs.budget_usd }}" \
             --validate-bin mallcop 2>&1 | tee "$RUNNER_TEMP/selfext-drive.log"
