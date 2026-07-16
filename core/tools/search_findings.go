@@ -20,11 +20,23 @@ import (
 // SearchFindingsInput is the filter for SearchFindings. Every field is optional;
 // an empty filter returns every finding in the stream.
 //
-// Actor / Source are case-insensitive equality filters. Since bounds the
-// finding timestamp (inclusive lower bound); a zero time means "unbounded".
+// Actor / Source / Type are case-insensitive equality filters. IDs restricts to
+// findings whose exact id is listed (case-insensitive) — the "ground on the
+// on-screen finding" filter that lets the analyst confirm a seeded finding by its
+// id instead of guessing a filter from prose. Since bounds the finding timestamp
+// (inclusive lower bound); a zero time means "unbounded".
+//
+// Type and IDs mirror SearchEventsInput (core/tools/search_events.go): before
+// they existed, a model that (correctly) scoped a lookup with {"type":"..."} or
+// {"ids":[...]} had those keys SILENTLY dropped by the JSON decoder and got the
+// ENTIRE stream back — 2000+ findings of garbage — instead of the one finding it
+// asked for (mallcoppro-a8b). Supporting them lets a question ABOUT a finding be
+// scoped to that finding's real type/id.
 type SearchFindingsInput struct {
 	Actor  string    `json:"actor,omitempty"`
 	Source string    `json:"source,omitempty"`
+	Type   string    `json:"type,omitempty"`
+	IDs    []string  `json:"ids,omitempty"`
 	Since  time.Time `json:"since,omitempty"`
 }
 
@@ -47,6 +59,16 @@ func SearchFindings(s *store.Store, in SearchFindingsInput) ([]finding.Finding, 
 		return nil, fmt.Errorf("search-findings: load findings: %w", err)
 	}
 
+	// An empty-string entry in IDs would otherwise match no finding and, being a
+	// filter, wrongly empty the result; build a normalized lookup set that skips
+	// blanks so a model that echoes an "" id is tolerated (mirrors search_events).
+	idSet := map[string]struct{}{}
+	for _, id := range in.IDs {
+		if id != "" {
+			idSet[strings.ToLower(id)] = struct{}{}
+		}
+	}
+
 	out := make([]finding.Finding, 0, len(raws))
 	for i, raw := range raws {
 		var f finding.Finding
@@ -60,6 +82,14 @@ func SearchFindings(s *store.Store, in SearchFindingsInput) ([]finding.Finding, 
 		}
 		if in.Source != "" && !strings.EqualFold(f.Source, in.Source) {
 			continue
+		}
+		if in.Type != "" && !strings.EqualFold(f.Type, in.Type) {
+			continue
+		}
+		if len(idSet) > 0 {
+			if _, ok := idSet[strings.ToLower(f.ID)]; !ok {
+				continue
+			}
 		}
 		if !in.Since.IsZero() {
 			if f.Timestamp.IsZero() || f.Timestamp.Before(in.Since) {
