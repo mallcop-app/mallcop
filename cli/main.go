@@ -32,6 +32,7 @@
 //	mallcop scenario    contribute [--yes] [--dry-run] [--allow-authored] [--repo owner/name] [--reference-repo <path>] <scenarios/file.yaml>
 //	mallcop improve     "<free text>" | --detector-id <id> --event-type <type> [--target-family <f>] [--rail <r>] [--json]
 //	mallcop investigate --question <text> --store <dir> [--baseline <path>] | --serve --inbox <file> --outbox <file> --store <dir>
+//	mallcop selfext     --run | --propose | --scaffold-gha  (BYOK self-extension: author detectors on YOUR OWN inference)
 package cli
 
 import (
@@ -97,6 +98,8 @@ func Main() {
 		err = runImprove(args)
 	case "investigate":
 		err = runInvestigate(args)
+	case "selfext":
+		err = runSelfext(args)
 	default:
 		fmt.Fprintf(os.Stderr, "mallcop: unknown command %q\n\n", cmd)
 		usage()
@@ -359,6 +362,24 @@ Commands:
                  Inference auth: $MALLCOP_INFERENCE_URL + $MALLCOP_API_KEY, same
                  as scan — but unlike scan, a missing endpoint is FATAL here
                  (there is no useful "investigate offline" degraded mode).
+
+  selfext  BYOK self-extension: author net-new detectors on YOUR OWN inference (no donut billing)
+    --run          Author ONE detector for a gap (--detector-id, --event-type,
+                   --target-family, --lane, --code-model, --target-repo,
+                   --exam-repo, --base-ref, --artifact-dir, --budget-usd, --autonomy)
+    --propose      Run the collect->propose->gate->route loop over a
+                   'mallcop collect --json' envelope (--collect-json, --store-repo,
+                   --consent/--contribute-back, --gate-json, --target-repo)
+    --scaffold-gha Write the CODE-lane GitHub Actions templates + operator setup
+                   checklist into --out (no inference key needed)
+    --inference-url      BYOK inference endpoint base URL (REQUIRED for --run/--propose)
+    --inference-key-env  NAME of the env var holding your inference key (REQUIRED;
+                         the key is read by name so it never appears in argv)
+    --no-jail            Disable the OS-enforced Landlock authoring jail (ON by default)
+                 BYOK is REQUIRED: this MIT binary has NO donut/commercial billing
+                 rail (that is a commercial add-on elsewhere). The engine authors
+                 in a sandboxed git worktree, gates in-runner, and on GREEN drops a
+                 reviewable artifact — it NEVER pushes or merges.
 
 Exit codes (scan):
   0  No findings

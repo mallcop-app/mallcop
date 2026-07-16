@@ -7,6 +7,7 @@ package main
 
 import (
 	"github.com/mallcop-app/mallcop/cli"
+	"github.com/mallcop-app/mallcop/selfext/jail"
 
 	// Link the agent-authored detector aggregator so its own-package detectors
 	// register with core/detect and become reachable by detect.Detect across
@@ -19,5 +20,12 @@ import (
 )
 
 func main() {
+	// `mallcop selfext --run` runs the headless opencode authoring child under an
+	// OS-enforced Landlock jail (selfext/jail) by re-execing THIS binary with the
+	// jail marker as argv[1]. MaybeReexec intercepts that marker at the very top
+	// of main(), applies the jail, and execs opencode — it NEVER returns on that
+	// path. On the normal invocation (argv[1] is a real subcommand) it returns
+	// immediately and the CLI proceeds unchanged.
+	jail.MaybeReexec()
 	cli.Main()
 }
