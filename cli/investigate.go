@@ -6,6 +6,8 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/mallcop-app/mallcop/core/config"
 	"github.com/mallcop-app/mallcop/core/inference"
@@ -140,6 +142,15 @@ func runInvestigate(args []string) error {
 	ctx := context.Background()
 
 	if *serve {
+		// A cancelled/timed-out GHA job delivers SIGINT/SIGTERM with a short
+		// grace window before SIGKILL. A signal-aware ctx lets the serve loop
+		// write its exit record — the browser's ONLY death signal — instead
+		// of dying silently and leaving the chat page waiting forever
+		// (mallcoppro-ebef).
+		var stop context.CancelFunc
+		ctx, stop = signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+		defer stop()
+
 		serveOpts := investigate.ServeOptions{
 			Options:     opts,
 			InboxPath:   *inboxPath,

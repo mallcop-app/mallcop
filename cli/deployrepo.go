@@ -743,6 +743,17 @@ on:
 permissions:
   contents: write
 
+# One runner per session, queued not cancelled: the git mailbox's
+# single-writer-per-file invariant (core/investigate/gitmailbox.go) breaks if
+# two runners append to the same sessions/<id>/outbox.jsonl — their seq
+# counters interleave and the browser's dedup cursor drops records
+# (mallcoppro-ebef). A duplicate dispatch (browser retry, rewake race) queues
+# behind the live runner instead, and session resume in the serve loop makes
+# the queued runner pick up exactly where the first one left off.
+concurrency:
+  group: mallcop-investigate-${{ inputs.session_id }}
+  cancel-in-progress: false
+
 env:
   MALLCOP_VERSION: "{{VERSION}}"
 
@@ -825,12 +836,20 @@ jobs:
         # the third-party actions/checkout@v4 action above.
         run: |
           set -euo pipefail
+          # --idle-timeout 10m (not the 90s library default): a human
+          # operator routinely pauses >90s reading an answer before the next
+          # question; at 90s the runner exits inside that pause and the next
+          # question races the browser's poll-lagged view of the exit,
+          # landing in a dead mailbox (mallcoppro-ebef). 10m matches
+          # conversation-pause scale; the runner still self-exits after a
+          # genuinely abandoned session.
           mallcop investigate --serve \
             --session "${SESSION_ID}" \
             --chat-branch "{{CHAT_BRANCH}}" \
             --chat-remote origin \
             --repo . \
-            --store ./store
+            --store ./store \
+            --idle-timeout 10m
         env:
           SESSION_ID: ${{ inputs.session_id }}
           MALLCOP_API_KEY: ${{ secrets.MALLCOP_API_KEY }}

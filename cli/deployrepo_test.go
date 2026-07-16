@@ -276,6 +276,28 @@ func TestScaffoldDeployAssetsWritesWellFormedInvestigateWorkflow(t *testing.T) {
 	if !hasRunSubstring("--session") || !hasRunSubstring("SESSION_ID") {
 		t.Fatalf("mallcop-investigate.yml's serve invocation does not pass through the session id:\n%s", raw)
 	}
+
+	// mallcoppro-ebef: exactly one runner per session (the git mailbox's
+	// single-writer-per-file invariant — two runners interleaving seq
+	// counters on one outbox corrupt the browser's dedup cursor), queued
+	// rather than cancelled so a live runner is never killed mid-answer.
+	conc, ok := doc["concurrency"].(map[string]any)
+	if !ok {
+		t.Fatalf("mallcop-investigate.yml has no concurrency group:\n%s", raw)
+	}
+	if group, _ := conc["group"].(string); !strings.Contains(group, "${{ inputs.session_id }}") {
+		t.Fatalf("concurrency.group is not keyed on the session id: %#v", conc)
+	}
+	if cancel, _ := conc["cancel-in-progress"].(bool); cancel {
+		t.Fatalf("concurrency.cancel-in-progress must be false (a duplicate dispatch must queue, not kill a live runner mid-answer): %#v", conc)
+	}
+
+	// mallcoppro-ebef: a conversation-scale idle timeout — at the 90s
+	// library default the runner exits inside an ordinary human pause and
+	// the next question lands in a dead mailbox.
+	if !hasRunSubstring("--idle-timeout 10m") {
+		t.Fatalf("mallcop-investigate.yml's serve invocation does not set the conversation-scale --idle-timeout:\n%s", raw)
+	}
 	if !hasRunSubstring("--chat-branch \"mallcop-chat\"") {
 		t.Fatalf("mallcop-investigate.yml's serve invocation does not pin --chat-branch to mallcop-chat (must differ from the findings branch):\n%s", raw)
 	}
