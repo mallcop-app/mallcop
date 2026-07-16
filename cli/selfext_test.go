@@ -125,6 +125,7 @@ func TestRunSelfextScaffold(t *testing.T) {
 		want := []string{
 			".github/workflows/mallcop-selfext-code.yml",
 			".github/workflows/selfext-code-reusable.yml",
+			".github/workflows/mallcop-version-bump.yml",
 			".github/CODEOWNERS",
 			".github/MALLCOP_SELFEXT_SETUP.md",
 		}

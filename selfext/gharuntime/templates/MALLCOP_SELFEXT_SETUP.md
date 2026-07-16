@@ -157,3 +157,35 @@ gh workflow run mallcop-selfext-code.yml -f promote_detector=<your-detector-name
 
 This opens a **review** PR upstream; it **never merges** — the OSS repo's own exam gate
 and code-owner review decide, at every autonomy setting.
+
+## 9. Keep current — auto-bump the pinned mallcop version (recommended)
+
+The scaffold also wrote `.github/workflows/mallcop-version-bump.yml`. Your scan /
+investigate / selfext workflows pin a specific mallcop release in a `MALLCOP_VERSION`
+env value; if you never bump it, shipped fixes never reach your scans. This workflow
+keeps that pin current for you.
+
+- **Weekly** (Monday 07:23 UTC) and **on demand** (`gh workflow run mallcop-version-bump.yml`),
+  it looks up the latest mallcop release, compares it to every `MALLCOP_VERSION` pin in
+  `.github/workflows`, and — if any is stale — opens a **PR** that bumps them all.
+- The PR rides **your own** review + required checks. It is **never auto-merged**.
+- **Scope:** it rewrites only `MALLCOP_VERSION` env pins. It never touches
+  `MALLCOP_OPS_VERSION`, `uses: ...@<sha>` action/reusable-workflow pins (Dependabot
+  owns those), or anything else.
+- If everything is already current, the run is a **loud no-op** — check the run's job
+  summary.
+
+### Prerequisite — let Actions open the PR (do this once)
+
+The workflow opens the PR with the built-in `GITHUB_TOKEN`, so GitHub must be allowed
+to let Actions create pull requests. Enable it once:
+
+> **Settings → Actions → General → Workflow permissions →**
+> ✅ *Allow GitHub Actions to create and approve pull requests*
+
+(If your repo is owned by an organization, an org owner may need to enable the same
+option under the **organization's** Settings → Actions → General first.)
+
+If this is off, the workflow does **not** fail silently — it pushes the bump branch and
+then fails **loud**, printing the exact setting above to the run summary so you know
+precisely what to flip.
