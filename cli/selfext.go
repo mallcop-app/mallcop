@@ -89,6 +89,7 @@ func runSelfext(args []string) error {
 	autonomyFlag := fs.String("autonomy", string(autonomy.NonAutonomy), "operator autonomy dial: non|semi|fully (only \"fully\" merge-automates a GREEN CODE proposal to a LOCAL branch — never a push)")
 	noJail := fs.Bool("no-jail", false, "DISABLE the OS-enforced Landlock authoring jail (accepted risk; jail is ON by default)")
 	opencodeBin := fs.String("opencode-bin", "", "path to the opencode binary (default: opencode on PATH)")
+	maxOutputTokens := fs.Int("max-output-tokens", 0, "per-request output-token ceiling requested of the authoring model (0 = default 32768; reasoning models bill thinking against it — set lower only if your BYOK endpoint rejects large max_tokens)")
 	validateBin := fs.String("validate-bin", "", "path to the mallcop binary that runs validate-proposal (default: mallcop on PATH)")
 	examRepo := fs.String("exam-repo", "", "path to a REFERENCE mallcop tree used to grade a CUSTOMER-SHAPED target repo (one with no cmd/mallcop of its own)")
 
@@ -167,6 +168,7 @@ func runSelfext(args []string) error {
 		sovereignty:     *sovereignty,
 		artifactDir:     *artifactDir,
 		opencodeBin:     *opencodeBin,
+		maxOutputTokens: *maxOutputTokens,
 		validateBin:     *validateBin,
 		examRepo:        *examRepo,
 		budgetUSD:       *budgetUSD,
@@ -215,6 +217,7 @@ type runArgs struct {
 	sovereignty     string
 	artifactDir     string
 	opencodeBin     string
+	maxOutputTokens int
 	validateBin     string
 	examRepo        string
 	budgetUSD       float64
@@ -264,13 +267,14 @@ func runSelfextRun(a runArgs) error {
 		Session: sess,
 		Jail:    &sandbox.Jail{TargetRepo: repo, BaseRef: a.baseRef},
 		Adapter: &opencode.Adapter{
-			Bin:          a.opencodeBin,
-			Lane:         a.lane,
-			Model:        a.codeModel, // BYOK: empty sends the bare lane; the customer opts into a literal id
-			Provider:     sandbox.ProviderName,
-			ForgeBaseURL: endpoint,
-			Confine:      !a.noJail, // Landlock jail ON by default; --no-jail escapes
-			Logger:       log,
+			Bin:             a.opencodeBin,
+			Lane:            a.lane,
+			Model:           a.codeModel, // BYOK: empty sends the bare lane; the customer opts into a literal id
+			Provider:        sandbox.ProviderName,
+			ForgeBaseURL:    endpoint,
+			Confine:         !a.noJail, // Landlock jail ON by default; --no-jail escapes
+			MaxOutputTokens: a.maxOutputTokens,
+			Logger:          log,
 		},
 		Fingerprints:  rejects,
 		ValidateBin:   a.validateBin,

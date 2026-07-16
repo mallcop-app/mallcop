@@ -83,7 +83,7 @@ func TestProviderConfigShape(t *testing.T) {
 		`"baseURL":"https://forge.example.com/v1"`,
 		`"apiKey":"mallcop-sk-secret123"`,
 		`"@ai-sdk/openai-compatible"`,
-		`"heal":{"limit":{"context":128000,"output":4096}}`, // lane declared with context+output caps
+		`"heal":{"limit":{"context":128000,"output":32768}}`, // lane declared with context+output caps
 		`"forge":`, // provider key
 	} {
 		if !strings.Contains(cfg, want) {
