@@ -1,0 +1,221 @@
+# .github/workflows/mallcop-version-bump.yml
+#
+# mallcop keep-current — auto-bump the pinned mallcop release (rd mallcoppro-c60).
+#
+# Written into the OPERATOR's fork/deploy repo by `mallcop selfext --scaffold-gha`.
+# Operators pin `MALLCOP_VERSION` in their scan/investigate/selfext workflows and
+# then never bump it, so shipped fixes are dead-on-arrival. This workflow keeps that
+# pin current: on a weekly schedule (and on demand) it looks up the latest mallcop
+# release, compares it to every `MALLCOP_VERSION` pin in this repo's workflows, and —
+# if any is stale — opens a PR that bumps them. The PR rides YOUR OWN review and
+# required checks; it is NEVER auto-merged. If everything is already current, the run
+# is a loud no-op (see the job summary).
+#
+# SCOPE GUARD: this workflow rewrites ONLY `MALLCOP_VERSION: "v..."` env pins. It
+# NEVER touches:
+#   - MALLCOP_OPS_VERSION (the commercial mallcop-ops pin — a separate release train),
+#   - reusable-workflow / action SHA pins (`uses: ...@<40-hex-sha>` are deliberate
+#     supply-chain pins that Dependabot owns, not us),
+#   - anything else. The sed is anchored to the exact `MALLCOP_VERSION:` key.
+#
+# mallcop-version-bump-template: v1
+name: mallcop keep-current (version bump)
+
+on:
+  schedule:
+    # Weekly, Monday 07:23 UTC — a deliberately quiet, off-the-hour slot (GitHub
+    # throttles cron at the top of the hour). workflow_dispatch runs it on demand.
+    - cron: "23 7 * * 1"
+  workflow_dispatch: {}
+
+# The ONLY elevated scopes: push the chore/mallcop-<latest> branch in THIS repo and
+# open the review PR. No id-token, no packages — a version bump needs neither.
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:            # never let two bump runs race on the same branch
+  group: mallcop-version-bump
+  cancel-in-progress: false
+
+env:
+  # The upstream release source of truth. `MALLCOP_VERSION` pins track THIS repo's
+  # `releases/latest`. (This is the OSS product repo, never mallcop-ops.)
+  MALLCOP_RELEASES_REPO: mallcop-app/mallcop
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    steps:
+      - name: checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4 — pinned by SHA
+
+      - name: resolve latest mallcop release tag
+        id: latest
+        env:
+          GITHUB_TOKEN: ${{ github.token }}   # authenticated call avoids the anon rate limit
+        run: |
+          set -euo pipefail
+          # Ask the GitHub API for the latest published release tag of the mallcop
+          # OSS repo. `gh api` carries GITHUB_TOKEN auth automatically.
+          latest="$(gh api "repos/${MALLCOP_RELEASES_REPO}/releases/latest" --jq '.tag_name')"
+          if [ -z "${latest}" ] || [ "${latest}" = "null" ]; then
+            {
+              echo "## mallcop keep-current — FAILED to resolve latest release"
+              echo ""
+              echo "\`GET repos/${MALLCOP_RELEASES_REPO}/releases/latest\` returned no \`tag_name\`."
+              echo "Nothing was changed. Re-run once the API is reachable."
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "could not resolve latest mallcop release tag" >&2
+            exit 1
+          fi
+          echo "tag=${latest}" >> "$GITHUB_OUTPUT"
+          echo "resolved latest mallcop release: ${latest}"
+
+      - name: rewrite stale MALLCOP_VERSION pins
+        id: rewrite
+        env:
+          LATEST: ${{ steps.latest.outputs.tag }}
+        run: |
+          set -euo pipefail
+          # Find every workflow file carrying a MALLCOP_VERSION env pin. The pattern
+          # is anchored to the START of the line (optional indent) so it matches the
+          # `MALLCOP_VERSION:` key ONLY — never MALLCOP_OPS_VERSION, and never a
+          # `uses: ...@<sha>` action pin, which have no such key. (SCOPE GUARD.)
+          pin_re='^[[:space:]]*MALLCOP_VERSION:[[:space:]]*"v[^"]*"'
+          mapfile -t files < <(grep -rlE "${pin_re}" .github/workflows 2>/dev/null | sort -u || true)
+
+          changed=""          # "path\told\tnew" lines for the PR body / summary
+          any_stale=0
+          for f in "${files[@]}"; do
+            [ -n "${f}" ] || continue
+            # Distinct current pin values in this file (usually exactly one).
+            olds="$(grep -oE "${pin_re}" "${f}" | grep -oE 'v[^"]*' | sort -u)"
+            file_stale=0
+            while IFS= read -r old; do
+              [ -n "${old}" ] || continue
+              if [ "${old}" != "${LATEST}" ]; then
+                file_stale=1
+                changed+="${f}"$'\t'"${old}"$'\t'"${LATEST}"$'\n'
+              fi
+            done <<< "${olds}"
+            if [ "${file_stale}" = "1" ]; then
+              any_stale=1
+              # Anchored, quoted-value replacement: rewrite ONLY the value inside the
+              # quotes of a MALLCOP_VERSION key. Leaves indentation, the key, and every
+              # other line untouched. Applies to ALL matching pins in the file.
+              sed -E -i "s#^([[:space:]]*MALLCOP_VERSION:[[:space:]]*\")[^\"]*(\")#\1${LATEST}\2#" "${f}"
+            fi
+          done
+
+          if [ "${any_stale}" = "0" ]; then
+            {
+              echo "## mallcop keep-current — already current ✅"
+              echo ""
+              echo "Every \`MALLCOP_VERSION\` pin in \`.github/workflows\` is already at the latest"
+              echo "release **${LATEST}**. No branch, no PR — nothing to do."
+              if [ "${#files[@]}" -gt 0 ]; then
+                echo ""
+                echo "Pins checked:"
+                for f in "${files[@]}"; do [ -n "${f}" ] && echo "- \`${f}\`"; done
+              fi
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "stale=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Persist the change manifest for the PR-opening step.
+          printf '%s' "${changed}" > "$RUNNER_TEMP/mallcop-bump-manifest.tsv"
+          echo "stale=true" >> "$GITHUB_OUTPUT"
+          echo "manifest=$RUNNER_TEMP/mallcop-bump-manifest.tsv" >> "$GITHUB_OUTPUT"
+
+      - name: open bump PR
+        if: steps.rewrite.outputs.stale == 'true'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          LATEST: ${{ steps.latest.outputs.tag }}
+          MANIFEST: ${{ steps.rewrite.outputs.manifest }}
+        run: |
+          set -euo pipefail
+          branch="chore/mallcop-${LATEST}"
+
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -B "${branch}"
+          git add -A .github/workflows
+          git commit -m "chore: bump MALLCOP_VERSION to ${LATEST}"
+          git push --force-with-lease origin "${branch}"
+
+          # Build the PR body: one old->new line per file, plus the release-notes link.
+          body_file="$RUNNER_TEMP/mallcop-bump-body.md"
+          {
+            echo "Automated by \`mallcop-version-bump.yml\` (rd mallcoppro-c60)."
+            echo ""
+            echo "Bumps the pinned \`MALLCOP_VERSION\` to the latest mallcop release **${LATEST}**"
+            echo "so shipped fixes actually reach this repo's scans."
+            echo ""
+            echo "| workflow | old | new |"
+            echo "| --- | --- | --- |"
+            while IFS=$'\t' read -r path old new; do
+              [ -n "${path}" ] || continue
+              echo "| \`${path}\` | ${old} | ${new} |"
+            done < "${MANIFEST}"
+            echo ""
+            echo "Release notes: https://github.com/${MALLCOP_RELEASES_REPO}/releases/tag/${LATEST}"
+            echo ""
+            echo "SCOPE: only \`MALLCOP_VERSION\` env pins were touched — never \`MALLCOP_OPS_VERSION\`,"
+            echo "action/reusable-workflow SHA pins, or anything else."
+            echo ""
+            echo "This PR rides your own review + required checks. It is **not** auto-merged."
+          } > "${body_file}"
+
+          # Open the review PR. If the org forbids Actions from creating PRs, `gh pr
+          # create` fails — surface the EXACT setting to flip (fail loud, mirror the
+          # consent-gate guidance pattern) rather than dying silently.
+          if ! gh pr create \
+              --base "${GITHUB_REF_NAME}" \
+              --head "${branch}" \
+              --title "chore: bump mallcop to ${LATEST}" \
+              --body-file "${body_file}" 2> "$RUNNER_TEMP/pr-err.txt"; then
+            err="$(cat "$RUNNER_TEMP/pr-err.txt" 2>/dev/null || true)"
+            {
+              echo "## mallcop keep-current — PR creation was REJECTED ❌"
+              echo ""
+              echo "The bump branch \`${branch}\` was pushed, but opening the PR failed:"
+              echo ""
+              echo '```'
+              echo "${err}"
+              echo '```'
+              echo ""
+              echo "This almost always means your org/repo forbids GitHub Actions from opening PRs."
+              echo "**Flip this setting, then re-run this workflow:**"
+              echo ""
+              echo "> **Settings → Actions → General → Workflow permissions →**"
+              echo "> ✅ *Allow GitHub Actions to create and approve pull requests*"
+              echo ""
+              echo "(Org-level owners may need to enable it under the **organization's**"
+              echo "Settings → Actions → General first, then the repo setting.)"
+              echo ""
+              echo "Nothing was merged. The branch is waiting; open the PR by hand if you prefer:"
+              echo "\`gh pr create --head ${branch} --base ${GITHUB_REF_NAME}\`"
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "gh pr create failed — see job summary for the exact repo setting to enable" >&2
+            exit 1
+          fi
+
+          pr_url="$(gh pr view "${branch}" --json url --jq '.url' 2>/dev/null || true)"
+          {
+            echo "## mallcop keep-current — opened a bump PR ⬆️"
+            echo ""
+            echo "Bumped stale \`MALLCOP_VERSION\` pins to **${LATEST}** on branch \`${branch}\`."
+            [ -n "${pr_url}" ] && echo "PR: ${pr_url}"
+            echo ""
+            echo "| workflow | old | new |"
+            echo "| --- | --- | --- |"
+            while IFS=$'\t' read -r path old new; do
+              [ -n "${path}" ] || continue
+              echo "| \`${path}\` | ${old} | ${new} |"
+            done < "${MANIFEST}"
+            echo ""
+            echo "Review and merge it yourself — this workflow never auto-merges."
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -30,6 +30,7 @@ func TestScaffoldGolden(t *testing.T) {
 	wantPaths := []string{
 		".github/workflows/mallcop-selfext-code.yml",
 		".github/workflows/selfext-code-reusable.yml",
+		".github/workflows/mallcop-version-bump.yml",
 		".github/CODEOWNERS",
 		".github/MALLCOP_SELFEXT_SETUP.md",
 	}
@@ -346,6 +347,96 @@ func TestContributeBackConsentIsConfigFileNotWorkflowInput(t *testing.T) {
 	if !strings.Contains(string(reusable), "learning.contribute_back") && !strings.Contains(string(reusable), "contribute_back:") {
 		t.Error("reusable workflow never parses learning.contribute_back from mallcop.yaml — the consent knob has no config-file source")
 	}
+}
+
+// TestVersionBumpTemplateShape pins the contract of the keep-current auto-bump
+// workflow (rd mallcoppro-c60). It is the template that keeps an operator's
+// MALLCOP_VERSION pins tracking the latest OSS release. The assertions below are
+// the properties the operator repos depend on:
+//
+//   - it is emitted at the canonical workflow path;
+//   - it fires on a weekly cron AND on workflow_dispatch (schedulable + on-demand);
+//   - SCOPE GUARD: it rewrites ONLY the MALLCOP_VERSION key, never MALLCOP_OPS_VERSION
+//     and never a `uses: ...@<sha>` action pin (the sed is anchored to the key);
+//   - FAIL LOUD: if the org forbids Actions from opening PRs, the run fails with the
+//     exact repo setting to flip (mirrors the consent-gate loud-guidance pattern);
+//   - it NEVER auto-merges — the PR rides the operator's own review;
+//   - a fully-current repo is a LOUD no-op (a job-summary line, not a silent pass).
+func TestVersionBumpTemplateShape(t *testing.T) {
+	rel := ".github/workflows/mallcop-version-bump.yml"
+	body, err := Content(rel)
+	if err != nil {
+		t.Fatalf("version-bump template not emitted: %v", err)
+	}
+	src := string(body)
+
+	// --- triggers: weekly cron + workflow_dispatch ---------------------------
+	root := docRoot(t, body)
+	on := mapGet(root, "on")
+	sched := mapGet(on, "schedule")
+	if sched == nil || sched.Kind != yaml.SequenceNode || len(sched.Content) == 0 {
+		t.Error("version-bump template has no schedule trigger (needs a weekly cron)")
+	} else {
+		var sawCron bool
+		for _, entry := range sched.Content {
+			if c := mapGet(entry, "cron"); c != nil && strings.TrimSpace(c.Value) != "" {
+				sawCron = true
+			}
+		}
+		if !sawCron {
+			t.Error("schedule trigger carries no cron expression")
+		}
+	}
+	// workflow_dispatch must be a present key (its value is often the empty map {}).
+	if _, ok := mapHasKey(on, "workflow_dispatch"); !ok {
+		t.Error("version-bump template has no workflow_dispatch trigger (needs on-demand runs)")
+	}
+
+	// --- SCOPE GUARD ---------------------------------------------------------
+	if !strings.Contains(src, "MALLCOP_VERSION") {
+		t.Error("template never references MALLCOP_VERSION — it must rewrite that pin")
+	}
+	// The rewrite must be anchored to the MALLCOP_VERSION key so a sibling
+	// MALLCOP_OPS_VERSION pin is never rewritten. Assert the anchored sed is present
+	// and that the guard is documented.
+	if !strings.Contains(src, `sed -E -i "s#^([[:space:]]*MALLCOP_VERSION:`) {
+		t.Error("template lacks the anchored MALLCOP_VERSION sed — the scope guard is not enforced")
+	}
+	if !strings.Contains(src, "MALLCOP_OPS_VERSION") {
+		t.Error("template does not name MALLCOP_OPS_VERSION as an explicitly-excluded pin (scope guard undocumented)")
+	}
+
+	// --- FAIL LOUD on PR-creation rejection ----------------------------------
+	if !strings.Contains(src, "Allow GitHub Actions to create and approve pull requests") {
+		t.Error("template does not name the exact 'Allow GitHub Actions to create and approve pull requests' setting for the PR-rejection fail-loud path")
+	}
+	if !strings.Contains(src, "Workflow permissions") {
+		t.Error("template does not point at Settings → Actions → General → Workflow permissions on PR rejection")
+	}
+
+	// --- NEVER auto-merges ---------------------------------------------------
+	if strings.Contains(stripShellComments(src), "gh pr merge") {
+		t.Error("version-bump template calls `gh pr merge` — it must never merge; the operator reviews the PR")
+	}
+
+	// --- LOUD no-op when already current -------------------------------------
+	if !strings.Contains(src, "already current") {
+		t.Error("template has no loud already-current no-op path (a fully-current repo must still emit a job-summary line)")
+	}
+}
+
+// mapHasKey reports whether mapping m has literal key (matching Node.Value, so the
+// YAML-1.1 on:->true resolution cannot hide it), returning its value node too.
+func mapHasKey(m *yaml.Node, key string) (*yaml.Node, bool) {
+	if m == nil || m.Kind != yaml.MappingNode {
+		return nil, false
+	}
+	for i := 0; i+1 < len(m.Content); i += 2 {
+		if m.Content[i].Value == key {
+			return m.Content[i+1], true
+		}
+	}
+	return nil, false
 }
 
 // stripShellComments removes full-line `#` comments from a shell script body so a

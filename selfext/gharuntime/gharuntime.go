@@ -25,7 +25,7 @@ import (
 	"path/filepath"
 )
 
-//go:embed templates/mallcop-selfext-code.yml templates/selfext-code-reusable.yml templates/CODEOWNERS templates/MALLCOP_SELFEXT_SETUP.md
+//go:embed templates/mallcop-selfext-code.yml templates/selfext-code-reusable.yml templates/mallcop-version-bump.yml templates/CODEOWNERS templates/MALLCOP_SELFEXT_SETUP.md
 var templatesFS embed.FS
 
 // setupGuideSrc is the embedded source of the persistent operator setup guide. It
@@ -53,6 +53,10 @@ type File struct {
 var Files = []File{
 	{src: "templates/mallcop-selfext-code.yml", RelPath: ".github/workflows/mallcop-selfext-code.yml"},
 	{src: "templates/selfext-code-reusable.yml", RelPath: ".github/workflows/selfext-code-reusable.yml"},
+	// The keep-current auto-bump workflow — keeps this repo's MALLCOP_VERSION pins
+	// tracking the latest OSS release (rd mallcoppro-c60). Opens a review PR; the
+	// operator's own review + required checks gate it; never auto-merges.
+	{src: "templates/mallcop-version-bump.yml", RelPath: ".github/workflows/mallcop-version-bump.yml"},
 	{src: "templates/CODEOWNERS", RelPath: ".github/CODEOWNERS"},
 	// A durable, version-controlled copy of the operator setup steps — the secrets,
 	// branch protection, and contribute-back token GitHub won't let a scaffold set.
