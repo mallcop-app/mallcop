@@ -142,8 +142,13 @@ type TrustedGap struct {
 	DetectorID string
 	// EventType is the connector event type the detector keys on.
 	EventType string
-	// TargetFamily is the finding family the detector emits — normalized into
-	// the fingerprint. Empty falls back to DetectorID.
+	// TargetFamily is an OPTIONAL metadata family tag, normalized into the
+	// anti-thrash fingerprint. It is NOT the emitted finding.Type: the detector
+	// ALWAYS emits finding.Type == DetectorID, and the merge gate matches a
+	// scenario's must_fire/must_not_fire labels against that emitted Type (the
+	// detector name). A TargetFamily that differs from DetectorID therefore only
+	// flavors metadata — the authoring prompt must NEVER put it in the scenarios'
+	// expected_detection labels. Empty falls back to DetectorID.
 	TargetFamily string
 	// Severity is the structural severity of the gap's exemplar finding
 	// (low/medium/high/critical). Structural, not free text.
