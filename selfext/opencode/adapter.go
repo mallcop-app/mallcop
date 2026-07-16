@@ -270,12 +270,18 @@ type Adapter struct {
 	extraRunArgs []string
 }
 
-// defaultMaxOutputTokens is the conservative output-token ceiling declared in the
-// opencode model config when Adapter.MaxOutputTokens is unset. It must not exceed the
-// smallest output cap across the lane models the inference endpoint routes to (4096
-// for the flash-tier triage/heal models), so an authoring request is never rejected
-// for over-requesting.
-const defaultMaxOutputTokens = 4096
+// defaultMaxOutputTokens is the output-token ceiling declared in the opencode
+// model config when Adapter.MaxOutputTokens is unset. It must not exceed the
+// inference endpoint's per-request acceptance cap, or every authoring request
+// 400s ("max_tokens must not exceed N") and opencode transient-fast-fails.
+// 32768 (was 4096): reasoning authoring models bill thinking tokens against
+// max_tokens, so an authoring turn (reasoning + a whole detector file in one
+// write tool call) cannot fit in 4096 — measured live, failing turns pegged
+// completion_tokens=4096 / finish_reason=length / empty content (rd 4a1). The
+// endpoint acceptance cap was raised in lockstep (forge#122). A BYOK endpoint
+// that caps lower will reject loudly; pass a smaller Adapter.MaxOutputTokens
+// (cli: --max-output-tokens) for such endpoints.
+const defaultMaxOutputTokens = 32768
 
 // defaultMaxContextTokens is the context-window size declared alongside the output cap.
 // opencode's config schema REJECTS a model whose limit block sets output without context
