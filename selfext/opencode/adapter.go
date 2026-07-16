@@ -611,6 +611,14 @@ func (a *Adapter) runOnce(ctx context.Context, wt *sandbox.Worktree, env []strin
 	redacted := redact.Redact(raw, apiKey)
 
 	files, text := Parse(stdout.Bytes())
+	// authored is the HONEST count of files opencode actually WROTE this attempt
+	// (write/edit tool calls only), distinct from files, which is EVERY path the
+	// transcript referenced — reads included. Logging len(files) as authored_files
+	// was a false positive (rd bc1: a zero-write run that READ 27 files logged
+	// authored_files=27). git (the worktree diff) remains authoritative; the
+	// engine logs that real count per attempt — this honest transcript-derived
+	// number is diagnostic only.
+	authored := WriteToolFiles(stdout.Bytes())
 
 	exitCode := 0
 	if runErr != nil {
@@ -635,7 +643,12 @@ func (a *Adapter) runOnce(ctx context.Context, wt *sandbox.Worktree, env []strin
 
 	a.logger().Info("opencode invocation complete",
 		"exit_code", exitCode,
-		"authored_files", len(files),
+		// authored_files counts WRITE/EDIT tool calls only (rd bc1) — an honest
+		// "files opencode wrote" tally. transcript_file_refs is every path the
+		// transcript referenced (reads included), kept as a separate, honestly
+		// named diagnostic. git (the engine's worktree diff) is authoritative.
+		"authored_files", len(authored),
+		"transcript_file_refs", len(files),
 		"transcript_bytes", len(redacted),
 		"timed_out", timedOut,
 	)
@@ -852,6 +865,83 @@ func looksLikePath(s string) bool {
 		return false
 	}
 	return strings.Contains(s, "/") || strings.Contains(s, ".")
+}
+
+// writeToolNames are the opencode tool names that AUTHOR a file (create or
+// modify content), as opposed to read/list/grep/glob tools that merely
+// REFERENCE a path. Only these count toward the honest "files authored" tally
+// (rd bc1). Deliberately conservative: an unrecognized tool contributes nothing,
+// so the count can only ever UNDER-report — git (the worktree diff) is the
+// authoritative record either way.
+var writeToolNames = map[string]bool{
+	"write":     true,
+	"edit":      true,
+	"patch":     true,
+	"multiedit": true,
+}
+
+// WriteToolFiles walks opencode's line-delimited --format json event stream and
+// returns the unique file paths authored by a WRITE or EDIT tool call — NOT every
+// path the transcript referenced. This is the fix for the bc1 false positive:
+// Parse (above) collects EVERY file-shaped key including a read tool's filePath,
+// so len(Parse(...)) counted reads as authored files (authored_files=27 on a
+// zero-write run). WriteToolFiles restricts the extraction to path values that
+// appear WITHIN a write/edit tool event line, so a run that only READ files
+// reports zero authored.
+//
+// It is SCHEMA-TOLERANT like Parse: each line is decoded as a generic object; a
+// line whose object carries a write/edit tool marker (a "tool" or "name" string
+// value in writeToolNames, at any depth) contributes the file path(s) found
+// under it. If the schema drifts and no write tool is recognized, the result is
+// empty — git remains authoritative.
+func WriteToolFiles(stdout []byte) []string {
+	seen := map[string]struct{}{}
+	var files []string
+	for _, line := range bytes.Split(stdout, []byte("\n")) {
+		line = bytes.TrimSpace(line)
+		if len(line) == 0 || line[0] != '{' {
+			continue
+		}
+		var obj any
+		if err := json.Unmarshal(line, &obj); err != nil {
+			continue
+		}
+		if !isWriteToolEvent(obj) {
+			continue
+		}
+		// This event line is a write/edit tool call — collect the path(s) it
+		// names. textParts is discarded here; WriteToolFiles reports files only.
+		var textSink []string
+		walkEvent(obj, seen, &files, &textSink)
+	}
+	return files
+}
+
+// isWriteToolEvent reports whether a decoded event value names a write/edit tool
+// invocation — a "tool" or "name" string value in writeToolNames, searched
+// recursively so a nested schema still matches.
+func isWriteToolEvent(v any) bool {
+	switch t := v.(type) {
+	case map[string]any:
+		for k, val := range t {
+			if s, ok := val.(string); ok {
+				if (strings.EqualFold(k, "tool") || strings.EqualFold(k, "name")) &&
+					writeToolNames[strings.ToLower(s)] {
+					return true
+				}
+			}
+			if isWriteToolEvent(val) {
+				return true
+			}
+		}
+	case []any:
+		for _, val := range t {
+			if isWriteToolEvent(val) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // openAIBaseURL derives the OpenAI-compatible base URL (the inference endpoint

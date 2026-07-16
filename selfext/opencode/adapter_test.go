@@ -700,3 +700,65 @@ exit 0
 	}
 	return path
 }
+
+// TestWriteToolFilesExcludesReads proves the bc1 fix: the honest authored-file
+// counter (WriteToolFiles) counts ONLY write/edit tool calls, never a read
+// tool's filePath or a bare file-reference event. Before the fix, the
+// "opencode invocation complete ... authored_files=N" log used len(Parse(...)),
+// which counts every path the transcript referenced — so a zero-write run that
+// READ 27 files logged authored_files=27 (a false positive).
+func TestWriteToolFilesExcludesReads(t *testing.T) {
+	stream := strings.Join([]string{
+		`{"type":"text","text":"surveying the repo"}`,
+		// READ tool calls — must NOT count as authored.
+		`{"type":"tool","tool":"read","state":{"input":{"filePath":"core/detect/authored/foo/existing.go"}}}`,
+		`{"type":"tool","tool":"read","state":{"input":{"filePath":"exams/scenarios/behavioral/VA-01.yaml"}}}`,
+		// A bare file-reference event (Parse extracts it too) — must NOT count.
+		`{"type":"file","path":"go.mod"}`,
+		// WRITE + EDIT tool calls — the only authored files.
+		`{"type":"tool","tool":"write","state":{"input":{"filePath":"core/detect/authored/foo/foo.go"}}}`,
+		`{"type":"tool","tool":"edit","state":{"input":{"filePath":"exams/scenarios/authored/foo-must-fire.yaml"}}}`,
+	}, "\n")
+
+	// Parse (the old counter) sees every path reference — reads included.
+	allRefs, _ := Parse([]byte(stream))
+	if len(allRefs) < 4 {
+		t.Fatalf("Parse should see all 5 path refs (reads+writes+file event), got %d: %v", len(allRefs), allRefs)
+	}
+
+	// WriteToolFiles (the honest counter) sees only the write/edit tool files.
+	authored := WriteToolFiles([]byte(stream))
+	if len(authored) != 2 {
+		t.Fatalf("WriteToolFiles = %v, want exactly the 2 write/edit files", authored)
+	}
+	got := map[string]bool{}
+	for _, f := range authored {
+		got[f] = true
+	}
+	for _, want := range []string{
+		"core/detect/authored/foo/foo.go",
+		"exams/scenarios/authored/foo-must-fire.yaml",
+	} {
+		if !got[want] {
+			t.Errorf("WriteToolFiles missing authored file %q; got %v", want, authored)
+		}
+	}
+	for _, unwanted := range []string{
+		"core/detect/authored/foo/existing.go",
+		"exams/scenarios/behavioral/VA-01.yaml",
+		"go.mod",
+	} {
+		if got[unwanted] {
+			t.Errorf("WriteToolFiles counted a non-authored (read/reference) path %q", unwanted)
+		}
+	}
+
+	// A zero-write run that only READ files reports zero authored (the bc1 case).
+	readsOnly := strings.Join([]string{
+		`{"type":"tool","tool":"read","state":{"input":{"filePath":"a.go"}}}`,
+		`{"type":"tool","tool":"read","state":{"input":{"filePath":"b.go"}}}`,
+	}, "\n")
+	if n := len(WriteToolFiles([]byte(readsOnly))); n != 0 {
+		t.Errorf("a reads-only transcript reported %d authored files, want 0", n)
+	}
+}

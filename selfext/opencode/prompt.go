@@ -5,6 +5,21 @@ import (
 	"strings"
 )
 
+// NoOpAuthoringEscalation is the paragraph the ENGINE appends to the base
+// authoring prompt on a RETRY attempt, after a previous attempt exited 0 having
+// written NOTHING — the narrate-then-die shape (rd 4a1): GLM narrates an
+// intention as a text-only turn ("Let me survey all pre-existing scenarios...")
+// and opencode ends the session with exit 0 and zero write tool calls, mid-
+// diligence. The engine keeps the base prompt BYTE-IDENTICAL on the first
+// attempt (so the anti-thrash fingerprint and the BuildTaskPrompt tests stay
+// stable) and only appends this on attempt >= 2. It lives here, beside the prompt
+// builders, so the escalation wording is versioned with the authoring prompt it
+// extends.
+const NoOpAuthoringEscalation = "\n\n" +
+	"NOTE: a previous attempt explored the repository but ended without writing " +
+	"any file. All required context is in this prompt — author the REQUIRED FILES " +
+	"now. Do not end your session before issuing the write tool calls."
+
 // synthmarkerExemplar is the reference own-package authored detector shape the
 // prompt hands opencode verbatim. It is the K7 L1 exemplar (mallcop
 // core/detect/authored/synthmarker): own package, pure Detect, imports limited

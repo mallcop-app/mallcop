@@ -172,6 +172,19 @@ type Engine struct {
 	// ignores it. Required (> 0).
 	BudgetUSD float64
 
+	// MaxAuthoringAttempts bounds how many times Run re-drives opencode as a FRESH
+	// session when an exit-0 attempt authored NOTHING — the narrate-then-die shape
+	// (rd 4a1): the model narrates an intention as a text-only turn and opencode
+	// ends the session with exit 0 having issued zero write tool calls. Each retry
+	// appends opencode.NoOpAuthoringEscalation to the (byte-identical) base prompt.
+	// This is DISTINCT from the adapter's MaxAttempts (which retries a TRANSIENT
+	// NON-ZERO-exit fast-fail WITHIN one Invoke): a no-op exit-0 run is a success
+	// to the adapter, so only the engine can catch it. ≤0 →
+	// defaultMaxAuthoringAttempts (3). The metered run key is authorized ONCE with
+	// BudgetUSD and every attempt spends against that same capped key, so the cap
+	// already bounds cumulative spend across ALL attempts — no per-attempt billing.
+	MaxAuthoringAttempts int
+
 	// Autonomy is the operator-owned dial. ONLY "fully"
 	// merge-automates a GREEN proposal (see AutoApplyBranchPrefix); "non" and
 	// "semi" both always leave it as an artifact for a human to review and
@@ -191,6 +204,40 @@ type Engine struct {
 
 // defaultClass is the spend-cap class for self-ext authoring runs.
 const defaultClass = "selfext-author"
+
+// defaultMaxAuthoringAttempts is the total opencode invocations for one Run when
+// Engine.MaxAuthoringAttempts is unset: the initial attempt plus up to two
+// re-drives of an exit-0 NO-OP (the model ended a session without writing any
+// file — rd 4a1). At the measured GLM write-rate (~14%/attempt) three fresh
+// attempts is the model-agnostic floor that makes forward progress likely
+// without an unbounded loop; the metered run key's spend cap bounds cost.
+const defaultMaxAuthoringAttempts = 3
+
+// authoringDeadlineMargin is the wall-clock runway a fresh metered authoring
+// attempt needs. When the context has a deadline closer than this,
+// authorWithRetries stops re-driving a no-op rather than starting a session it
+// cannot finish. It is a coarse floor — the adapter ALSO bounds each individual
+// invocation with its own per-attempt timeout.
+const authoringDeadlineMargin = 60 * time.Second
+
+func (e *Engine) maxAuthoringAttempts() int {
+	if e.MaxAuthoringAttempts > 0 {
+		return e.MaxAuthoringAttempts
+	}
+	return defaultMaxAuthoringAttempts
+}
+
+// deadlineNear reports whether the context deadline is within
+// authoringDeadlineMargin of now. A context with no deadline (the common CLI
+// case, context.Background()) is never "near", so the full attempt budget is
+// always available there.
+func (e *Engine) deadlineNear(ctx context.Context) bool {
+	dl, ok := ctx.Deadline()
+	if !ok {
+		return false
+	}
+	return e.now().Add(authoringDeadlineMargin).After(dl)
+}
 
 // defaultValidateBin is the gate binary name resolved from PATH when
 // Engine.ValidateBin is unset. It is never trusted on name alone — see
@@ -442,9 +489,30 @@ func (e *Engine) Run(ctx context.Context, gap opencode.TrustedGap) (out Outcome,
 	if credErr != nil {
 		return Outcome{}, fmt.Errorf("selfext: resolve inference credentials: %w", credErr)
 	}
-	res, ierr := e.Adapter.Invoke(ctx, wt, key, e.Adapter.BuildTaskPrompt(gap, customerShaped))
+	res, attempts, authored, ierr := e.authorWithRetries(ctx, log, wt, key, gap, customerShaped)
 	if ierr != nil {
 		return e.failWithTranscript(ctx, log, gap, model, baseURL, "opencode invoke: "+ierr.Error(), res), nil
+	}
+
+	// 5.1) NO-OP authoring guard. An exit-0 opencode run that wrote NOTHING is the
+	//   narrate-then-die shape (rd 4a1): the model narrated an intention as a
+	//   text-only turn and opencode ended the session with exit 0 having issued
+	//   zero write tool calls. authorWithRetries already re-drove it as a FRESH
+	//   escalated session up to MaxAuthoringAttempts; if the worktree is STILL
+	//   clean after an exit-0 attempt, classify it as an authoring failure HERE —
+	//   with a structured reason — rather than letting CommitAuthored surface a
+	//   confusing "nothing to commit" minutes later. A NON-ZERO exit with a clean
+	//   tree is the adapter's transient-retry domain (already exhausted) and
+	//   deliberately falls through to the commit-fail diagnostics below, preserving
+	//   that path's existing reason. Like every failWithTranscript terminal this
+	//   writes a failed-audit record and does NOT poison the fingerprint (a later,
+	//   non-narrate run may still author the detector — same semantics as today's
+	//   commit-failure path, which never poisons either).
+	if !authored && res.ExitCode == 0 {
+		reason := fmt.Sprintf(
+			"authoring: %d attempt(s), no files written (model ended each session without write tool calls)",
+			attempts)
+		return e.failWithTranscript(ctx, log, gap, model, baseURL, reason, res), nil
 	}
 
 	// 5.5) Register the authored package DETERMINISTICALLY — IN-TREE LANE ONLY
@@ -596,15 +664,96 @@ func (e *Engine) record(ctx context.Context, log *slog.Logger, gatePassed bool) 
 // package's blank import to. Kept in one place so the path can't drift.
 const authoredRegistryPath = "core/detect/authored/registry.go"
 
+// authorWithRetries drives opencode until it AUTHORS something in the worktree or
+// the authoring-attempt budget is exhausted. It is the engine-level answer to the
+// narrate-then-die failure (rd 4a1): the adapter's own retry only fires on a
+// TRANSIENT NON-ZERO exit, but a model that narrates a plan as a text-only turn
+// ends the opencode session with exit 0 and an EMPTY worktree — a "success" to
+// the adapter that later fails at CommitAuthored as "nothing to commit".
+//
+// The worktree diff (git status --porcelain) is the ground truth for "did it
+// author anything", never opencode's tool-call self-report. The first attempt
+// uses the byte-identical base prompt (fingerprint/test stability); a no-op exit-0
+// attempt is re-driven as a FRESH opencode session (each Invoke is a new session)
+// with opencode.NoOpAuthoringEscalation appended, up to MaxAuthoringAttempts.
+//
+// Returns the LAST attempt's Result, the number of attempts made, whether the
+// worktree ended non-clean (authored), and any hard Invoke error (spawn/cancel —
+// surfaced immediately, never retried). A NON-ZERO-exit no-op is returned
+// (authored=false) WITHOUT re-driving: it is the adapter's transient domain
+// (already exhausted) and the caller lets it flow to the commit-fail diagnostics.
+func (e *Engine) authorWithRetries(ctx context.Context, log *slog.Logger, wt *sandbox.Worktree, key string, gap opencode.TrustedGap, customerShaped bool) (res opencode.Result, attempts int, authored bool, err error) {
+	maxAttempts := e.maxAuthoringAttempts()
+	basePrompt := e.Adapter.BuildTaskPrompt(gap, customerShaped)
+	for attempts = 1; attempts <= maxAttempts; attempts++ {
+		prompt := basePrompt
+		if attempts > 1 {
+			// Retry: escalate. The base prompt stays byte-identical on attempt 1.
+			prompt = basePrompt + opencode.NoOpAuthoringEscalation
+		}
+		var ierr error
+		res, ierr = e.Adapter.Invoke(ctx, wt, key, prompt)
+		if ierr != nil {
+			return res, attempts, false, ierr
+		}
+		fileCount, cerr := worktreeChangedFiles(ctx, wt.Dir)
+		if cerr != nil {
+			// An indeterminate worktree is not a no-op we can safely re-drive;
+			// surface it as an Invoke-shaped error (the failWithTranscript path).
+			return res, attempts, false, fmt.Errorf("inspect worktree after authoring: %w", cerr)
+		}
+		log.Info("selfext: authoring attempt complete",
+			"attempt", attempts, "max_attempts", maxAttempts,
+			"authored_files", fileCount, "opencode_exit", res.ExitCode)
+		if fileCount > 0 {
+			return res, attempts, true, nil
+		}
+		// Nothing authored. Only the exit-0 narrate-then-die shape is re-driven.
+		if res.ExitCode != 0 {
+			return res, attempts, false, nil
+		}
+		if attempts == maxAttempts {
+			break
+		}
+		// A fresh attempt is a fresh metered session — do not start one the
+		// context has no runway to finish.
+		if e.deadlineNear(ctx) {
+			log.Warn("selfext: authoring wrote nothing but context deadline is near; not re-driving",
+				"attempt", attempts, "max_attempts", maxAttempts)
+			break
+		}
+		log.Warn("selfext: authoring attempt wrote nothing (no-op); re-driving as a fresh escalated session",
+			"attempt", attempts, "next_attempt", attempts+1, "max_attempts", maxAttempts)
+	}
+	return res, attempts, false, nil
+}
+
+// worktreeChangedFiles returns the number of staged+unstaged paths in the
+// worktree — one line per changed path in `git status --porcelain`. It is the
+// REAL authored-file count from the worktree diff, the ground truth the engine
+// logs and gates on (never opencode's tool-call self-report, which counts read
+// refs too — rd bc1).
+func worktreeChangedFiles(ctx context.Context, dir string) (int, error) {
+	out, err := exec.CommandContext(ctx, "git", "-C", dir, "status", "--porcelain").Output()
+	if err != nil {
+		return 0, err
+	}
+	trimmed := strings.TrimSpace(string(out))
+	if trimmed == "" {
+		return 0, nil
+	}
+	return len(strings.Split(trimmed, "\n")), nil
+}
+
 // worktreeAuthored reports whether opencode left any change in the worktree
 // (staged or unstaged). A clean tree means the model authored nothing, so the
 // engine skips the registry append and lets the commit step report the fast-fail.
 func worktreeAuthored(ctx context.Context, dir string) (bool, error) {
-	out, err := exec.CommandContext(ctx, "git", "-C", dir, "status", "--porcelain").Output()
+	n, err := worktreeChangedFiles(ctx, dir)
 	if err != nil {
 		return false, err
 	}
-	return strings.TrimSpace(string(out)) != "", nil
+	return n > 0, nil
 }
 
 // registerAuthoredPackage deterministically links the authored detector package

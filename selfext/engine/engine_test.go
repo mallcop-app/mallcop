@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/mallcop-app/mallcop/selfext/autonomy"
 	"github.com/mallcop-app/mallcop/selfext/opencode"
@@ -1392,5 +1393,213 @@ func TestRun_CustomerShapedTarget_AuthorsSidecarSkipsRegistryReachesGateVerdict(
 	}
 	if strings.Contains(string(patch), "core/detect/authored") {
 		t.Errorf("proposal.patch must NOT touch anything under core/detect/authored/ for a customer-shaped target:\n%s", patch)
+	}
+}
+
+// ---- retry-until-write (rd mallcoppro-149 / 4a1) -----------------------------
+//
+// The narrate-then-die shape: opencode exits 0 having written NOTHING (the model
+// narrated an intention as a text-only turn). The engine must classify that as an
+// authoring failure and re-drive a FRESH escalated session, never surface it later
+// as CommitAuthored's "nothing to commit".
+
+// writeCleanDetector authors an allow-list-clean own-package detector into wt so
+// there is something committable the stub gate greenlights.
+func writeCleanDetector(t *testing.T, wt *sandbox.Worktree) {
+	t.Helper()
+	dir := filepath.Join(wt.Dir, "core/detect/authored/deployburst")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir authored pkg: %v", err)
+	}
+	body := "package deployburst\n\nfunc Name() string { return \"authored-deploy-burst\" }\n"
+	if err := os.WriteFile(filepath.Join(dir, "deployburst.go"), []byte(body), 0o644); err != nil {
+		t.Fatalf("write detector: %v", err)
+	}
+}
+
+// noThenWriteAuthorer is the narrate-then-die-then-recover shape: the FIRST
+// invocation writes NOTHING and exits 0 (a no-op), the SECOND authors a clean
+// detector. It records the task prompt each attempt so a test can assert the
+// escalation paragraph is appended ONLY on the retry, and the base prompt is
+// byte-identical on attempt 1.
+type noThenWriteAuthorer struct {
+	t       *testing.T
+	prompts []string
+	invoked int
+}
+
+func (a *noThenWriteAuthorer) BuildTaskPrompt(opencode.TrustedGap, bool) string { return "BASE-PROMPT" }
+func (a *noThenWriteAuthorer) Invoke(_ context.Context, wt *sandbox.Worktree, _, task string) (opencode.Result, error) {
+	a.invoked++
+	a.prompts = append(a.prompts, task)
+	if a.invoked == 1 {
+		// No-op: narrate, write nothing, exit 0.
+		return opencode.Result{TranscriptRedacted: []byte("Let me survey the pre-existing scenarios..."), ExitCode: 0}, nil
+	}
+	writeCleanDetector(a.t, wt)
+	return opencode.Result{TranscriptRedacted: []byte("authored the detector"), ExitCode: 0}, nil
+}
+
+// alwaysNoOpAuthorer NEVER writes a file and always exits 0 — every attempt is
+// the narrate-then-die shape.
+type alwaysNoOpAuthorer struct {
+	prompts []string
+	invoked int
+}
+
+func (a *alwaysNoOpAuthorer) BuildTaskPrompt(opencode.TrustedGap, bool) string { return "BASE-PROMPT" }
+func (a *alwaysNoOpAuthorer) Invoke(_ context.Context, _ *sandbox.Worktree, _, task string) (opencode.Result, error) {
+	a.invoked++
+	a.prompts = append(a.prompts, task)
+	return opencode.Result{TranscriptRedacted: []byte("narration only, no writes"), ExitCode: 0}, nil
+}
+
+// TestRunRetriesNoOpThenWrites proves an exit-0 EMPTY-worktree attempt is
+// re-driven as a FRESH escalated session, and once the retry writes files the
+// GREEN path is unchanged. It asserts the escalation paragraph is absent on
+// attempt 1 (base prompt byte-identical) and present on attempt 2.
+func TestRunRetriesNoOpThenWrites(t *testing.T) {
+	h := newHarness(t, 0.02)
+	gate := &spySpendGate{}
+	authorer := &noThenWriteAuthorer{t: t}
+	eng := h.engine(gate, authorer, writeValidateStub(t))
+
+	out, err := eng.Run(context.Background(), testGap())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !out.Proposed {
+		t.Fatalf("expected Proposed after a no-op attempt then a writing retry, got %+v", out)
+	}
+	if out.Gate == nil || !out.Gate.Passed {
+		t.Fatalf("expected GREEN GateResult, got %+v", out.Gate)
+	}
+	if authorer.invoked != 2 {
+		t.Fatalf("expected exactly 2 authoring attempts (no-op then write), got %d", authorer.invoked)
+	}
+	// Attempt 1: byte-identical base prompt, NO escalation.
+	if strings.Contains(authorer.prompts[0], opencode.NoOpAuthoringEscalation) {
+		t.Errorf("attempt 1 prompt carried the escalation paragraph (base prompt must stay byte-identical):\n%q", authorer.prompts[0])
+	}
+	if authorer.prompts[0] != "BASE-PROMPT" {
+		t.Errorf("attempt 1 prompt = %q, want the byte-identical base prompt", authorer.prompts[0])
+	}
+	// Attempt 2: the escalation paragraph IS appended.
+	if !strings.Contains(authorer.prompts[1], opencode.NoOpAuthoringEscalation) {
+		t.Errorf("attempt 2 prompt missing the escalation paragraph:\n%q", authorer.prompts[1])
+	}
+	if !strings.HasPrefix(authorer.prompts[1], "BASE-PROMPT") {
+		t.Errorf("attempt 2 prompt should be the base prompt + escalation, got %q", authorer.prompts[1])
+	}
+	// A GREEN run is never a failure and never poisons the fingerprint.
+	if h.rejects.Has(testGap().Fingerprint()) {
+		t.Errorf("a GREEN-after-retry run poisoned the reject set")
+	}
+}
+
+// TestRunAllAttemptsNoOpFailsStructured proves that when EVERY attempt exits 0
+// having written nothing, the run fails with a STRUCTURED reason (attempt count
+// + "no files written"), never CommitAuthored's confusing "nothing to commit";
+// the failed-audit record is persisted; the fingerprint is NOT poisoned (matching
+// today's commit-failure semantics exactly).
+func TestRunAllAttemptsNoOpFailsStructured(t *testing.T) {
+	h := newHarness(t, 0.0)
+	gate := &spySpendGate{}
+	authorer := &alwaysNoOpAuthorer{}
+	eng := h.engine(gate, authorer, writeValidateStub(t))
+
+	out, err := eng.Run(context.Background(), testGap())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !out.Failed {
+		t.Fatalf("expected Failed (all attempts no-op), got %+v", out)
+	}
+	// Default budget = 3 fresh attempts.
+	if authorer.invoked != 3 {
+		t.Errorf("expected 3 authoring attempts (default), got %d", authorer.invoked)
+	}
+	// Structured reason: attempt count + no-files-written, and NOT the git message.
+	if !strings.Contains(out.Reason, "no files written") {
+		t.Errorf("reason should say no files written, got %q", out.Reason)
+	}
+	if !strings.Contains(out.Reason, "3 attempt") {
+		t.Errorf("reason should report the attempt count (3), got %q", out.Reason)
+	}
+	if strings.Contains(out.Reason, "nothing to commit") || strings.Contains(out.Reason, "commit authored") {
+		t.Errorf("no-op run must NOT surface the confusing git commit failure, got %q", out.Reason)
+	}
+	// A failed-audit record was persisted (same debuggability path as a commit fail).
+	failedDir := filepath.Join(h.artifacts, "failed")
+	entries, rerr := os.ReadDir(failedDir)
+	if rerr != nil {
+		t.Fatalf("read failed dir: %v", rerr)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected exactly 1 failed-audit record, got %d", len(entries))
+	}
+	// No reject fingerprint for a no-op run — matches today's commit-failure path,
+	// which routes through failWithTranscript and never calls Fingerprints.Add.
+	if h.rejects.Has(testGap().Fingerprint()) {
+		t.Errorf("a no-op authoring run poisoned the reject set (must match today's non-poisoning commit-failure path)")
+	}
+	// No reviewable proposal.
+	if out.ArtifactPath != "" {
+		t.Errorf("a no-op run emitted a proposal artifact %q", out.ArtifactPath)
+	}
+	// The run key was still revoked on teardown.
+	assertRevoked(t, h)
+}
+
+// TestRunMaxAuthoringAttemptsRespected proves the Engine.MaxAuthoringAttempts
+// knob bounds the no-op re-drive count (here 2 instead of the default 3).
+func TestRunMaxAuthoringAttemptsRespected(t *testing.T) {
+	h := newHarness(t, 0.0)
+	gate := &spySpendGate{}
+	authorer := &alwaysNoOpAuthorer{}
+	eng := h.engine(gate, authorer, writeValidateStub(t))
+	eng.MaxAuthoringAttempts = 2
+
+	out, err := eng.Run(context.Background(), testGap())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !out.Failed {
+		t.Fatalf("expected Failed (all attempts no-op), got %+v", out)
+	}
+	if authorer.invoked != 2 {
+		t.Errorf("expected exactly 2 attempts (MaxAuthoringAttempts=2), got %d", authorer.invoked)
+	}
+	if !strings.Contains(out.Reason, "2 attempt") {
+		t.Errorf("reason should report 2 attempts, got %q", out.Reason)
+	}
+}
+
+// TestRunNoOpStopsEarlyOnNearDeadline proves the engine does NOT start a fresh
+// metered session when the context deadline is within the runway margin: a
+// no-op first attempt against an already-near-deadline context fails after ONE
+// attempt rather than exhausting the budget.
+func TestRunNoOpStopsEarlyOnNearDeadline(t *testing.T) {
+	h := newHarness(t, 0.0)
+	gate := &spySpendGate{}
+	authorer := &alwaysNoOpAuthorer{}
+	eng := h.engine(gate, authorer, writeValidateStub(t))
+
+	// Deadline already inside the margin — deadlineNear() is immediately true.
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(1*time.Second))
+	defer cancel()
+
+	out, err := eng.Run(ctx, testGap())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !out.Failed {
+		t.Fatalf("expected Failed, got %+v", out)
+	}
+	if authorer.invoked != 1 {
+		t.Errorf("near-deadline: expected exactly 1 attempt (no re-drive), got %d", authorer.invoked)
+	}
+	if !strings.Contains(out.Reason, "1 attempt") {
+		t.Errorf("reason should report 1 attempt, got %q", out.Reason)
 	}
 }
