@@ -67,6 +67,7 @@ func Register(d Detector) {
 // tree, and the tree walk would flag it as colliding with itself. A
 // process-independent list avoids that false positive.
 var frameworkDetectorNames = []string{
+	"alert-signal",
 	"auth-failure-burst",
 	"config-drift",
 	"dependency-tamper",
