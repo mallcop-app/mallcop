@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/mallcop-app/mallcop/core/tools"
@@ -257,8 +258,24 @@ func emit(ob *outboxWriter, mb GitSyncer, record map[string]any, force bool) err
 // A loop-level error (model/store failure) is reported as an "answer" record
 // carrying the error text rather than killing the whole Serve session — one
 // bad question should not take down a warm runner.
+//
+// The outbox is silent for the ENTIRE duration of askCore below unless the
+// model happens to call a tool (tool_call/tool_result), which is exactly the
+// gap that makes a long-thinking turn indistinguishable from a hard-killed
+// runner (SIGKILL / evicted job — a graceful SIGTERM is handled elsewhere,
+// mallcop#205): the browser's rewake watchdog only fires off an explicit
+// "exit" record or an idle heartbeat, neither of which a still-running-but-
+// silent handleQuestion ever produces. busyHeartbeats below closes that gap
+// by appending a heartbeat/state:"busy" record on the SAME cadence as the
+// idle heartbeat (DefaultHeartbeatPeriod / opts.heartbeatPeriod()) for as
+// long as this question is in flight, so the mallcop-pro chat client's
+// silence-based stall watchdog (chat_page.go) always sees a live record
+// within one heartbeat period even mid-answer.
 func handleQuestion(ctx context.Context, opts ServeOptions, ob *outboxWriter, rec inboxRecord) {
 	_ = emit(ob, opts.Mailbox, map[string]any{"type": "ack", "q": rec.ID, "seq": rec.Seq, "ts": nowRFC3339()}, false)
+
+	stopBusyHeartbeats := startBusyHeartbeats(ctx, opts, ob, rec.ID)
+	defer stopBusyHeartbeats()
 
 	hook := &traceHook{
 		onToolCall: func(step int, name string, input any) {
@@ -289,6 +306,37 @@ func handleQuestion(ctx context.Context, opts ServeOptions, ob *outboxWriter, re
 	}
 	_ = emit(ob, opts.Mailbox, map[string]any{"type": "answer", "q": rec.ID, "text": res.Answer, "citations": citations}, true)
 	_ = emit(ob, opts.Mailbox, map[string]any{"type": "done", "q": rec.ID, "ts": nowRFC3339()}, true)
+}
+
+// startBusyHeartbeats launches a ticker goroutine that appends a
+// heartbeat/state:"busy" outbox record every opts.heartbeatPeriod() (the
+// SAME named period as the main loop's idle heartbeat, DefaultHeartbeatPeriod
+// — there is only one heartbeat cadence, idle and busy just carry a
+// different "state") until the returned stop func is called. Serve's main
+// loop only ever emits heartbeats while idle-waiting between questions
+// (state:"idle"); this is the busy-side counterpart so a long askCore call
+// still produces periodic proof of life. The ticker goroutine calls
+// ob.append (via emit) concurrently with handleQuestion's own hook-driven
+// emits on the same *outboxWriter — outboxWriter.append is mutex-protected
+// specifically to make that safe (see outboxWriter.mu).
+func startBusyHeartbeats(ctx context.Context, opts ServeOptions, ob *outboxWriter, qID string) (stop func()) {
+	done := make(chan struct{})
+	var once sync.Once
+	go func() {
+		t := time.NewTicker(opts.heartbeatPeriod())
+		defer t.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				_ = emit(ob, opts.Mailbox, map[string]any{"type": "heartbeat", "runner": opts.runnerID(), "state": "busy", "q": qID, "ts": nowRFC3339()}, false)
+			}
+		}
+	}()
+	return func() { once.Do(func() { close(done) }) }
 }
 
 // summarizeToolResult renders the short human trace string the protocol's
@@ -426,20 +474,36 @@ func readInbox(path string) ([]inboxRecord, error) {
 	return out, sc.Err()
 }
 
-// outboxWriter appends JSON-line trace records to a single file. Serve is the
-// only writer of this file (per the protocol's single-writer-per-file rule),
-// so a simple O_APPEND write is safe — no coordination with any other
-// process is required. It also assigns the record's "seq" field: protocol
-// §4 states "seq is monotonic per file per session: browser assigns inbox
-// seq, runner assigns outbox seq" -- every record this process appends (not
-// just questions/answers) gets the next outbox seq, so a browser resuming a
-// poll can cursor the outbox exactly like the runner cursors the inbox.
+// outboxWriter appends JSON-line trace records to a single file. Serve
+// itself is still the only PROCESS writing this file (per the protocol's
+// single-writer-per-file rule) — but as of the busy-heartbeat ticker
+// (startBusyHeartbeats), it is no longer the only GOROUTINE: the ticker
+// appends heartbeat/state:"busy" records concurrently with handleQuestion's
+// own hook-driven tool_call/tool_result/answer/done appends on the same
+// *outboxWriter, and Serve's main loop can itself still be mid-append when
+// the ticker fires. append is therefore NOT safe to call from multiple
+// goroutines without mu: two concurrent appends could interleave their
+// f.Write calls (O_APPEND only guarantees atomicity per write(2) syscall,
+// not across the read-modify-write of lastSeq + marshal + write done here)
+// or hand out the same "seq" value twice. mu serializes the whole
+// increment-marshal-write sequence so every append is atomic with respect
+// to every other one, from any goroutine.
+//
+// It also assigns the record's "seq" field: protocol §4 states "seq is
+// monotonic per file per session: browser assigns inbox seq, runner assigns
+// outbox seq" -- every record this process appends (not just
+// questions/answers) gets the next outbox seq, so a browser resuming a poll
+// can cursor the outbox exactly like the runner cursors the inbox.
 type outboxWriter struct {
 	path    string
 	lastSeq int
+	mu      sync.Mutex
 }
 
 func (w *outboxWriter) append(record map[string]any) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
 	w.lastSeq++
 	record["seq"] = w.lastSeq
 	line, err := json.Marshal(record)
