@@ -51,8 +51,12 @@ type SearchEventsInput struct {
 // useful rather than silently empty. The boolean second return reports whether
 // this fallback fired, so the caller can annotate the result if it cares.
 //
-// SearchEvents returns an error only when the store cannot be read or a record
-// is not valid event JSON.
+// SearchEvents returns an error when the store cannot be read, a record is not
+// valid event JSON, or (mallcoppro-448) a requested id in IDs has no exact
+// match and its git-style unique-prefix resolution is ambiguous (matches more
+// than one stored event id) — the error text lists the candidate ids so the
+// caller can disambiguate. An id with no match at all (exact or prefix) is
+// NOT an error; it simply contributes nothing to the result, same as today.
 func SearchEvents(s *store.Store, in SearchEventsInput) (events []event.Event, timeFilterFellBack bool, err error) {
 	if s == nil {
 		return nil, false, fmt.Errorf("search-events: nil store")
@@ -81,13 +85,53 @@ func SearchEvents(s *store.Store, in SearchEventsInput) (events []event.Event, t
 	// mallcoppro-45c: a requested id carrying a "finding-" prefix (echoed from
 	// the finding side of a conversation) is also tried with the prefix
 	// stripped, so it still resolves to the underlying bare-hash event id.
+	//
+	// mallcoppro-448: an id with no exact match (even with the finding-/bare
+	// lenience above) falls back to git-style unique-prefix resolution — a
+	// truncated id still resolves as long as it is a prefix of exactly one
+	// stored event id. An ambiguous prefix errors out the whole call (with the
+	// candidate ids in the error text) so the model disambiguates before
+	// trusting a (possibly wrong) result; a prefix that matches nothing is left
+	// to fall through to the existing no-match behavior for that id.
+	pool := make(map[string]struct{}, len(all))
+	poolList := make([]string, 0, len(all))
+	for _, ev := range all {
+		lower := strings.ToLower(ev.ID)
+		if _, ok := pool[lower]; ok {
+			continue
+		}
+		pool[lower] = struct{}{}
+		poolList = append(poolList, ev.ID)
+	}
+
+	// idsRequested tracks whether an id FILTER was in effect (at least one
+	// non-blank entry in in.IDs), independent of whether idSet ends up
+	// populated. mallcoppro-448 can legitimately leave idSet empty for a
+	// requested id that resolves to nothing (short prefix, or a prefix/exact
+	// match that matches no stored event) — that must still filter the result
+	// down to zero, not be mistaken for "no id filter was given at all" (the
+	// len(idSet)>0 check below would otherwise return every event).
 	idSet := map[string]struct{}{}
+	idsRequested := false
 	for _, id := range in.IDs {
 		if id == "" {
 			continue
 		}
+		idsRequested = true
+		matchedExact := false
 		for _, c := range eventIDCandidates(id) {
-			idSet[c] = struct{}{}
+			if _, ok := pool[c]; ok {
+				idSet[c] = struct{}{}
+				matchedExact = true
+			}
+		}
+		if matchedExact {
+			continue
+		}
+		if matched, ambiguous, total := resolveEventIDPrefix(id, poolList); matched != "" {
+			idSet[matched] = struct{}{}
+		} else if len(ambiguous) > 0 {
+			return nil, false, ambiguousIDError("search-events", id, ambiguous, total)
 		}
 	}
 
@@ -103,7 +147,7 @@ func SearchEvents(s *store.Store, in SearchEventsInput) (events []event.Event, t
 		if in.Type != "" && !strings.EqualFold(ev.Type, in.Type) {
 			continue
 		}
-		if len(idSet) > 0 {
+		if idsRequested {
 			if _, ok := idSet[strings.ToLower(ev.ID)]; !ok {
 				continue
 			}
@@ -150,9 +194,11 @@ func SearchEvents(s *store.Store, in SearchEventsInput) (events []event.Event, t
 //   - §3.3 one shape always: every field is populated on every call (empty
 //     slices, empty strings) — never an omitted key, never a conditional shape.
 //   - §3.4 empty-is-data: no matches returns the wrapped envelope with empty
-//     Events / MatchedRules and a Notes explanation. An ERROR is returned ONLY
-//     for a genuine schema violation (nil store, unreadable store, malformed
-//     record JSON) — never for "the world is empty".
+//     Events / MatchedRules and a Notes explanation. An ERROR is returned for a
+//     genuine schema violation (nil store, unreadable store, malformed record
+//     JSON) or an ambiguous id-prefix match (mallcoppro-448: more than one
+//     stored event shares a requested id's unique-prefix resolution — the
+//     error carries the candidate ids) — never for "the world is empty".
 //   - §3.5 self-resolving config: the rule corpus is located by walking up from
 //     the binary, not from CWD or a required env var.
 //   - §3.6 date-hallucination fallback: a time window that excludes every
@@ -167,8 +213,9 @@ func SearchEvents(s *store.Store, in SearchEventsInput) (events []event.Event, t
 func SearchEventsWrapped(s *store.Store, in SearchEventsInput, findingFamily string, findingMetadata map[string]string) (SearchEventsEnvelope, error) {
 	events, fellBack, err := SearchEvents(s, in)
 	if err != nil {
-		// Genuine schema violation (nil/unreadable store, malformed record).
-		// Reserve the error channel for these — never for an empty world.
+		// Genuine schema violation (nil/unreadable store, malformed record) or
+		// an ambiguous id-prefix match (mallcoppro-448). Reserve the error
+		// channel for these — never for an empty world.
 		return SearchEventsEnvelope{}, err
 	}
 

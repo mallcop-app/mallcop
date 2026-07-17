@@ -602,7 +602,7 @@ func ToolDefs() []agent.Tool {
 					"actor":  map[string]any{"type": "string", "description": "Filter by actor (case-insensitive)."},
 					"source": map[string]any{"type": "string", "description": "Filter by event source (case-insensitive)."},
 					"type":   map[string]any{"type": "string", "description": "Filter by event type (case-insensitive)."},
-					"ids":    map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Restrict to events with these exact IDs (case-insensitive). Use this to chain a finding's event_ids to the underlying events."},
+					"ids":    map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Restrict to events with these IDs (case-insensitive). Use this to chain a finding's event_ids to the underlying events. A truncated id (e.g. copied from a UI list, or from earlier in this conversation) is also accepted: it resolves like a git short SHA as long as it uniquely prefixes one stored id (minimum 4 characters) — an ambiguous prefix returns an error listing the candidates so you can retry with more characters."},
 					"since":  map[string]any{"type": "string", "description": "RFC3339 lower time bound (inclusive). Omit if unknown."},
 					"until":  map[string]any{"type": "string", "description": "RFC3339 upper time bound (inclusive). Omit if unknown."},
 				},
@@ -629,7 +629,7 @@ func ToolDefs() []agent.Tool {
 					"actor":  map[string]any{"type": "string", "description": "Filter by actor (case-insensitive)."},
 					"source": map[string]any{"type": "string", "description": "Filter by finding source (case-insensitive)."},
 					"type":   map[string]any{"type": "string", "description": "Filter by finding type, e.g. \"new-external-access\" (case-insensitive)."},
-					"ids":    map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Restrict to findings with these exact IDs (case-insensitive). Use this to confirm the on-screen finding the operator is asking about."},
+					"ids":    map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Restrict to findings with these IDs (case-insensitive). Use this to confirm the on-screen finding the operator is asking about. A truncated id (e.g. copied from a UI list, or from earlier in this conversation) is also accepted: it resolves like a git short SHA as long as it uniquely prefixes one stored id (minimum 4 characters) — an ambiguous prefix returns an error listing the candidates so you can retry with more characters."},
 					"since":  map[string]any{"type": "string", "description": "RFC3339 lower time bound (inclusive). Omit if unknown."},
 				},
 			},
@@ -758,11 +758,14 @@ func ToolDefs() []agent.Tool {
 				"\"truncated\" field is literally true, never inferred. Known credential fields " +
 				"(sessionToken, secretAccessKey) are redacted; a very large payload has its largest " +
 				"values truncated rather than dropped. Accepts either the bare event id or a " +
-				"\"finding-\"-prefixed id (the prefix is stripped).",
+				"\"finding-\"-prefixed id (the prefix is stripped). " +
+				"A truncated id is also accepted: it resolves like a git short SHA as long as it uniquely " +
+				"prefixes one stored id (minimum 4 characters) — an ambiguous prefix returns an error " +
+				"listing the candidates so you can retry with more characters.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"id": map[string]any{"type": "string", "description": "The event id to fetch. Required. A finding id (\"finding-\"-prefixed) also resolves, stripped to the bare event id."},
+					"id": map[string]any{"type": "string", "description": "The event id to fetch. Required. A finding id (\"finding-\"-prefixed) also resolves, stripped to the bare event id. A truncated/partial id also resolves as long as it is a unique prefix (minimum 4 characters) of exactly one stored id."},
 				},
 				"required": []string{"id"},
 			},

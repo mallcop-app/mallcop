@@ -429,3 +429,99 @@ func TestGetRawEvent_EmptyID(t *testing.T) {
 		t.Fatal("expected error for empty id")
 	}
 }
+
+// ---- mallcoppro-448: git-style unique-prefix id lookup ---------------------
+
+// TestGetRawEvent_PrefixResolvesUnique proves a truncated id that uniquely
+// prefixes exactly one stored event resolves, exactly like a git short SHA.
+func TestGetRawEvent_PrefixResolvesUnique(t *testing.T) {
+	s := newTempStore(t)
+	seedRawEvent(t, s, "feedaced1111", `{"eventName":"AssumeRole"}`)
+	seedRawEvent(t, s, "0000000000aa", `{"eventName":"Other"}`)
+
+	out, err := GetRawEvent(s, GetRawEventInput{ID: "feedac"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !out.Found {
+		t.Fatal("Found = false, want true for a unique prefix match")
+	}
+	if out.ID != "feedaced1111" {
+		t.Errorf("ID = %q, want the resolved full event id %q", out.ID, "feedaced1111")
+	}
+}
+
+// TestGetRawEvent_PrefixExactMatchWins proves that when the requested id is
+// itself a FULL stored id, the exact match wins even though the same id is
+// also a prefix that would otherwise be ambiguous against a sibling event —
+// exact match is always tried first and short-circuits before prefix
+// resolution ever runs.
+func TestGetRawEvent_PrefixExactMatchWins(t *testing.T) {
+	s := newTempStore(t)
+	seedRawEvent(t, s, "cafe1", `{"eventName":"Exact"}`)
+	seedRawEvent(t, s, "cafe1234abcd", `{"eventName":"PrefixSibling"}`)
+
+	out, err := GetRawEvent(s, GetRawEventInput{ID: "cafe1"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !out.Found {
+		t.Fatal("Found = false, want true")
+	}
+	if out.ID != "cafe1" {
+		t.Errorf("ID = %q, want the EXACT match %q (not a prefix guess)", out.ID, "cafe1")
+	}
+}
+
+// TestGetRawEvent_PrefixAmbiguous proves a prefix matching more than one
+// stored event returns an error listing the candidate ids, rather than
+// silently picking one.
+func TestGetRawEvent_PrefixAmbiguous(t *testing.T) {
+	s := newTempStore(t)
+	seedRawEvent(t, s, "cafe1111aaaa", `{"eventName":"A"}`)
+	seedRawEvent(t, s, "cafe2222bbbb", `{"eventName":"B"}`)
+
+	out, err := GetRawEvent(s, GetRawEventInput{ID: "cafe"})
+	if err == nil {
+		t.Fatalf("expected an ambiguous-prefix error, got out=%+v", out)
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "cafe1111aaaa") || !strings.Contains(msg, "cafe2222bbbb") {
+		t.Errorf("error %q must list both candidate ids", msg)
+	}
+}
+
+// TestGetRawEvent_PrefixShortRejected proves a prefix shorter than the
+// minimum (4 chars) never auto-resolves or reports ambiguity — it falls
+// through to the ordinary not-found result, same as an unrelated id.
+func TestGetRawEvent_PrefixShortRejected(t *testing.T) {
+	s := newTempStore(t)
+	seedRawEvent(t, s, "cafe1234abcd", `{"eventName":"AssumeRole"}`)
+
+	out, err := GetRawEvent(s, GetRawEventInput{ID: "caf"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if out.Found {
+		t.Error("Found = true, want false — a 3-char prefix must be rejected outright, not auto-resolved")
+	}
+}
+
+// TestGetRawEvent_PrefixZeroMatchUnchanged proves a prefix at or above the
+// minimum length that simply matches nothing behaves exactly like today's
+// not-found path — no error, Found=false.
+func TestGetRawEvent_PrefixZeroMatchUnchanged(t *testing.T) {
+	s := newTempStore(t)
+	seedRawEvent(t, s, "cafe1234abcd", `{"eventName":"AssumeRole"}`)
+
+	out, err := GetRawEvent(s, GetRawEventInput{ID: "zzzz"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if out.Found {
+		t.Error("Found = true, want false for a prefix matching nothing")
+	}
+	if out.Notes == "" {
+		t.Error("Notes empty, want an explanation for the miss")
+	}
+}
