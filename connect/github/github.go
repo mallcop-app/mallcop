@@ -181,27 +181,43 @@ func readAppKey() ([]byte, error) {
 	return nil, fmt.Errorf("github: GITHUB_APP_ID set but no GITHUB_APP_PRIVATE_KEY[_FILE]")
 }
 
-// Pull fetches the most-recent pages from the chosen feed, normalizes each entry
-// to an event.Event, and filters client-side to the lookback window. It returns a
-// materialized batch (the detector floor is whole-corpus). ctx is honored between
-// page fetches.
+// Pull fetches the most-recent pages from the chosen activity feed PLUS the
+// three GitHub-native security alert families (Dependabot, code-scanning,
+// secret-scanning — see pullAlerts), normalizes every entry to an event.Event,
+// and filters client-side to the lookback window. It returns a materialized
+// batch (the detector floor is whole-corpus). ctx is honored between page
+// fetches.
 func (c *Connector) Pull(ctx context.Context) ([]event.Event, error) {
 	cutoff := time.Now().Add(-c.lookback)
 
+	var out []event.Event
 	if c.auditLog {
 		evs, err := c.pullAuditLog(ctx, cutoff)
 		if err == nil {
-			return evs, nil
-		}
-		if isEnterpriseDenied(err) {
+			out = evs
+		} else if isEnterpriseDenied(err) {
 			log.Printf("github: audit-log requires GitHub Enterprise; falling back to /orgs/%s/events", c.org)
-			// fall through to events feed
+			evs, ferr := c.pullEvents(ctx, cutoff)
+			if ferr != nil {
+				return nil, ferr
+			}
+			out = evs
 		} else {
 			return nil, err
 		}
+	} else {
+		evs, err := c.pullEvents(ctx, cutoff)
+		if err != nil {
+			return nil, err
+		}
+		out = evs
 	}
 
-	return c.pullEvents(ctx, cutoff)
+	alertEvs, err := c.pullAlerts(ctx, cutoff)
+	if err != nil {
+		return nil, err
+	}
+	return append(out, alertEvs...), nil
 }
 
 // pullEvents pulls and normalizes the /orgs/{org}/events feed (primary path).
@@ -254,6 +270,145 @@ func (c *Connector) pullAuditLog(ctx context.Context, cutoff time.Time) ([]event
 	return out, err
 }
 
+// alertFamily describes one GitHub-native security-alert REST family: the
+// dedicated alert APIs (distinct from the audit-feed echoes pullAuditLog reads).
+// orgPath is the path fragment appended to both the org-wide
+// (/orgs/{org}/orgPath) and per-repo (/repos/{org}/{repo}/orgPath) endpoints —
+// the two list shapes are identical apart from the repository sub-object, which
+// the org-wide response includes and the per-repo response omits (hence
+// normalize's repoHint parameter).
+type alertFamily struct {
+	name      string // human-readable, used only in log lines ("dependabot", …)
+	orgPath   string // e.g. "dependabot/alerts"
+	normalize func(raw json.RawMessage, org, repoHint string) (event.Event, bool)
+}
+
+var alertFamilies = []alertFamily{
+	{name: "dependabot", orgPath: "dependabot/alerts", normalize: normalizeDependabotAlert},
+	{name: "code-scanning", orgPath: "code-scanning/alerts", normalize: normalizeCodeScanningAlert},
+	{name: "secret-scanning", orgPath: "secret-scanning/alerts", normalize: normalizeSecretScanningAlert},
+}
+
+// pullAlerts pulls all three GitHub-native alert families and concatenates the
+// normalized events. Each family degrades INDEPENDENTLY: a family unavailable
+// for plan/GHAS reasons contributes zero events (with a warning logged) rather
+// than failing the whole Pull — Dependabot alerts are free on every plan;
+// code-scanning/secret-scanning alerts need GHAS on private repos (free on
+// public repos), so a 403/404 there is an expected, not exceptional, outcome.
+func (c *Connector) pullAlerts(ctx context.Context, cutoff time.Time) ([]event.Event, error) {
+	var out []event.Event
+	for _, fam := range alertFamilies {
+		evs, err := c.pullAlertFamily(ctx, fam, cutoff)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, evs...)
+	}
+	return out, nil
+}
+
+// pullAlertFamily pulls one alert family org-wide first; on a 403/404 (denied —
+// plan/GHAS gating, mirrors isEnterpriseDenied/enterpriseDenied below) it falls
+// back to listing the org's repos and pulling per-repo. If the per-repo fallback
+// is ALSO denied (the feature is genuinely unavailable org-wide, e.g. no GHAS
+// license), the family degrades to zero events with one warning — never a hard
+// Pull failure, mirroring the audit-log -> events fallback (github.go:196-201).
+func (c *Connector) pullAlertFamily(ctx context.Context, fam alertFamily, cutoff time.Time) ([]event.Event, error) {
+	start := fmt.Sprintf("%s/orgs/%s/%s?per_page=%d", c.baseURL, url.PathEscape(c.org), fam.orgPath, perPage)
+	evs, err := c.pullAlertPages(ctx, start, fam, "", cutoff)
+	if err == nil {
+		return evs, nil
+	}
+	if !isEnterpriseDenied(err) {
+		return nil, err
+	}
+
+	evs, ferr := c.pullPerRepoAlerts(ctx, fam, cutoff)
+	if ferr == nil {
+		return evs, nil
+	}
+	if !isEnterpriseDenied(ferr) {
+		return nil, ferr
+	}
+	log.Printf("github: %s alerts unavailable for org %s (%v); skipping this family", fam.name, c.org, ferr)
+	return nil, nil
+}
+
+// pullPerRepoAlerts lists the org's repos and pulls fam per-repo. A single
+// repo's 403/404 (e.g. GHAS off on that one private repo) skips just that repo,
+// not the whole family — the family-level "genuinely unavailable" signal is
+// listRepos itself failing denied (no repo access at all to enumerate).
+func (c *Connector) pullPerRepoAlerts(ctx context.Context, fam alertFamily, cutoff time.Time) ([]event.Event, error) {
+	repos, err := c.listRepos(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var out []event.Event
+	for _, repo := range repos {
+		start := fmt.Sprintf("%s/repos/%s/%s/%s?per_page=%d",
+			c.baseURL, url.PathEscape(c.org), url.PathEscape(repo), fam.orgPath, perPage)
+		evs, err := c.pullAlertPages(ctx, start, fam, c.org+"/"+repo, cutoff)
+		if err != nil {
+			if isEnterpriseDenied(err) {
+				log.Printf("github: %s alerts unavailable for %s/%s (%v); skipping repo", fam.name, c.org, repo, err)
+				continue
+			}
+			return nil, err
+		}
+		out = append(out, evs...)
+	}
+	return out, nil
+}
+
+// pullAlertPages walks one alert-list URL (org-wide or per-repo) and normalizes
+// every page, filtering client-side to cutoff via each event's Timestamp
+// (updated_at high-water — see normalizeDependabotAlert et al.). repoHint fills
+// the repo field when the response omits a "repository" sub-object (the
+// per-repo endpoint shape).
+func (c *Connector) pullAlertPages(ctx context.Context, startURL string, fam alertFamily, repoHint string, cutoff time.Time) ([]event.Event, error) {
+	var out []event.Event
+	err := c.paginate(ctx, startURL, func(body []byte) error {
+		var raws []json.RawMessage
+		if err := json.Unmarshal(body, &raws); err != nil {
+			return fmt.Errorf("github: decode %s alerts page: %w", fam.name, err)
+		}
+		for _, raw := range raws {
+			ev, ok := fam.normalize(raw, c.org, repoHint)
+			if !ok {
+				continue
+			}
+			if ev.Timestamp.Before(cutoff) {
+				continue
+			}
+			out = append(out, ev)
+		}
+		return nil
+	})
+	return out, err
+}
+
+// listRepos returns every repo name in the org (GET /orgs/{org}/repos,
+// paginated). Used only by the per-repo alert fallback.
+func (c *Connector) listRepos(ctx context.Context) ([]string, error) {
+	start := fmt.Sprintf("%s/orgs/%s/repos?per_page=%d", c.baseURL, url.PathEscape(c.org), perPage)
+	var names []string
+	err := c.paginate(ctx, start, func(body []byte) error {
+		var repos []struct {
+			Name string `json:"name"`
+		}
+		if err := json.Unmarshal(body, &repos); err != nil {
+			return fmt.Errorf("github: decode repos page: %w", err)
+		}
+		for _, r := range repos {
+			if r.Name != "" {
+				names = append(names, r.Name)
+			}
+		}
+		return nil
+	})
+	return names, err
+}
+
 // linkNextRe extracts the rel="next" URL from a GitHub Link header.
 var linkNextRe = regexp.MustCompile(`<([^>]+)>\s*;\s*rel="next"`)
 
@@ -290,8 +445,12 @@ func (c *Connector) paginate(ctx context.Context, startURL string, onPage func([
 // fetch performs one authenticated GET, returning the body and Link header. On a
 // 401 it invalidates the App token cache and retries once (the installation may
 // have been revoked mid-life). A 403 carrying rate-limit headers is a clear rate
-// error (not the audit-log-fallback path); a 403 without them is an
-// enterpriseDenied error (drives the audit-log -> events fallback).
+// error (not the denied-feed path); a 403 without them, OR a 404, is an
+// enterpriseDenied error — the signal that drives the audit-log -> events
+// fallback AND the alert-family org-wide -> per-repo -> skip fallback. 404 is
+// included because the alert-list endpoints 404 (not 403) when the feature is
+// off for the target (e.g. secret-scanning alerts on an org/repo with no GHAS):
+// both status codes mean "this feed is not available here," never "retry."
 func (c *Connector) fetch(ctx context.Context, rawURL string) ([]byte, string, error) {
 	body, link, status, hdr, err := c.do(ctx, rawURL)
 	if err != nil {
@@ -310,8 +469,8 @@ func (c *Connector) fetch(ctx context.Context, rawURL string) ([]byte, string, e
 	case status == http.StatusForbidden && isRateLimited(hdr):
 		reset := hdr.Get("X-RateLimit-Reset")
 		return nil, "", fmt.Errorf("github: rate limited (403); X-RateLimit-Reset=%s — back off, do not retry-storm", reset)
-	case status == http.StatusForbidden:
-		return nil, "", &enterpriseDenied{url: rawURL}
+	case status == http.StatusForbidden || status == http.StatusNotFound:
+		return nil, "", &enterpriseDenied{url: rawURL, status: status}
 	default:
 		return nil, "", fmt.Errorf("github: GET %s returned %d: %s", rawURL, status, truncate(body, 200))
 	}
@@ -379,12 +538,18 @@ func parseNextLink(link string) string {
 	return ""
 }
 
-// enterpriseDenied marks a 403 that means "this feed needs Enterprise" — the
-// signal that drives the audit-log -> events fallback.
-type enterpriseDenied struct{ url string }
+// enterpriseDenied marks a 403 or 404 that means "this feed is not available
+// here" — Enterprise-only (audit-log), or plan/GHAS-gated (alert families). The
+// name predates the alert-family use (audit-log was the only denied feed when
+// it was introduced) but the semantics — "denied, degrade gracefully, do not
+// hard-fail the Pull" — are identical for both callers.
+type enterpriseDenied struct {
+	url    string
+	status int
+}
 
 func (e *enterpriseDenied) Error() string {
-	return fmt.Sprintf("github: %s returned 403 (Enterprise-only feed)", e.url)
+	return fmt.Sprintf("github: %s returned %d (feed unavailable)", e.url, e.status)
 }
 
 func isEnterpriseDenied(err error) bool {
