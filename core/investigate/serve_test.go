@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -420,5 +421,158 @@ func TestServe_ShutdownControlRecordExitsImmediately(t *testing.T) {
 	raw, _ := os.ReadFile(outboxPath)
 	if !strings.Contains(string(raw), `"reason":"shutdown"`) {
 		t.Fatalf("exit record did not carry reason shutdown:\n%s", raw)
+	}
+}
+
+// TestOutboxWriter_ConcurrentAppendIsRaceSafe is the mallcoppro-cea
+// regression test for the busy-heartbeat ticker's concurrency requirement:
+// startBusyHeartbeats' goroutine calls ob.append (via emit) concurrently
+// with handleQuestion's own hook-driven appends on the SAME *outboxWriter.
+// Before outboxWriter.mu was added, append's read-modify-write of lastSeq
+// plus its os.OpenFile/Write was not safe for concurrent callers — this
+// drives many goroutines at the same writer at once and, under `go test
+// -race`, proves there is no data race; it also proves the OBSERVABLE
+// correctness property that matters to the protocol: every append survives
+// (no lost writes) and the assigned "seq" values are a gapless permutation
+// of 1..n with no duplicates (the browser's outbox cursor depends on a
+// strictly monotonic, contiguous seq line).
+func TestOutboxWriter_ConcurrentAppendIsRaceSafe(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "outbox.jsonl")
+	ob := &outboxWriter{path: path}
+
+	const n = 50
+	var wg sync.WaitGroup
+	wg.Add(n)
+	for i := 0; i < n; i++ {
+		go func(i int) {
+			defer wg.Done()
+			if err := ob.append(map[string]any{"type": "heartbeat", "state": "busy", "i": i}); err != nil {
+				t.Errorf("concurrent append %d: %v", i, err)
+			}
+		}(i)
+	}
+	wg.Wait()
+
+	recs := readOutboxRecords(t, path)
+	if len(recs) != n {
+		t.Fatalf("outbox has %d records, want %d (a lost write means the mutex is not protecting the append)", len(recs), n)
+	}
+	seen := make(map[int]bool, n)
+	for _, rec := range recs {
+		seqF, ok := rec["seq"].(float64)
+		if !ok {
+			t.Fatalf("record missing numeric seq: %v", rec)
+		}
+		seq := int(seqF)
+		if seen[seq] {
+			t.Fatalf("seq %d assigned twice — concurrent appends raced on lastSeq: %v", seq, recs)
+		}
+		seen[seq] = true
+	}
+	for i := 1; i <= n; i++ {
+		if !seen[i] {
+			t.Fatalf("seq line has a gap: never saw seq %d among %d records: %v", i, n, recs)
+		}
+	}
+}
+
+// slowAnsweringServer is a REAL httptest.Server (the same "the LLM transport
+// is the only stub" boundary as scriptedServer/answeringServer above) that
+// sleeps for delay before returning a plain end_turn answer — standing in
+// for a genuinely slow model turn, so handleQuestion's askCore call stays in
+// flight long enough to observe the busy-heartbeat ticker actually tick.
+func slowAnsweringServer(t *testing.T, delay time.Duration) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(delay)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"type":        "message",
+			"role":        "assistant",
+			"stop_reason": "end_turn",
+			"content":     []map[string]any{{"type": "text", "text": "the answer."}},
+		})
+	}))
+}
+
+// TestHandleQuestion_EmitsBusyHeartbeatsDuringASlowAnswer is the fix's own
+// regression test for the silent-outbox gap: before this fix, the outbox
+// produced NOTHING between "ack" and "answer" for a question that never
+// called a tool, no matter how long askCore took — indistinguishable from a
+// hard-killed runner from the browser's point of view. With HeartbeatPeriod
+// set well below the (stubbed, but genuinely slow) model turn's duration,
+// handleQuestion must append at least two heartbeat/state:"busy" records —
+// each carrying this question's id — while the answer is still in flight.
+func TestHandleQuestion_EmitsBusyHeartbeatsDuringASlowAnswer(t *testing.T) {
+	st := seedStore(t)
+	const heartbeatPeriod = 25 * time.Millisecond
+	const answerDelay = 220 * time.Millisecond // not a clean multiple of heartbeatPeriod
+	srv := slowAnsweringServer(t, answerDelay)
+	defer srv.Close()
+
+	dir := t.TempDir()
+	inboxPath := filepath.Join(dir, "inbox.jsonl")
+	outboxPath := filepath.Join(dir, "outbox.jsonl")
+
+	question := map[string]any{"type": "question", "seq": 1, "id": "q_slow", "text": "What has ghost been doing?"}
+	line, _ := json.Marshal(question)
+	if err := os.WriteFile(inboxPath, append(line, '\n'), 0o644); err != nil {
+		t.Fatalf("write inbox: %v", err)
+	}
+
+	client := &inference.DirectClient{BaseURL: srv.URL, Model: "test-model"}
+	opts := ServeOptions{
+		Options:         Options{Client: client, Model: "test-model", Store: st},
+		InboxPath:       inboxPath,
+		OutboxPath:      outboxPath,
+		IdleTimeout:     150 * time.Millisecond,
+		PollInterval:    20 * time.Millisecond,
+		HeartbeatPeriod: heartbeatPeriod,
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := Serve(ctx, opts); err != nil {
+		t.Fatalf("Serve: unexpected error: %v", err)
+	}
+
+	recs := readOutboxRecords(t, outboxPath)
+
+	ackIdx, answerIdx := -1, -1
+	busyHeartbeats := 0
+	for i, rec := range recs {
+		switch rec["type"] {
+		case "ack":
+			if ackIdx == -1 {
+				ackIdx = i
+			}
+		case "answer":
+			if answerIdx == -1 {
+				answerIdx = i
+			}
+		case "heartbeat":
+			if rec["state"] != "busy" {
+				continue
+			}
+			if rec["q"] != "q_slow" {
+				t.Fatalf("busy heartbeat record %d missing/wrong q field (want q_slow): %v", i, rec)
+			}
+			if ackIdx == -1 {
+				t.Fatalf("busy heartbeat record %d appeared before the question's ack record: %v", i, recs)
+			}
+			busyHeartbeats++
+		}
+	}
+	if ackIdx == -1 {
+		t.Fatalf("outbox never got an ack record for q_slow: %v", recs)
+	}
+	if answerIdx == -1 {
+		t.Fatalf("outbox never got an answer record for q_slow: %v", recs)
+	}
+	if busyHeartbeats < 2 {
+		t.Fatalf("got %d busy heartbeat(s) during a %v-long answer with a %v heartbeat period, want >= 2: %v",
+			busyHeartbeats, answerDelay, heartbeatPeriod, recs)
 	}
 }
