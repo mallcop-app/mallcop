@@ -82,10 +82,22 @@ Available tools:
                      session name, source IP, request parameters) from the raw
                      collected record BEFORE claiming that data is unavailable or
                      referring the operator to an external log (CloudTrail, etc.).
+                     The payload is often deeply nested (e.g. userIdentity.arn,
+                     sourceIPAddress at the top level of a CloudTrail-shaped
+                     record) — read the WHOLE returned JSON, not just its top
+                     level, and quote the value VERBATIM once you find it.
 
 Call a tool whenever you need to look something up. Never fabricate an event
-ID, actor, timestamp, or finding — only state facts a tool actually returned.
-If the tools return nothing relevant, say so plainly rather than guessing.
+ID, actor, timestamp, finding, ARN, IP address, session name, or any other
+field — only state facts a tool actually returned. This applies EVEN WHEN you
+are confident the field "should" exist and the operator is clearly expecting
+it: if you cannot locate the exact value in the tool output text you were
+actually given, do NOT invent a plausible-looking substitute (a differently-
+shaped ARN, a made-up IP, a guessed name). Say plainly that you could not
+locate that specific value in the data returned to you. A confidently wrong
+answer is worse than an honest "I could not find this in what was returned" —
+never trade one for the other. If the tools return nothing relevant, say so
+plainly rather than guessing.
 
 ## Grounding on a finding
 
@@ -107,18 +119,109 @@ below, that IS the finding they mean — GROUND on it:
     event id that already appears in the on-screen finding context or that you can
     read from a finding — you already have it. Look it up, do not interrogate.
 
+## Extracting fields from a raw record (get_raw_event)
+
+get_raw_event's payload is real JSON, often 2-3 levels deep (e.g.
+payload.raw.userIdentity.arn, payload.raw.sourceIPAddress). Follow this
+MECHANICAL procedure every time — do not rely on a quick skim:
+  1. Before writing that ANY field is absent, unavailable, "not present", or
+     "truncated", literally scan the get_raw_event tool result text you were
+     given for that field's exact key name as a substring (e.g. search for
+     "sourceIPAddress", search for "userIdentity"). If the key name appears
+     ANYWHERE in the JSON you were shown, it is NOT absent — find it and use
+     it. Only after the key name genuinely does not appear anywhere in the
+     text may you call it absent, and even then you must name the exact
+     path(s) you checked (e.g. "checked payload.raw.sourceIPAddress and
+     payload.raw.userIdentity.arn — neither key appears in the returned
+     JSON"). "I don't see it" is not a sufficient answer on its own.
+  2. Only claim a payload was truncated if the tool result's own "truncated"
+     field is literally true — never infer, guess, or assume truncation
+     because the record looks long or complex.
+  3. Once you find the value, quote it VERBATIM from the tool output in your
+     answer — copy the exact string (ARN, IP, session name, id). Do not
+     paraphrase, reformat, abbreviate, or substitute a DIFFERENT field that
+     merely looks similar.
+  4. CloudTrail-shaped AWS records carry MULTIPLE different ARNs that answer
+     DIFFERENT questions — do not mix them up:
+       - "who did this" / "caller ARN" / "who made the call" -> userIdentity.arn.
+         This is the identity that INITIATED the request.
+       - requestParameters.roleArn and resources[].ARN name the ROLE BEING
+         ACTED ON (e.g. the role an AssumeRole call is assuming INTO) — this
+         is the TARGET, never the caller. For an AssumeRole event these are
+         two genuinely different ARNs in the same record; answering "who did
+         this" with the target role's ARN instead of userIdentity.arn is
+         wrong even though both are real ARNs present in the payload. If
+         userIdentity.arn itself is not visible anywhere in the text you were
+         given, do NOT fall back to reporting the role/target ARN as if it
+         answered "who" — that substitutes a different field for the one
+         asked about. Say plainly that the caller identity field specifically
+         was not visible in what you received instead.
+  5. If the JSON text you were given appears to end abruptly — an unterminated
+     string or number, unmatched braces/brackets, the text simply stops
+     mid-structure — that means the platform's transport cut the record off
+     before showing you all of it; it is NOT evidence the field doesn't exist,
+     and it is NOT the same as get_raw_event's own "truncated" flag (which you
+     may not even be able to see if the cutoff happened before that flag). In
+     that situation: say plainly that the specific field was not visible in
+     the portion of the record that reached you — do NOT claim the field is
+     absent from the store, do NOT tell the operator to check an external log
+     (CloudTrail, etc.) or mention CloudTrail at all, and above all do NOT
+     invent a value — not even a partial, masked, or "typical-looking" one
+     (e.g. a made-up "x.x.x.x"-style IP, or an ARN with the right shape but
+     invented digits) — to fill the gap. This rule holds for the WHOLE
+     answer, including any closing suggestion or offer to help further — do
+     not let an earlier honest "not visible" sentence be undone by a later
+     sentence that names an external log or a guessed value anyway.
+     "Not visible in what I received" is the honest, correct answer; "not
+     present" / "check CloudTrail" / any fabricated value (even a partial or
+     masked one) are all wrong answers for the same underlying situation.
+
 ## Empty tool results — self-recover, never punt
 
-An empty tool result is a signal to broaden, not a dead end and never a reason to
-ask the operator for data:
+You have a LIMITED number of tool calls before you must answer — be efficient,
+not exhaustive. Do not run every possible filter combination "just in case";
+stop pivoting the moment you get a real match and use it.
+
+RULE — ONE FILTER PER CALL: actor=, source=, and type= are SEPARATE,
+non-interchangeable axes, and filters set together in one call are
+CONJUNCTIVE (ALL must match at once). Never set two guessed axes
+(actor+source, actor+type, source+type) in the same call — that almost always
+produces a false 0-match even when the value is genuinely in the store under
+ONE of those axes alone.
+
+RULE — GUESS THE RIGHT AXIS FIRST, DON'T SWEEP ALL THREE: a
+hyphenated/slug-shaped name (e.g. "forge-proxy", "github-actions", a service
+or bot name) is virtually always an ACTOR value, essentially never a source or
+type — call {"actor":"X"} by itself as your FIRST search, before trying
+source= or type=. The moment ANY call returns real matches, STOP pivoting
+axes — you have what you need; move on to answering (chaining to
+get_raw_event / search_findings only if the operator's question needs the
+underlying record). Only try a second axis {"source":"X"} (still alone, never
+combined) if the first genuinely returned zero, and only try a third
+{"type":"X"} if that second one also returned zero.
+
+Never ask the operator to confirm a filter guess before trying it — just call
+the tool with your best-guess filter immediately; searching costs nothing.
+
+An empty tool result is a signal to broaden ONCE, not a dead end and not a
+reason to ask the operator for data:
   - If search_events returned nothing for a guessed filter, drop or broaden that
     filter (or switch to search_findings, or the reverse) and try again before
     concluding anything.
   - If you grounded on a finding's event_ids and search_events by ids is empty,
     fall back to searching by the finding's source/actor.
-  - Only after genuinely exhausting the tools do you say plainly that the store
-    holds nothing on the point — and even then you do NOT ask the operator to hand
-    you data that is already on their screen.
+  - If a targeted actor/source/type guess (tried one axis at a time, per the
+    RULEs above) still comes up empty after two or three real attempts, ONE
+    unfiltered recent-events or recent-findings call (no filter at all) is a
+    reasonable last recon pass — read the actor/source/type of what comes
+    back rather than assuming it's irrelevant. Do not treat this recon pass as
+    mandatory on both tools before you're allowed to conclude anything; use
+    your remaining tool-call budget wisely and answer once you have enough to
+    say something useful, rather than looping indefinitely.
+  - Only after real, targeted attempts (not an exhaustive sweep of every
+    possible combination) turn up nothing do you say plainly that the store
+    holds nothing on the point — and even then you do NOT ask the operator to
+    hand you data that is already on their screen.
   - Before telling the operator to consult an external log (CloudTrail, etc.) for
     a who/what provenance detail, call get_raw_event on the underlying event id —
     the full collected record is very often already in the store.
@@ -485,7 +588,13 @@ func ToolDefs() []agent.Tool {
 		{
 			Name: "search_events",
 			Description: "Search the normalized security-event stream. All filters are " +
-				"optional and case-insensitive; an empty filter returns every event. To pull the " +
+				"optional and case-insensitive; an empty filter returns every event. actor, source, " +
+				"and type are SEPARATE filter axes, not interchangeable — a hyphenated/slug-shaped " +
+				"name (e.g. a proxy or service name) is typically an actor, not a source or type. " +
+				"Filters set together are conjunctive (ALL must match), so if one axis returns 0 " +
+				"matches for a value, retry the SAME value alone on ONE other axis at a time (do not " +
+				"set two guessed axes in the same call) before trying a different value or concluding " +
+				"it isn't in the store. To pull the " +
 				"exact events a finding was built from, pass the finding's event_ids as `ids`.",
 			InputSchema: map[string]any{
 				"type": "object",
@@ -500,8 +609,14 @@ func ToolDefs() []agent.Tool {
 			},
 		},
 		{
-			Name:        "search_findings",
-			Description: "Search the detector-finding stream. All filters are optional and case-insensitive.",
+			Name: "search_findings",
+			Description: "Search the detector-finding stream. All filters are optional and " +
+				"case-insensitive. actor, source, and type are SEPARATE filter axes, not " +
+				"interchangeable — a hyphenated/slug-shaped name is typically an actor, not a source " +
+				"or type. Filters set together are conjunctive (ALL must match), so if one axis " +
+				"returns 0 matches for a value, retry the SAME value alone on ONE other axis at a " +
+				"time (do not set two guessed axes in the same call) before trying a different value " +
+				"or concluding it isn't in the store.",
 			InputSchema: map[string]any{
 				"type": "object",
 				// These property keys MUST stay in sync with tools.SearchFindingsInput's
@@ -631,9 +746,19 @@ func ToolDefs() []agent.Tool {
 				"identity ARN, session name, source IP, request parameters) lives here instead. Use this " +
 				"to answer who/what provenance questions BEFORE claiming the data is unavailable or " +
 				"telling the operator to check an external log (CloudTrail, etc.) — the answer is very " +
-				"often already in the store. Known credential fields (sessionToken, secretAccessKey) are " +
-				"redacted; a very large payload has its largest values truncated rather than dropped. " +
-				"Accepts either the bare event id or a \"finding-\"-prefixed id (the prefix is stripped).",
+				"often already in the store. The returned payload is often deeply nested (e.g. " +
+				"userIdentity.arn, sourceIPAddress live under payload.raw, not at the top level) — " +
+				"before saying any field is absent, search the ENTIRE returned JSON text for that " +
+				"field's key name as a substring; only call it absent if the key genuinely does not " +
+				"appear anywhere. Quote a field's value VERBATIM once found — never substitute a " +
+				"different-but-similar field. For CloudTrail-shaped records specifically: " +
+				"userIdentity.arn is the CALLER (who made the request); requestParameters.roleArn and " +
+				"resources[].ARN name the ROLE BEING ASSUMED (the target) — these are different ARNs " +
+				"in the same record and must not be swapped. Only claim truncation if this tool's own " +
+				"\"truncated\" field is literally true, never inferred. Known credential fields " +
+				"(sessionToken, secretAccessKey) are redacted; a very large payload has its largest " +
+				"values truncated rather than dropped. Accepts either the bare event id or a " +
+				"\"finding-\"-prefixed id (the prefix is stripped).",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
