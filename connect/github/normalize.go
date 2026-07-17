@@ -2,6 +2,7 @@ package github
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"time"
 
@@ -54,12 +55,34 @@ type auditEntry struct {
 //   - "org.add_member"            -> new_external_access
 //   - "org.add_outside_collaborator" -> new_external_access
 //   - "secret_scanning_alert"     -> (informational)
+//   - "dependabot_alert"          -> (informational)
+//   - "code_scanning_alert"       -> (informational)
 //   - "github_other"              -> benign catch-all (detectors gate on specific
 //     types, so unknowns are inert, never crash)
+//
+// dependabot_alert / secret_scanning_alert are emitted from TWO sources with
+// DIFFERENT payload shapes: the audit-feed echo (classifyAuditAction, below —
+// action-bearing synthPayload) and the dedicated alert REST APIs
+// (normalizeDependabotAlert et al. — alert-bearing synthPayload with
+// signal_class="alert", alert_number, alert_state, severity, …). Same Type
+// string, same routing gate; consumers MUST read alert-specific fields
+// defensively (they are absent on the audit-feed shape).
 //
 // Verified against core/detect: priv_escalation.elevationEventTypes,
 // new_actor.entityCreationEventTypes, new_external_access.externalAccessEventTypes,
 // git_oops gate ("push"/"branch_delete"/"tag_delete").
+
+// Type strings for the three GitHub-native alert families, emitted by
+// normalizeDependabotAlert / normalizeCodeScanningAlert /
+// normalizeSecretScanningAlert (the dedicated REST alert APIs — see
+// pullAlerts in github.go). dependabot_alert and secret_scanning_alert are
+// ALSO emitted, with a different (action-bearing) payload shape, from
+// classifyAuditAction's audit-feed echoes — see the normalizedType doc above.
+const (
+	typeDependabotAlert     = "dependabot_alert"
+	typeCodeScanningAlert   = "code_scanning_alert"
+	typeSecretScanningAlert = "secret_scanning_alert"
+)
 
 // eventTypeMap maps GitHub Event object "type" values (the events feed) to the
 // normalized vocabulary. Action-qualified GitHub events (MemberEvent.added vs
@@ -166,6 +189,23 @@ type synthPayload struct {
 	// unmarshaled; it makes a corrupt payload visible in the finding record
 	// instead of silently misclassifying the event.
 	ParseError string `json:"parse_error,omitempty"`
+	// --- Alert-family fields (normalizeDependabotAlert / normalizeCodeScanningAlert
+	// / normalizeSecretScanningAlert — the dedicated REST alert APIs, NOT the
+	// audit-feed echo). SHARED ALERT CONTRACT: every alert-family event carries
+	// SignalClass="alert", AlertNumber, AlertState, Repo (above), and — where the
+	// source API provides one — Severity and HTMLURL. Family-specific: Package +
+	// Ecosystem (dependabot), Rule (code-scanning), SecretType (secret-scanning).
+	// Consumers read these defensively: the audit-feed shape of
+	// dependabot_alert/secret_scanning_alert (classifyAuditAction) never sets them.
+	SignalClass string `json:"signal_class,omitempty"`
+	AlertNumber int    `json:"alert_number,omitempty"`
+	AlertState  string `json:"alert_state,omitempty"`
+	Severity    string `json:"severity,omitempty"`
+	HTMLURL     string `json:"html_url,omitempty"`
+	Package     string `json:"package,omitempty"`
+	Ecosystem   string `json:"ecosystem,omitempty"`
+	SecretType  string `json:"secret_type,omitempty"`
+	Rule        string `json:"rule,omitempty"`
 	// UnmappedAction carries the RAW source action string whenever this event
 	// fell all the way through to the "github_other" default bucket (i.e. no
 	// classifier and no learned overlay mapped it). It is the uniform mapping-gap
@@ -330,4 +370,262 @@ func orgOr(a, b string) string {
 		return a
 	}
 	return b
+}
+
+// --- GitHub-native security alerts (dedicated REST APIs) ---------------------
+//
+// GET /orgs/{org}/dependabot/alerts, /orgs/{org}/code-scanning/alerts,
+// /orgs/{org}/secret-scanning/alerts (org-wide; per-repo fallback in
+// github.go:pullPerRepoAlerts). These are DIFFERENT from the audit-feed echoes
+// classifyAuditAction reads above: the audit feed sees a create-action event
+// with the actor who triggered the scan; these APIs return the current alert
+// RECORD (state, severity, package/rule/secret-type) — richer, and the only
+// source for code-scanning alerts (the audit feed has no code-scanning action).
+
+// actorSystemAlert is the Actor value for every alert-family event: GitHub
+// itself raises these (Dependabot/CodeQL/secret-scanning), not a human/bot
+// principal, so there is no actor login to attribute — unlike "unknown" (used
+// where a login WAS expected but missing), this is a deliberate, always-the-same
+// sentinel for a system-generated record.
+const actorSystemAlert = "github"
+
+// alertRepo is the repository sub-object present on ORG-WIDE alert list
+// responses. The PER-REPO list responses omit it (the repo is already implied
+// by the request URL) — repoOr falls back to the caller-supplied repoHint
+// ("org/repo") in that case.
+type alertRepo struct {
+	FullName string `json:"full_name"`
+	Name     string `json:"name"`
+}
+
+func repoOr(r alertRepo, hint string) string {
+	if r.FullName != "" {
+		return r.FullName
+	}
+	if r.Name != "" {
+		return r.Name
+	}
+	return hint
+}
+
+// alertTimestamp resolves the event Timestamp for high-water filtering: prefer
+// updated_at (state transitions — fixed/dismissed — must be visible to a
+// re-scan even though the alert was created outside the lookback window), fall
+// back to created_at. Returns ok=false when neither parses (skip, per the
+// normalizeEvent/normalizeAuditEntry convention above — never zero-value).
+func alertTimestamp(updatedAt, createdAt string) (time.Time, bool) {
+	for _, s := range []string{updatedAt, createdAt} {
+		if s == "" {
+			continue
+		}
+		if ts, err := time.Parse(time.RFC3339, s); err == nil {
+			return ts, true
+		}
+	}
+	return time.Time{}, false
+}
+
+// dependabotAlert is the subset of a GET .../dependabot/alerts list item we
+// normalize (https://docs.github.com/rest/dependabot/alerts).
+type dependabotAlert struct {
+	Number     int       `json:"number"`
+	State      string    `json:"state"`
+	CreatedAt  string    `json:"created_at"`
+	UpdatedAt  string    `json:"updated_at"`
+	HTMLURL    string    `json:"html_url"`
+	Repository alertRepo `json:"repository"`
+	Dependency struct {
+		Package struct {
+			Name      string `json:"name"`
+			Ecosystem string `json:"ecosystem"`
+		} `json:"package"`
+	} `json:"dependency"`
+	SecurityVulnerability struct {
+		Severity string `json:"severity"`
+	} `json:"security_vulnerability"`
+}
+
+// normalizeDependabotAlert normalizes one dependabot/alerts list item. repoHint
+// fills Repo when the response has no "repository" sub-object (per-repo pull).
+func normalizeDependabotAlert(raw json.RawMessage, org, repoHint string) (event.Event, bool) {
+	var da dependabotAlert
+	if err := json.Unmarshal(raw, &da); err != nil {
+		return event.Event{}, false
+	}
+	ts, ok := alertTimestamp(da.UpdatedAt, da.CreatedAt)
+	if !ok {
+		return event.Event{}, false
+	}
+	repo := repoOr(da.Repository, repoHint)
+	sp := synthPayload{
+		SignalClass: "alert",
+		AlertNumber: da.Number,
+		AlertState:  da.State,
+		Severity:    da.SecurityVulnerability.Severity,
+		Repo:        repo,
+		Org:         org,
+		HTMLURL:     da.HTMLURL,
+		Package:     da.Dependency.Package.Name,
+		Ecosystem:   da.Dependency.Package.Ecosystem,
+		Raw:         raw,
+	}
+	payload, _ := json.Marshal(sp)
+
+	// Deterministic ID: family + repo + alert number + state — a re-scan of an
+	// UNCHANGED alert reproduces the identical ID (store dedup); a state
+	// transition (open -> fixed/dismissed) is a DIFFERENT ID, so the transition
+	// itself is recorded as a new event rather than silently overwriting the
+	// original.
+	idSrc := fmt.Sprintf("dependabot_alert|%s|%d|%s", repo, da.Number, da.State)
+	return event.Event{
+		ID:        makeEventID(idSrc),
+		Source:    sourceGitHub,
+		Type:      typeDependabotAlert,
+		Actor:     actorSystemAlert,
+		Timestamp: ts,
+		Org:       org,
+		Payload:   payload,
+	}, true
+}
+
+// codeScanningAlert is the subset of a GET .../code-scanning/alerts list item
+// we normalize (https://docs.github.com/rest/code-scanning). Severity prefers
+// rule.security_severity_level (GHAS's CVSS-derived bucket) and falls back to
+// rule.severity (the linter's own note/warning/error) when absent.
+type codeScanningAlert struct {
+	Number     int       `json:"number"`
+	State      string    `json:"state"`
+	CreatedAt  string    `json:"created_at"`
+	UpdatedAt  string    `json:"updated_at"`
+	HTMLURL    string    `json:"html_url"`
+	Repository alertRepo `json:"repository"`
+	Rule       struct {
+		ID                    string `json:"id"`
+		Severity              string `json:"severity"`
+		SecuritySeverityLevel string `json:"security_severity_level"`
+	} `json:"rule"`
+}
+
+// normalizeCodeScanningAlert normalizes one code-scanning/alerts list item.
+// repoHint fills Repo when the response has no "repository" sub-object
+// (per-repo pull).
+func normalizeCodeScanningAlert(raw json.RawMessage, org, repoHint string) (event.Event, bool) {
+	var ca codeScanningAlert
+	if err := json.Unmarshal(raw, &ca); err != nil {
+		return event.Event{}, false
+	}
+	ts, ok := alertTimestamp(ca.UpdatedAt, ca.CreatedAt)
+	if !ok {
+		return event.Event{}, false
+	}
+	repo := repoOr(ca.Repository, repoHint)
+	severity := ca.Rule.SecuritySeverityLevel
+	if severity == "" {
+		severity = ca.Rule.Severity
+	}
+	sp := synthPayload{
+		SignalClass: "alert",
+		AlertNumber: ca.Number,
+		AlertState:  ca.State,
+		Severity:    severity,
+		Repo:        repo,
+		Org:         org,
+		HTMLURL:     ca.HTMLURL,
+		Rule:        ca.Rule.ID,
+		Raw:         raw,
+	}
+	payload, _ := json.Marshal(sp)
+
+	idSrc := fmt.Sprintf("code_scanning_alert|%s|%d|%s", repo, ca.Number, ca.State)
+	return event.Event{
+		ID:        makeEventID(idSrc),
+		Source:    sourceGitHub,
+		Type:      typeCodeScanningAlert,
+		Actor:     actorSystemAlert,
+		Timestamp: ts,
+		Org:       org,
+		Payload:   payload,
+	}, true
+}
+
+// secretScanningAlert is the subset of a GET .../secret-scanning/alerts list
+// item we normalize (https://docs.github.com/rest/secret-scanning).
+// DELIBERATELY has no "secret" field: the real API response's "secret" key
+// carries the ACTUAL LEAKED SECRET VALUE, and this connector must never read it
+// into a Go value that could get logged, copied, or re-serialized anywhere
+// other than the one-shot redaction pass (redactSecretField) below.
+type secretScanningAlert struct {
+	Number     int       `json:"number"`
+	State      string    `json:"state"`
+	CreatedAt  string    `json:"created_at"`
+	UpdatedAt  string    `json:"updated_at"`
+	HTMLURL    string    `json:"html_url"`
+	Repository alertRepo `json:"repository"`
+	SecretType string    `json:"secret_type"`
+}
+
+// normalizeSecretScanningAlert normalizes one secret-scanning/alerts list item.
+// repoHint fills Repo when the response has no "repository" sub-object
+// (per-repo pull).
+//
+// CRITICAL REDACTION: the source API response embeds the leaked secret value
+// itself under the "secret" key. Raw is set to redactSecretField(raw), NEVER
+// the verbatim raw bytes — see redactSecretField's doc comment and
+// TestSecretScanningRedaction (normalize_alerts_test.go) for the explicit proof.
+func normalizeSecretScanningAlert(raw json.RawMessage, org, repoHint string) (event.Event, bool) {
+	var sa secretScanningAlert
+	if err := json.Unmarshal(raw, &sa); err != nil {
+		return event.Event{}, false
+	}
+	ts, ok := alertTimestamp(sa.UpdatedAt, sa.CreatedAt)
+	if !ok {
+		return event.Event{}, false
+	}
+	repo := repoOr(sa.Repository, repoHint)
+	sp := synthPayload{
+		SignalClass: "alert",
+		AlertNumber: sa.Number,
+		AlertState:  sa.State,
+		Repo:        repo,
+		Org:         org,
+		HTMLURL:     sa.HTMLURL,
+		SecretType:  sa.SecretType,
+		Raw:         redactSecretField(raw),
+	}
+	payload, _ := json.Marshal(sp)
+
+	idSrc := fmt.Sprintf("secret_scanning_alert|%s|%d|%s", repo, sa.Number, sa.State)
+	return event.Event{
+		ID:        makeEventID(idSrc),
+		Source:    sourceGitHub,
+		Type:      typeSecretScanningAlert,
+		Actor:     actorSystemAlert,
+		Timestamp: ts,
+		Org:       org,
+		Payload:   payload,
+	}, true
+}
+
+// redactSecretField returns raw with the top-level "secret" key's value
+// replaced by a fixed marker. GitHub's secret-scanning alert API embeds the
+// ACTUAL LEAKED SECRET VALUE in this field (see
+// https://docs.github.com/rest/secret-scanning) — it MUST NEVER reach the
+// stored event payload, which flows into findings, investigation transcripts,
+// and any downstream export. Fails CLOSED: if the raw bytes don't parse as a
+// JSON object, the whole raw object is replaced (never passed through
+// un-redacted on a parse error) — the redaction can be wrong in the direction
+// of dropping too much, never in the direction of leaking the secret.
+func redactSecretField(raw json.RawMessage) json.RawMessage {
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return json.RawMessage(`{"redacted":"unparseable secret-scanning payload"}`)
+	}
+	if _, ok := m["secret"]; ok {
+		m["secret"] = json.RawMessage(`"[REDACTED]"`)
+	}
+	out, err := json.Marshal(m)
+	if err != nil {
+		return json.RawMessage(`{"redacted":"re-marshal failure"}`)
+	}
+	return out
 }
