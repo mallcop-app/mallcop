@@ -48,8 +48,13 @@ type SearchFindingsInput struct {
 // tool which skipped findings whose timestamp could not be parsed. Without a
 // Since bound, timestamp is ignored entirely.
 //
-// SearchFindings returns an error only when the store cannot be read or a record
-// is not valid finding JSON.
+// SearchFindings returns an error when the store cannot be read, a record is
+// not valid finding JSON, or (mallcoppro-448) a requested id in IDs has no
+// exact match and its git-style unique-prefix resolution is ambiguous
+// (matches more than one stored finding id) — the error text lists the
+// candidate ids so the caller can disambiguate. An id with no match at all
+// (exact or prefix) is NOT an error; it simply contributes nothing to the
+// result, same as today.
 func SearchFindings(s *store.Store, in SearchFindingsInput) ([]finding.Finding, error) {
 	if s == nil {
 		return nil, fmt.Errorf("search-findings: nil store")
@@ -57,6 +62,17 @@ func SearchFindings(s *store.Store, in SearchFindingsInput) ([]finding.Finding, 
 	raws, err := s.Load(store.KindFindings)
 	if err != nil {
 		return nil, fmt.Errorf("search-findings: load findings: %w", err)
+	}
+
+	all := make([]finding.Finding, 0, len(raws))
+	for i, raw := range raws {
+		var f finding.Finding
+		// §3.7: normalize key casing at the boundary so PascalCase / camelCase /
+		// kebab-case fixtures parse into the snake_case struct tags.
+		if err := json.Unmarshal(normalizeRecordKeys(raw), &f); err != nil {
+			return nil, fmt.Errorf("search-findings: decode finding %d: %w", i, err)
+		}
+		all = append(all, f)
 	}
 
 	// An empty-string entry in IDs would otherwise match no finding and, being a
@@ -67,24 +83,58 @@ func SearchFindings(s *store.Store, in SearchFindingsInput) ([]finding.Finding, 
 	// carries the standard "finding-" prefix — a model that queried with the
 	// bare event hash (as shown elsewhere in the console) still finds the
 	// prefixed finding, instead of exact-equality silently returning nothing.
+	//
+	// mallcoppro-448: an id with no exact match (even with the bare/"finding-"
+	// lenience above) falls back to git-style unique-prefix resolution — a
+	// truncated id still resolves as long as it is a prefix of exactly one
+	// stored finding id. An ambiguous prefix errors out the whole call (with the
+	// candidate ids in the error text) so the model disambiguates before
+	// trusting a (possibly wrong) result; a prefix that matches nothing is left
+	// to fall through to the existing no-match behavior for that id.
+	pool := make(map[string]struct{}, len(all))
+	poolList := make([]string, 0, len(all))
+	for _, f := range all {
+		lower := strings.ToLower(f.ID)
+		if _, ok := pool[lower]; ok {
+			continue
+		}
+		pool[lower] = struct{}{}
+		poolList = append(poolList, f.ID)
+	}
+
+	// idsRequested tracks whether an id FILTER was in effect (at least one
+	// non-blank entry in in.IDs), independent of whether idSet ends up
+	// populated. mallcoppro-448 can legitimately leave idSet empty for a
+	// requested id that resolves to nothing (short prefix, or a prefix/exact
+	// match that matches no stored finding) — that must still filter the
+	// result down to zero, not be mistaken for "no id filter was given at
+	// all" (the len(idSet)>0 check below would otherwise return everything).
 	idSet := map[string]struct{}{}
+	idsRequested := false
 	for _, id := range in.IDs {
 		if id == "" {
 			continue
 		}
+		idsRequested = true
+		matchedExact := false
 		for _, c := range findingIDCandidates(id) {
-			idSet[c] = struct{}{}
+			if _, ok := pool[c]; ok {
+				idSet[c] = struct{}{}
+				matchedExact = true
+			}
+		}
+		if matchedExact {
+			continue
+		}
+		if matched, ambiguous, total := resolveFindingIDPrefix(id, poolList); matched != "" {
+			idSet[matched] = struct{}{}
+		} else if len(ambiguous) > 0 {
+			return nil, ambiguousIDError("search-findings", id, ambiguous, total)
 		}
 	}
 
-	out := make([]finding.Finding, 0, len(raws))
-	for i, raw := range raws {
-		var f finding.Finding
-		// §3.7: normalize key casing at the boundary so PascalCase / camelCase /
-		// kebab-case fixtures parse into the snake_case struct tags.
-		if err := json.Unmarshal(normalizeRecordKeys(raw), &f); err != nil {
-			return nil, fmt.Errorf("search-findings: decode finding %d: %w", i, err)
-		}
+	out := make([]finding.Finding, 0, len(all))
+	for _, f := range all {
 		if in.Actor != "" && !strings.EqualFold(f.Actor, in.Actor) {
 			continue
 		}
@@ -94,7 +144,7 @@ func SearchFindings(s *store.Store, in SearchFindingsInput) ([]finding.Finding, 
 		if in.Type != "" && !strings.EqualFold(f.Type, in.Type) {
 			continue
 		}
-		if len(idSet) > 0 {
+		if idsRequested {
 			if _, ok := idSet[strings.ToLower(f.ID)]; !ok {
 				continue
 			}

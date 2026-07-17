@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -476,6 +477,105 @@ func TestSearchEventsNilStore(t *testing.T) {
 	}
 }
 
+// ---- search-events: mallcoppro-448 git-style unique-prefix id lookup -------
+
+// TestSearchEventsIDPrefix drives the id-resolution ladder — exact match,
+// unique prefix, ambiguous prefix, short prefix, zero match — against a
+// store seeded specifically for prefix-collision control, independent of
+// TestSearchEvents' own id fixtures.
+func TestSearchEventsIDPrefix(t *testing.T) {
+	s := newTempStore(t)
+	base := time.Date(2026, 4, 10, 9, 0, 0, 0, time.UTC)
+	seed := []event.Event{
+		{ID: "cafe1111aaaa", Actor: "svc-a", Timestamp: base},
+		{ID: "cafe2222bbbb", Actor: "svc-b", Timestamp: base.Add(time.Hour)},
+		{ID: "feedaced1111", Actor: "svc-c", Timestamp: base.Add(2 * time.Hour)},
+	}
+	for _, ev := range seed {
+		if _, err := s.Append(store.KindEvents, ev); err != nil {
+			t.Fatalf("append event %s: %v", ev.ID, err)
+		}
+	}
+
+	t.Run("exact match still wins over a would-be-ambiguous prefix", func(t *testing.T) {
+		got, _, err := SearchEvents(s, SearchEventsInput{IDs: []string{"cafe1111aaaa"}})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		ids := make([]string, 0, len(got))
+		for _, ev := range got {
+			ids = append(ids, ev.ID)
+		}
+		if !equalStrings(ids, []string{"cafe1111aaaa"}) {
+			t.Errorf("ids: got %v want [cafe1111aaaa] (exact match, not the ambiguous cafe* prefix)", ids)
+		}
+	})
+
+	t.Run("unique prefix resolves", func(t *testing.T) {
+		got, _, err := SearchEvents(s, SearchEventsInput{IDs: []string{"feedac"}})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		ids := make([]string, 0, len(got))
+		for _, ev := range got {
+			ids = append(ids, ev.ID)
+		}
+		if !equalStrings(ids, []string{"feedaced1111"}) {
+			t.Errorf("ids: got %v want [feedaced1111]", ids)
+		}
+	})
+
+	t.Run("ambiguous prefix errors with candidates", func(t *testing.T) {
+		_, _, err := SearchEvents(s, SearchEventsInput{IDs: []string{"cafe"}})
+		if err == nil {
+			t.Fatal("expected an ambiguous-prefix error")
+		}
+		msg := err.Error()
+		if !strings.Contains(msg, "cafe1111aaaa") || !strings.Contains(msg, "cafe2222bbbb") {
+			t.Errorf("error %q must list both candidate ids", msg)
+		}
+	})
+
+	t.Run("short prefix rejected", func(t *testing.T) {
+		got, _, err := SearchEvents(s, SearchEventsInput{IDs: []string{"caf"}})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(got) != 0 {
+			t.Errorf("got %d events, want 0 — a 3-char prefix must not auto-resolve or error", len(got))
+		}
+	})
+
+	t.Run("zero match unchanged", func(t *testing.T) {
+		got, _, err := SearchEvents(s, SearchEventsInput{IDs: []string{"zzzzzzzz"}})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(got) != 0 {
+			t.Errorf("got %d events, want 0", len(got))
+		}
+	})
+}
+
+// TestSearchEventsWrappedIDPrefixAmbiguous proves the ambiguous-prefix error
+// propagates through the agent-facing wrapped envelope call, not just the
+// unwrapped SearchEvents.
+func TestSearchEventsWrappedIDPrefixAmbiguous(t *testing.T) {
+	s := newTempStore(t)
+	for _, ev := range []event.Event{
+		{ID: "cafe1111aaaa", Actor: "svc-a", Timestamp: time.Now()},
+		{ID: "cafe2222bbbb", Actor: "svc-b", Timestamp: time.Now()},
+	} {
+		if _, err := s.Append(store.KindEvents, ev); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_, err := SearchEventsWrapped(s, SearchEventsInput{IDs: []string{"cafe"}}, "", nil)
+	if err == nil {
+		t.Fatal("expected an ambiguous-prefix error to propagate through SearchEventsWrapped")
+	}
+}
+
 // ---- search-findings -------------------------------------------------------
 
 // TestSearchFindings drives search-findings against a REAL core/store temp repo.
@@ -618,6 +718,87 @@ func TestSearchFindingsNilStore(t *testing.T) {
 	if _, err := SearchFindings(nil, SearchFindingsInput{}); err == nil {
 		t.Fatal("expected error for nil store")
 	}
+}
+
+// ---- search-findings: mallcoppro-448 git-style unique-prefix id lookup -----
+
+// TestSearchFindingsIDPrefix mirrors TestSearchEventsIDPrefix's ladder —
+// exact match, unique prefix, ambiguous prefix, short prefix, zero match —
+// but against findings, which are stored under the standard "finding-"
+// prefix: a BARE truncated hash must still resolve through the same
+// findingIDCandidates "finding-"+id direction the exact-match lenience uses.
+func TestSearchFindingsIDPrefix(t *testing.T) {
+	s := newTempStore(t)
+	base := time.Date(2026, 4, 10, 9, 0, 0, 0, time.UTC)
+	seed := []finding.Finding{
+		{ID: "finding-cafe1111aaaa", Actor: "svc-a", Timestamp: base},
+		{ID: "finding-cafe2222bbbb", Actor: "svc-b", Timestamp: base.Add(time.Hour)},
+		{ID: "finding-feedaced1111", Actor: "svc-c", Timestamp: base.Add(2 * time.Hour)},
+	}
+	for _, f := range seed {
+		if _, err := s.Append(store.KindFindings, f); err != nil {
+			t.Fatalf("append finding %s: %v", f.ID, err)
+		}
+	}
+
+	t.Run("exact match still wins over a would-be-ambiguous prefix", func(t *testing.T) {
+		got, err := SearchFindings(s, SearchFindingsInput{IDs: []string{"finding-cafe1111aaaa"}})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		ids := make([]string, 0, len(got))
+		for _, f := range got {
+			ids = append(ids, f.ID)
+		}
+		if !equalStrings(ids, []string{"finding-cafe1111aaaa"}) {
+			t.Errorf("ids: got %v want [finding-cafe1111aaaa]", ids)
+		}
+	})
+
+	t.Run("unique prefix resolves (bare hash, finding- prefix added)", func(t *testing.T) {
+		got, err := SearchFindings(s, SearchFindingsInput{IDs: []string{"feedac"}})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		ids := make([]string, 0, len(got))
+		for _, f := range got {
+			ids = append(ids, f.ID)
+		}
+		if !equalStrings(ids, []string{"finding-feedaced1111"}) {
+			t.Errorf("ids: got %v want [finding-feedaced1111]", ids)
+		}
+	})
+
+	t.Run("ambiguous prefix errors with candidates", func(t *testing.T) {
+		_, err := SearchFindings(s, SearchFindingsInput{IDs: []string{"cafe"}})
+		if err == nil {
+			t.Fatal("expected an ambiguous-prefix error")
+		}
+		msg := err.Error()
+		if !strings.Contains(msg, "finding-cafe1111aaaa") || !strings.Contains(msg, "finding-cafe2222bbbb") {
+			t.Errorf("error %q must list both candidate ids", msg)
+		}
+	})
+
+	t.Run("short prefix rejected", func(t *testing.T) {
+		got, err := SearchFindings(s, SearchFindingsInput{IDs: []string{"caf"}})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(got) != 0 {
+			t.Errorf("got %d findings, want 0 — a 3-char prefix must not auto-resolve or error", len(got))
+		}
+	})
+
+	t.Run("zero match unchanged", func(t *testing.T) {
+		got, err := SearchFindings(s, SearchFindingsInput{IDs: []string{"zzzzzzzz"}})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(got) != 0 {
+			t.Errorf("got %d findings, want 0", len(got))
+		}
+	})
 }
 
 // ---- helpers ---------------------------------------------------------------
