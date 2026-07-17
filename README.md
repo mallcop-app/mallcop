@@ -74,6 +74,8 @@ Scan complete
   Findings detected:  2
   Escalated:          2
   Resolved:           0
+  Investigated:       0
+  Investigations degraded: 2
 ```
 
 `scan` discovers `mallcop.yaml`, reads its `connectors:`/`store:`/`inference:`
@@ -82,6 +84,14 @@ and commits findings + decisions into `store/`. With no inference endpoint
 configured (the OSS default), every finding force-escalates — the documented
 fail-safe — so the sample scan above runs end to end with zero credentials.
 Exit code `1` means findings were detected, not that the scan failed.
+
+Every escalated finding is also investigated at detection time: a
+deterministic evidence chain (actor provenance, timing recurrence, baseline
+history, scan-schedule correlation) is committed beside the finding at
+`store/investigations/<finding-id>.json`, on by default. With no inference
+endpoint configured the model narrative degrades honestly (`Investigations
+degraded` above) — the evidence still ships. See `investigate:` in
+`mallcop.yaml` to tune or disable it.
 
 (The old flag-only invocation — `mallcop scan --events events.jsonl --store
 store` — still works and takes precedence over the config for any flag you

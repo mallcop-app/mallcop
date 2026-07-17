@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -18,6 +19,7 @@ import (
 	"github.com/mallcop-app/mallcop/core/config"
 	"github.com/mallcop-app/mallcop/core/connect"
 	"github.com/mallcop-app/mallcop/core/inference"
+	"github.com/mallcop-app/mallcop/core/inquest"
 	"github.com/mallcop-app/mallcop/core/pipeline"
 	"github.com/mallcop-app/mallcop/core/store"
 	"github.com/mallcop-app/mallcop/core/toolrun"
@@ -45,6 +47,20 @@ const (
 	// data). The --learned-mappings flag wins over it; both absent => no overlay
 	// (classification is byte-identical to the pre-overlay behavior).
 	envLearnedMappings = "MALLCOP_LEARNED_MAPPINGS"
+	// envInvestigate overrides investigate.enabled: "off"|"0"|"false" disables,
+	// "on"|"1"|"true" enables. Any other (or unset) value leaves the
+	// config/default value alone.
+	envInvestigate = "MALLCOP_INVESTIGATE"
+	// envInvestigateModel overrides investigate.model (the narrate call's
+	// model id — "" means inherit the scan's resolved inference model).
+	envInvestigateModel = "MALLCOP_INVESTIGATE_MODEL"
+	// envInvestigateMax overrides investigate.max_per_scan (the per-scan
+	// metered-narrate-call budget).
+	envInvestigateMax = "MALLCOP_INVESTIGATE_MAX"
+	// envMallcopVersion is a best-effort provenance stamp threaded onto
+	// investigation records and the KindScans register — set by the deploy
+	// workflow when re-pinning the release tag; empty when unknown.
+	envMallcopVersion = "MALLCOP_VERSION"
 )
 
 // ScanSummary holds the results of a completed scan cycle.
@@ -57,6 +73,11 @@ type ScanSummary struct {
 	FindingsDetected  int `json:"findings_detected"`
 	Escalated         int `json:"escalated"`
 	Resolved          int `json:"resolved"`
+	// Investigated/InvestigationsDegraded mirror pipeline.Summary's
+	// detection-time-investigation counters (mallcoppro-e3c). Omitted when
+	// zero (investigate disabled, or nothing escalated this scan).
+	Investigated           int `json:"investigated,omitempty"`
+	InvestigationsDegraded int `json:"investigations_degraded,omitempty"`
 }
 
 // scanOutput collects structured Findings and Resolutions parsed from a JSONL
@@ -99,6 +120,7 @@ func runScan(args []string) error {
 	tuningPath := fs.String("tuning", "", "Optional path to a detector tuning YAML (widen-only extra_* knobs)")
 	maxFindings := fs.Int("max-findings", 0, "Volume circuit-breaker ceiling: a scan producing MORE findings than this force-escalates a critical meta-finding to a human (0 = default 25)")
 	configPath := fs.String("config", "", "Path to mallcop.yaml (overrides discovery/$"+config.EnvConfigPath+"); absent config => today's flag-only behavior")
+	noInvestigate := fs.Bool("no-investigate", false, "Disable detection-time investigation for this run (see investigate: in mallcop.yaml, $"+envInvestigate+")")
 
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -267,6 +289,56 @@ func runScan(args []string) error {
 		resolvedMax = cfg.Budgets.MaxFindings
 	}
 
+	// (3.95) Resolve the investigate: config for detection-time investigation
+	// (mallcoppro-e3c). Precedence flag > env > config > default, same helper
+	// discipline as the rest of this function — but UNLIKE the legacy fields
+	// above, this does NOT gate on haveConfig: cfg is always the
+	// Defaults()-floored effective config regardless of whether a mallcop.yaml
+	// was found (config.LoadEffective's contract), so investigate is ON by
+	// default even on a zero-config deploy — the feature ships in the BINARY,
+	// no scan.yml template change required.
+	investigateWindow := func(s string, def time.Duration) time.Duration {
+		if s == "" {
+			return def
+		}
+		d, perr := time.ParseDuration(s)
+		if perr != nil {
+			return def
+		}
+		return d
+	}
+	investigateCfg := inquest.Config{
+		Enabled:           cfg.Investigate.Enabled,
+		Model:             cfg.Investigate.Model,
+		MaxPerScan:        cfg.Investigate.MaxPerScan,
+		Retries:           cfg.Investigate.Retries,
+		NeighborWindow:    investigateWindow(cfg.Investigate.NeighborWindow, time.Hour),
+		MaxNeighbors:      cfg.Investigate.MaxNeighbors,
+		CorrelationWindow: investigateWindow(cfg.Investigate.CorrelationWindow, 10*time.Minute),
+		MaxTokens:         cfg.Investigate.MaxTokens,
+	}
+	if v := os.Getenv(envInvestigate); v != "" {
+		switch strings.ToLower(v) {
+		case "off", "0", "false":
+			investigateCfg.Enabled = false
+		case "on", "1", "true":
+			investigateCfg.Enabled = true
+		}
+	}
+	if v := os.Getenv(envInvestigateModel); v != "" {
+		investigateCfg.Model = v
+	}
+	if v := os.Getenv(envInvestigateMax); v != "" {
+		if n, perr := strconv.Atoi(v); perr == nil && n > 0 {
+			investigateCfg.MaxPerScan = n
+		}
+	}
+	if *noInvestigate {
+		// Flag has the HIGHEST precedence — applied last so it always wins,
+		// including over $MALLCOP_INVESTIGATE=on.
+		investigateCfg.Enabled = false
+	}
+
 	// (4) Run the pipeline.
 	ctx := context.Background()
 	sum, err := pipeline.Run(ctx, pipeline.Config{
@@ -296,9 +368,21 @@ func runScan(args []string) error {
 			ConsensusRuns: agent.DefaultConsensusRuns,
 			Tools:         &toolrun.Runner{Store: st, Baseline: bl, RepoRoot: ""},
 		},
+		// Investigate: detection-time investigation (mallcoppro-e3c). Runs
+		// STRICTLY AFTER resolutions commit (core/pipeline's step 5) — it
+		// cannot influence Resolved/Escalated above.
+		Investigate:    investigateCfg,
+		MallcopVersion: os.Getenv(envMallcopVersion),
 	})
 	if err != nil {
 		return fmt.Errorf("scan: %w", err)
+	}
+
+	// Non-fatal stderr warning per degraded/failed investigation record — same
+	// pattern as the gated Discord-emit warning below: the finding's own
+	// evidence-only record already shipped, this is visibility only.
+	for _, w := range sum.InvestigationWarnings {
+		fmt.Fprintf(os.Stderr, "scan: inquest: %s\n", w)
 	}
 
 	// (4.5) GATED Discord emit: when DISCORD_WEBHOOK_URL is set, post the
@@ -319,11 +403,13 @@ func runScan(args []string) error {
 	}
 
 	out := ScanSummary{
-		EventsScanned:     sum.EventsScanned,
-		DuplicatesSkipped: sum.DuplicatesSkipped,
-		FindingsDetected:  sum.FindingsDetected,
-		Escalated:         sum.Escalated,
-		Resolved:          sum.Resolved,
+		EventsScanned:          sum.EventsScanned,
+		DuplicatesSkipped:      sum.DuplicatesSkipped,
+		FindingsDetected:       sum.FindingsDetected,
+		Escalated:              sum.Escalated,
+		Resolved:               sum.Resolved,
+		Investigated:           sum.Investigated,
+		InvestigationsDegraded: sum.InvestigationsDegraded,
 	}
 	if *asJSON {
 		if err := printJSON(out); err != nil {
@@ -595,6 +681,12 @@ func printSummary(s ScanSummary) {
 	fmt.Printf("  Findings detected:  %d\n", s.FindingsDetected)
 	fmt.Printf("  Escalated:          %d\n", s.Escalated)
 	fmt.Printf("  Resolved:           %d\n", s.Resolved)
+	if s.Investigated > 0 || s.InvestigationsDegraded > 0 {
+		fmt.Printf("  Investigated:       %d\n", s.Investigated)
+		if s.InvestigationsDegraded > 0 {
+			fmt.Printf("  Investigations degraded: %d\n", s.InvestigationsDegraded)
+		}
+	}
 }
 
 // printJSON writes the summary as JSON to stdout.

@@ -28,9 +28,9 @@ func TestResolvePrecedence(t *testing.T) {
 		defV  = "default-endpoint"
 	)
 	cases := []struct {
-		name             string
-		flag, env, cfg   string
-		want             string
+		name           string
+		flag, env, cfg string
+		want           string
 	}{
 		{"flag wins over all", flagV, envV, cfgV, flagV},
 		{"env wins when no flag", "", envV, cfgV, envV},
@@ -200,6 +200,74 @@ func TestLoadRejectsInlineSecretConnectorEnv(t *testing.T) {
 func TestDefaultsModelIsRealLane(t *testing.T) {
 	if got := Defaults().Inference.Model; got != "triage" {
 		t.Fatalf("Defaults().Inference.Model = %q, want triage (a real lane)", got)
+	}
+}
+
+// TestDefaultsInvestigateOnByDefault proves detection-time investigation
+// (mallcoppro-e3c) is ON with the documented budget/window defaults even with
+// NO config file present — the "ships in the binary, no template change"
+// requirement — and that Load("") (the absent-config path) resolves to the
+// identical defaults, not a zero-value struct.
+func TestDefaultsInvestigateOnByDefault(t *testing.T) {
+	want := Investigate{
+		Enabled: true, Model: "", MaxPerScan: 10, Retries: 0,
+		NeighborWindow: "1h", MaxNeighbors: 50, CorrelationWindow: "10m", MaxTokens: 1024,
+	}
+	if got := Defaults().Investigate; got != want {
+		t.Fatalf("Defaults().Investigate = %+v, want %+v", got, want)
+	}
+	cfg, err := Load("")
+	if err != nil {
+		t.Fatalf("Load(\"\"): %v", err)
+	}
+	if cfg.Investigate != want {
+		t.Fatalf("Load(\"\").Investigate = %+v, want %+v", cfg.Investigate, want)
+	}
+}
+
+// TestLoadInvestigateBlockOverridesOnlySetFields proves a PARTIAL
+// investigate: block overlays onto Defaults() — an explicit max_per_scan
+// override keeps every other Investigate default (enabled stays true, etc.),
+// matching the rest of this package's partial-overlay contract.
+func TestLoadInvestigateBlockOverridesOnlySetFields(t *testing.T) {
+	p := writeConfig(t, t.TempDir(), "investigate:\n  max_per_scan: 3\n")
+	cfg, err := Load(p)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Investigate.MaxPerScan != 3 {
+		t.Errorf("Investigate.MaxPerScan = %d, want 3", cfg.Investigate.MaxPerScan)
+	}
+	if !cfg.Investigate.Enabled {
+		t.Error("Investigate.Enabled should keep its default (true) when only max_per_scan is set")
+	}
+	if cfg.Investigate.NeighborWindow != "1h" {
+		t.Errorf("Investigate.NeighborWindow = %q, want default 1h preserved", cfg.Investigate.NeighborWindow)
+	}
+}
+
+// TestLoadInvestigateExplicitlyDisabled proves an explicit `enabled: false`
+// overrides the ON default — the same "explicit false still wins" contract
+// every other bool in this package documents.
+func TestLoadInvestigateExplicitlyDisabled(t *testing.T) {
+	p := writeConfig(t, t.TempDir(), "investigate:\n  enabled: false\n")
+	cfg, err := Load(p)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Investigate.Enabled {
+		t.Error("explicit investigate.enabled: false should override the ON default")
+	}
+}
+
+// TestLoadRejectsUnknownInvestigateKey proves the strict decode extends to
+// the investigate: block — a typo'd/unknown key is a loud load error, exactly
+// like every other section (design: "strict decode only rejects PRESENT
+// unknown keys").
+func TestLoadRejectsUnknownInvestigateKey(t *testing.T) {
+	p := writeConfig(t, t.TempDir(), "investigate:\n  enabled: true\n  bogus_field: value\n")
+	if _, err := Load(p); err == nil {
+		t.Fatal("expected a load error for an unknown investigate: key")
 	}
 }
 

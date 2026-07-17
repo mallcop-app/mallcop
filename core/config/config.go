@@ -57,6 +57,7 @@ type Config struct {
 	Learning    Learning    `yaml:"learning"`
 	Sovereignty Sovereignty `yaml:"sovereignty"`
 	Budgets     Budgets     `yaml:"budgets"`
+	Investigate Investigate `yaml:"investigate"`
 }
 
 // Inference is the LLM rail. mode is donut (Forge managed) | byoi | offline.
@@ -214,6 +215,31 @@ type Budgets struct {
 	SelfextSpendCapUSD float64 `yaml:"selfext_spend_cap_usd"`
 }
 
+// Investigate configures detection-time investigation (mallcoppro-e3c): after
+// a scan escalates a finding, ONE metered narrate call assembles a
+// deterministic evidence chain (identity, neighbors, recurrence, baseline,
+// scan-schedule correlation) and a model narrative, committed beside the
+// finding as investigations/<finding-id>.json (core/inquest). DEFAULT ON —
+// this feature ships IN THE BINARY, not gated behind a mallcop.yaml template
+// change: an absent investigate: block resolves to exactly these defaults, so
+// a zero-config deploy still gets detection-time investigation, bounded by
+// MaxPerScan.
+type Investigate struct {
+	Enabled bool `yaml:"enabled"`
+	// Model is "" (inherit inference.model) or an explicit lane name (e.g.
+	// "investigate") to pin a stronger Forge lane for the narrate call.
+	Model      string `yaml:"model"`
+	MaxPerScan int    `yaml:"max_per_scan"`
+	// Retries is carried for schema completeness only — core/inquest always
+	// makes exactly ONE call per finding regardless of this value (the hard
+	// one-call contract; see core/inquest.Config's doc comment).
+	Retries           int    `yaml:"retries"`
+	NeighborWindow    string `yaml:"neighbor_window"`
+	MaxNeighbors      int    `yaml:"max_neighbors"`
+	CorrelationWindow string `yaml:"correlation_window"`
+	MaxTokens         int    `yaml:"max_tokens"`
+}
+
 // Defaults returns the built-in default Config — the safe OSS defaults `mallcop
 // init` generates (design §B): offline fail-safe inference, auto-mutation OFF,
 // the single sample file connector, learning.dir=detectors, the $25 cap. An
@@ -230,7 +256,7 @@ func Defaults() Config {
 			// the lane names (triage/investigate/heal) to a Bedrock model and 404s
 			// on anything else. triage (glm-4.7-flash, open sovereignty) is the
 			// cheapest lane and the safe default (mallcoppro-2b9).
-			Model:    "triage",
+			Model: "triage",
 		},
 		Store: Store{Path: "./store", Baseline: ""},
 		Connectors: []Connector{
@@ -243,6 +269,10 @@ func Defaults() Config {
 		Learning:    Learning{Dir: "detectors", Autonomy: AutonomyNon, EnforcePin: false, ContributeBack: false},
 		Sovereignty: Sovereignty{Tier: "open", ContributeBack: false},
 		Budgets:     Budgets{MaxFindings: 25, ScanTimeout: "10m", SelfextSpendCapUSD: 25},
+		Investigate: Investigate{
+			Enabled: true, Model: "", MaxPerScan: 10, Retries: 0,
+			NeighborWindow: "1h", MaxNeighbors: 50, CorrelationWindow: "10m", MaxTokens: 1024,
+		},
 	}
 }
 

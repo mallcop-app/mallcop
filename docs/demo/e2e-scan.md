@@ -86,7 +86,8 @@ The JSON summary (exit code **1** = findings present):
   "events_scanned": 2,
   "findings_detected": 2,
   "escalated": 2,
-  "resolved": 0
+  "resolved": 0,
+  "investigations_degraded": 2
 }
 ```
 

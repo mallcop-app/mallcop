@@ -3,6 +3,7 @@ package store
 import (
 	"encoding/json"
 	"fmt"
+	"time"
 )
 
 // Directive is an operator-steering record on the directives stream. It is
@@ -82,6 +83,40 @@ func (s *Store) LoadConversation() ([]Turn, error) {
 			return nil, fmt.Errorf("store: decode turn %d: %w", i, err)
 		}
 		out = append(out, t)
+	}
+	return out, nil
+}
+
+// ScanRecord is one entry on the scans stream (mallcoppro-e3c): a durable,
+// rotation-surviving register of every completed `mallcop scan` run — appended
+// by core/pipeline.Run at the end of EVERY run, findings or not. It is the
+// authoritative source detection-time investigation's scan-schedule
+// correlation reads first (CommitTimesFor is the historical fallback for scan
+// times that predate this stream).
+type ScanRecord struct {
+	StartedAt        time.Time `json:"started_at"`
+	FinishedAt       time.Time `json:"finished_at"`
+	EventsScanned    int       `json:"events_scanned"`
+	FindingsDetected int       `json:"findings_detected"`
+	Escalated        int       `json:"escalated"`
+	MallcopVersion   string    `json:"mallcop_version,omitempty"`
+}
+
+// LoadScans replays the scans stream into typed ScanRecord records, oldest
+// first. A store that has never completed a scan (or predates KindScans)
+// returns an empty slice, not an error.
+func (s *Store) LoadScans() ([]ScanRecord, error) {
+	raws, err := s.Load(KindScans)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]ScanRecord, 0, len(raws))
+	for i, raw := range raws {
+		var r ScanRecord
+		if err := json.Unmarshal(raw, &r); err != nil {
+			return nil, fmt.Errorf("store: decode scan record %d: %w", i, err)
+		}
+		out = append(out, r)
 	}
 	return out, nil
 }

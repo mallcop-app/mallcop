@@ -88,6 +88,15 @@ func TestScanE2E_BinaryAgainstCannedBackend(t *testing.T) {
 		// Pin the cascade corpus root to the repo so the injection-probe
 		// force-escalate route fires inside the built binary.
 		"MALLCOP_REPO_ROOT="+repoRoot(t),
+		// This test's scope is the CASCADE's model-call mechanics (the exact
+		// triage+investigate call count, and the pre-LLM force-escalate
+		// floor) — detection-time investigation (mallcoppro-e3c, default ON)
+		// is a SEPARATE concern with its own coverage (core/inquest,
+		// core/pipeline's inquest_integration_test.go). Disabled here so this
+		// cannedbackend's cascade-shaped script isn't ALSO asked to serve
+		// inquest's narrate call (a different reply shape) and inflate the
+		// call count this test asserts.
+		"MALLCOP_INVESTIGATE=off",
 	)
 	out, err := cmd.CombinedOutput()
 	t.Logf("mallcop scan output:\n%s", out)
