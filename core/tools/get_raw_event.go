@@ -31,6 +31,15 @@
 // eventIDCandidates tries the id as given and, if it carries a "finding-"
 // prefix, the id with that prefix stripped — so a finding id echoed from
 // earlier in the conversation still resolves to its underlying event.
+//
+// mallcoppro-448: when no exact match (including the finding-/bare lenience
+// above) is found, GetRawEvent falls back to git-style unique-prefix
+// resolution — a truncated id (copied from a UI list, or paraphrased by the
+// model from earlier context) still resolves as long as it is a prefix of
+// exactly one stored event id. An ambiguous prefix (more than one match) is
+// reported back as an error listing the candidate ids so the model can
+// disambiguate; a prefix shorter than minIDPrefixLen, or one matching
+// nothing, falls through to the existing not-found result unchanged.
 package tools
 
 import (
@@ -90,11 +99,15 @@ type GetRawEventOutput struct {
 
 // GetRawEvent reads the events stream from the store and returns the full,
 // scrubbed, size-capped payload of the ONE event whose id matches (leniently,
-// per eventIDCandidates). GetRawEvent returns an error only for a genuine
+// per eventIDCandidates, then — if that fails — per a git-style unique-prefix
+// resolution, mallcoppro-448). GetRawEvent returns an error for a genuine
 // schema violation (nil store, unreadable store, malformed record JSON, empty
-// input id) — an id that resolves to no event is NOT an error, it is Found:
-// false with an explanatory Notes, so the model can self-recover (broaden,
-// try search_events/search_findings) instead of the call itself failing.
+// input id) AND for an ambiguous prefix match (more than one stored event
+// shares the requested prefix — the candidate list is in the error text so
+// the model can disambiguate). An id that resolves to no event (exactly, nor
+// as a unique prefix) is NOT an error, it is Found: false with an
+// explanatory Notes, so the model can self-recover (broaden, try
+// search_events/search_findings) instead of the call itself failing.
 func GetRawEvent(s *store.Store, in GetRawEventInput) (GetRawEventOutput, error) {
 	if s == nil {
 		return GetRawEventOutput{}, fmt.Errorf("get-raw-event: nil store")
@@ -113,15 +126,34 @@ func GetRawEvent(s *store.Store, in GetRawEventInput) (GetRawEventOutput, error)
 		candidates[c] = struct{}{}
 	}
 
+	events := make([]event.Event, 0, len(raws))
 	for i, raw := range raws {
 		var ev event.Event
 		if err := json.Unmarshal(normalizeRecordKeys(raw), &ev); err != nil {
 			return GetRawEventOutput{}, fmt.Errorf("get-raw-event: decode event %d: %w", i, err)
 		}
-		if _, ok := candidates[strings.ToLower(ev.ID)]; !ok {
-			continue
+		if _, ok := candidates[strings.ToLower(ev.ID)]; ok {
+			return buildRawEventOutput(ev.ID, ev.Payload), nil
 		}
-		return buildRawEventOutput(ev.ID, ev.Payload), nil
+		events = append(events, ev)
+	}
+
+	// mallcoppro-448: no exact match — fall back to git-style unique-prefix
+	// resolution before giving up. events already holds every decoded record
+	// (the exact-match loop above only returns early on a hit), so this reuses
+	// that decode work rather than re-reading the store.
+	pool := make([]string, len(events))
+	for i, ev := range events {
+		pool[i] = ev.ID
+	}
+	if matched, ambiguous, total := resolveEventIDPrefix(in.ID, pool); matched != "" {
+		for _, ev := range events {
+			if strings.EqualFold(ev.ID, matched) {
+				return buildRawEventOutput(ev.ID, ev.Payload), nil
+			}
+		}
+	} else if len(ambiguous) > 0 {
+		return GetRawEventOutput{}, ambiguousIDError("get-raw-event", in.ID, ambiguous, total)
 	}
 
 	return GetRawEventOutput{
