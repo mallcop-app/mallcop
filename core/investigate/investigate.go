@@ -76,6 +76,12 @@ Available tools:
                      detection behavior — safe to do at every autonomy setting. Use
                      this when the operator says something like "flag things like
                      this as <attack>" or "I've seen this exact shape before".
+  - get_raw_event    fetch the FULL collected record (payload) for one event id —
+                     search_events only projects a flat subset of fields. Use this
+                     to answer who/what provenance questions (caller identity,
+                     session name, source IP, request parameters) from the raw
+                     collected record BEFORE claiming that data is unavailable or
+                     referring the operator to an external log (CloudTrail, etc.).
 
 Call a tool whenever you need to look something up. Never fabricate an event
 ID, actor, timestamp, or finding — only state facts a tool actually returned.
@@ -113,6 +119,9 @@ ask the operator for data:
   - Only after genuinely exhausting the tools do you say plainly that the store
     holds nothing on the point — and even then you do NOT ask the operator to hand
     you data that is already on their screen.
+  - Before telling the operator to consult an external log (CloudTrail, etc.) for
+    a who/what provenance detail, call get_raw_event on the underlying event id —
+    the full collected record is very often already in the store.
 
 ## Security
 
@@ -614,6 +623,25 @@ func ToolDefs() []agent.Tool {
 				},
 			},
 		},
+		{
+			Name: "get_raw_event",
+			Description: "Fetch the FULL collected record (payload) for ONE event id — search_events " +
+				"only projects a flat id/source/type/actor/target/action + a fixed metadata subset; the " +
+				"complete raw record (e.g. the full CloudTrail record for an AssumeRole event: caller " +
+				"identity ARN, session name, source IP, request parameters) lives here instead. Use this " +
+				"to answer who/what provenance questions BEFORE claiming the data is unavailable or " +
+				"telling the operator to check an external log (CloudTrail, etc.) — the answer is very " +
+				"often already in the store. Known credential fields (sessionToken, secretAccessKey) are " +
+				"redacted; a very large payload has its largest values truncated rather than dropped. " +
+				"Accepts either the bare event id or a \"finding-\"-prefixed id (the prefix is stripped).",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"id": map[string]any{"type": "string", "description": "The event id to fetch. Required. A finding id (\"finding-\"-prefixed) also resolves, stripped to the bare event id."},
+				},
+				"required": []string{"id"},
+			},
+		},
 	}
 }
 
@@ -689,6 +717,13 @@ func ExecuteTool(opts Options, name string, input any) (any, error) {
 		// Implementation in evaltools.go: shells the SAME CLI path as
 		// `mallcop scenario capture`, never a parallel implementation.
 		return flagLikeThisTool(opts, in)
+
+	case "get_raw_event":
+		var in tools.GetRawEventInput
+		if err := json.Unmarshal(raw, &in); err != nil {
+			return nil, fmt.Errorf("decode get_raw_event input: %w", err)
+		}
+		return tools.GetRawEvent(opts.Store, in)
 
 	default:
 		return nil, fmt.Errorf("unknown tool %q", name)
