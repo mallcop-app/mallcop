@@ -350,6 +350,9 @@ func TestSearchEvents(t *testing.T) {
 		{ID: "e2", Source: "github", Type: "push", Actor: "ci-bot", Timestamp: base.Add(1 * time.Hour)},
 		{ID: "e3", Source: "azure", Type: "container_restart", Actor: "deploy-svc", Timestamp: base.Add(2 * time.Hour)},
 		{ID: "e4", Source: "github", Type: "delete", Actor: "baron", Timestamp: base.Add(3 * time.Hour)},
+		// mallcoppro-45c: a bare-hash event id, stored WITHOUT a "finding-" prefix,
+		// used to prove the reverse leniency direction below.
+		{ID: "cafe1234", Source: "aws", Type: "assume_role", Actor: "svc-role", Timestamp: base.Add(4 * time.Hour)},
 	}
 	for _, ev := range seed {
 		if _, err := s.Append(store.KindEvents, ev); err != nil {
@@ -366,7 +369,7 @@ func TestSearchEvents(t *testing.T) {
 		{
 			name:    "no filter returns all in order",
 			input:   SearchEventsInput{},
-			wantIDs: []string{"e1", "e2", "e3", "e4"},
+			wantIDs: []string{"e1", "e2", "e3", "e4", "cafe1234"},
 		},
 		{
 			name:    "actor filter case-insensitive",
@@ -421,6 +424,19 @@ func TestSearchEvents(t *testing.T) {
 			input:   SearchEventsInput{IDs: []string{"", "e3"}},
 			wantIDs: []string{"e3"},
 		},
+		{
+			// mallcoppro-45c: a "finding-"-prefixed id (echoed from the finding side
+			// of a conversation) still finds the underlying bare-hash event.
+			name:    "finding-prefixed id finds the bare event",
+			input:   SearchEventsInput{IDs: []string{"finding-cafe1234"}},
+			wantIDs: []string{"cafe1234"},
+		},
+		{
+			// The prefix match is case-insensitive too.
+			name:    "finding-prefixed id case-insensitive",
+			input:   SearchEventsInput{IDs: []string{"FINDING-CAFE1234"}},
+			wantIDs: []string{"cafe1234"},
+		},
 	}
 
 	for _, tc := range cases {
@@ -471,6 +487,9 @@ func TestSearchFindings(t *testing.T) {
 		{ID: "f1", Source: "detector:unusual-login", Severity: "high", Type: "unusual-login", Actor: "baron", Timestamp: base},
 		{ID: "f2", Source: "detector:new-actor", Severity: "medium", Type: "new-actor", Actor: "ci-bot", Timestamp: base.Add(1 * time.Hour)},
 		{ID: "f3", Source: "detector:unusual-login", Severity: "low", Type: "unusual-login", Actor: "baron", Timestamp: base.Add(2 * time.Hour)},
+		// mallcoppro-45c: a finding stored under the standard "finding-" prefix,
+		// used to prove a bare-hash lookup still resolves it.
+		{ID: "finding-cafe1234", Source: "detector:new-external-access", Severity: "high", Type: "new-external-access", Actor: "svc-role", Timestamp: base.Add(3 * time.Hour)},
 	}
 	for _, f := range seed {
 		if _, err := s.Append(store.KindFindings, f); err != nil {
@@ -486,7 +505,7 @@ func TestSearchFindings(t *testing.T) {
 		{
 			name:    "no filter returns all in order",
 			input:   SearchFindingsInput{},
-			wantIDs: []string{"f1", "f2", "f3"},
+			wantIDs: []string{"f1", "f2", "f3", "finding-cafe1234"},
 		},
 		{
 			name:    "actor filter case-insensitive",
@@ -539,7 +558,7 @@ func TestSearchFindings(t *testing.T) {
 		{
 			name:    "since lower bound inclusive",
 			input:   SearchFindingsInput{Since: base.Add(1 * time.Hour)},
-			wantIDs: []string{"f2", "f3"},
+			wantIDs: []string{"f2", "f3", "finding-cafe1234"},
 		},
 		{
 			name:    "actor + since combined",
@@ -550,6 +569,20 @@ func TestSearchFindings(t *testing.T) {
 			name:    "no match yields empty",
 			input:   SearchFindingsInput{Actor: "nobody"},
 			wantIDs: []string{},
+		},
+		{
+			// mallcoppro-45c: the live-chat bug — a bare event hash queried against
+			// search_findings must still resolve the "finding-"-prefixed finding
+			// instead of exact-equality silently returning nothing.
+			name:    "bare hash finds prefixed finding",
+			input:   SearchFindingsInput{IDs: []string{"cafe1234"}},
+			wantIDs: []string{"finding-cafe1234"},
+		},
+		{
+			// The bare-hash leniency is case-insensitive too.
+			name:    "bare hash lookup is case-insensitive",
+			input:   SearchFindingsInput{IDs: []string{"CAFE1234"}},
+			wantIDs: []string{"finding-cafe1234"},
 		},
 	}
 

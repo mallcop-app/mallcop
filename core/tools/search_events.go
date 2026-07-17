@@ -77,10 +77,17 @@ func SearchEvents(s *store.Store, in SearchEventsInput) (events []event.Event, t
 	// An empty-string entry in IDs would otherwise match no event and, being the
 	// only filter, wrongly empty the result; build a normalized lookup set that
 	// skips blanks so a model that echoes an "" id is tolerated.
+	//
+	// mallcoppro-45c: a requested id carrying a "finding-" prefix (echoed from
+	// the finding side of a conversation) is also tried with the prefix
+	// stripped, so it still resolves to the underlying bare-hash event id.
 	idSet := map[string]struct{}{}
 	for _, id := range in.IDs {
-		if id != "" {
-			idSet[strings.ToLower(id)] = struct{}{}
+		if id == "" {
+			continue
+		}
+		for _, c := range eventIDCandidates(id) {
+			idSet[c] = struct{}{}
 		}
 	}
 

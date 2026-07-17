@@ -62,10 +62,18 @@ func SearchFindings(s *store.Store, in SearchFindingsInput) ([]finding.Finding, 
 	// An empty-string entry in IDs would otherwise match no finding and, being a
 	// filter, wrongly empty the result; build a normalized lookup set that skips
 	// blanks so a model that echoes an "" id is tolerated (mirrors search_events).
+	//
+	// mallcoppro-45c: each requested id also matches a stored finding whose id
+	// carries the standard "finding-" prefix — a model that queried with the
+	// bare event hash (as shown elsewhere in the console) still finds the
+	// prefixed finding, instead of exact-equality silently returning nothing.
 	idSet := map[string]struct{}{}
 	for _, id := range in.IDs {
-		if id != "" {
-			idSet[strings.ToLower(id)] = struct{}{}
+		if id == "" {
+			continue
+		}
+		for _, c := range findingIDCandidates(id) {
+			idSet[c] = struct{}{}
 		}
 	}
 

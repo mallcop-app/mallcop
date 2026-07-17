@@ -105,7 +105,11 @@ type EventView struct {
 // at what privilege; JUSTIFICATION (job_id / ticket_id / schedule / scheduled /
 // maintenance_window / window_id / post_deploy) is the legitimate-operation companion
 // that tells a scheduled batch apart from an unexplained bulk export — the
-// discriminator the bulk-export floor (core/eval) keys on. Only these keys are
+// discriminator the bulk-export floor (core/eval) keys on; IDENTITY (caller /
+// session_name / source_ip) is the promoted provenance triple normalize.go
+// surfaces alongside payload.raw (mallcoppro-37d's coordination item) so a
+// who/what-did-it question can be answered from the ordinary search_events view
+// without needing get_raw_event for the common case. Only these keys are
 // surfaced (the schema stays flat + fixed); every other payload field is omitted,
 // exactly as the rest of the projection is.
 var discriminatingMetaKeys = []string{
@@ -128,6 +132,9 @@ var discriminatingMetaKeys = []string{
 	"maintenance_window",
 	"window_id",
 	"post_deploy",
+	"caller",
+	"session_name",
+	"source_ip",
 }
 
 // eventViewFieldCap bounds a single projected EventView string. It matches the
