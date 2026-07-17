@@ -59,8 +59,17 @@ type NarrativeStatus string
 const (
 	StatusOK NarrativeStatus = "ok"
 	// StatusAbsentModelError covers a transport error, a non-2xx response, a
-	// context-deadline/panic, or any other failure BEFORE a reply was parsed.
+	// context-deadline, a panic INSIDE the model call itself (after processOne
+	// has actually attempted it — see StatusAbsentInternalError for a panic
+	// anywhere else), or any other failure BEFORE a reply was parsed.
 	StatusAbsentModelError NarrativeStatus = "absent-model-error"
+	// StatusAbsentInternalError covers a panic in processOne's OWN code BEFORE
+	// any model call was attempted — evidence assembly, prompt building, or
+	// (on the no-client/budget branches, where no call is ever attempted) the
+	// record write itself. Distinct from StatusAbsentModelError so an inquest
+	// bug is never mislabeled as a model/transport failure (mallcoppro-e3c
+	// review finding 3).
+	StatusAbsentInternalError NarrativeStatus = "absent-internal-error"
 	// StatusAbsentInvalidOutput covers a reply that came back but failed the
 	// deterministic validation matrix (bad enum, out-of-range confidence,
 	// empty/oversized narrative, unparseable JSON).

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"os/exec"
+	"strings"
 	"testing"
 	"time"
 
@@ -43,6 +44,58 @@ func newTempStore(t *testing.T) *store.Store {
 		t.Fatalf("open store: %v", err)
 	}
 	return s
+}
+
+// corruptHeadCommitObjectForTest overwrites the CURRENT HEAD commit's loose
+// object bytes with garbage, then returns a restore func. This is the ONLY
+// way to make store.Store.ReadSnapshot return a REAL (non-"not found") error
+// from this package's tests: Input.Store is a concrete *store.Store, not an
+// interface, so there is no mock seam.
+//
+// `git rev-parse HEAD` (store.head, which ReadSnapshot uses for its
+// not-found short-circuit) only resolves the ref chain — it never opens the
+// commit object — so it keeps succeeding after this corruption. `git cat-file
+// -p HEAD:path` (store.blobAt, which does the actual content read) DOES need
+// to open the commit object and fails with "fatal: loose object ... is
+// corrupt", a message that (unlike a merely-missing path) does NOT match any
+// of blobAt's not-found heuristics ("does not exist" / "Not a valid object
+// name" / "exists on disk, but not in") — so it surfaces as a genuine error,
+// simulating a transient git-pull/read failure on an otherwise-healthy repo.
+//
+// The caller MUST invoke the returned restore func before making any further
+// store calls in the test (a write during the corrupted window would either
+// fail outright or build on top of a HEAD whose content nothing can verify).
+func corruptHeadCommitObjectForTest(t *testing.T, s *store.Store) func() {
+	t.Helper()
+	shaOut, err := exec.Command("git", "-C", s.Path(), "rev-parse", "HEAD").Output()
+	if err != nil {
+		t.Fatalf("git rev-parse HEAD: %v", err)
+	}
+	sha := strings.TrimSpace(string(shaOut))
+	objPath := s.Path() + "/.git/objects/" + sha[:2] + "/" + sha[2:]
+
+	info, err := os.Stat(objPath)
+	if err != nil {
+		t.Fatalf("stat commit object %s: %v", objPath, err)
+	}
+	orig, err := os.ReadFile(objPath)
+	if err != nil {
+		t.Fatalf("read commit object %s: %v", objPath, err)
+	}
+	if err := os.Chmod(objPath, 0o644); err != nil {
+		t.Fatalf("chmod commit object %s: %v", objPath, err)
+	}
+	if err := os.WriteFile(objPath, []byte("corrupted-for-test-not-a-valid-git-object"), 0o644); err != nil {
+		t.Fatalf("corrupt commit object %s: %v", objPath, err)
+	}
+	return func() {
+		if err := os.WriteFile(objPath, orig, info.Mode()); err != nil {
+			t.Fatalf("restore commit object %s: %v", objPath, err)
+		}
+		if err := os.Chmod(objPath, info.Mode()); err != nil {
+			t.Fatalf("restore commit object mode %s: %v", objPath, err)
+		}
+	}
 }
 
 // seedEvent appends one event to the store's KindEvents stream.

@@ -394,3 +394,152 @@ func headSHA(t *testing.T, s *store.Store) string {
 	}
 	return strings.TrimSpace(string(out))
 }
+
+// TestRunAll_SetupPanicGuard proves review finding 1: a panic in RunAll's OWN
+// body (setup — the sort/slice-copy region BEFORE the per-finding loop,
+// which processOne's own guard cannot reach) is caught by RunAll's top-level
+// defer/recover and converted into the Outcome accumulated so far plus a
+// warning, never propagating out of RunAll. Forced via the
+// runAllPanicHookForTest seam (there is no naturally-reachable panic in
+// today's setup code — the seam exists precisely so this defensive guard is
+// provably exercised rather than merely inspected).
+func TestRunAll_SetupPanicGuard(t *testing.T) {
+	s := newTempStore(t)
+	orig := runAllPanicHookForTest
+	runAllPanicHookForTest = func() { panic("simulated RunAll setup panic") }
+	defer func() { runAllPanicHookForTest = orig }()
+
+	client := &scriptedClient{reply: `{"verdict":"benign","confidence":0.5,"narrative":"should never be reached — setup panics first"}`}
+	in := Input{
+		Store:    s,
+		Client:   client,
+		Findings: []EscalatedFinding{escalatedFor("finding-1", "a")},
+		Config:   okConfig(),
+	}
+
+	var out Outcome
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				t.Fatalf("RunAll panicked out of its own defer/recover: %v", r)
+			}
+		}()
+		out = RunAll(context.Background(), in)
+	}()
+
+	if len(out.Errors) == 0 {
+		t.Error("expected a non-empty Errors entry describing the setup panic")
+	}
+	if out.Investigated != 0 || out.Degraded != 0 || out.Skipped != 0 {
+		t.Errorf("Outcome = %+v, want all-zero counts (the panic pre-empted the per-finding loop entirely)", out)
+	}
+	if client.calls != 0 {
+		t.Errorf("client called %d times, want 0 (the loop never ran)", client.calls)
+	}
+	if data, err := s.ReadSnapshot(recordPath("finding-1")); err != nil || len(data) != 0 {
+		t.Errorf("expected no record written when RunAll panics in setup, got data=%q err=%v", data, err)
+	}
+}
+
+// TestRunAll_ExistingRecordReadError_SkipsWithoutBurningBudgetOrCreatedAt
+// proves review finding 2: when readExistingRecord's own read of an ALREADY
+// EXISTING record fails with a transient error (as opposed to the record
+// being cleanly absent), processOne skips the finding for THIS scan
+// entirely — zero narrate calls, the record on disk left byte-for-byte
+// untouched. Burning a metered call and resetting CreatedAt just because a
+// transient read hiccup made a good record LOOK absent would be worse than
+// doing nothing; the next scan simply retries the read.
+func TestRunAll_ExistingRecordReadError_SkipsWithoutBurningBudgetOrCreatedAt(t *testing.T) {
+	s := newTempStore(t)
+	client := &scriptedClient{reply: `{"verdict":"benign","confidence":0.9,"narrative":"first pass, before the read error."}`}
+	in := Input{Store: s, Client: client, Findings: []EscalatedFinding{escalatedFor("finding-1", "a")}, Config: okConfig()}
+
+	first := RunAll(context.Background(), in)
+	if first.Investigated != 1 {
+		t.Fatalf("seed run Outcome = %+v, want Investigated=1", first)
+	}
+	firstRec := readRecord(t, in, "finding-1")
+
+	restore := corruptHeadCommitObjectForTest(t, s)
+	second := RunAll(context.Background(), in)
+	restore()
+
+	if second.Investigated != 0 {
+		t.Errorf("second run Investigated = %d, want 0 (a read error must never proceed to a model call)", second.Investigated)
+	}
+	if second.Skipped != 0 {
+		t.Errorf("second run Skipped = %d, want 0 (this is the read-error skip, not the ok-skip path — it is tallied as Degraded)", second.Skipped)
+	}
+	if second.Degraded != 1 {
+		t.Errorf("second run Degraded = %d, want 1 (the read-error skip must be visible, not silent)", second.Degraded)
+	}
+	if len(second.Errors) == 0 {
+		t.Error("expected a non-empty Errors entry describing the read error")
+	}
+	if client.calls != 1 {
+		t.Errorf("client called %d times across two runs, want 1 (the read error must NOT burn a metered call)", client.calls)
+	}
+
+	secondRec := readRecord(t, in, "finding-1")
+	if secondRec.CreatedAt != firstRec.CreatedAt || secondRec.UpdatedAt != firstRec.UpdatedAt || secondRec.Narrative != firstRec.Narrative {
+		t.Errorf("record was overwritten despite the read error: first=%+v second=%+v", firstRec, secondRec)
+	}
+}
+
+// TestRunAll_AssemblyPanicOnPreviouslyDegradedRecord proves review finding 3:
+// a panic strictly BEFORE any model call was ever attempted (evidence
+// assembly) (a) gets the honest StatusAbsentInternalError label, never
+// StatusAbsentModelError — an assembly bug is not a model failure — and (b)
+// preserves a KNOWN prior CreatedAt instead of resetting it to now(), when
+// one exists: here, a previously-degraded record from an earlier run (the
+// re-investigation/refresh path, not a brand-new record).
+func TestRunAll_AssemblyPanicOnPreviouslyDegradedRecord(t *testing.T) {
+	s := newTempStore(t)
+	// Seed a previously-degraded record (invalid model output) so the SECOND
+	// run below takes the refresh path (found==true, not ok) rather than the
+	// brand-new-record path.
+	seedClient := &scriptedClient{reply: "not json at all"}
+	seedIn := Input{Store: s, Client: seedClient, Findings: []EscalatedFinding{escalatedFor("finding-1", "a")}, Config: okConfig()}
+	seedOut := RunAll(context.Background(), seedIn)
+	if seedOut.Degraded != 1 {
+		t.Fatalf("seed run Outcome = %+v, want Degraded=1", seedOut)
+	}
+	seedRec := readRecord(t, seedIn, "finding-1")
+	if seedRec.NarrativeStatus != StatusAbsentInvalidOutput {
+		t.Fatalf("seed record NarrativeStatus = %q, want %q", seedRec.NarrativeStatus, StatusAbsentInvalidOutput)
+	}
+
+	// Sleep past RFC3339's 1s resolution so a changed UpdatedAt is provably
+	// new, not a coincidence of running fast.
+	time.Sleep(1100 * time.Millisecond)
+
+	orig := processOnePanicHookForTest
+	processOnePanicHookForTest = func(findingID string) {
+		if findingID == "finding-1" {
+			panic("simulated assembly panic")
+		}
+	}
+	defer func() { processOnePanicHookForTest = orig }()
+
+	client := &scriptedClient{reply: `{"verdict":"benign","confidence":0.9,"narrative":"should never be reached — assembly panics first"}`}
+	in := Input{Store: s, Client: client, Findings: []EscalatedFinding{escalatedFor("finding-1", "a")}, Config: okConfig()}
+	out := RunAll(context.Background(), in)
+
+	if out.Degraded != 1 || out.Investigated != 0 {
+		t.Fatalf("Outcome = %+v, want Degraded=1/Investigated=0", out)
+	}
+	if client.calls != 0 {
+		t.Errorf("client called %d times, want 0 (assembly panicked before any model call was attempted)", client.calls)
+	}
+
+	rec := readRecord(t, in, "finding-1")
+	if rec.NarrativeStatus != StatusAbsentInternalError {
+		t.Errorf("NarrativeStatus = %q, want %q (an assembly panic is inquest's OWN bug, never a model-error mislabel)", rec.NarrativeStatus, StatusAbsentInternalError)
+	}
+	if rec.CreatedAt != seedRec.CreatedAt {
+		t.Errorf("CreatedAt = %q, want preserved from the prior record %q — a panic must not silently reset it", rec.CreatedAt, seedRec.CreatedAt)
+	}
+	if rec.UpdatedAt == seedRec.UpdatedAt {
+		t.Error("UpdatedAt did not change — expected a fresh UpdatedAt on this refresh attempt")
+	}
+}

@@ -109,7 +109,10 @@ type Outcome struct {
 	Investigated int
 	// Degraded counts findings this run wrote (or refreshed) a record for with
 	// any NarrativeStatus OTHER than "ok" — the deterministic evidence still
-	// shipped.
+	// shipped. ALSO counts a finding skipped after a transient error reading
+	// its existing record (readExistingRecord's error path in processOne) —
+	// that case writes NO record at all (protecting budget and CreatedAt);
+	// it is still tallied here so the operator sees it rather than silence.
 	Degraded int
 	// Skipped counts findings whose existing record was already current + ok:
 	// zero calls, zero writes. Not surfaced on pipeline.Summary; exists so a
@@ -123,17 +126,30 @@ type Outcome struct {
 // RunAll investigates every finding in in.Findings, at most ONE metered model
 // call per finding, budgeted at in.Config.MaxPerScan calls total THIS run,
 // and commits a Record to investigations/<finding-id>.json per finding (see
-// recordPath). It NEVER returns an error the caller must handle — every
-// failure mode (nil store, model failure, panic, marshal error) degrades an
-// INDIVIDUAL record; RunAll always returns a valid Outcome.
+// recordPath). It NEVER returns an error the caller must handle, AND IT NEVER
+// PANICS OUT — every failure mode (nil store, model failure, panic, marshal
+// error) degrades an INDIVIDUAL record via processOne's own per-finding
+// guard; a panic anywhere else in RunAll's OWN body (the deterministic-order
+// setup below, or any future code added to this function) is caught by the
+// top-level defer/recover immediately below and converted into the Outcome
+// accumulated so far plus a warning line, never propagated into the caller
+// (core/pipeline.Run — see pipeline.go's RunAll call site doc). This makes
+// failureSemantics' "the whole inquest step is panic-guarded" claim literally
+// true: there is no code path in this package that can crash the scan.
 //
 // Idempotency: a finding whose EXISTING record already has the current
 // SchemaVersion and NarrativeStatus "ok" is skipped entirely — zero calls,
 // zero store reads beyond the one existence check, zero writes. A finding
 // whose record is absent, schema-stale, or degraded is (re-)investigated,
 // preserving the original CreatedAt on a refresh.
-func RunAll(ctx context.Context, in Input) Outcome {
-	var out Outcome
+func RunAll(ctx context.Context, in Input) (out Outcome) {
+	defer func() {
+		if r := recover(); r != nil {
+			out.Errors = append(out.Errors, fmt.Sprintf(
+				"inquest: panic in RunAll outside any single finding's guard: %v — returning the %d investigated/%d degraded/%d skipped accumulated before the panic",
+				r, out.Investigated, out.Degraded, out.Skipped))
+		}
+	}()
 
 	if !in.Config.Enabled {
 		// Off-switch: no records at all, not even evidence-only.
@@ -150,6 +166,10 @@ func RunAll(ctx context.Context, in Input) Outcome {
 	maxPerScan := in.Config.MaxPerScan
 	if maxPerScan <= 0 {
 		maxPerScan = defaultMaxPerScan
+	}
+
+	if runAllPanicHookForTest != nil {
+		runAllPanicHookForTest()
 	}
 
 	// Deterministic order: a re-run of the same scan budgets identically
@@ -170,20 +190,46 @@ func RunAll(ctx context.Context, in Input) Outcome {
 	return out
 }
 
+// runAllPanicHookForTest, when non-nil, is invoked exactly once per RunAll
+// call, immediately after setup (maxPerScan resolution) and BEFORE the
+// sort/slice-copy step — the only seam a test can use to force a panic in
+// RunAll's OWN body (as opposed to inside one finding's processOne, which
+// panickingClient already covers) and prove the top-level defer/recover above
+// actually catches it. Always nil in production.
+var runAllPanicHookForTest func()
+
 // processOne handles exactly one finding under a panic guard: any panic
 // during evidence assembly, prompt building, or record write converts to a
-// degraded record rather than propagating (crashing the scan).
+// degraded record rather than propagating (crashing the scan). modelCallAttempted
+// tracks whether the panic happened during/after the actual model call (an
+// honest StatusAbsentModelError) or strictly BEFORE it — evidence assembly,
+// prompt building — which is inquest's OWN bug and must never be mislabeled
+// as a model failure (StatusAbsentInternalError instead; review finding 3a).
+// priorCreatedAt/havePriorCreatedAt are captured from the pre-panic
+// existing-record read (below) so the panic-guard fallback record preserves a
+// known CreatedAt rather than resetting it to now() (review finding 3b).
 func processOne(ctx context.Context, in Input, ef EscalatedFinding, maxPerScan int, callsUsed *int) (investigated, degraded, skipped int, errMsg string) {
+	var modelCallAttempted bool
+	var priorCreatedAt string
+	var havePriorCreatedAt bool
+
 	defer func() {
 		if r := recover(); r != nil {
 			errMsg = appendErr(errMsg, fmt.Sprintf("inquest: panic investigating %s: %v", ef.Finding.ID, r))
+			status := StatusAbsentInternalError
+			if modelCallAttempted {
+				status = StatusAbsentModelError
+			}
 			// Best-effort: still write a minimal degraded record so the
 			// operator sees SOMETHING rather than silence. A second panic here
 			// (this only marshals/writes a small struct) is swallowed — it
 			// must never escape and abort the scan.
 			func() {
 				defer func() { _ = recover() }()
-				rec := minimalDegradedRecord(ef, in.MallcopVersion, StatusAbsentModelError)
+				rec := minimalDegradedRecord(ef, in.MallcopVersion, status)
+				if havePriorCreatedAt {
+					rec.CreatedAt = priorCreatedAt
+				}
 				_, _ = writeRecord(in.Store, rec)
 			}()
 			degraded = 1
@@ -192,12 +238,25 @@ func processOne(ctx context.Context, in Input, ef EscalatedFinding, maxPerScan i
 
 	existing, found, rerr := readExistingRecord(in.Store, ef.Finding.ID)
 	if rerr != nil {
-		errMsg = appendErr(errMsg, fmt.Sprintf("inquest: read existing record for %s: %v", ef.Finding.ID, rerr))
+		// Transient read error (e.g. a git-pull/read hiccup) — existing may
+		// hold a perfectly good record we simply can't verify right now.
+		// SKIP this finding for THIS scan entirely: no assembly, no metered
+		// call, no write. Burning a call and resetting CreatedAt on a finding
+		// that may already have a good record would be worse than doing
+		// nothing; the next scan retries the read. Never invent a success.
+		return 0, 1, 0, appendErr(errMsg, fmt.Sprintf("inquest: read existing record for %s: %v — skipped this scan (no call, no write) to protect budget and CreatedAt", ef.Finding.ID, rerr))
+	}
+	if found {
+		priorCreatedAt = existing.CreatedAt
+		havePriorCreatedAt = true
 	}
 	if found && existing.SchemaVersion == SchemaVersion && existing.NarrativeStatus == StatusOK {
 		return 0, 0, 1, errMsg
 	}
 
+	if processOnePanicHookForTest != nil {
+		processOnePanicHookForTest(ef.Finding.ID)
+	}
 	ev := assemble(in.Store, in.AllEvents, in.Baseline, ef, in.Config)
 
 	rec := Record{
@@ -237,6 +296,7 @@ func processOne(ctx context.Context, in Input, ef EscalatedFinding, maxPerScan i
 			timeout = defaultModelCallTimeout
 		}
 		callCtx, cancel := context.WithTimeout(ctx, timeout)
+		modelCallAttempted = true // from here on, a panic is an honest model-error, not inquest's own bug
 		res := narrate(callCtx, in.Client, in.Config.Model, in.Config.MaxTokens, userDoc)
 		cancel()
 
@@ -261,6 +321,14 @@ func processOne(ctx context.Context, in Input, ef EscalatedFinding, maxPerScan i
 	}
 	return investigated, degraded, 0, errMsg
 }
+
+// processOnePanicHookForTest, when non-nil, is invoked once per finding
+// immediately BEFORE evidence assembly (strictly before any model call could
+// ever be attempted) — the seam a test uses to force an assembly-time panic
+// and prove it gets the honest StatusAbsentInternalError label (never
+// StatusAbsentModelError) and preserves a known prior CreatedAt. Always nil
+// in production.
+var processOnePanicHookForTest func(findingID string)
 
 // recordPath is the store path a finding's investigation record lives at.
 func recordPath(findingID string) string {
@@ -296,7 +364,12 @@ func writeRecord(st *store.Store, rec Record) (string, error) {
 
 // minimalDegradedRecord builds the smallest valid Record for the panic-guard
 // fallback write: no evidence (assembly itself may be what panicked), an
-// honest degraded status.
+// honest degraded status (StatusAbsentInternalError for a panic before the
+// model call was attempted, StatusAbsentModelError for one during/after —
+// see processOne's modelCallAttempted). CreatedAt defaults to now() here
+// (the "brand new record" case); the caller overwrites it with a known prior
+// CreatedAt when processOne captured one before the panic, so a refresh never
+// silently resets it.
 func minimalDegradedRecord(ef EscalatedFinding, mallcopVersion string, status NarrativeStatus) Record {
 	now := nowRFC3339()
 	return Record{
