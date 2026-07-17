@@ -5,8 +5,10 @@ package tools
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/mallcop-app/mallcop/core/store"
 	"github.com/mallcop-app/mallcop/pkg/event"
@@ -131,9 +133,10 @@ func TestGetRawEvent_RedactionIsCaseInsensitive(t *testing.T) {
 	}
 }
 
-// TestGetRawEvent_SizeCap proves an oversized payload comes back truncated,
-// under (or acceptably close to) the cap, with Truncated=true and a Notes
-// explanation — NEVER an error.
+// TestGetRawEvent_SizeCap proves an oversized payload dominated by one huge
+// leaf string comes back truncated, at or under the cap (a hard guarantee,
+// not best-effort), with Truncated=true and a Notes explanation — NEVER an
+// error.
 func TestGetRawEvent_SizeCap(t *testing.T) {
 	s := newTempStore(t)
 
@@ -160,11 +163,8 @@ func TestGetRawEvent_SizeCap(t *testing.T) {
 	if !out.Truncated {
 		t.Error("Truncated = false, want true for a 200KB leaf value")
 	}
-	if len(out.Payload) > getRawEventPayloadCap*2 {
-		// Generous slack: the contract is "never an error, best-effort under
-		// cap", not a byte-exact guarantee — but it must be dramatically
-		// smaller than the untouched 200KB+ input.
-		t.Errorf("Payload len = %d, want well under original ~200KB (cap is %d)", len(out.Payload), getRawEventPayloadCap)
+	if len(out.Payload) > getRawEventPayloadCap {
+		t.Errorf("Payload len = %d, want <= cap %d (hard guarantee)", len(out.Payload), getRawEventPayloadCap)
 	}
 	if out.Notes == "" {
 		t.Error("Notes empty, want an explanation that truncation fired")
@@ -176,6 +176,201 @@ func TestGetRawEvent_SizeCap(t *testing.T) {
 	}
 	if decoded["actor"] != "forge-proxy" {
 		t.Errorf("actor = %v, want forge-proxy to survive truncation", decoded["actor"])
+	}
+}
+
+// TestGetRawEvent_SizeCap_ManyFieldsGuarantee proves the size cap is a hard
+// guarantee even when the payload is a MAP dominated by sheer field COUNT
+// rather than any single huge value: 6000 short (~44-byte) string leaves
+// serialize to ~366KB, well over getRawEventPayloadCap, and none of those
+// leaves are individually long enough for leaf-string truncation
+// (truncateLeaves) to touch. Only the final subtree-pruning guarantee pass
+// (which can drop whole map entries, not just shorten values) can get this
+// under the cap.
+func TestGetRawEvent_SizeCap_ManyFieldsGuarantee(t *testing.T) {
+	s := newTempStore(t)
+
+	fields := make(map[string]any, 6000)
+	for i := 0; i < 6000; i++ {
+		fields[fmt.Sprintf("field%04d", i)] = strings.Repeat("x", 44)
+	}
+	payload, err := json.Marshal(fields)
+	if err != nil {
+		t.Fatalf("marshal fixture: %v", err)
+	}
+	if len(payload) <= getRawEventPayloadCap {
+		t.Fatalf("fixture too small: %d bytes, want well over cap %d", len(payload), getRawEventPayloadCap)
+	}
+	seedRawEvent(t, s, "e-manyfields", string(payload))
+
+	out, err := GetRawEvent(s, GetRawEventInput{ID: "e-manyfields"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !out.Found {
+		t.Fatal("Found = false, want true")
+	}
+	if !out.Truncated {
+		t.Error("Truncated = false, want true for a 6000-field object")
+	}
+	if len(out.Payload) > getRawEventPayloadCap {
+		t.Fatalf("Payload len = %d, want <= cap %d (hard guarantee)", len(out.Payload), getRawEventPayloadCap)
+	}
+	if !json.Valid(out.Payload) {
+		t.Fatalf("Payload is not valid JSON: %s", out.Payload)
+	}
+}
+
+// TestGetRawEvent_SizeCap_HugeArrayGuarantee proves the size cap is a hard
+// guarantee for a 40,000-element int array: each element serializes to only
+// a few bytes (nowhere near any leaf-string cap), so leaf-string truncation
+// is a complete no-op here — only array capping (head + trailing marker)
+// gets this under the cap.
+func TestGetRawEvent_SizeCap_HugeArrayGuarantee(t *testing.T) {
+	s := newTempStore(t)
+
+	nums := make([]int, 40000)
+	for i := range nums {
+		nums[i] = i
+	}
+	payload, err := json.Marshal(nums)
+	if err != nil {
+		t.Fatalf("marshal fixture: %v", err)
+	}
+	if len(payload) <= getRawEventPayloadCap {
+		t.Fatalf("fixture too small: %d bytes, want well over cap %d", len(payload), getRawEventPayloadCap)
+	}
+	seedRawEvent(t, s, "e-hugearray", string(payload))
+
+	out, err := GetRawEvent(s, GetRawEventInput{ID: "e-hugearray"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !out.Found {
+		t.Fatal("Found = false, want true")
+	}
+	if !out.Truncated {
+		t.Error("Truncated = false, want true for a 40,000-element array")
+	}
+	if len(out.Payload) > getRawEventPayloadCap {
+		t.Fatalf("Payload len = %d, want <= cap %d (hard guarantee)", len(out.Payload), getRawEventPayloadCap)
+	}
+	if !json.Valid(out.Payload) {
+		t.Fatalf("Payload is not valid JSON: %s", out.Payload)
+	}
+}
+
+// TestGetRawEvent_SizeCap_MultibyteLeafStaysValidUTF8 proves leaf-string
+// truncation cuts at a UTF-8 rune boundary, not a raw byte offset: a huge
+// CJK (3-bytes-per-rune in UTF-8) leaf must truncate to a string that
+// decodes cleanly, with no U+FFFD replacement character — slicing
+// s[:leafCap] by byte offset alone can and does land mid-rune for non-ASCII
+// text.
+func TestGetRawEvent_SizeCap_MultibyteLeafStaysValidUTF8(t *testing.T) {
+	s := newTempStore(t)
+
+	// "漢字" (漢字, "Chinese characters") repeated: each rune is 3
+	// bytes in UTF-8, so a byte-offset slice very often lands inside a rune.
+	huge := strings.Repeat("漢字", 40*1024) // ~240KB
+	payload, err := json.Marshal(map[string]any{
+		"actor":    "forge-proxy",
+		"hugeBlob": huge,
+	})
+	if err != nil {
+		t.Fatalf("marshal fixture: %v", err)
+	}
+	seedRawEvent(t, s, "e-cjk", string(payload))
+
+	out, err := GetRawEvent(s, GetRawEventInput{ID: "e-cjk"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !out.Truncated {
+		t.Fatal("Truncated = false, want true for a 240KB CJK leaf")
+	}
+	if len(out.Payload) > getRawEventPayloadCap {
+		t.Fatalf("Payload len = %d, want <= cap %d", len(out.Payload), getRawEventPayloadCap)
+	}
+
+	var decoded map[string]any
+	if err := json.Unmarshal(out.Payload, &decoded); err != nil {
+		t.Fatalf("truncated Payload is not valid JSON: %v", err)
+	}
+	blob, _ := decoded["hugeBlob"].(string)
+	if blob == "" {
+		// The leaf may have been pruned entirely by the final guarantee pass
+		// rather than truncated in place — acceptable, nothing left to
+		// UTF-8-check.
+		return
+	}
+	if !utf8.ValidString(blob) {
+		t.Fatalf("truncated hugeBlob is not valid UTF-8: %q", blob)
+	}
+	if strings.ContainsRune(blob, utf8.RuneError) {
+		t.Errorf("truncated hugeBlob contains U+FFFD (mid-rune cut): %q", blob)
+	}
+}
+
+// TestGetRawEvent_SizeCap_NeverLeaksTokenUnderHugeSubtree proves that when a
+// sessionToken sits under a subtree big enough to trigger the size-cap
+// guarantee pass, redaction (which always runs BEFORE any truncation/
+// pruning) has already replaced it with "[REDACTED]" — so the size-cap pass
+// can only ever see and prune/replace that marker, never the live secret.
+// Either the "[REDACTED]" marker survives verbatim, or the whole subtree
+// around it collapses into a "[TRUNCATED: ...]" marker — but the literal
+// token value must never appear anywhere in the output.
+func TestGetRawEvent_SizeCap_NeverLeaksTokenUnderHugeSubtree(t *testing.T) {
+	s := newTempStore(t)
+
+	const liveToken = "FQoGZXIvYXdzEXAMPLE_SUPER_SECRET_TOKEN_DO_NOT_LEAK"
+
+	padding := make(map[string]any, 6000)
+	for i := 0; i < 6000; i++ {
+		padding[fmt.Sprintf("field%04d", i)] = strings.Repeat("y", 44)
+	}
+	body := map[string]any{
+		"credentials": map[string]any{
+			"sessionToken": liveToken,
+			"accessKeyId":  "ASIAEXAMPLE",
+		},
+		"padding": padding,
+	}
+	payload, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("marshal fixture: %v", err)
+	}
+	if len(payload) <= getRawEventPayloadCap {
+		t.Fatalf("fixture too small: %d bytes, want well over cap %d", len(payload), getRawEventPayloadCap)
+	}
+	seedRawEvent(t, s, "e-token-huge", string(payload))
+
+	out, err := GetRawEvent(s, GetRawEventInput{ID: "e-token-huge"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !out.Found {
+		t.Fatal("Found = false, want true")
+	}
+	if len(out.Payload) > getRawEventPayloadCap {
+		t.Fatalf("Payload len = %d, want <= cap %d (hard guarantee)", len(out.Payload), getRawEventPayloadCap)
+	}
+	if !json.Valid(out.Payload) {
+		t.Fatalf("Payload is not valid JSON: %s", out.Payload)
+	}
+
+	// The hard invariant: the live token substring must never appear,
+	// anywhere, under any circumstance.
+	if strings.Contains(string(out.Payload), liveToken) {
+		t.Fatalf("live sessionToken leaked into output payload: %s", out.Payload)
+	}
+
+	// Either the redaction marker is still present (subtree survived
+	// unpruned), or it isn't because the whole subtree got collapsed to a
+	// size marker — both are acceptable, but one of them must be true.
+	hasRedactedMarker := strings.Contains(string(out.Payload), "[REDACTED]")
+	hasSizeMarker := strings.Contains(string(out.Payload), "[TRUNCATED:")
+	if !hasRedactedMarker && !hasSizeMarker {
+		t.Fatalf("expected either a [REDACTED] marker or a [TRUNCATED: ...] marker in output, found neither: %s", out.Payload)
 	}
 }
 
