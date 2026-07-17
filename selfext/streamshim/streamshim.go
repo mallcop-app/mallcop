@@ -32,7 +32,25 @@ import (
 
 // MaxTokensCap is the inference endpoint's hard per-request output ceiling (it
 // 400s above this). opencode requests far more, so the shim clamps down to it.
-const MaxTokensCap = 4096
+//
+// 32768 (was 4096): this constant is ONE of three caps that must move in
+// LOCKSTEP — forge's own maxTokensCap (internal/handler/messages.go +
+// completions.go, forge#122) and this package's mallcop-side consumer,
+// opencode.Adapter.MaxOutputTokens (selfext/opencode/adapter.go,
+// defaultMaxOutputTokens, mallcop#201) — because all three sit on the SAME
+// wire path for the donut rail: cmd/mallcop-ops/selfext.go's
+// resolveAuthoringEndpoint ALWAYS routes donut-rail authoring through this
+// shim (streamshim.Start(..., MaxTokensCap, ...)), which rewrites the
+// request's max_tokens DOWN to whatever this constant says — clamping BELOW
+// the Adapter's own declared cap silently defeats it, reproducing the exact
+// truncation (rd 4a1: completion_tokens pegged at the cap, finish_reason=length,
+// opencode relabels the tool call tool="invalid" and retries silently forever
+// — upstream sst/opencode#18108) that raising the other two caps to 32768 was
+// meant to fix. This constant was NOT part of that lockstep when it shipped —
+// found stale at 4096 during rd mallcoppro-da5 (2026-07-17), a live gap on the
+// production donut rail. If forge's cap ever changes again, update ALL THREE
+// together or the lowest one silently wins.
+const MaxTokensCap = 32768
 
 // Shim is a running loopback stream→non-stream bridge. Zero value is not usable;
 // construct with Start.

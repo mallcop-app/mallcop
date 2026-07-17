@@ -69,7 +69,7 @@ func startShim(t *testing.T) (*Shim, *fakeUpstream) {
 func TestBridgesStreamingRequestToNonStreamingUpstream(t *testing.T) {
 	sh, up := startShim(t)
 
-	req := `{"model":"heal","stream":true,"max_tokens":32000,"messages":[{"role":"user","content":"hi"}]}`
+	req := `{"model":"heal","stream":true,"max_tokens":99999,"messages":[{"role":"user","content":"hi"}]}`
 	resp, err := http.Post(sh.BaseURL()+"/chat/completions", "application/json", strings.NewReader(req))
 	if err != nil {
 		t.Fatalf("POST: %v", err)
