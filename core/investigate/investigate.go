@@ -9,9 +9,10 @@
 // definitions to the model; when the model replies with tool_use blocks,
 // execute the corresponding PURE core/tools function against the real
 // git-backed store (and, for check_baseline, the real loaded baseline),
-// box the result in [USER_DATA_BEGIN]/[USER_DATA_END] markers (core/agent's
-// untrusted-data discipline — the same primitive tier.go uses for the
-// triage/investigate cascade), feed it back as a tool_result, and repeat
+// box the result in [USER_DATA_BEGIN]/[USER_DATA_END] markers via
+// agent.WrapUntrustedToolResult (core/agent's untrusted-data discipline,
+// sized for a whole structured tool result rather than tier.go's
+// single-scalar WrapUntrusted — mallcoppro-a1e), feed it back as a tool_result, and repeat
 // until the model returns a final text-only answer. Every turn — the
 // question, each tool_use, each tool_result, and the final answer — is
 // durably appended to the store's `conversation` stream (store.Turn) so a
@@ -484,6 +485,15 @@ func askCore(ctx context.Context, opts Options, question string, hook *traceHook
 // returns the tool_result content blocks (each boxed in USER_DATA markers) to
 // feed back to the model. step is a shared, monotonically increasing counter
 // across the whole Ask/Serve call, used only for the hook's trace numbering.
+//
+// Each tool_result is boxed via agent.WrapUntrustedToolResult, NOT the
+// single-scalar agent.WrapUntrusted — a tool result here is the FULL
+// marshaled JSON of the tool's output (get_raw_event's whole raw record,
+// search_events'/search_findings' whole envelope), not one short attacker-
+// controlled string, and needs the much larger tool-result size budget (see
+// mallcoppro-a1e / sanitize.go's maxToolResultLen) so real evidence like a
+// CloudTrail record's userIdentity.arn/sourceIPAddress survives the box
+// instead of being silently cut before the model ever sees it.
 func runTools(_ context.Context, opts Options, toolUses []agent.ContentBlock, res *Result, knownIDs map[string]string, hook *traceHook, step *int) ([]agent.ContentBlock, error) {
 	var blocks []agent.ContentBlock
 	for _, tu := range toolUses {
@@ -527,7 +537,7 @@ func runTools(_ context.Context, opts Options, toolUses []agent.ContentBlock, re
 			hook.onToolResult(*step, tu.Name, out, terr)
 		}
 
-		boxed := agent.WrapUntrusted("tool:"+tu.Name, resultText)
+		boxed := agent.WrapUntrustedToolResult("tool:"+tu.Name, resultText)
 		blocks = append(blocks, agent.ContentBlock{
 			Type:      "tool_result",
 			ToolUseID: tu.ID,
