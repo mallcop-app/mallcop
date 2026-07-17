@@ -515,6 +515,153 @@ func TestInvokeDoesNotRetryNonTransient(t *testing.T) {
 	}
 }
 
+// TestInvokeFailsLoudlyOnTruncation proves the truncation guard end to end: a
+// stub that emits opencode's REAL 1.17.11 --format json event shape for a
+// truncated tool call — tool="invalid" AND a step-finish reason="length" —
+// makes Invoke fail IMMEDIATELY with a loud, diagnosed error naming the
+// configured cap, and is NEVER retried even though MaxAttempts allows more.
+// The two literal event lines below are copied verbatim (session/timestamp
+// fields aside) from a live capture: the real opencode-ai 1.17.11 binary driven
+// against a local fake server scripted to truncate a write-tool argument
+// mid-string (rd mallcoppro-da5) — not a guessed schema.
+func TestInvokeFailsLoudlyOnTruncation(t *testing.T) {
+	repo := initFixtureRepo(t)
+	j := &sandbox.Jail{TargetRepo: repo, BaseRef: "main"}
+	wt, err := j.Open(context.Background())
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer wt.Close()
+
+	stub, countFile := writeTruncationDoomLoopStub(t)
+	const cap = 4096
+	a := &Adapter{
+		Bin: stub, Lane: "heal", Provider: "forge", ForgeBaseURL: "https://forge.example.com",
+		MaxOutputTokens: cap,
+		MaxAttempts:     3, RetryBackoff: time.Millisecond, sleepFn: func(time.Duration) {},
+	}
+
+	res, err := a.Invoke(context.Background(), wt, "mallcop-sk-x", "author a detector")
+	if err == nil {
+		t.Fatalf("Invoke: expected a loud error for a truncated generation, got nil (res=%+v)", res)
+	}
+	if !strings.Contains(err.Error(), strconv.Itoa(cap)) {
+		t.Errorf("error does not name the configured cap %d: %v", cap, err)
+	}
+	if !strings.Contains(err.Error(), "sst/opencode#18108") {
+		t.Errorf("error does not cite the upstream issue for diagnosability: %v", err)
+	}
+	if !strings.Contains(strings.ToLower(err.Error()), "never retried") {
+		t.Errorf("error does not say it was never retried: %v", err)
+	}
+	if !res.Truncated {
+		t.Errorf("Result.Truncated = false, want true")
+	}
+	if res.TruncationDetail == "" {
+		t.Errorf("Result.TruncationDetail is empty, want a diagnostic")
+	}
+	if got := readCount(t, countFile); got != 1 {
+		t.Errorf("opencode invoked %d times, want exactly 1 (truncation must NEVER be retried — retrying "+
+			"resends the same prompt against the same cap and reproduces opencode's own silent doom loop)", got)
+	}
+}
+
+// TestInvokeFailsLoudlyOnLengthFinishAlone proves the guard fires on the
+// step-finish reason="length" signal ALONE — no tool call in play at all (the
+// model exhausted its output budget on invisible reasoning before ever
+// emitting a tool call, the OTHER live-observed shape from rd mallcoppro-4a1's
+// wire-level bisection: completion_tokens pegged at the cap, finish_reason
+// length, zero visible content, zero tool calls).
+func TestInvokeFailsLoudlyOnLengthFinishAlone(t *testing.T) {
+	repo := initFixtureRepo(t)
+	j := &sandbox.Jail{TargetRepo: repo, BaseRef: "main"}
+	wt, err := j.Open(context.Background())
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer wt.Close()
+
+	stub, countFile := stubWithCounter(t, "opencode-length-finish.sh",
+		`printf '{"type":"step_finish","part":{"reason":"length","type":"step-finish","tokens":{"total":4101,"input":5,"output":4096,"reasoning":4091}}}\n'
+exit 0`)
+	a := &Adapter{
+		Bin: stub, Lane: "heal", Provider: "forge", ForgeBaseURL: "https://forge.example.com",
+		MaxOutputTokens: 4096,
+		MaxAttempts:     3, RetryBackoff: time.Millisecond, sleepFn: func(time.Duration) {},
+	}
+
+	res, err := a.Invoke(context.Background(), wt, "mallcop-sk-x", "author a detector")
+	if err == nil {
+		t.Fatalf("Invoke: expected a loud error, got nil (res=%+v)", res)
+	}
+	if !res.Truncated {
+		t.Errorf("Result.Truncated = false, want true")
+	}
+	if !strings.Contains(res.TruncationDetail, "finish_reason=length") {
+		t.Errorf("TruncationDetail missing the length-finish diagnostic: %q", res.TruncationDetail)
+	}
+	if got := readCount(t, countFile); got != 1 {
+		t.Errorf("opencode invoked %d times, want exactly 1 (never retried)", got)
+	}
+}
+
+// writeTruncationDoomLoopStub writes a fake opencode that authors NOTHING and
+// emits opencode's real tool="invalid" + step-finish reason="length" event pair
+// (see TestInvokeFailsLoudlyOnTruncation), then exits 0 — mirroring the LIVE
+// observation that opencode does not fail the session over this, it just does
+// nothing useful.
+func writeTruncationDoomLoopStub(t *testing.T) (bin, countFile string) {
+	body := `printf '{"type":"tool_use","part":{"type":"tool","tool":"invalid","callID":"call_trunc","state":{"status":"completed","input":{"tool":"write","error":"Invalid input for tool write: JSON parsing failed: Text: {\"filePath\":\"detector.go\",\"content\":\"package foo truncated mid strin.\nError message: JSON Parse error: Unterminated string"},"title":"Invalid Tool"}}}\n'
+printf '{"type":"step_finish","part":{"reason":"length","type":"step-finish","tokens":{"total":4101,"input":5,"output":4096,"reasoning":0}}}\n'
+exit 0`
+	return stubWithCounter(t, "opencode-truncation-doomloop.sh", body)
+}
+
+// TestScanTruncation proves scanTruncation's schema-tolerant classification
+// directly: the real invalid-tool event, the real length-finish event, both
+// together, and negative cases (a normal write-tool event, unparseable lines,
+// and empty input) that must NOT flag truncation.
+func TestScanTruncation(t *testing.T) {
+	const invalidToolLine = `{"type":"tool_use","part":{"type":"tool","tool":"invalid","callID":"call_trunc","state":{"status":"completed","input":{"tool":"write","error":"Invalid input for tool write: JSON parsing failed: Unterminated string"}}}}`
+	const lengthFinishLine = `{"type":"step_finish","part":{"reason":"length","type":"step-finish","tokens":{"total":4101,"input":5,"output":4096,"reasoning":0}}}`
+	const normalWriteLine = `{"type":"tool","tool":"write","state":{"input":{"filePath":"authored.go"}}}`
+	const normalStopFinishLine = `{"type":"step_finish","part":{"reason":"stop","type":"step-finish","tokens":{"total":50,"input":5,"output":45}}}`
+
+	cases := []struct {
+		name          string
+		stdout        string
+		wantTruncated bool
+		wantDetail    []string // substrings that must all appear in detail when wantTruncated
+	}{
+		{"invalid tool alone", invalidToolLine, true, []string{"1 tool call(s) relabeled \"invalid\"", "write"}},
+		{"length finish alone", lengthFinishLine, true, []string{"finish_reason=length", "output_tokens=4096", "cap=4096"}},
+		{"both signals", invalidToolLine + "\n" + lengthFinishLine, true,
+			[]string{"relabeled \"invalid\"", "finish_reason=length"}},
+		{"repeated invalid tool counts each occurrence",
+			invalidToolLine + "\n" + invalidToolLine + "\n" + invalidToolLine, true, []string{"3 tool call(s)"}},
+		{"normal write event: not truncated", normalWriteLine, false, nil},
+		{"normal stop finish: not truncated", normalStopFinishLine, false, nil},
+		{"garbage lines: not truncated", "not json at all\n{broken", false, nil},
+		{"empty input: not truncated", "", false, nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			truncated, detail := scanTruncation([]byte(tc.stdout), 4096)
+			if truncated != tc.wantTruncated {
+				t.Fatalf("scanTruncation truncated=%v, want %v (detail=%q)", truncated, tc.wantTruncated, detail)
+			}
+			if !tc.wantTruncated && detail != "" {
+				t.Errorf("expected empty detail when not truncated, got %q", detail)
+			}
+			for _, want := range tc.wantDetail {
+				if !strings.Contains(detail, want) {
+					t.Errorf("detail %q missing substring %q", detail, want)
+				}
+			}
+		})
+	}
+}
+
 func TestLooksTransient(t *testing.T) {
 	pad := strings.Repeat("x", transientEmptyThreshold+100)
 	cases := []struct {

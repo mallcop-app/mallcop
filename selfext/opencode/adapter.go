@@ -68,6 +68,7 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -395,6 +396,26 @@ type Result struct {
 	// the retry heuristic targets, and retrying a bounded hang just risks
 	// stacking several bounded hangs back to back instead of failing fast.
 	TimedOut bool
+	// Truncated is true when the event stream shows the model's generation was
+	// cut off by the configured output-token cap (Adapter.maxOutputTokens) mid
+	// tool-call: opencode could not parse the truncated JSON arguments and
+	// relabeled the call tool="invalid" (upstream sst/opencode#18108), and/or a
+	// step-finish event reports reason="length". LIVE-REPRODUCED (2026-07-17,
+	// real opencode 1.17.11 against a local fake server scripted to truncate):
+	// opencode does NOT fail the session or stop — it silently re-sends the SAME
+	// oversized turn and relabels the reply "invalid" again, 35+ times in 45s,
+	// with ZERO stdout events any caller could act on, until something external
+	// kills it. See TruncationDetail for what was observed. Invoke treats
+	// Truncated as a hard, immediate, non-retried failure (see Invoke) — the
+	// same cap will truncate an identical retry, and letting opencode's own
+	// loop run is exactly the silent-hang hazard this field exists to surface
+	// loudly instead of.
+	Truncated bool
+	// TruncationDetail is a human-readable diagnostic set only when Truncated is
+	// true: the cap value, how many invalid-tool/length-finish events were
+	// observed, and (when the event carried it) the output-token count opencode
+	// reported at cutoff.
+	TruncationDetail string
 }
 
 // ProviderConfig marshals the opencode OpenAI-compatible provider config as a
@@ -471,6 +492,18 @@ func (a *Adapter) ProviderConfig(apiKey, forgeBaseURL string) (string, error) {
 //     is not retried because a retry cannot help it.
 //
 // A canceled context or a spawn failure surfaces immediately (never retried).
+//
+// # Truncation is fail-loud, never retried
+//
+// When Result.Truncated is set (see its doc), Invoke returns an error IMMEDIATELY
+// — no attempts remain, regardless of MaxAttempts — instead of falling into the
+// exit-code/TimedOut/transient checks below. Retrying would resend the SAME
+// prompt against the SAME cap, which reproduces the identical truncation; the
+// point of this guard is to convert opencode's own silent, unbounded
+// invalid-tool retry loop (upstream sst/opencode#18108 — live-reproduced,
+// 35+ silent re-sends in 45s with zero actionable stdout, see Result.Truncated)
+// into ONE loud, diagnosed Go error naming the cap, the moment the signature is
+// seen — never a generic timeout or "nothing to commit".
 func (a *Adapter) Invoke(ctx context.Context, wt *sandbox.Worktree, apiKey, task string) (Result, error) {
 	if wt == nil {
 		return Result{}, errors.New("opencode: worktree is nil")
@@ -493,6 +526,21 @@ func (a *Adapter) Invoke(ctx context.Context, wt *sandbox.Worktree, apiKey, task
 		if runErr != nil {
 			// Spawn failure / context cancellation: surface it, never retry.
 			return res, runErr
+		}
+		if res.Truncated {
+			// The output cap truncated this attempt mid-tool-call and opencode
+			// relabeled it "invalid" (or reported finish reason "length") —
+			// checked BEFORE the exit-code/TimedOut branches below because
+			// opencode does not reliably signal this any other way (it can still
+			// exit 0, or hang until Adapter.Timeout kills it, while doing this).
+			// Fail LOUDLY, once, naming the cap — never let this feed another
+			// attempt against the identical limit.
+			a.logger().Error("opencode: authoring truncated at the output cap; failing loudly instead of retrying",
+				"attempt", attempt, "max_output_tokens", a.maxOutputTokens(), "detail", res.TruncationDetail)
+			return res, fmt.Errorf("opencode: authoring output truncated at MaxOutputTokens=%d (%s) — "+
+				"never retried: this is opencode's silent invalid-tool retry loop (upstream sst/opencode#18108), "+
+				"not a transient failure; raise Adapter.MaxOutputTokens (cli: --max-output-tokens) or shorten the "+
+				"authoring task", a.maxOutputTokens(), res.TruncationDetail)
 		}
 		if res.ExitCode == 0 || attempt == maxAttempts {
 			return res, nil
@@ -620,6 +668,13 @@ func (a *Adapter) runOnce(ctx context.Context, wt *sandbox.Worktree, env []strin
 	// number is diagnostic only.
 	authored := WriteToolFiles(stdout.Bytes())
 
+	// truncated/detail: scan the SAME raw event stream for the output-cap
+	// truncation signature (see scanTruncation) BEFORE exitCode is even
+	// computed — truncation can coincide with any exit shape (clean 0, a
+	// signal-killed timeout, or a non-zero exit), so it must not depend on how
+	// this attempt happened to end.
+	truncated, truncDetail := scanTruncation(stdout.Bytes(), a.maxOutputTokens())
+
 	exitCode := 0
 	if runErr != nil {
 		var exitErr *exec.ExitError
@@ -651,6 +706,7 @@ func (a *Adapter) runOnce(ctx context.Context, wt *sandbox.Worktree, env []strin
 		"transcript_file_refs", len(files),
 		"transcript_bytes", len(redacted),
 		"timed_out", timedOut,
+		"truncated", truncated,
 	)
 
 	return Result{
@@ -659,6 +715,8 @@ func (a *Adapter) runOnce(ctx context.Context, wt *sandbox.Worktree, env []strin
 		TranscriptRedacted: []byte(redacted),
 		ExitCode:           exitCode,
 		TimedOut:           timedOut,
+		Truncated:          truncated,
+		TruncationDetail:   truncDetail,
 	}, nil
 }
 
@@ -942,6 +1000,131 @@ func isWriteToolEvent(v any) bool {
 		}
 	}
 	return false
+}
+
+// scanTruncation walks opencode's line-delimited --format json event stream for
+// the output-cap truncation signature and reports whether it fired, plus a
+// human-readable detail naming capTokens (the caller's a.maxOutputTokens()) for
+// the diagnostic message. It recognizes TWO real, independently-occurring
+// signals (either is sufficient — an attempt can show one, the other, or both):
+//
+//   - a tool-call event relabeled tool="invalid": opencode could not parse the
+//     tool call's JSON arguments (the model's turn was cut off mid-argument by
+//     the output cap). This is the exact upstream sst/opencode#18108 shape.
+//     invalidToolEvents counts occurrences; toolNames collects the ORIGINAL
+//     tool name opencode was trying to call, when the event carries it (nested
+//     under state.input.tool in the real 1.17.11 wire shape), for the
+//     diagnostic.
+//   - a step-finish event with reason="length": the provider's own
+//     finish_reason (mapped through opencode's "unified" finish-reason enum)
+//     reporting the generation was cut off by the token limit, independent of
+//     whether a tool call was even in progress. lengthFinishes counts
+//     occurrences; observedOutputTokens is the largest tokens.output value
+//     seen on such an event (0 if the schema didn't carry it).
+//
+// Ground truth for this exact event shape (opencode-ai 1.17.11, captured
+// 2026-07-17 driving the REAL binary against a local fake server scripted to
+// truncate a write-tool argument mid-string):
+//
+//	{"type":"tool_use","...","part":{"type":"tool","tool":"invalid","callID":"...",
+//	 "state":{"status":"completed","input":{"tool":"write","error":"Invalid input
+//	 for tool write: JSON parsing failed: ... Unterminated string"},
+//	 "output":"The arguments provided to the tool are invalid: ...",
+//	 "title":"Invalid Tool", ...}}}
+//	{"type":"step_finish","...","part":{"reason":"length","type":"step-finish",
+//	 "tokens":{"total":4101,"input":5,"output":4096,"reasoning":0, ...}}}
+//
+// Both events recurred identically 35+ times in 45s in that live capture —
+// opencode re-sent the SAME oversized turn and got relabeled "invalid" again
+// every time, never stopping on its own — which is why Invoke treats even ONE
+// occurrence as a hard, immediate, non-retried failure (see Invoke) rather than
+// waiting to see whether it repeats.
+//
+// SCHEMA-TOLERANT like Parse/WriteToolFiles: each line is decoded as a generic
+// JSON object and walked recursively by key name, at any nesting depth. An
+// unrecognized schema reports (false, ""), never a false positive.
+func scanTruncation(stdout []byte, capTokens int) (truncated bool, detail string) {
+	var invalidToolEvents int
+	var lengthFinishes int
+	var observedOutputTokens int
+	toolNames := map[string]struct{}{}
+
+	for _, line := range bytes.Split(stdout, []byte("\n")) {
+		line = bytes.TrimSpace(line)
+		if len(line) == 0 || line[0] != '{' {
+			continue
+		}
+		var obj any
+		if err := json.Unmarshal(line, &obj); err != nil {
+			continue
+		}
+		walkTruncation(obj, &invalidToolEvents, &lengthFinishes, &observedOutputTokens, toolNames)
+	}
+
+	if invalidToolEvents == 0 && lengthFinishes == 0 {
+		return false, ""
+	}
+
+	var parts []string
+	if invalidToolEvents > 0 {
+		names := ""
+		if len(toolNames) > 0 {
+			ns := make([]string, 0, len(toolNames))
+			for n := range toolNames {
+				ns = append(ns, n)
+			}
+			sort.Strings(ns)
+			names = " (" + strings.Join(ns, ", ") + ")"
+		}
+		parts = append(parts, fmt.Sprintf("%d tool call(s) relabeled \"invalid\"%s — opencode could not parse the "+
+			"truncated JSON arguments", invalidToolEvents, names))
+	}
+	if lengthFinishes > 0 {
+		tok := "unknown"
+		if observedOutputTokens > 0 {
+			tok = strconv.Itoa(observedOutputTokens)
+		}
+		parts = append(parts, fmt.Sprintf("%d generation(s) ended finish_reason=length (output_tokens=%s, cap=%d)",
+			lengthFinishes, tok, capTokens))
+	}
+	return true, strings.Join(parts, "; ")
+}
+
+// walkTruncation recursively collects the truncation signals scanTruncation
+// looks for from a decoded JSON value: a "tool":"invalid" event (recording the
+// original tool name from state.input.tool when present) and a
+// "reason":"length" event (recording tokens.output when present).
+func walkTruncation(v any, invalidToolEvents, lengthFinishes, observedOutputTokens *int, toolNames map[string]struct{}) {
+	m, ok := v.(map[string]any)
+	if !ok {
+		if arr, ok := v.([]any); ok {
+			for _, val := range arr {
+				walkTruncation(val, invalidToolEvents, lengthFinishes, observedOutputTokens, toolNames)
+			}
+		}
+		return
+	}
+	if tool, ok := m["tool"].(string); ok && strings.EqualFold(tool, "invalid") {
+		*invalidToolEvents++
+		if state, ok := m["state"].(map[string]any); ok {
+			if input, ok := state["input"].(map[string]any); ok {
+				if orig, ok := input["tool"].(string); ok && orig != "" {
+					toolNames[orig] = struct{}{}
+				}
+			}
+		}
+	}
+	if reason, ok := m["reason"].(string); ok && strings.EqualFold(reason, "length") {
+		*lengthFinishes++
+		if tokens, ok := m["tokens"].(map[string]any); ok {
+			if out, ok := tokens["output"].(float64); ok && int(out) > *observedOutputTokens {
+				*observedOutputTokens = int(out)
+			}
+		}
+	}
+	for _, val := range m {
+		walkTruncation(val, invalidToolEvents, lengthFinishes, observedOutputTokens, toolNames)
+	}
 }
 
 // openAIBaseURL derives the OpenAI-compatible base URL (the inference endpoint
