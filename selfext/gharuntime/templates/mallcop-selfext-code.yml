@@ -54,7 +54,7 @@ jobs:
     # itself hits CODEOWNERS review). The reusable workflow pins its toolchain by
     # pinned version + checksum (fail-closed), so the whole supply chain is SHA-locked
     # end to end.
-    uses: mallcop-app/selfext/.github/workflows/selfext-code-reusable.yml@d9d51da47376025fe6033afa414a1298a841d2d8
+    uses: mallcop-app/selfext/.github/workflows/selfext-code-reusable.yml@f019f78d7a0d8e07067f08d6a605925a0069b770
     secrets:
       inference_key: ${{ secrets.INFERENCE_KEY }}   # BYOK: your OWN inference API key — never an admin key. Reaches the binary only via --inference-key-env.
       oss_contrib_token: ${{ secrets.OSS_CONTRIB_TOKEN }}   # operator's OWN token for the upstream OSS PR; absent => contribute-back skips
