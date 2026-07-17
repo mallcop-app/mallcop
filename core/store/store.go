@@ -1,6 +1,6 @@
-// Package store is the git-repo source of truth for mallcop's six append-only
-// streams: events, findings, resolutions, baseline, conversation, and
-// directives.
+// Package store is the git-repo source of truth for mallcop's seven append-only
+// streams: events, findings, resolutions, baseline, conversation, directives,
+// and scans.
 //
 // ONE-BRAIN keystone. Every other core subsystem (the agent loop, the scan
 // pipeline) CONSUMES this package; this package consumes nothing from them. The
@@ -39,6 +39,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -69,6 +70,17 @@ const (
 	// KindDirectives is the operator-steering stream (suppressions, focus,
 	// policy). Loaded and obeyed by the next scan.
 	KindDirectives Kind = "directives"
+	// KindScans is the scan-run register (mallcoppro-e3c): one record per
+	// completed `mallcop scan` invocation (findings or not), appended by
+	// core/pipeline.Run at the end of every run. It is the durable,
+	// rotation-surviving source detection-time investigation correlates
+	// recurrence timing against ("this fires ~2min after every scheduled
+	// scan"): unlike KindEvents/KindBaseline, a store rotation (mallcoppro-ee3)
+	// never needs to truncate it, and CommitTimesFor supplies a historical
+	// fallback for scan times that predate this stream's introduction. Purely
+	// additive — an older binary that has never heard of KindScans reads every
+	// other stream unaffected.
+	KindScans Kind = "scans"
 )
 
 // kinds is the closed set of valid streams. Append/Load reject anything else so
@@ -80,14 +92,15 @@ var kinds = map[Kind]bool{
 	KindBaseline:     true,
 	KindConversation: true,
 	KindDirectives:   true,
+	KindScans:        true,
 }
 
-// Kinds returns the six stream kinds in deterministic order. Useful for
+// Kinds returns the seven stream kinds in deterministic order. Useful for
 // callers that want to enumerate or snapshot every stream.
 func Kinds() []Kind {
 	return []Kind{
 		KindEvents, KindFindings, KindResolutions,
-		KindBaseline, KindConversation, KindDirectives,
+		KindBaseline, KindConversation, KindDirectives, KindScans,
 	}
 }
 
@@ -640,6 +653,73 @@ func (s *Store) WriteSnapshot(name string, records any) (string, error) {
 		return commitSHA, nil
 	}
 	return "", fmt.Errorf("store: snapshot %s gave up after %d retries: %w", name, maxRetries, lastErr)
+}
+
+// ReadSnapshot returns the current committed bytes of a full-document file at
+// HEAD — a snapshot written by WriteSnapshot (findings.json,
+// investigations/<finding-id>.json, …) or any other path present in the repo's
+// tree. It is a thin PUBLIC wrapper over the same blobAt(HEAD, name) plumbing
+// WriteSnapshot already uses internally for its own byte-identical no-op check,
+// exposed so a consumer (core/inquest's idempotency check, prior-investigation
+// lookup) can read a snapshot back without reaching into the store's private
+// git plumbing. A path that does not exist at HEAD (including "the repo has no
+// commits yet") returns (nil, nil) — not found is not an error, exactly like
+// Load's empty-stream case.
+func (s *Store) ReadSnapshot(name string) ([]byte, error) {
+	head, err := s.head()
+	if err != nil {
+		// No HEAD (repo with zero commits) → nothing has ever been written.
+		return nil, nil
+	}
+	return s.blobAt(head, name)
+}
+
+// CommitTimesFor returns the commit timestamps (RFC3339, git's %cI) of every
+// commit that touched ANY of the given repo-root-relative paths, ascending. It
+// is the HISTORICAL fallback for scan-cadence correlation on a store that
+// predates the KindScans register (mallcoppro-e3c): every commitAppend/
+// WriteSnapshot call this store's sole writer (`mallcop scan`) makes is ITSELF
+// a scan-run timestamp, so the git log of the streams a scan always touches
+// (events.jsonl, baseline.jsonl, resolutions.jsonl) recovers scan cadence back
+// to the repo's very first commit with zero additional bookkeeping — this is
+// what lets correlation see "hourly, since March" on a store whose KindScans
+// register only started today.
+//
+// No dedup across paths: commitAppend/WriteSnapshot's per-commit plumbing
+// swaps in exactly ONE file per commit (buildTree), so two DIFFERENT paths
+// never share a commit — deduping by timestamp would wrongly collapse two
+// genuinely distinct commits that happen to land within the same
+// second-resolution %cI value (routine under a fast test or a burst of
+// scans), undercounting scan_count.
+//
+// A repo with zero commits, or a path never committed, is not an error — it
+// contributes no timestamps.
+func (s *Store) CommitTimesFor(paths ...string) ([]time.Time, error) {
+	var out []time.Time
+	for _, p := range paths {
+		raw, err := s.git("log", "--format=%cI", "--", p)
+		if err != nil {
+			if strings.Contains(err.Error(), "does not have any commits yet") ||
+				strings.Contains(err.Error(), "unknown revision or path") ||
+				strings.Contains(err.Error(), "bad revision") {
+				continue
+			}
+			return nil, fmt.Errorf("store: commit times for %s: %w", p, err)
+		}
+		for _, line := range strings.Split(strings.TrimSpace(raw), "\n") {
+			line = strings.TrimSpace(line)
+			if line == "" {
+				continue
+			}
+			t, terr := time.Parse(time.RFC3339, line)
+			if terr != nil {
+				continue // a malformed log line is skipped, not fatal
+			}
+			out = append(out, t)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Before(out[j]) })
+	return out, nil
 }
 
 // blobAt returns the bytes of the file blob at the given commit, or empty bytes

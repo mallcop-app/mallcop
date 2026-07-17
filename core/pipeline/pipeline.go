@@ -45,6 +45,7 @@ import (
 	"github.com/mallcop-app/mallcop/core/agent"
 	"github.com/mallcop-app/mallcop/core/connect"
 	"github.com/mallcop-app/mallcop/core/detect"
+	"github.com/mallcop-app/mallcop/core/inquest"
 	"github.com/mallcop-app/mallcop/core/store"
 	"github.com/mallcop-app/mallcop/pkg/baseline"
 	"github.com/mallcop-app/mallcop/pkg/event"
@@ -106,6 +107,22 @@ type Config struct {
 	// value applies defaultMaxFindingsForActors — the caller only sets this to
 	// OVERRIDE the default (scan.go threads a --max-findings flag through here).
 	Budget agent.BudgetConfig
+
+	// Investigate is the resolved investigate: config for detection-time
+	// investigation (mallcoppro-e3c, core/inquest). The zero value has
+	// Enabled==false — a caller that wants the config-driven default (ON) must
+	// resolve core/config.Investigate onto this struct itself (cli/scan.go
+	// does this via config.LoadEffective, which always returns a
+	// Defaults()-floored Config regardless of whether a mallcop.yaml is
+	// present). Existing callers that construct Config{} directly (tests,
+	// other embedders) get investigate OFF by default, unaffected by this
+	// addition.
+	Investigate inquest.Config
+
+	// MallcopVersion is a best-effort provenance stamp threaded onto both the
+	// KindScans register and investigation records. Empty when unknown —
+	// never fabricated.
+	MallcopVersion string
 }
 
 // Summary is the result of one completed scan cycle. The four counts answer the
@@ -137,6 +154,22 @@ type Summary struct {
 	// from the JSON encoding when zero (the common case: a connector with a
 	// durable cursor never re-pulls).
 	DuplicatesSkipped int `json:"duplicates_skipped,omitempty"`
+	// Investigated is the number of ESCALATED findings this scan produced a
+	// successful (narrative_status "ok") detection-time investigation record
+	// for (mallcoppro-e3c, core/inquest). Omitted when zero.
+	Investigated int `json:"investigated,omitempty"`
+	// InvestigationsDegraded is the number of escalated findings whose
+	// investigation record this scan wrote (or refreshed) with a non-"ok"
+	// narrative_status — the deterministic evidence chain still shipped, only
+	// the model narrative degraded. Omitted when zero.
+	InvestigationsDegraded int `json:"investigations_degraded,omitempty"`
+	// InvestigationWarnings carries one human-readable line per degraded/failed
+	// investigation record this scan produced (inquest.Outcome.Errors),
+	// entirely for the CLI's own non-fatal stderr reporting — excluded from the
+	// JSON summary (it is operational noise, not part of the machine-readable
+	// contract; the same pattern as the gated Discord-emit warning in
+	// cli/scan.go).
+	InvestigationWarnings []string `json:"-"`
 	// Duration is the wall-clock time the whole Run took, for latency reporting.
 	Duration time.Duration `json:"duration_ms"`
 }
@@ -355,6 +388,9 @@ func Run(ctx context.Context, cfg Config) (Summary, error) {
 	}
 
 	if len(findings) == 0 {
+		if err := recordScan(cfg, summary, start); err != nil {
+			return Summary{}, err
+		}
 		summary.Duration = time.Since(start)
 		return summary, nil
 	}
@@ -386,8 +422,71 @@ func Run(ctx context.Context, cfg Config) (Summary, error) {
 		}
 	}
 
+	// (5) INVESTIGATE at detection time (mallcoppro-e3c), STRICTLY AFTER the
+	// resolutions batch above has committed. This ordering is load-bearing for
+	// the consensus invariant: by the time inquest.RunAll runs, every
+	// disposition is already durably persisted, so an investigation
+	// PHYSICALLY cannot change one — inquest has no write path to
+	// findings/resolutions/directives/findings.json, only to
+	// investigations/<finding-id>.json (core/inquest's package doc). RunAll
+	// NEVER returns an error this function propagates: a bug or model failure
+	// degrades one record, it never aborts or delays the scan's core output.
+	var escalated []inquest.EscalatedFinding
+	for _, r := range results {
+		if r.resolution.Action == agent.ActionEscalated {
+			escalated = append(escalated, inquest.EscalatedFinding{
+				Finding:    r.finding,
+				Resolution: inquest.ResolutionRef{Action: "escalate", Reason: r.resolution.Reason},
+			})
+		}
+	}
+	if len(escalated) > 0 {
+		allEvents := make([]event.Event, 0, len(priorEvents)+len(events))
+		allEvents = append(allEvents, priorEvents...)
+		allEvents = append(allEvents, events...)
+		outcome := inquest.RunAll(ctx, inquest.Input{
+			Store:          cfg.Store,
+			Client:         cfg.Client,
+			Findings:       escalated,
+			AllEvents:      allEvents,
+			Baseline:       bl,
+			MallcopVersion: cfg.MallcopVersion,
+			Config:         cfg.Investigate,
+		})
+		summary.Investigated = outcome.Investigated
+		summary.InvestigationsDegraded = outcome.Degraded
+		summary.InvestigationWarnings = outcome.Errors
+	}
+
+	if err := recordScan(cfg, summary, start); err != nil {
+		return Summary{}, err
+	}
+
 	summary.Duration = time.Since(start)
 	return summary, nil
+}
+
+// recordScan appends one store.ScanRecord to the store's KindScans register —
+// the durable, rotation-surviving source detection-time investigation's
+// scan-schedule correlation reads (core/inquest's assemble.go). Called at the
+// end of EVERY Run, findings or not, so the register's cadence reflects the
+// TRUE scan schedule regardless of whether anything fired. A write failure
+// here is a hard error, exactly like every other store append in Run — the
+// register is part of "durably recording what happened this scan", not an
+// optional side effect.
+func recordScan(cfg Config, summary Summary, startedAt time.Time) error {
+	rec := store.ScanRecord{
+		StartedAt:        startedAt,
+		FinishedAt:       time.Now(),
+		EventsScanned:    summary.EventsScanned,
+		FindingsDetected: summary.FindingsDetected,
+		Escalated:        summary.Escalated,
+		MallcopVersion:   cfg.MallcopVersion,
+	}
+	if _, err := cfg.Store.Append(store.KindScans, rec); err != nil {
+		return fmt.Errorf("pipeline: store scan record: %w", err)
+	}
+	return nil
 }
 
 // resolveAll runs ResolveFindingWith over every finding through a bounded pool of

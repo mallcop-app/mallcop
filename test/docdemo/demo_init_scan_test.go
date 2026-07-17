@@ -70,7 +70,9 @@ func TestDemo_Scan(t *testing.T) {
 		"  Events scanned:     1\n" +
 		"  Findings detected:  2\n" +
 		"  Escalated:          2\n" +
-		"  Resolved:           0\n"
+		"  Resolved:           0\n" +
+		"  Investigated:       0\n" +
+		"  Investigations degraded: 2\n"
 	mustContain(t, "README.md", doc, scanShown, "`mallcop scan` output")
 
 	stdout, stderr, code := run(t, dir, bin, nil, "scan")
@@ -174,9 +176,12 @@ func TestDemo_E2EScan(t *testing.T) {
 		"  \"events_scanned\": 2,\n" +
 		"  \"findings_detected\": 2,\n" +
 		"  \"escalated\": 2,\n" +
-		"  \"resolved\": 0\n" +
+		"  \"resolved\": 0,\n" +
+		"  \"investigations_degraded\": 2\n" +
 		"}\n"
-	mustContain(t, "docs/demo/e2e-scan.md", doc, "\"events_scanned\": 2,\n  \"findings_detected\": 2,\n  \"escalated\": 2,\n  \"resolved\": 0", "expected JSON summary")
+	mustContain(t, "docs/demo/e2e-scan.md", doc,
+		"\"events_scanned\": 2,\n  \"findings_detected\": 2,\n  \"escalated\": 2,\n  \"resolved\": 0,\n  \"investigations_degraded\": 2",
+		"expected JSON summary")
 
 	stdout, stderr, code := run(t, mallcopRoot, bin, nil,
 		"scan",

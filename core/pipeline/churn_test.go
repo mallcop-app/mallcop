@@ -83,11 +83,12 @@ func manyEventsSameActor(n int) []event.Event {
 // TestPipeline_ChurnRegression is THE commit-churn regression test
 // (mallcoppro-ee3). Run 1 over 200 fresh events must cost only a HANDFUL of
 // commits (events batch + baseline + findings batch + snapshot + resolutions
-// batch = at most 5), never one per event. Run 2 over the IDENTICAL events
-// must dedupe every one of them (EventsScanned==0, DuplicatesSkipped==200)
-// and cost at most 2 more commits (the re-derived baseline + the findings
-// snapshot, both of which run unconditionally) — never the ~200+ commits a
-// naive per-record re-append would have cost.
+// batch + the KindScans register record, mallcoppro-e3c = at most 6), never
+// one per event. Run 2 over the IDENTICAL events must dedupe every one of
+// them (EventsScanned==0, DuplicatesSkipped==200) and cost at most 3 more
+// commits (the re-derived baseline + the findings snapshot + the scan
+// register record, all three of which run unconditionally on every scan) —
+// never the ~200+ commits a naive per-record re-append would have cost.
 func TestPipeline_ChurnRegression(t *testing.T) {
 	const n = 200
 	conn := &fakeConnector{events: manyEventsSameActor(n)}
@@ -112,9 +113,9 @@ func TestPipeline_ChurnRegression(t *testing.T) {
 
 	afterRun1 := repoCommitCount(t, st)
 	growth1 := afterRun1 - baseCommits
-	if growth1 > 5 {
-		t.Fatalf("run 1 grew the commit log by %d commits for %d events, want <= 5 "+
-			"(events batch + baseline + findings batch + snapshot + resolutions batch) — "+
+	if growth1 > 6 {
+		t.Fatalf("run 1 grew the commit log by %d commits for %d events, want <= 6 "+
+			"(events batch + baseline + findings batch + snapshot + resolutions batch + scan register) — "+
 			"a per-record commit regression would grow this by ~%d", growth1, n, n)
 	}
 	if growth1 < 1 {
@@ -141,10 +142,10 @@ func TestPipeline_ChurnRegression(t *testing.T) {
 
 	afterRun2 := repoCommitCount(t, st)
 	growth2 := afterRun2 - afterRun1
-	if growth2 > 2 {
-		t.Fatalf("run 2 (all duplicates) grew the commit log by %d commits, want <= 2 "+
-			"(the re-derived baseline record + the findings snapshot, both unconditional) — "+
-			"a broken dedupe would grow this by ~%d (re-appending every duplicate)", growth2, n)
+	if growth2 > 3 {
+		t.Fatalf("run 2 (all duplicates) grew the commit log by %d commits, want <= 3 "+
+			"(the re-derived baseline record + the findings snapshot + the scan register record, "+
+			"all three unconditional) — a broken dedupe would grow this by ~%d (re-appending every duplicate)", growth2, n)
 	}
 }
 
