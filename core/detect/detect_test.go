@@ -73,6 +73,29 @@ func fixtures(t *testing.T) []positiveFixture {
 			},
 		},
 		{
+			detector: "alert-signal",
+			wantType: "alert-signal",
+			baseline: &baseline.Baseline{},
+			events: func(t *testing.T) []event.Event {
+				// A GitHub dependabot_alert (dedicated-API shape) — no correlated
+				// activity needed to prove the detector fires at all: an alert
+				// event, alone, now produces a finding (it used to be inert).
+				return []event.Event{{
+					ID: "as-1", Source: "github", Type: "dependabot_alert",
+					Actor: "github-actions", Timestamp: ts(16, 30),
+					Payload: raw(t, map[string]interface{}{
+						"signal_class": "alert",
+						"alert_number": 7,
+						"alert_state":  "open",
+						"severity":     "critical",
+						"repo":         "acme/widgets",
+						"package":      "left-pad",
+						"ecosystem":    "npm",
+					}),
+				}}
+			},
+		},
+		{
 			detector: "exfil-pattern",
 			wantType: "exfil-pattern",
 			baseline: &baseline.Baseline{},
@@ -412,12 +435,13 @@ func TestDetectNilBaseline(t *testing.T) {
 	}
 }
 
-// TestRegistryHasAllSeventeen is a guard against accidentally dropping a
+// TestRegistryHasAllEighteen is a guard against accidentally dropping a
 // detector from the registry, AND a guard that the four attack-family detectors
 // added for e2e detect-fidelity (new-external-access, auth-failure-burst,
-// unusual-resource-access, log-format-drift) stay registered.
-func TestRegistryHasAllSeventeen(t *testing.T) {
-	want := 17
+// unusual-resource-access, log-format-drift) plus alert-signal (GitHub-native
+// alert triage + correlation, mallcoppro-b825) stay registered.
+func TestRegistryHasAllEighteen(t *testing.T) {
+	want := 18
 	got := len(Detectors())
 	names := map[string]bool{}
 	for _, d := range Detectors() {
@@ -433,6 +457,7 @@ func TestRegistryHasAllSeventeen(t *testing.T) {
 	for _, fam := range []string{
 		"new-external-access", "auth-failure-burst",
 		"unusual-resource-access", "log-format-drift",
+		"alert-signal",
 	} {
 		if !names[fam] {
 			t.Errorf("expected attack-family detector %q registered, missing", fam)

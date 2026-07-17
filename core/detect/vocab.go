@@ -69,6 +69,7 @@ func KnownEventTypes() map[string]bool {
 		resourceAccessEventTypes,   // unusual-resource-access
 		authFailureEventTypes,      // auth-failure-burst (failure signal)
 		authSuccessEventTypes,      // auth-failure-burst (terminal success)
+		alertEventTypes,            // alert-signal (dependabot/code-scanning/secret-scanning alerts)
 	} {
 		for k := range gate {
 			out[k] = true
