@@ -148,7 +148,7 @@ func TestBuildUserMessage_Golden_WithOrgContext(t *testing.T) {
 // the exact verdict/confidence/narrative.
 func TestNarrate_ValidReply(t *testing.T) {
 	c := &scriptedClient{reply: `{"verdict":"benign","confidence":0.85,"narrative":"forge-proxy assumed mallcop-bedrock-relay hourly, ~2min after each scan."}`}
-	out := narrate(context.Background(), c, "investigate", 1024, "{}")
+	out := narrate(context.Background(), c, "investigate", 1024, "{}", Evidence{})
 	if out.Status != StatusOK {
 		t.Fatalf("Status = %q, want ok (err=%v)", out.Status, out.Err)
 	}
@@ -187,7 +187,7 @@ func TestNarrate_ValidationMatrix(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			client := &scriptedClient{reply: c.reply}
-			out := narrate(context.Background(), client, "", 1024, "{}")
+			out := narrate(context.Background(), client, "", 1024, "{}", Evidence{})
 			if out.Status != StatusOK {
 				t.Fatalf("Status = %q, want ok (err=%v) for reply %q", out.Status, out.Err, c.reply)
 			}
@@ -207,7 +207,7 @@ func TestNarrate_ValidationMatrix(t *testing.T) {
 	for _, c := range invalid {
 		t.Run(c.name, func(t *testing.T) {
 			client := &scriptedClient{reply: c.reply}
-			out := narrate(context.Background(), client, "", 1024, "{}")
+			out := narrate(context.Background(), client, "", 1024, "{}", Evidence{})
 			if out.Status != StatusAbsentInvalidOutput {
 				t.Fatalf("Status = %q, want absent-invalid-output for reply case %q", out.Status, c.name)
 			}
@@ -225,7 +225,7 @@ func TestNarrate_ValidationMatrix(t *testing.T) {
 // absent-model-error, one call, no panic.
 func TestNarrate_TransportError(t *testing.T) {
 	client := &scriptedClient{err: context.DeadlineExceeded}
-	out := narrate(context.Background(), client, "", 1024, "{}")
+	out := narrate(context.Background(), client, "", 1024, "{}", Evidence{})
 	if out.Status != StatusAbsentModelError {
 		t.Fatalf("Status = %q, want absent-model-error", out.Status)
 	}

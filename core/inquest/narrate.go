@@ -74,6 +74,10 @@ type narrateOutput struct {
 	Status     NarrativeStatus
 	Model      string
 	Usage      Usage
+	// ContractNotes carries any calibrateVerdict audit line(s) — why a verdict
+	// was downgraded or a confidence derated by the deterministic contract
+	// (contract.go). Empty when the model's verdict passed through untouched.
+	ContractNotes []string
 	// Err is the underlying transport/validation error, for the caller's
 	// non-fatal log line — never surfaced in the committed Record.
 	Err error
@@ -86,7 +90,14 @@ type narrateOutput struct {
 // "inherit the scan's resolved model" config semantic) — a per-request Model
 // always wins over a client default when set (core/inference.DirectClient's
 // documented contract).
-func narrate(ctx context.Context, client agent.Client, model string, maxTokens int, userDoc string) narrateOutput {
+//
+// ev is the SAME assembled Evidence sent to the model in userDoc — narrate
+// re-reads its numeric/bool fields to enforce the narrate CONTRACT over the ONE
+// reply (contract.go): a reply that cites evidence absent from the record is
+// rejected (StatusAbsentInvalidOutput), and an over-confident threat verdict on
+// the operational-infrastructure signature is calibrated down. This is pure
+// post-processing over the single reply — never a second model call.
+func narrate(ctx context.Context, client agent.Client, model string, maxTokens int, userDoc string, ev Evidence) narrateOutput {
 	if maxTokens <= 0 {
 		maxTokens = 1024
 	}
@@ -111,14 +122,26 @@ func narrate(ctx context.Context, client agent.Client, model string, maxTokens i
 	if verr != nil {
 		return narrateOutput{Status: StatusAbsentInvalidOutput, Err: verr, Model: model}
 	}
+	// Contract enforcement over the ONE reply (contract.go). A narrative citing
+	// evidence the record does not contain is discarded exactly like any other
+	// malformed reply — the deterministic evidence still ships.
+	if rejected, why := rejectFabricatedEvidence(narrative, ev, userDoc); rejected {
+		return narrateOutput{
+			Status: StatusAbsentInvalidOutput,
+			Err:    fmt.Errorf("inquest: narrate reply cites evidence absent from the record: %s", why),
+			Model:  model,
+		}
+	}
 	narrative = scrubCredentialShapes(narrative)
+	verdict, confidence, notes := calibrateVerdict(verdict, confidence, ev)
 
 	return narrateOutput{
-		Verdict:    verdict,
-		Confidence: confidence,
-		Narrative:  narrative,
-		Status:     StatusOK,
-		Model:      model,
+		Verdict:       verdict,
+		Confidence:    confidence,
+		Narrative:     narrative,
+		Status:        StatusOK,
+		Model:         model,
+		ContractNotes: notes,
 	}
 }
 
