@@ -57,16 +57,64 @@ func findingIDCandidates(id string) []string {
 	return []string{lower, strings.ToLower("finding-" + id)}
 }
 
+// eventIDSuffixStripBound bounds how many trailing "-<segment>" pieces
+// eventIDCandidates strips off the "finding-"-stripped id when generating
+// suffix-stripped candidates (mallcoppro-323). Bounded so a pathological id
+// with many hyphens cannot turn this into unbounded work; every real
+// suffix-ID detector's suffix is a handful of "-"-joined words at most (e.g.
+// "-inj-command-injection-chain" is 4 segments).
+const eventIDSuffixStripBound = 6
+
 // eventIDCandidates returns the case-insensitive lookup keys for a requested
-// event id: the id as given, and — when the id itself carries a "finding-"
-// prefix — the id with that prefix stripped. A stored event matches a
-// requested id when its own id (lowercased) appears in this set.
+// event id: the id as given; when the id carries a "finding-" prefix, the id
+// with that prefix stripped; and (mallcoppro-323) that stripped form with up
+// to eventIDSuffixStripBound trailing "-<segment>" pieces progressively
+// removed.
+//
+// The suffix-stripping direction exists because 5 detector families
+// (injection-probe, git-oops, secrets-exposure, malicious-skill,
+// dependency-tamper) mint Finding.ID = "finding-"+ev.ID+"-<suffix>" — e.g.
+// "finding-evt_ab12cd34ef56-inj-command-injection-chain". The PLAIN
+// "finding-" strip alone leaves "evt_ab12cd34ef56-inj-command-injection-chain",
+// which is LONGER than the stored event id "evt_ab12cd34ef56" and so can
+// never resolve — neither as an exact match nor as a unique PREFIX match
+// (resolveEventIDPrefix tests whether a stored id starts with the candidate,
+// and a longer candidate can never be a prefix of a shorter stored id).
+// Stripping trailing "-<segment>" pieces one at a time recovers the bare
+// event id as one of the generated candidates, so both the exact-match pass
+// (GetRawEvent, SearchEvents) and the unique-prefix fallback
+// (resolveEventIDPrefix, which reuses this same candidate list) can resolve
+// it. mallcoppro-323 also adds Finding.EventIDs as the primary, structured
+// linkage for these detectors — this id-lenience widening is the defensive
+// backstop for a finding id a model echoes from earlier conversation
+// context, or an older stored record predating EventIDs.
+//
+// A stored event matches a requested id when its own id (lowercased) appears
+// in the returned set.
 func eventIDCandidates(id string) []string {
 	lower := strings.ToLower(id)
 	out := []string{lower}
-	if stripped, ok := strings.CutPrefix(lower, "finding-"); ok {
+
+	stripped, hadFindingPrefix := strings.CutPrefix(lower, "finding-")
+	if hadFindingPrefix {
 		out = append(out, stripped)
+	} else {
+		stripped = lower
 	}
+
+	// Progressively strip trailing "-<segment>" pieces off the
+	// (finding-prefix-stripped, or original if it had none) form. Each
+	// intermediate result is its own candidate.
+	cur := stripped
+	for i := 0; i < eventIDSuffixStripBound; i++ {
+		idx := strings.LastIndex(cur, "-")
+		if idx <= 0 {
+			break
+		}
+		cur = cur[:idx]
+		out = append(out, cur)
+	}
+
 	return out
 }
 

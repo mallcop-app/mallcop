@@ -70,6 +70,12 @@ func (authFailureBurstDetector) Detect(events []event.Event, bl *baseline.Baseli
 		failures   int
 		succeeded  bool
 		firstEvent event.Event
+		// eventIDs is the FULL contributing set of failure-event ids for this
+		// actor's burst — every event.Event.ID this finding was derived from,
+		// not just firstEvent's (mallcoppro-323: an aggregate detector must
+		// carry its whole contributing set in Finding.EventIDs, not one
+		// representative id).
+		eventIDs []string
 	}
 	states := map[string]*actorState{}
 	order := []string{}
@@ -84,6 +90,9 @@ func (authFailureBurstDetector) Detect(events []event.Event, bl *baseline.Baseli
 				order = append(order, ev.Actor)
 			}
 			st.failures++
+			if ev.ID != "" {
+				st.eventIDs = append(st.eventIDs, ev.ID)
+			}
 		case authSuccessEventTypes[ev.Type]:
 			if st := states[ev.Actor]; st != nil {
 				// A terminal success after the failures resolves the burst: the
@@ -124,6 +133,7 @@ func (authFailureBurstDetector) Detect(events []event.Event, bl *baseline.Baseli
 				actor, st.failures,
 			),
 			Evidence: evidence,
+			EventIDs: st.eventIDs,
 		})
 	}
 
@@ -189,6 +199,15 @@ func detectDistributedSpray(events []event.Event) *finding.Finding {
 		if len(actors) >= sprayMinActors && len(ips) >= sprayMinDistinctIP {
 			first := members[0].ev
 			acct := sortedKeys(actors)
+			// memberEventIDs is the FULL contributing set of failure-event ids
+			// across every member of the spray window (mallcoppro-323) — not
+			// just first.ID, which evidence.event_id keeps for backward compat.
+			memberEventIDs := make([]string, 0, len(members))
+			for _, m := range members {
+				if m.ev.ID != "" {
+					memberEventIDs = append(memberEventIDs, m.ev.ID)
+				}
+			}
 			evidence, _ := json.Marshal(map[string]any{
 				"pattern":           "distributed-spray",
 				"accounts_affected": len(actors),
@@ -209,6 +228,7 @@ func detectDistributedSpray(events []event.Event) *finding.Finding {
 					len(actors), len(ips), spraySameWindow,
 				),
 				Evidence: evidence,
+				EventIDs: memberEventIDs,
 			}
 		}
 	}

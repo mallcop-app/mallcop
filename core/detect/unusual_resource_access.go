@@ -95,6 +95,7 @@ func unusualResourceAccessEvaluate(ev event.Event, bl *baseline.Baseline, emitte
 			ev.Actor, target,
 		),
 		Evidence: evidence,
+		EventIDs: []string{ev.ID},
 	}
 }
 

@@ -108,6 +108,7 @@ func dependencyTamperEvaluate(ev event.Event, _ *baseline.Baseline) []finding.Fi
 			"expected_hash": dp.ExpectedHash,
 			"actual_hash":   dp.ActualHash,
 			"rule":          "hash-mismatch",
+			"event_id":      ev.ID,
 		})
 		findings = append(findings, finding.Finding{
 			ID:        "finding-" + ev.ID + "-hash",
@@ -118,6 +119,7 @@ func dependencyTamperEvaluate(ev event.Event, _ *baseline.Baseline) []finding.Fi
 			Timestamp: ev.Timestamp,
 			Reason:    fmt.Sprintf("dependency hash mismatch for %q (%s): expected %s got %s", dp.Package, dp.Ecosystem, dp.ExpectedHash[:depMin(8, len(dp.ExpectedHash))], dp.ActualHash[:depMin(8, len(dp.ActualHash))]),
 			Evidence:  evidence,
+			EventIDs:  []string{ev.ID},
 		})
 	}
 
@@ -131,6 +133,7 @@ func dependencyTamperEvaluate(ev event.Event, _ *baseline.Baseline) []finding.Fi
 					"registry":  dp.Registry,
 					"ecosystem": dp.Ecosystem,
 					"rule":      "suspicious-registry",
+					"event_id":  ev.ID,
 				})
 				findings = append(findings, finding.Finding{
 					ID:        "finding-" + ev.ID + "-registry",
@@ -141,6 +144,7 @@ func dependencyTamperEvaluate(ev event.Event, _ *baseline.Baseline) []finding.Fi
 					Timestamp: ev.Timestamp,
 					Reason:    fmt.Sprintf("package %q (%s) installed from suspicious registry: %s", dp.Package, dp.Ecosystem, dp.Registry),
 					Evidence:  evidence,
+					EventIDs:  []string{ev.ID},
 				})
 				break
 			}
@@ -156,6 +160,7 @@ func dependencyTamperEvaluate(ev event.Event, _ *baseline.Baseline) []finding.Fi
 				"package":   added,
 				"ecosystem": dp.Ecosystem,
 				"rule":      "typosquatting",
+				"event_id":  ev.ID,
 			})
 			findings = append(findings, finding.Finding{
 				ID:        "finding-" + ev.ID + "-typosquat-" + depSanitizeID(added),
@@ -166,6 +171,7 @@ func dependencyTamperEvaluate(ev event.Event, _ *baseline.Baseline) []finding.Fi
 				Timestamp: ev.Timestamp,
 				Reason:    fmt.Sprintf("potential typosquatting package added: %q", added),
 				Evidence:  evidence,
+				EventIDs:  []string{ev.ID},
 			})
 		}
 	}
@@ -180,6 +186,7 @@ func dependencyTamperEvaluate(ev event.Event, _ *baseline.Baseline) []finding.Fi
 			"ecosystem": dp.Ecosystem,
 			"registry":  dp.Registry,
 			"rule":      "unexpected-direct-dependency",
+			"event_id":  ev.ID,
 		})
 		findings = append(findings, finding.Finding{
 			ID:        "finding-" + ev.ID + "-add",
@@ -190,6 +197,7 @@ func dependencyTamperEvaluate(ev event.Event, _ *baseline.Baseline) []finding.Fi
 			Timestamp: ev.Timestamp,
 			Reason:    fmt.Sprintf("new direct dependency added by %q: %s@%s (%s)", ev.Actor, dp.Package, dp.NewVersion, dp.Ecosystem),
 			Evidence:  evidence,
+			EventIDs:  []string{ev.ID},
 		})
 	}
 
@@ -203,6 +211,7 @@ func dependencyTamperEvaluate(ev event.Event, _ *baseline.Baseline) []finding.Fi
 				"new_version": dp.NewVersion,
 				"ecosystem":   dp.Ecosystem,
 				"rule":        "version-downgrade",
+				"event_id":    ev.ID,
 			})
 			findings = append(findings, finding.Finding{
 				ID:        "finding-" + ev.ID + "-downgrade",
@@ -213,6 +222,7 @@ func dependencyTamperEvaluate(ev event.Event, _ *baseline.Baseline) []finding.Fi
 				Timestamp: ev.Timestamp,
 				Reason:    fmt.Sprintf("dependency %q (%s) downgraded by %q: %s → %s", dp.Package, dp.Ecosystem, ev.Actor, dp.OldVersion, dp.NewVersion),
 				Evidence:  evidence,
+				EventIDs:  []string{ev.ID},
 			})
 		}
 	}

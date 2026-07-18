@@ -83,6 +83,7 @@ func createdEntityEvaluate(ev event.Event, bl *baseline.Baseline, emitted map[st
 		Timestamp: ev.Timestamp,
 		Reason:    fmt.Sprintf("new principal %q created by %q (not seen in baseline period)", created, ev.Actor),
 		Evidence:  evidence,
+		EventIDs:  []string{ev.ID},
 	}
 }
 
@@ -120,5 +121,6 @@ func newActorEvaluate(ev event.Event, bl *baseline.Baseline, emitted map[string]
 		Timestamp: ev.Timestamp,
 		Reason:    fmt.Sprintf("actor %q not seen in baseline period (source: %s)", ev.Actor, ev.Source),
 		Evidence:  evidence,
+		EventIDs:  []string{ev.ID},
 	}
 }

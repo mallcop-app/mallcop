@@ -70,6 +70,7 @@ func unusualLoginEvaluate(ev event.Event, bl *baseline.Baseline) *finding.Findin
 			Timestamp: ev.Timestamp,
 			Reason:    "login from unrecognized user account",
 			Evidence:  evidence,
+			EventIDs:  []string{ev.ID},
 		}
 	}
 
@@ -102,6 +103,7 @@ func unusualLoginEvaluate(ev event.Event, bl *baseline.Baseline) *finding.Findin
 			Timestamp: ev.Timestamp,
 			Reason:    fmt.Sprintf("login from new IP in known region (%s)", lp.Geo),
 			Evidence:  evidence,
+			EventIDs:  []string{ev.ID},
 		}
 	}
 
@@ -115,5 +117,6 @@ func unusualLoginEvaluate(ev event.Event, bl *baseline.Baseline) *finding.Findin
 		Timestamp: ev.Timestamp,
 		Reason:    fmt.Sprintf("login from unknown location (IP: %s, geo: %s)", lp.IP, lp.Geo),
 		Evidence:  evidence,
+		EventIDs:  []string{ev.ID},
 	}
 }

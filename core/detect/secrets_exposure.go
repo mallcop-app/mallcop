@@ -92,10 +92,11 @@ func secretsExposureEvaluate(ev event.Event, _ *baseline.Baseline) []finding.Fin
 			if rule.re.MatchString(text) {
 				// Redact: don't include the actual secret value in the finding.
 				evidence, _ := json.Marshal(map[string]string{
-					"actor":   ev.Actor,
-					"pattern": rule.name,
-					"field":   "payload",
-					"rule":    "secret-in-payload",
+					"actor":    ev.Actor,
+					"pattern":  rule.name,
+					"field":    "payload",
+					"rule":     "secret-in-payload",
+					"event_id": ev.ID,
 				})
 				findings = append(findings, finding.Finding{
 					ID:        "finding-" + ev.ID + "-secret-" + rule.name,
@@ -106,6 +107,7 @@ func secretsExposureEvaluate(ev event.Event, _ *baseline.Baseline) []finding.Fin
 					Timestamp: ev.Timestamp,
 					Reason:    "secret detected in event payload: " + rule.name,
 					Evidence:  evidence,
+					EventIDs:  []string{ev.ID},
 				})
 				seen[rule.name] = true
 				break

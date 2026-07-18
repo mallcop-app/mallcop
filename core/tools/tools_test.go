@@ -720,6 +720,69 @@ func TestSearchFindingsNilStore(t *testing.T) {
 	}
 }
 
+// TestSearchFindings_SurfacesEventIDsInToolOutput proves the mallcoppro-323
+// fix reaches the model: an injection-probe-shaped finding (the compound
+// "finding-"+ev.ID+"-inj-<rule>" id, no evidence.event_id — exactly the
+// pre-fix shape of the 5 suffix-ID detector families) that carries
+// Finding.EventIDs is returned by SearchFindings AND survives being
+// marshaled to JSON — the exact step core/investigate.ExecuteTool performs
+// on SearchFindings' return value before boxing it as the tool_result text
+// the model reads (investigate.go: `resultJSON, _ = json.Marshal(out)`).
+// Before EventIDs existed, this finding's tool-output JSON carried no
+// event_ids field at all, so the model had no id to chain search_events to.
+func TestSearchFindings_SurfacesEventIDsInToolOutput(t *testing.T) {
+	s := newTempStore(t)
+
+	base := time.Date(2026, 4, 10, 9, 0, 0, 0, time.UTC)
+	injectionShaped := finding.Finding{
+		ID:        "finding-evt_ab12cd34ef56-inj-command-injection-chain",
+		Source:    "detector:injection-probe",
+		Severity:  "critical",
+		Type:      "injection-probe",
+		Actor:     "mallory",
+		Timestamp: base,
+		Evidence:  json.RawMessage(`{"actor":"mallory","pattern":"command-injection-chain","match":"...","rule":"injection-pattern","event_id":"evt_ab12cd34ef56"}`),
+		EventIDs:  []string{"evt_ab12cd34ef56"},
+	}
+	if _, err := s.Append(store.KindFindings, injectionShaped); err != nil {
+		t.Fatalf("append finding: %v", err)
+	}
+
+	got, err := SearchFindings(s, SearchFindingsInput{Type: "injection-probe"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("want 1 finding, got %d", len(got))
+	}
+	if len(got[0].EventIDs) != 1 || got[0].EventIDs[0] != "evt_ab12cd34ef56" {
+		t.Fatalf("SearchFindings result EventIDs = %v, want [evt_ab12cd34ef56]", got[0].EventIDs)
+	}
+
+	// The exact marshal step ExecuteTool performs on the tool's return value
+	// before it becomes the model-visible tool_result text.
+	toolOutputJSON, err := json.Marshal(got)
+	if err != nil {
+		t.Fatalf("marshal tool output: %v", err)
+	}
+	var decoded []map[string]any
+	if err := json.Unmarshal(toolOutputJSON, &decoded); err != nil {
+		t.Fatalf("unmarshal tool output: %v", err)
+	}
+	if len(decoded) != 1 {
+		t.Fatalf("decoded tool output has %d entries, want 1", len(decoded))
+	}
+	rawIDs, ok := decoded[0]["event_ids"]
+	if !ok {
+		t.Fatalf("tool output JSON has no event_ids key at all — the finding.EventIDs field did not "+
+			"survive the marshal step: %s", toolOutputJSON)
+	}
+	ids, ok := rawIDs.([]any)
+	if !ok || len(ids) != 1 || ids[0] != "evt_ab12cd34ef56" {
+		t.Fatalf("tool output event_ids = %v, want [evt_ab12cd34ef56]\nfull tool output: %s", rawIDs, toolOutputJSON)
+	}
+}
+
 // ---- search-findings: mallcoppro-448 git-style unique-prefix id lookup -----
 
 // TestSearchFindingsIDPrefix mirrors TestSearchEventsIDPrefix's ladder —

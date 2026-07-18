@@ -244,10 +244,11 @@ func injectionProbeEvaluate(ev event.Event, _ *baseline.Baseline) []finding.Find
 					matched = matched[:80] + "..."
 				}
 				evidence, _ := json.Marshal(map[string]string{
-					"actor":   ev.Actor,
-					"pattern": rule.name,
-					"match":   matched,
-					"rule":    "injection-pattern",
+					"actor":    ev.Actor,
+					"pattern":  rule.name,
+					"match":    matched,
+					"rule":     "injection-pattern",
+					"event_id": ev.ID,
 				})
 				findings = append(findings, finding.Finding{
 					ID:        "finding-" + ev.ID + "-inj-" + rule.name,
@@ -258,6 +259,7 @@ func injectionProbeEvaluate(ev event.Event, _ *baseline.Baseline) []finding.Find
 					Timestamp: ev.Timestamp,
 					Reason:    "prompt injection pattern detected: " + rule.name,
 					Evidence:  evidence,
+					EventIDs:  []string{ev.ID},
 				})
 				seen[rule.name] = true
 				break

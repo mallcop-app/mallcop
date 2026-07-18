@@ -174,6 +174,24 @@ func safeAssembleIdentity(st *store.Store, f finding.Finding) (out IdentityEvide
 	return assembleIdentity(st, f)
 }
 
+// resolveIdentityEvent resolves the ONE event assembleIdentity extracts
+// identity fields from. It prefers the finding's first-class EventIDs
+// (mallcoppro-323) — the first id in that list, since identity extraction
+// reads a single representative event's payload — and falls back to the
+// legacy f.ID-based resolution (tools.GetRawEvent's own eventIDCandidates
+// finding-/bare lenience plus git-style unique-prefix resolution) only when
+// EventIDs is empty: an older stored finding predating this field, or a
+// (should no longer exist, but defensively handled) detector that fires with
+// no event linkage at all. This is the SAME tools.GetRawEvent call either
+// way — only the id fed into it differs — so the credential scrub and size
+// cap apply identically regardless of which path resolved the id.
+func resolveIdentityEvent(st *store.Store, f finding.Finding) (tools.GetRawEventOutput, error) {
+	if len(f.EventIDs) > 0 {
+		return tools.GetRawEvent(st, tools.GetRawEventInput{ID: f.EventIDs[0]})
+	}
+	return tools.GetRawEvent(st, tools.GetRawEventInput{ID: f.ID})
+}
+
 // assembleIdentity resolves the finding's underlying event via
 // tools.GetRawEvent — deliberately the SAME function get_raw_event uses, so
 // the credential scrub (sessionToken/secretAccessKey redaction) and the 64KB
@@ -182,10 +200,15 @@ func safeAssembleIdentity(st *store.Store, f finding.Finding) (out IdentityEvide
 // first (caller/session_name/source_ip/target — the connectors v0.9.0
 // promotion), then OLD FORMAT raw CloudTrail-style fallbacks. FieldPaths
 // records which path supplied each populated value.
+//
+// Event resolution itself is resolveIdentityEvent (mallcoppro-323): the
+// first-class f.EventIDs is tried FIRST, falling back to the legacy
+// f.ID-based lenience path only when EventIDs is empty — see that function's
+// doc comment for why.
 func assembleIdentity(st *store.Store, f finding.Finding) IdentityEvidence {
 	out := IdentityEvidence{Actor: f.Actor, FieldPaths: map[string]string{}}
 
-	res, err := tools.GetRawEvent(st, tools.GetRawEventInput{ID: f.ID})
+	res, err := resolveIdentityEvent(st, f)
 	if err != nil {
 		out.Error = err.Error()
 		return out

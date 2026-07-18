@@ -117,6 +117,10 @@ func unusualTimingFindingForGroup(k unusualTimingKey, evs []event.Event) finding
 	sourceSet := map[string]struct{}{}
 	typeSet := map[string]struct{}{}
 	eventIDs := make([]string, 0, unusualTimingEventIDCap)
+	// allEventIDs is the FULL, uncapped contributing set for Finding.EventIDs
+	// (mallcoppro-323) — distinct from eventIDs above, which stays capped at
+	// unusualTimingEventIDCap for the evidence blob's display sample.
+	allEventIDs := make([]string, 0, len(evs))
 	for i, ev := range evs {
 		// len(...) > 0, not a direct `ev.Type != ""` comparison: vocab_test.go's
 		// AST scan treats any `*.Type == "literal"` / `!=` comparison in this
@@ -130,6 +134,9 @@ func unusualTimingFindingForGroup(k unusualTimingKey, evs []event.Event) finding
 		}
 		if i < unusualTimingEventIDCap {
 			eventIDs = append(eventIDs, ev.ID)
+		}
+		if ev.ID != "" {
+			allEventIDs = append(allEventIDs, ev.ID)
 		}
 	}
 
@@ -153,6 +160,7 @@ func unusualTimingFindingForGroup(k unusualTimingKey, evs []event.Event) finding
 		Reason: fmt.Sprintf("actor %q active at unusual hour %02d:xx UTC (%d event(s), not in baseline pattern)",
 			k.actor, k.hour, len(evs)),
 		Evidence: evidence,
+		EventIDs: allEventIDs,
 	}
 }
 

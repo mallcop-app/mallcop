@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mallcop-app/mallcop/core/tools"
 	"github.com/mallcop-app/mallcop/pkg/event"
 	"github.com/mallcop-app/mallcop/pkg/finding"
 )
@@ -140,6 +141,65 @@ func TestAssembleIdentity_NotFound(t *testing.T) {
 	out := assembleIdentity(s, f)
 	if out.Error == "" {
 		t.Fatal("expected a non-empty Error for a finding with no underlying event")
+	}
+}
+
+// TestAssembleIdentity_EventIDsResolvesWhenIDLenienceCannot proves the
+// mallcoppro-323 fix: a finding shaped like the 5 suffix-ID detector families
+// (Finding.ID = "finding-"+ev.ID+"-<suffix>") still resolves identity when
+// Finding.EventIDs carries the real event id directly — even for a suffix
+// long enough (many "-"-joined segments) that id-lenience's OWN widened
+// eventIDCandidates (core/tools/id_lenience.go's bounded
+// eventIDSuffixStripBound progressive-strip backstop, added alongside this
+// same mallcoppro-323 fix) still cannot recover the bare event id from the
+// compound id alone. EventIDs is the AUTHORITATIVE, unambiguous linkage;
+// id-lenience's suffix stripping is a best-effort, BOUNDED backstop for an
+// id a model echoes from earlier conversation context — it is not, and was
+// never meant to be, a substitute for a detector recording real linkage.
+func TestAssembleIdentity_EventIDsResolvesWhenIDLenienceCannot(t *testing.T) {
+	s := newTempStore(t)
+	seedEvent(t, s, event.Event{
+		ID: "evt_ab12cd34ef56", Source: "github", Type: "push", Actor: "mallory",
+		Timestamp: time.Now(),
+		Payload: rawEventPayload(t, map[string]any{
+			"caller":    "arn:aws:iam::111122223333:role/attacker",
+			"source_ip": "203.0.113.99",
+		}),
+	})
+	// A suffix-ID shape with MORE hyphen-joined segments than id-lenience's
+	// eventIDSuffixStripBound (6): "-inj-a-b-c-d-e-f" is 7 segments, so the
+	// widened eventIDCandidates strip loop bottoms out at
+	// "evt_ab12cd34ef56-inj" — one segment short of the bare event id — and
+	// genuinely cannot recover it, by construction of the bound.
+	f := finding.Finding{
+		ID:       "finding-evt_ab12cd34ef56-inj-a-b-c-d-e-f",
+		Actor:    "mallory",
+		Type:     "injection-probe",
+		EventIDs: []string{"evt_ab12cd34ef56"},
+	}
+
+	// Control: prove the OLD f.ID-only path genuinely cannot resolve this
+	// shape even WITH id-lenience's widened suffix-stripping backstop — the
+	// suffix has more segments than eventIDSuffixStripBound allows it to
+	// strip through.
+	fallback, err := tools.GetRawEvent(s, tools.GetRawEventInput{ID: f.ID})
+	if err != nil {
+		t.Fatalf("unexpected error probing the fallback path: %v", err)
+	}
+	if fallback.Found {
+		t.Fatal("precondition violated: the suffixed finding id unexpectedly resolved via f.ID alone — " +
+			"this test no longer proves what it claims")
+	}
+
+	out := assembleIdentity(s, f)
+	if out.Error != "" {
+		t.Fatalf("unexpected error: %s (EventIDs should have resolved the event)", out.Error)
+	}
+	if out.SourceIP != "203.0.113.99" {
+		t.Errorf("SourceIP = %q, want 203.0.113.99 — identity should have resolved via f.EventIDs[0]", out.SourceIP)
+	}
+	if out.Caller != "arn:aws:iam::111122223333:role/attacker" {
+		t.Errorf("Caller = %q", out.Caller)
 	}
 }
 

@@ -119,6 +119,16 @@ below, that IS the finding they mean — GROUND on it:
   - NEVER ask the operator to supply an id, source, actor, severity, port, or
     event id that already appears in the on-screen finding context or that you can
     read from a finding — you already have it. Look it up, do not interrogate.
+  - If the finding you resolved has NO event linkage — search_findings returns it
+    with an empty/missing event_ids, or its seed context block above is
+    missing/truncated — SAY SO PLAINLY (e.g. "this finding has no linked event id
+    on record, so I can't pull the underlying raw event") and keep answering about
+    THAT SAME finding at the finding level (its actor/reason/severity/evidence are
+    still real data you can use). Do NOT silently pivot to a different finding you
+    happen to be able to fully resolve just because it is easier to answer about —
+    if you switch which finding you are discussing for ANY reason, say so
+    explicitly before doing it. Answering confidently about the wrong finding is
+    worse than an honest "I can't reach the raw events for this one."
 
 ## Extracting fields from a raw record (get_raw_event)
 
@@ -346,11 +356,21 @@ func (o Options) systemPrompt() string {
 // formatSeedFindings renders the on-screen findings the browser seeded into a
 // live question (mallcoppro-010) as the leading, UNTRUSTED-boxed context block of
 // the operator's first user message. The findings are marshaled to a single JSON
-// line and wrapped with agent.WrapUntrusted, so the fields (a finding's actor,
-// reason, etc. — all attacker-influenceable customer data) are neutralized and
-// boxed in [USER_DATA_BEGIN]/[USER_DATA_END] exactly like every tool result: the
-// analyst reads them as data to ground on, never as instructions. Returns "" when
-// nothing was seeded, so the un-seeded Ask/CLI path is byte-for-byte unchanged.
+// line and boxed via agent.WrapUntrustedToolResult — NOT the single-scalar
+// agent.WrapUntrusted (mallcoppro-9af6): the seed is a whole marshaled JSON
+// array, exactly the "structured multi-record payload" shape
+// WrapUntrustedToolResult exists for (mallcoppro-a1e's tool_result fix — see
+// that function's doc comment), not a single short scalar. Boxing it through
+// WrapUntrusted's 1024-byte SILENT cap truncated a 7-finding seed mid-JSON
+// with no indication anything was cut; WrapUntrustedToolResult's 64KB budget
+// fits the seed intact in the overwhelming majority of cases, and on the rare
+// oversized seed appends a VISIBLE [TOOL_RESULT_TRUNCATED: N more bytes not
+// shown] marker instead of silently dropping data. The fields (a finding's
+// actor, reason, etc. — all attacker-influenceable customer data) are
+// neutralized and boxed in [USER_DATA_BEGIN]/[USER_DATA_END] exactly like
+// every tool result: the analyst reads them as data to ground on, never as
+// instructions. Returns "" when nothing was seeded, so the un-seeded Ask/CLI
+// path is byte-for-byte unchanged.
 func formatSeedFindings(seed []SeededFinding) string {
 	if len(seed) == 0 {
 		return ""
@@ -359,7 +379,7 @@ func formatSeedFindings(seed []SeededFinding) string {
 	if err != nil {
 		return ""
 	}
-	boxed := agent.WrapUntrusted("findings on the operator's screen", string(raw))
+	boxed := agent.WrapUntrustedToolResult("findings on the operator's screen", string(raw))
 	return "CONTEXT — the operator is looking at the finding(s) below on their " +
 		"screen right now, and their question is almost certainly ABOUT one of " +
 		"them. Resolve which finding they mean from this context, ground your answer " +

@@ -222,10 +222,30 @@ func DetectorGaps(st *store.Store, rows []eval.DetectFidelityRow) ([]GapCandidat
 
 	// (c) Consensus-dissent clusters: resolutions whose reason carries the fanout
 	// dissent marker. We surface the finding, NOT the raw reason (no free text).
+	//
+	// DEDUPED BY FindingID (mallcoppro-9015): a consensus re-vote appends a
+	// SECOND resolution row for the same finding — observed live in prod
+	// gaps.json, two byte-identical dissent candidates for
+	// finding-evt_5628196043f0 — so a naive one-candidate-per-RESOLUTION-ROW
+	// loop (the pre-fix shape) emits a duplicate "panel did not fully agree"
+	// notice per re-vote. Keep exactly one candidate per FindingID: the MOST
+	// RECENT dissenting resolution (resolutions replays oldest-first per the
+	// store's append-only contract — see byFinding's own "first wins" comment
+	// above — so the LAST write into dissentByFinding during this forward scan
+	// is the most recent one).
+	dissentByFinding := make(map[string]resolution.Resolution)
+	var dissentOrder []string
 	for _, r := range resolutions {
 		if !strings.Contains(r.Reason, dissentReasonMarker) {
 			continue
 		}
+		if _, seen := dissentByFinding[r.FindingID]; !seen {
+			dissentOrder = append(dissentOrder, r.FindingID)
+		}
+		dissentByFinding[r.FindingID] = r
+	}
+	for _, fid := range dissentOrder {
+		r := dissentByFinding[fid]
 		out = append(out, GapCandidate{
 			Kind:           GapDissent,
 			Source:         r.Source,

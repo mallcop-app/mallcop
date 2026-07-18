@@ -522,6 +522,60 @@ func TestRelevantEvents_EventIDsWinOverActor(t *testing.T) {
 	}
 }
 
+// TestRelevantEvents_FindingEventIDsIsThePrimaryPath verifies the
+// mallcoppro-323 fix directly: a finding whose first-class EventIDs field is
+// set (the shape every core/detect detector now produces) selects those
+// events even when Evidence carries NOTHING resolvable — exactly the
+// pre-fix failure mode for the 5 suffix-ID detector families (Evidence was
+// {"actor":..., "pattern":..., "match":..., "rule":...}, no event_id key at
+// all).
+func TestRelevantEvents_FindingEventIDsIsThePrimaryPath(t *testing.T) {
+	fi := &finding.Finding{
+		ID:       "finding-evt-2-inj-command-injection-chain",
+		Actor:    "alice",
+		Evidence: json.RawMessage(`{"actor":"alice","pattern":"command-injection-chain","match":"...","rule":"injection-pattern"}`),
+		EventIDs: []string{"evt-2"},
+	}
+	events := []event.Event{
+		mkEvent("evt-1", "alice"),
+		mkEvent("evt-2", "alice"),
+		mkEvent("evt-3", "bob"),
+	}
+	got := relevantEvents(fi, events)
+	if len(got) != 1 || got[0].ID != "evt-2" {
+		t.Errorf("got %v, want [evt-2] (resolved via fi.EventIDs — Evidence carries no recoverable id)", got)
+	}
+}
+
+// TestRelevantEvents_FindingEventIDsWinsOverEvidence verifies fi.EventIDs
+// takes precedence over Evidence when BOTH are present and would select
+// different events — the first-class field is the authoritative source, the
+// Evidence extraction is only ever the fallback for an older record.
+func TestRelevantEvents_FindingEventIDsWinsOverEvidence(t *testing.T) {
+	fi := &finding.Finding{
+		ID:       "f1",
+		Actor:    "alice",
+		Evidence: json.RawMessage(`{"event_id":"evt-1"}`), // would select evt-1 alone
+		EventIDs: []string{"evt-2", "evt-3"},              // the authoritative linkage
+	}
+	events := []event.Event{
+		mkEvent("evt-1", "alice"),
+		mkEvent("evt-2", "alice"),
+		mkEvent("evt-3", "alice"),
+	}
+	got := relevantEvents(fi, events)
+	if len(got) != 2 {
+		t.Fatalf("got %d events, want 2 (fi.EventIDs must win over Evidence)", len(got))
+	}
+	ids := map[string]bool{}
+	for _, e := range got {
+		ids[e.ID] = true
+	}
+	if !ids["evt-2"] || !ids["evt-3"] || ids["evt-1"] {
+		t.Errorf("got %v, want exactly [evt-2 evt-3]", ids)
+	}
+}
+
 // TestEmitExternalMessages_FiltersIrrelevant verifies the end-to-end emit
 // path: 100 events for different actors, finding references 3 by ID,
 // output contains exactly the 3 payload blocks. This is the regression

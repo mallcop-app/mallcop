@@ -104,6 +104,7 @@ func rateAnomalyEvaluate(ev event.Event, bl *baseline.Baseline) *finding.Finding
 			Timestamp: ev.Timestamp,
 			Reason:    reason,
 			Evidence:  evidence,
+			EventIDs:  []string{ev.ID},
 		}
 	}
 
@@ -123,6 +124,7 @@ func rateAnomalyEvaluate(ev event.Event, bl *baseline.Baseline) *finding.Finding
 			Timestamp: ev.Timestamp,
 			Reason:    fmt.Sprintf("elevated request rate by %q: %d requests", ev.Actor, count),
 			Evidence:  evidence,
+			EventIDs:  []string{ev.ID},
 		}
 	}
 
@@ -148,6 +150,7 @@ func rateAnomalyEvaluate(ev event.Event, bl *baseline.Baseline) *finding.Finding
 				Timestamp: ev.Timestamp,
 				Reason:    fmt.Sprintf("rate anomaly for %q: %.0fx baseline (%s:%s)", ev.Actor, ratio, ev.Source, ev.Type),
 				Evidence:  evidence,
+				EventIDs:  []string{ev.ID},
 			}
 		}
 		if ratio >= float64(mediumRateMultiplier) {
@@ -168,6 +171,7 @@ func rateAnomalyEvaluate(ev event.Event, bl *baseline.Baseline) *finding.Finding
 				Timestamp: ev.Timestamp,
 				Reason:    fmt.Sprintf("elevated rate for %q: %.0fx baseline (%s:%s)", ev.Actor, ratio, ev.Source, ev.Type),
 				Evidence:  evidence,
+				EventIDs:  []string{ev.ID},
 			}
 		}
 	}
@@ -189,6 +193,7 @@ func rateAnomalyEvaluate(ev event.Event, bl *baseline.Baseline) *finding.Finding
 			Timestamp: ev.Timestamp,
 			Reason:    fmt.Sprintf("repeated access to sensitive endpoint %q by %q: %d requests", rp.Endpoint, ev.Actor, count),
 			Evidence:  evidence,
+			EventIDs:  []string{ev.ID},
 		}
 	}
 
