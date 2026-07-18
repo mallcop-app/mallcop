@@ -65,6 +65,50 @@ func TestBuildUserMessage_Golden(t *testing.T) {
 	}
 }
 
+// TestSystemPrompt_RequiresGrantDirectionClause proves the fixed system prompt
+// still carries the grantor/grantee/capability/direction requirement
+// (mallcoppro-15e) — so a future prompt edit cannot silently drop the ACTION
+// explanation contract that makes a trust/access-change finding intelligible.
+func TestSystemPrompt_RequiresGrantDirectionClause(t *testing.T) {
+	for _, want := range []string{"grantor", "grantee", "capability", "direction"} {
+		if !strings.Contains(systemPrompt, want) {
+			t.Errorf("systemPrompt no longer mentions %q — the grant-direction narrate contract was dropped", want)
+		}
+	}
+}
+
+// TestBuildUserMessage_Golden_WithGrantDirection proves the new
+// grantor/grantee/capability identity fields serialize into the JSON user
+// document so the narrate model actually receives the resolved direction. It is
+// SEPARATE from TestBuildUserMessage_Golden (which must keep passing byte-for-
+// byte with no grant fields present) precisely so the omitempty behavior of
+// both the empty and populated cases is locked in.
+func TestBuildUserMessage_Golden_WithGrantDirection(t *testing.T) {
+	f := sampleFinding()
+	res := ResolutionRef{Action: "escalate", Reason: "hard-constraint route: new-external-access"}
+	ev := Evidence{
+		Identity: IdentityEvidence{
+			Grantor:    "arn:aws:iam::458526671706:role/mallcop-bedrock-relay",
+			Grantee:    "arn:aws:sts::225635015146:assumed-role/forge-proxy-bedrock-role/forge-proxy",
+			Capability: "can assume this role and act with its permissions",
+			FieldPaths: map[string]string{"grantor": "finding.evidence"},
+		},
+	}
+	got, err := buildUserMessage(f, res, ev)
+	if err != nil {
+		t.Fatalf("buildUserMessage: %v", err)
+	}
+	for _, want := range []string{
+		`"grantor":"arn:aws:iam::458526671706:role/mallcop-bedrock-relay"`,
+		`"grantee":"arn:aws:sts::225635015146:assumed-role/forge-proxy-bedrock-role/forge-proxy"`,
+		`"capability":"can assume this role and act with its permissions"`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("user document missing grant-direction fragment:\n  want substring: %s\n  got: %s", want, got)
+		}
+	}
+}
+
 // TestNarrate_ValidReply proves a well-formed reply parses to StatusOK with
 // the exact verdict/confidence/narrative.
 func TestNarrate_ValidReply(t *testing.T) {

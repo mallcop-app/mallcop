@@ -110,6 +110,52 @@ func TestRunAll_SuccessfulInvestigation(t *testing.T) {
 	}
 }
 
+// TestRunAll_GrantDirectionFlowsToModel is the end-to-end proof (mallcoppro-15e)
+// that the resolved trust direction reaches the ACTUAL request sent to the model,
+// not just the pure resolveGrantDirection function in isolation. A
+// new-external-access finding with a realistic AWS cross-account trust_added
+// Evidence blob is run through RunAll; the scripted client records the user
+// document it received, and we assert the FLIPPED grantor/grantee (the assumed
+// role is the grantor, the calling principal is the grantee) appear in that
+// document's JSON body.
+func TestRunAll_GrantDirectionFlowsToModel(t *testing.T) {
+	s := newTempStore(t)
+	const forgeProxy = "arn:aws:sts::225635015146:assumed-role/forge-proxy-bedrock-role/forge-proxy"
+	const relay = "arn:aws:iam::458526671706:role/mallcop-bedrock-relay"
+
+	client := &scriptedClient{reply: `{"verdict":"benign","confidence":0.9,"narrative":"mallcop-bedrock-relay granted forge-proxy assume-role access; operational relay."}`}
+	ef := EscalatedFinding{
+		Finding: finding.Finding{
+			ID: "finding-evt-trust", Actor: forgeProxy, Type: "new-external-access",
+			Timestamp: time.Now(),
+			Evidence:  json.RawMessage(`{"actor":"` + forgeProxy + `","grantee":"` + relay + `","member":"` + relay + `","event_type":"trust_added"}`),
+		},
+		Resolution: ResolutionRef{Action: "escalate", Reason: "test"},
+	}
+	in := Input{Store: s, Client: client, Findings: []EscalatedFinding{ef}, Config: okConfig()}
+
+	out := RunAll(context.Background(), in)
+	if out.Investigated != 1 {
+		t.Fatalf("Outcome = %+v, want Investigated=1", out)
+	}
+	if client.calls != 1 {
+		t.Fatalf("client called %d times, want 1", client.calls)
+	}
+	if len(client.lastReq.Messages) == 0 || len(client.lastReq.Messages[0].Content) == 0 {
+		t.Fatal("no user message recorded on the scripted client")
+	}
+	userDoc := client.lastReq.Messages[0].Content[0].Text
+	if !strings.Contains(userDoc, `"grantor":"`+relay+`"`) {
+		t.Errorf("user document does not carry the FLIPPED grantor (assumed role %q):\n%s", relay, userDoc)
+	}
+	if !strings.Contains(userDoc, `"grantee":"`+forgeProxy+`"`) {
+		t.Errorf("user document does not carry the FLIPPED grantee (calling principal %q):\n%s", forgeProxy, userDoc)
+	}
+	if !strings.Contains(userDoc, `"capability":`) {
+		t.Errorf("user document does not carry a capability field:\n%s", userDoc)
+	}
+}
+
 // TestRunAll_IdempotencyDecisionTable exercises the three documented cases:
 // (a) record exists + ok + current schema -> ok-skip (zero calls, zero
 // writes — the WriteSnapshot commit SHA is unchanged); (b) record exists but

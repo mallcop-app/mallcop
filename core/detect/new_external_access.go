@@ -92,7 +92,16 @@ func newExternalAccessEvaluate(ev event.Event, emitted map[string]bool) *finding
 		"permission": permission,
 		"event_type": ev.Type,
 		"target":     metaStr(meta, "target", "repo", "org"),
-		"event_id":   ev.ID,
+		// member is the raw AWS AssumeRole trust boundary (the assumed role's
+		// ARN, from aws.go's payload "member" key) and is present ONLY for
+		// AWS cross-account trust_added events. A domain-only trust_added
+		// (e.g. M365 "Set federation settings on domain.", which carries
+		// domain/domain_name but no member) leaves this empty. assemble.go's
+		// resolveGrantDirection reads this to pick the correct direction
+		// convention for the two event shapes that both use event_type
+		// "trust_added" (mallcoppro-15e).
+		"member":   metaStr(meta, "member"),
+		"event_id": ev.ID,
 	})
 
 	reason := fmt.Sprintf("external access granted: %q added external principal %q", ev.Actor, grantee)
