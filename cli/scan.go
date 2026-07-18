@@ -423,7 +423,12 @@ func runScan(args []string) error {
 	// cases.Escalation carrying no Action/Reason/Confidence field to act on.
 	if sum.FindingsDetected > 0 {
 		if err := collapseCases(st, sum.FindingsDetected); err != nil {
-			return fmt.Errorf("scan: case collapse: %w", err)
+			// A case-collapse failure must not fail the scan (the findings
+			// and their resolutions are already durably stored — cases.json
+			// is a best-effort side projection, not a required output);
+			// surface it on stderr and continue. Mirrors the Discord-emit
+			// non-fatal precedent above.
+			fmt.Fprintf(os.Stderr, "scan: case collapse: %v\n", err)
 		}
 	}
 

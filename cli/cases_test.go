@@ -1,9 +1,12 @@
 package cli
 
 import (
+	"bytes"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/mallcop-app/mallcop/core/cases"
@@ -237,5 +240,68 @@ func TestScanCases_NoEscalation_NoCasesFile(t *testing.T) {
 
 	if _, statErr := os.Stat(casesJSONPath(storePath)); !os.IsNotExist(statErr) {
 		t.Fatalf("expected NO cases.json when nothing escalated, stat error: %v", statErr)
+	}
+}
+
+// TestScanCases_CollapseFailureNonFatal_ScanStillReportsFindings is the
+// regression test for the mallcoppro-554 review finding: a collapseCases
+// failure (here, a corrupted committed cases.json that fails
+// json.Unmarshal(existingRaw, &existing)) must NOT abort the whole scan or
+// swallow the findings-detected signal. runScan must still return the
+// errFindings sentinel (exit 1, "findings detected" — not exit 2, a generic
+// tooling failure) and the ScanSummary must still print; the case-collapse
+// error is surfaced as a non-fatal stderr warning, mirroring the Discord-emit
+// precedent immediately above the call site in cli/scan.go.
+func TestScanCases_CollapseFailureNonFatal_ScanStillReportsFindings(t *testing.T) {
+	dir := t.TempDir()
+	storePath := filepath.Join(dir, "store")
+	baselinePath := filepath.Join(dir, "baseline.json")
+	writeKnownActorsBaseline(t, baselinePath, "dev")
+
+	eventsPath1 := filepath.Join(dir, "events-g1.jsonl")
+	writeFile(t, eventsPath1, gitOopsEventWithID("g1", "2026-01-01T00:00:00Z"))
+	if err := runScan([]string{"--store", storePath, "--connector", "file", "--events", eventsPath1, "--baseline", baselinePath}); !isFindingsError(err) {
+		t.Fatalf("first scan: want findings sentinel, got %v", err)
+	}
+
+	// Corrupt the committed cases.json in place: overwrite it in the store's
+	// work tree with invalid JSON and commit through plain git (the store is
+	// a real git work tree — see core/store.Open's doc comment; runGit is
+	// deployrepo.go's existing git-wrapping helper, reused here rather than
+	// duplicated). The NEXT scan's collapseCases call reads this back via
+	// ReadSnapshot and its json.Unmarshal(existingRaw, &existing) fails.
+	if err := os.WriteFile(casesJSONPath(storePath), []byte("not valid json"), 0o644); err != nil {
+		t.Fatalf("corrupt cases.json: %v", err)
+	}
+	if err := runGit(storePath, "add", "cases.json"); err != nil {
+		t.Fatalf("git add cases.json: %v", err)
+	}
+	if err := runGit(storePath, "-c", "user.name=test", "-c", "user.email=test@example.com",
+		"commit", "-m", "corrupt cases.json"); err != nil {
+		t.Fatalf("git commit corrupt cases.json: %v", err)
+	}
+
+	old := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	os.Stderr = w
+
+	eventsPath2 := filepath.Join(dir, "events-g2.jsonl")
+	writeFile(t, eventsPath2, gitOopsEventWithID("g2", "2026-01-01T01:00:00Z"))
+	scanErr := runScan([]string{"--store", storePath, "--connector", "file", "--events", eventsPath2, "--baseline", baselinePath})
+
+	w.Close()
+	os.Stderr = old
+	var buf bytes.Buffer
+	io.Copy(&buf, r)
+	stderr := buf.String()
+
+	if !isFindingsError(scanErr) {
+		t.Fatalf("second scan (collapse failure): want findings sentinel despite the case-collapse error, got %v", scanErr)
+	}
+	if !strings.Contains(stderr, "scan: case collapse:") {
+		t.Errorf("want a non-fatal case-collapse warning on stderr, got:\n%s", stderr)
 	}
 }
