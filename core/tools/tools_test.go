@@ -576,6 +576,44 @@ func TestSearchEventsWrappedIDPrefixAmbiguous(t *testing.T) {
 	}
 }
 
+// TestSearchEvents_ExactMatchOnHyphenatedIDWinsOverStrippedGuess mirrors
+// TestGetRawEvent_ExactMatchOnHyphenatedIDWinsOverStrippedGuess for
+// SearchEvents' independent exact-match loop (search_events.go's own
+// `for _, c := range eventIDCandidates(id) { if _, ok := pool[c]; ... }`) —
+// the code review named BOTH call sites as exposed to the same bug, since
+// both build their exact-match set straight from eventIDCandidates. A query
+// for the EXISTING, EXACT id "abc-1-2-3" must return exactly that event,
+// never fall through to the shorter, unrelated "abc" via a suffix-stripped
+// guess.
+func TestSearchEvents_ExactMatchOnHyphenatedIDWinsOverStrippedGuess(t *testing.T) {
+	s := newTempStore(t)
+	base := time.Date(2026, 4, 10, 9, 0, 0, 0, time.UTC)
+	seed := []event.Event{
+		{ID: "abc", Source: "exec", Type: "custom", Actor: "svc", Timestamp: base},
+		{ID: "abc-1-2-3", Source: "exec", Type: "custom", Actor: "svc", Timestamp: base.Add(time.Minute)},
+	}
+	for _, ev := range seed {
+		if _, err := s.Append(store.KindEvents, ev); err != nil {
+			t.Fatalf("append event %s: %v", ev.ID, err)
+		}
+	}
+
+	got, fellBack, err := SearchEvents(s, SearchEventsInput{IDs: []string{"abc-1-2-3"}})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if fellBack {
+		t.Error("fellBack = true, want false — this is an exact id match, not a time-window fallback")
+	}
+	ids := make([]string, 0, len(got))
+	for _, ev := range got {
+		ids = append(ids, ev.ID)
+	}
+	if !equalStrings(ids, []string{"abc-1-2-3"}) {
+		t.Fatalf("ids = %v, want exactly [abc-1-2-3] — a suffix-stripped guess must never steal an exact match", ids)
+	}
+}
+
 // ---- search-findings -------------------------------------------------------
 
 // TestSearchFindings drives search-findings against a REAL core/store temp repo.

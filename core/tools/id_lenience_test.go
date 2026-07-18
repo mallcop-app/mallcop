@@ -130,15 +130,58 @@ func TestResolveIDPrefixMulti_ExactFullIDStillResolvesAsPrefixOfItself(t *testin
 	}
 }
 
-// ---- eventIDCandidates: mallcoppro-323 suffix stripping ---------------------
+// ---- eventIDCandidates / eventIDSuffixStrippedCandidates: mallcoppro-323 ---
 
-// TestEventIDCandidates_SuffixStrippingResolvesSuffixIDShape proves the
-// mallcoppro-323 widening: a suffix-ID detector's compound finding id (e.g.
-// injection-probe's "finding-"+ev.ID+"-inj-"+rule) generates the bare event
-// id as one of its candidates, by progressively stripping trailing
-// "-<segment>" pieces after the "finding-" prefix strip.
-func TestEventIDCandidates_SuffixStrippingResolvesSuffixIDShape(t *testing.T) {
-	got := eventIDCandidates("finding-evt_ab12cd34ef56-inj-command-injection-chain")
+// TestEventIDCandidates_NeverSuffixStrips is the code-review regression test
+// (MAJOR finding): eventIDCandidates — the function whose output feeds the
+// SILENT exact-match set in get_raw_event.go and search_events.go — must
+// NEVER generate a suffix-stripped candidate, for ANY input, prefixed or
+// not. Suffix stripping is a heuristic guess and belongs exclusively in
+// eventIDSuffixStrippedCandidates, consumed only through the
+// ambiguity-aware resolveEventIDPrefix path.
+func TestEventIDCandidates_NeverSuffixStrips(t *testing.T) {
+	cases := []struct {
+		id   string
+		want []string
+	}{
+		{id: "cafe1234abcd", want: []string{"cafe1234abcd"}},
+		{id: "finding-cafe1234abcd", want: []string{"finding-cafe1234abcd", "cafe1234abcd"}},
+		// A BARE hyphenated id (no "finding-" prefix) — a customer's own id
+		// scheme via file/exec/sibling connectors or --events JSONL — must
+		// generate EXACTLY itself, never a stripped guess. This is the exact
+		// shape the code review's reproduction (store has "abc" and
+		// "abc-1-2-3") depends on staying un-stripped.
+		{id: "abc-1-2-3", want: []string{"abc-1-2-3"}},
+		// A "finding-"-prefixed compound suffix-ID shape: the finding-
+		// prefix strips (existing, safe, lossless), but the suffix itself
+		// does NOT get progressively stripped here anymore.
+		{id: "finding-evt_ab12cd34ef56-inj-command-injection-chain",
+			want: []string{"finding-evt_ab12cd34ef56-inj-command-injection-chain", "evt_ab12cd34ef56-inj-command-injection-chain"}},
+	}
+	for _, tc := range cases {
+		got := eventIDCandidates(tc.id)
+		if !equalStrings(got, tc.want) {
+			t.Errorf("eventIDCandidates(%q) = %v, want %v", tc.id, got, tc.want)
+		}
+	}
+}
+
+// TestEventIDSuffixStrippedCandidates_OnlyForFindingPrefixedIDs proves the
+// suffix-stripping generator is gated on the id actually carrying a
+// "finding-" prefix: a bare id (no prefix) — including one with plenty of
+// hyphens, like "abc-1-2-3" — yields NO suffix-stripped candidates at all,
+// even though it superficially looks stripable. This is the MAJOR fix: the
+// pre-review version stripped ANY id unconditionally, which is what let a
+// bare, EXISTING exact id like "abc-1-2-3" get treated as if "abc" were an
+// alternate identity for it.
+func TestEventIDSuffixStrippedCandidates_OnlyForFindingPrefixedIDs(t *testing.T) {
+	if got := eventIDSuffixStrippedCandidates("abc-1-2-3"); got != nil {
+		t.Errorf("eventIDSuffixStrippedCandidates(%q) = %v, want nil (no \"finding-\" prefix — never stripped)", "abc-1-2-3", got)
+	}
+	if got := eventIDSuffixStrippedCandidates("cafe1234abcd"); got != nil {
+		t.Errorf("eventIDSuffixStrippedCandidates(%q) = %v, want nil (no hyphens, no prefix)", "cafe1234abcd", got)
+	}
+	got := eventIDSuffixStrippedCandidates("finding-evt_ab12cd34ef56-inj-command-injection-chain")
 	want := "evt_ab12cd34ef56"
 	found := false
 	for _, c := range got {
@@ -147,20 +190,26 @@ func TestEventIDCandidates_SuffixStrippingResolvesSuffixIDShape(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Fatalf("eventIDCandidates(...) = %v, want it to include the bare event id %q", got, want)
+		t.Fatalf("eventIDSuffixStrippedCandidates(finding-prefixed) = %v, want it to include the bare event id %q", got, want)
 	}
 }
 
-// TestEventIDCandidates_SuffixStrippingBounded proves the strip loop is
+// TestEventIDSuffixStrippedCandidates_Bounded proves the strip loop is
 // bounded — it does not walk past eventIDSuffixStripBound iterations even
 // when the id has enough hyphens to keep going, and it never strips into a
 // leading empty/near-empty string.
-func TestEventIDCandidates_SuffixStrippingBounded(t *testing.T) {
+func TestEventIDSuffixStrippedCandidates_Bounded(t *testing.T) {
 	// 10 hyphen-joined segments after the "finding-" prefix — more than
 	// eventIDSuffixStripBound (6) — so the shortest candidate must stop
 	// eventIDSuffixStripBound strips short of the single first segment.
 	id := "finding-a-b-c-d-e-f-g-h-i-j"
-	got := eventIDCandidates(id)
+	got := eventIDSuffixStrippedCandidates(id)
+	if len(got) == 0 {
+		t.Fatalf("eventIDSuffixStrippedCandidates(%q) returned nothing", id)
+	}
+	if len(got) > eventIDSuffixStripBound {
+		t.Errorf("generated %d candidates, want at most %d (candidates: %v)", len(got), eventIDSuffixStripBound, got)
+	}
 	shortest := got[len(got)-1]
 	strips := strings.Count("a-b-c-d-e-f-g-h-i-j", "-") - strings.Count(shortest, "-")
 	if strips > eventIDSuffixStripBound {
@@ -173,26 +222,6 @@ func TestEventIDCandidates_SuffixStrippingBounded(t *testing.T) {
 		}
 		if strings.HasPrefix(c, "-") {
 			t.Errorf("candidates = %v: candidate %q starts with a stray hyphen", got, c)
-		}
-	}
-}
-
-// TestEventIDCandidates_NoHyphenUnaffected proves an id with no hyphens
-// (the common case: a bare hex/hash event id, or "finding-"+bare-hash with
-// no suffix) generates exactly the pre-mallcoppro-323 candidate set — the
-// widening changes nothing for the shapes it never needed to touch.
-func TestEventIDCandidates_NoHyphenUnaffected(t *testing.T) {
-	cases := []struct {
-		id   string
-		want []string
-	}{
-		{id: "cafe1234abcd", want: []string{"cafe1234abcd"}},
-		{id: "finding-cafe1234abcd", want: []string{"finding-cafe1234abcd", "cafe1234abcd"}},
-	}
-	for _, tc := range cases {
-		got := eventIDCandidates(tc.id)
-		if !equalStrings(got, tc.want) {
-			t.Errorf("eventIDCandidates(%q) = %v, want %v", tc.id, got, tc.want)
 		}
 	}
 }

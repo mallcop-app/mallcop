@@ -42,19 +42,56 @@ type findingLiteralViolation struct {
 // scanFindingLiteralsForEventLinkage walks every finding.Finding{...}
 // composite literal in the given parsed file and returns one violation per
 // literal that has no EventIDs: key among its elements.
+//
+// Code-review hardening (MINOR): an ELIDED-type composite literal inside a
+// []finding.Finding (or [N]finding.Finding / []*finding.Finding) slice/array
+// literal — e.g. `[]finding.Finding{{ID: ev.ID}}` — has cl.Type == nil on
+// the INNER literal; Go infers its type from the surrounding slice's element
+// type rather than repeating it per-element. The naive top-level
+// isFindingFindingType(cl.Type) check would silently skip these (nil never
+// matches the SelectorExpr assertion), so a future detector using this form
+// could evade the gate entirely. Handled by special-casing a CompositeLit
+// whose Type IS a []finding.Finding-shaped ArrayType: its own elided-type
+// elements are checked directly here, by identity — the elements are never
+// separately visited as their own violation site (their Type is nil, so
+// neither branch below matches them on the natural ast.Inspect re-visit),
+// so this is the ONLY place they are checked, with no double-reporting risk
+// for an explicitly-typed element (`[]finding.Finding{finding.Finding{...}}`,
+// unusual but legal) either — that shape gets skipped here and caught by the
+// ordinary top-level branch when ast.Inspect visits it as its own node.
 func scanFindingLiteralsForEventLinkage(fset *token.FileSet, filename string, f *ast.File) []findingLiteralViolation {
 	var violations []findingLiteralViolation
+	report := func(pos token.Pos) {
+		p := fset.Position(pos)
+		violations = append(violations, findingLiteralViolation{file: filename, line: p.Line})
+	}
 	ast.Inspect(f, func(n ast.Node) bool {
 		cl, ok := n.(*ast.CompositeLit)
 		if !ok {
 			return true
 		}
-		if !isFindingFindingType(cl.Type) {
+		if isFindingFindingType(cl.Type) {
+			if !hasEventIDsKey(cl) {
+				report(cl.Pos())
+			}
 			return true
 		}
-		if !hasEventIDsKey(cl) {
-			pos := fset.Position(cl.Pos())
-			violations = append(violations, findingLiteralViolation{file: filename, line: pos.Line})
+		if isFindingFindingSliceOrArrayType(cl.Type) {
+			for _, elt := range cl.Elts {
+				eltCL, ok := elt.(*ast.CompositeLit)
+				if !ok || eltCL.Type != nil {
+					// Not a composite literal element at all (e.g. a bare
+					// variable reference), or an EXPLICITLY-typed element —
+					// the latter is its own top-level CompositeLit node and
+					// gets checked by the isFindingFindingType branch above
+					// when ast.Inspect visits it separately; skip here.
+					continue
+				}
+				if !hasEventIDsKey(eltCL) {
+					report(eltCL.Pos())
+				}
+			}
+			return true
 		}
 		return true
 	})
@@ -65,6 +102,8 @@ func scanFindingLiteralsForEventLinkage(fset *token.FileSet, filename string, f 
 // `finding.Finding` (a SelectorExpr with package ident "finding" and selector
 // "Finding") — the exact qualified type every core/detect file uses, since
 // they all import "github.com/mallcop-app/mallcop/pkg/finding" as "finding".
+// Safe to call with e == nil (an elided composite-literal type) — the type
+// assertion on a nil ast.Expr interface simply fails, returning false.
 func isFindingFindingType(e ast.Expr) bool {
 	sel, ok := e.(*ast.SelectorExpr)
 	if !ok {
@@ -75,6 +114,30 @@ func isFindingFindingType(e ast.Expr) bool {
 		return false
 	}
 	return pkgIdent.Name == "finding" && sel.Sel != nil && sel.Sel.Name == "Finding"
+}
+
+// isFindingFindingElementType reports whether e is `finding.Finding` or
+// `*finding.Finding` — either element-type shape a []finding.Finding /
+// []*finding.Finding slice or array literal may carry.
+func isFindingFindingElementType(e ast.Expr) bool {
+	if isFindingFindingType(e) {
+		return true
+	}
+	if star, ok := e.(*ast.StarExpr); ok {
+		return isFindingFindingType(star.X)
+	}
+	return false
+}
+
+// isFindingFindingSliceOrArrayType reports whether e is an ArrayType (a
+// slice `[]T` — Len == nil — or a fixed-size array `[N]T`) whose element
+// type is finding.Finding or *finding.Finding. Safe to call with e == nil.
+func isFindingFindingSliceOrArrayType(e ast.Expr) bool {
+	at, ok := e.(*ast.ArrayType)
+	if !ok {
+		return false
+	}
+	return isFindingFindingElementType(at.Elt)
 }
 
 // hasEventIDsKey reports whether the composite literal has an `EventIDs:`
@@ -177,6 +240,60 @@ func remembersPointer(ev struct{ ID string }) *finding.Finding {
 }
 `
 
+	// Code-review hardening (MINOR): elided-type composite literals inside a
+	// []finding.Finding slice — `[]finding.Finding{{ID: ...}}` — where the
+	// INNER literal has no explicit `finding.Finding` type of its own (Go
+	// infers it from the slice's element type). This form must be caught
+	// exactly like the explicit form.
+	const elidedTypeSliceWithoutEventIDs = `package detect
+
+import "github.com/mallcop-app/mallcop/pkg/finding"
+
+func forgetfulSlice(ev struct{ ID string }) []finding.Finding {
+	return []finding.Finding{
+		{ID: "finding-" + ev.ID},
+	}
+}
+`
+	const elidedTypeSliceWithEventIDs = `package detect
+
+import "github.com/mallcop-app/mallcop/pkg/finding"
+
+func remembersSlice(ev struct{ ID string }) []finding.Finding {
+	return []finding.Finding{
+		{ID: "finding-" + ev.ID, EventIDs: []string{ev.ID}},
+	}
+}
+`
+	// A mix of elided and explicitly-typed elements in the SAME slice
+	// literal, one violating and one clean — proves the two code paths
+	// (the special-cased elided-element scan, and the ordinary top-level
+	// isFindingFindingType branch that ast.Inspect visits separately for an
+	// explicitly-typed element) each fire independently, with no
+	// double-counting and no cross-contamination.
+	const mixedElidedAndExplicitOneViolation = `package detect
+
+import "github.com/mallcop-app/mallcop/pkg/finding"
+
+func mixedSlice(ev struct{ ID string }) []finding.Finding {
+	return []finding.Finding{
+		{ID: "finding-" + ev.ID}, // elided type, MISSING EventIDs
+		finding.Finding{ID: "finding-" + ev.ID, EventIDs: []string{ev.ID}}, // explicit type, clean
+	}
+}
+`
+	// A slice of POINTER elements, elided type: []*finding.Finding{{...}}.
+	const elidedPointerSliceWithoutEventIDs = `package detect
+
+import "github.com/mallcop-app/mallcop/pkg/finding"
+
+func forgetfulPointerSlice(ev struct{ ID string }) []*finding.Finding {
+	return []*finding.Finding{
+		{ID: "finding-" + ev.ID},
+	}
+}
+`
+
 	cases := []struct {
 		name     string
 		src      string
@@ -185,6 +302,10 @@ func remembersPointer(ev struct{ ID string }) *finding.Finding {
 		{name: "missing EventIDs is caught", src: withoutEventIDs, wantViol: 1},
 		{name: "present EventIDs (value form) passes clean", src: withEventIDs, wantViol: 0},
 		{name: "present EventIDs (pointer form) passes clean", src: pointerFormWithEventIDs, wantViol: 0},
+		{name: "elided-type slice element missing EventIDs is caught", src: elidedTypeSliceWithoutEventIDs, wantViol: 1},
+		{name: "elided-type slice element with EventIDs passes clean", src: elidedTypeSliceWithEventIDs, wantViol: 0},
+		{name: "mixed elided+explicit slice catches exactly the violating element", src: mixedElidedAndExplicitOneViolation, wantViol: 1},
+		{name: "elided-type pointer-slice element missing EventIDs is caught", src: elidedPointerSliceWithoutEventIDs, wantViol: 1},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
