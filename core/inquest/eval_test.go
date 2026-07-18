@@ -52,6 +52,37 @@ func benignInfraEvidence() Evidence {
 	}
 }
 
+// benignInfraFinding is the finding half of the forge-proxy shape, paired
+// with benignInfraEvidence() to build the REAL production userDoc via
+// buildUserMessage — never the synthetic "{}" placeholder. Its Type/Reason
+// deliberately name nothing "log"-shaped, so a case that must reject a
+// fabricated "logs" claim in these tests is proving the reject fires when the
+// record genuinely says nothing about logs, not merely when the test forgot
+// to assemble a document at all (mallcoppro-044 review finding: the eval
+// harness's prior "{}" documents could not have caught the production bug
+// where userDoc always superficially contains "log" via the
+// "has_login_profile" JSON field name).
+func benignInfraFinding() finding.Finding {
+	return finding.Finding{
+		ID: "finding-forge-proxy-1", Type: "assume_role", Severity: "high",
+		Actor: "forge-proxy", Reason: "AssumeRole into mallcop-bedrock-relay",
+		Timestamp: time.Now(),
+	}
+}
+
+// mustBuildUserDoc builds the real production userDoc (finding.Finding +
+// Evidence, exactly as buildUserMessage renders it) for a test case, failing
+// the test on a build error rather than silently falling back to a synthetic
+// document.
+func mustBuildUserDoc(t *testing.T, f finding.Finding, ev Evidence) string {
+	t.Helper()
+	doc, err := buildUserMessage(f, ResolutionRef{Action: "escalate"}, ev)
+	if err != nil {
+		t.Fatalf("buildUserMessage: %v", err)
+	}
+	return doc
+}
+
 func replyJSON(verdict string, confidence float64, narrative string) string {
 	return `{"verdict":"` + verdict + `","confidence":` + strconv.FormatFloat(confidence, 'f', -1, 64) + `,"narrative":"` + narrative + `"}`
 }
@@ -106,8 +137,9 @@ func TestNarrateContract_KnownBenignInfrastructureCorpus(t *testing.T) {
 
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
+			userDoc := mustBuildUserDoc(t, benignInfraFinding(), c.ev)
 			client := &scriptedClient{reply: c.reply}
-			out := narrate(context.Background(), client, "investigate", 1024, "{}", c.ev)
+			out := narrate(context.Background(), client, "investigate", 1024, userDoc, c.ev)
 
 			// The universal invariant: a benign-infrastructure record is NEVER
 			// surfaced as a StatusOK threat.
@@ -159,8 +191,9 @@ func TestNarrateContract_ForgeProxyPostmortemCase_NeverThreat(t *testing.T) {
 	reply := replyJSON("threat", 0.85,
 		"forge-proxy is not consistent with prior benign activity; this is a deviation from baseline behavior, and the absence of justifying logs plus the fact it does not correlate with scan schedule indicates a threat. Revoke the trust policy.")
 
+	userDoc := mustBuildUserDoc(t, benignInfraFinding(), ev)
 	client := &scriptedClient{reply: reply}
-	out := narrate(context.Background(), client, "investigate", 1024, "{}", ev)
+	out := narrate(context.Background(), client, "investigate", 1024, userDoc, ev)
 
 	if out.Status == StatusOK && out.Verdict == VerdictThreat {
 		t.Fatalf("the forge-proxy postmortem case surfaced as a StatusOK threat again — regression reshipped (conf=%v)", out.Confidence)
@@ -185,8 +218,9 @@ func TestNarrateContract_PostmortemNumbersDowngradeWhenNarrativeIsClean(t *testi
 	reply := replyJSON("threat", 0.85,
 		"forge-proxy assumed mallcop-bedrock-relay 693 times at roughly one-second cadence; the granted trust is broad, so revoke the policy.")
 
+	userDoc := mustBuildUserDoc(t, benignInfraFinding(), ev)
 	client := &scriptedClient{reply: reply}
-	out := narrate(context.Background(), client, "investigate", 1024, "{}", ev)
+	out := narrate(context.Background(), client, "investigate", 1024, userDoc, ev)
 
 	if out.Status != StatusOK {
 		t.Fatalf("Status = %q, want ok (clean narrative should downgrade, not reject)", out.Status)
@@ -272,8 +306,14 @@ func TestNarrate_FabricationRejects(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
+			// Real production userDoc (mallcoppro-044 review finding), not the
+			// synthetic "{}" placeholder — benignInfraFinding's Type/Reason
+			// deliberately name nothing "log"-shaped, so the
+			// logs_mention_absent_from_record case actually proves the reject
+			// fires against a real assembled record, not merely an empty one.
+			userDoc := mustBuildUserDoc(t, benignInfraFinding(), c.ev)
 			client := &scriptedClient{reply: c.reply}
-			out := narrate(context.Background(), client, "", 1024, "{}", c.ev)
+			out := narrate(context.Background(), client, "", 1024, userDoc, c.ev)
 			if out.Status != StatusAbsentInvalidOutput {
 				t.Fatalf("Status = %q, want absent-invalid-output for fabrication case %q", out.Status, c.name)
 			}
@@ -343,6 +383,52 @@ func TestNarrateContract_LogFindingNarrativeNotFabricated(t *testing.T) {
 	}
 	if out.Verdict != VerdictThreat {
 		t.Fatalf("Verdict = %q, want threat (single-occurrence baseline-unknown actor is not the operational-infra shape, so calibration must not fire)", out.Verdict)
+	}
+}
+
+// TestNarrateContract_HasLoginProfileFieldNameDoesNotGroundLogsFabrication is
+// the exact regression proof for the mallcoppro-044 code-review finding: a
+// naive substring scan of the whole marshaled userDoc always "finds" the term
+// "log", because Go always emits BaselineEvidence.HasLoginProfile as the JSON
+// KEY "has_login_profile" (no omitempty) and that KEY's own text contains
+// "log" via "login" — regardless of its true/false VALUE and regardless of
+// whether any finding/evidence VALUE ever mentions logs. That made the
+// logs/audit-trail reject permanently dead in production. Here the finding
+// (Type/Reason) and every Evidence value deliberately name nothing
+// "log"/"audit trail"-shaped, so the ONLY "log"-shaped text anywhere in
+// userDoc is the "has_login_profile" field NAME itself — proving the fix
+// grounds the check against VALUES, not the raw marshaled string.
+func TestNarrateContract_HasLoginProfileFieldNameDoesNotGroundLogsFabrication(t *testing.T) {
+	f := finding.Finding{
+		ID: "f-assume-role-1", Type: "assume_role", Severity: "high",
+		Actor: "forge-proxy", Reason: "AssumeRole into mallcop-bedrock-relay",
+		Timestamp: time.Now(),
+	}
+	ev := Evidence{
+		Identity:   IdentityEvidence{Actor: "forge-proxy", Target: "mallcop-bedrock-relay"},
+		Recurrence: RecurrenceEvidence{Occurrences: 1},
+		// HasLoginProfile is the field whose JSON KEY name ("has_login_profile")
+		// contains "log" — set true so the field's presence (and its boolean
+		// VALUE, which is never text) is exercised either way.
+		Baseline: BaselineEvidence{KnownActor: true, HasLoginProfile: true},
+	}
+	userDoc, err := buildUserMessage(f, ResolutionRef{Action: "escalate"}, ev)
+	if err != nil {
+		t.Fatalf("buildUserMessage: %v", err)
+	}
+	if !strings.Contains(strings.ToLower(userDoc), "log") {
+		t.Fatalf("test fixture invalid: userDoc must contain the substring \"log\" via the has_login_profile field name for this to be a meaningful regression proof:\n%s", userDoc)
+	}
+	reply := replyJSON("suspicious", 0.7, "the absence of justifying logs for this assume-role call is concerning.")
+
+	client := &scriptedClient{reply: reply}
+	out := narrate(context.Background(), client, "investigate", 1024, userDoc, ev)
+
+	if out.Status != StatusAbsentInvalidOutput {
+		t.Fatalf("Status = %q, want absent-invalid-output — the fabricated 'logs' claim must be rejected even though userDoc's has_login_profile FIELD NAME contains \"log\" (only VALUES should ground the check)", out.Status)
+	}
+	if out.Err == nil || !strings.Contains(out.Err.Error(), "absent from the record") {
+		t.Errorf("Err = %v, want a fabrication-reject explanation", out.Err)
 	}
 }
 

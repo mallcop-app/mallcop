@@ -12,7 +12,13 @@
 //     the FULL document sent to the model (userDoc), not Evidence alone: a
 //     log_bucket_delete/audit_log_disabled finding's own Type/Reason legitimately
 //     names "log" — narrating that back is not fabrication (mallcoppro-044
-//     review finding 1).
+//     review finding 1). That grounding walks userDoc's parsed JSON VALUES only
+//     (logTermInDocValues) — never its object keys — so a struct field NAME Go
+//     always emits (e.g. "has_login_profile") can never itself ground the
+//     check; only an actual finding/evidence value can (mallcoppro-044 review
+//     finding: a prior version scanned the raw marshaled string and always
+//     matched "log" via that field name's own "login" substring, making the
+//     reject permanently dead in production).
 //   - calibrateVerdict: down-weights an over-confident THREAT verdict when the
 //     evidence is the signature of automated operational infrastructure (a
 //     baseline-known actor repeating an identical action hundreds of times at
@@ -42,6 +48,7 @@
 package inquest
 
 import (
+	"encoding/json"
 	"fmt"
 	"regexp"
 	"strings"
@@ -96,14 +103,22 @@ var reUnknownActor = regexp.MustCompile(`(?i)(unknown actor|unrecogni[sz]ed acto
 //
 // userDoc is the EXACT document buildUserMessage sent to the model (Finding
 // fields plus Evidence, JSON-encoded) — the logs/audit-trail check is grounded
-// against it: a match only rejects when "log" appears nowhere in userDoc, so a
-// log_bucket_delete/audit_log_disabled finding whose own Type/Reason names
-// "log" is never rejected for accurately narrating its own subject. The
-// no-prior-history and unknown-actor checks read only Evidence numeric/bool
-// fields (occurrences, known_actor) — never a name/type/id — so neither can
-// become a family-match override.
+// against it via logTermInDocValues, NOT a raw substring scan of the whole
+// marshaled JSON (mallcoppro-044 review finding: a raw scan for "log" always
+// matches, because Go always emits the STRUCT FIELD NAME
+// "has_login_profile" — whose own substring "login" contains "log" — even
+// when Evidence.Baseline.HasLoginProfile is false and no finding/evidence
+// VALUE ever mentions logs; that made the reject dead in production).
+// logTermInDocValues instead walks the parsed JSON tree and inspects only
+// leaf VALUES, never map keys, so a log_bucket_delete/audit_log_disabled
+// finding whose own Type/Reason VALUE names "log" still grounds the check
+// (narrating that back is not fabrication — mallcoppro-044 review finding 1),
+// while a bystander boolean field's KEY never does. The no-prior-history and
+// unknown-actor checks read only Evidence numeric/bool fields (occurrences,
+// known_actor) — never a name/type/id — so neither can become a family-match
+// override.
 func rejectFabricatedEvidence(narrative string, ev Evidence, userDoc string) (bool, string) {
-	if reFabricatedLogs.MatchString(narrative) && !strings.Contains(strings.ToLower(userDoc), "log") {
+	if reFabricatedLogs.MatchString(narrative) && !logTermInDocValues(userDoc) {
 		return true, "cites logs/audit-trail — no such term appears anywhere in the assembled record"
 	}
 	if ev.Recurrence.Occurrences > 1 && reNoPriorHistory.MatchString(narrative) {
@@ -113,6 +128,48 @@ func rejectFabricatedEvidence(narrative string, ev Evidence, userDoc string) (bo
 		return true, "calls the actor unknown but baseline marks it a known actor"
 	}
 	return false, ""
+}
+
+// logTermInDocValues reports whether the term "log" (case-insensitive, as a
+// substring — matching both "log"/"logs" and "audit trail"'s "log"-free
+// wording is handled by the caller's own regex over the NARRATIVE; this
+// grounding side only needs the bare substring) appears in some leaf VALUE of
+// userDoc — never a JSON object key. userDoc is re-parsed into a generic
+// JSON tree (map[string]any / []any / string / float64 / bool / nil) and
+// walked recursively, inspecting only the string leaves: struct field NAMES
+// that Go always emits (e.g. "has_login_profile", "cadence_label") are map
+// keys in that tree and are never visited, so a bystander field name can
+// never ground the check — only an actual finding/evidence VALUE (a Type,
+// Reason, Actor, Target, error string, etc.) can. A malformed/unparseable
+// userDoc grounds nothing (fails closed toward rejecting the fabrication
+// claim, consistent with STRICT validation elsewhere in this package).
+func logTermInDocValues(userDoc string) bool {
+	var v interface{}
+	if err := json.Unmarshal([]byte(userDoc), &v); err != nil {
+		return false
+	}
+	return valuesContainLogTerm(v)
+}
+
+// valuesContainLogTerm is logTermInDocValues' recursive walker.
+func valuesContainLogTerm(v interface{}) bool {
+	switch t := v.(type) {
+	case string:
+		return strings.Contains(strings.ToLower(t), "log")
+	case map[string]interface{}:
+		for _, val := range t { // keys deliberately never inspected
+			if valuesContainLogTerm(val) {
+				return true
+			}
+		}
+	case []interface{}:
+		for _, item := range t {
+			if valuesContainLogTerm(item) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // isRegularCadence reports whether the recurrence cadence reads as automated:
