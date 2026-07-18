@@ -473,6 +473,24 @@ func alertSignalFindingFor(alertEv event.Event, ap alertPayload, key string, eve
 
 	evidence := alertEvidenceJSON(alertEv, ap, sev, derived, match)
 
+	// eventIDs is the finding's event linkage (mallcoppro-323): the alert's own
+	// event first, plus — when an escalation fired — the corroborating
+	// correlated events too, since those are concrete evidence the analyst
+	// should be able to chain straight to (not just the alert record itself).
+	// Deduped in case a correlated id somehow equals the alert's own (shouldn't
+	// happen — collectCorrelatedEventIDs excludes alertEv.ID — but the dedup
+	// keeps this robust regardless).
+	eventIDs := []string{alertEv.ID}
+	if match != nil {
+		seen := map[string]bool{alertEv.ID: true}
+		for _, id := range match.eventIDs {
+			if !seen[id] {
+				seen[id] = true
+				eventIDs = append(eventIDs, id)
+			}
+		}
+	}
+
 	return finding.Finding{
 		ID:        "finding-" + key,
 		Source:    "detector:alert-signal",
@@ -482,6 +500,7 @@ func alertSignalFindingFor(alertEv event.Event, ap alertPayload, key string, eve
 		Timestamp: alertEv.Timestamp,
 		Reason:    reason,
 		Evidence:  evidence,
+		EventIDs:  eventIDs,
 	}
 }
 

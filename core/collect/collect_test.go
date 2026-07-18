@@ -163,8 +163,8 @@ func TestDetectorGapsSurfacesAllThree(t *testing.T) {
 	}
 	dissentRes := resolution.Resolution{
 		FindingID: "find-dis", Action: "resolve",
-		Reason:    "deep panel majority RESOLVE (2 resolve / 1 escalate). Dissent (malicious) cited; confidence penalized 0.10.",
-		Actor:     "dana", Severity: "medium", Source: "detector:unusual-login",
+		Reason: "deep panel majority RESOLVE (2 resolve / 1 escalate). Dissent (malicious) cited; confidence penalized 0.10.",
+		Actor:  "dana", Severity: "medium", Source: "detector:unusual-login",
 		Timestamp: time.Unix(1_700_000_001, 0).UTC(),
 	}
 	// A calm resolution that must NOT surface as any gap.
@@ -277,6 +277,97 @@ func TestDetectorGapsSurfacesAllThree(t *testing.T) {
 	}
 }
 
+// TestDetectorGaps_DissentDedupedByFinding proves the mallcoppro-9015 fix: a
+// consensus RE-VOTE appends a SECOND resolution row for the SAME finding
+// (exactly what a re-vote on an already-resolved finding produces — observed
+// live in prod gaps.json as two byte-identical dissent candidates for
+// finding-evt_5628196043f0). DetectorGaps must emit exactly ONE dissent
+// GapCandidate for that finding — the most recent dissenting resolution —
+// never one per resolution row.
+func TestDetectorGaps_DissentDedupedByFinding(t *testing.T) {
+	st := openStore(t)
+
+	// Two resolution rows for the SAME finding id, both carrying the dissent
+	// marker (a consensus re-vote scenario: the panel dissented on the first
+	// pass, then dissented again on a re-vote). The second carries a
+	// different Reason/Severity so the test can prove the MOST RECENT one is
+	// the one that survives, not just "some" dedup.
+	first := resolution.Resolution{
+		FindingID: "find-revote", Action: "resolve",
+		Reason: "deep panel majority RESOLVE (2 resolve / 1 escalate). Dissent (malicious) cited; confidence penalized 0.10.",
+		Actor:  "dana", Severity: "medium", Source: "detector:unusual-login",
+		Timestamp: time.Unix(1_700_000_010, 0).UTC(),
+	}
+	revote := resolution.Resolution{
+		FindingID: "find-revote", Action: "escalate",
+		Reason: "deep panel majority ESCALATE (2 escalate / 1 resolve); dissent (malicious) cited",
+		Actor:  "dana", Severity: "high", Source: "detector:unusual-login",
+		Timestamp: time.Unix(1_700_000_020, 0).UTC(),
+	}
+	appendRec(t, st, store.KindResolutions, first)
+	appendRec(t, st, store.KindResolutions, revote)
+
+	gaps, err := DetectorGaps(st, nil)
+	if err != nil {
+		t.Fatalf("DetectorGaps: %v", err)
+	}
+
+	var dissentGaps []GapCandidate
+	for _, g := range gaps {
+		if g.Kind == GapDissent {
+			dissentGaps = append(dissentGaps, g)
+		}
+	}
+	if len(dissentGaps) != 1 {
+		t.Fatalf("want exactly 1 dissent gap for the re-voted finding, got %d: %+v", len(dissentGaps), dissentGaps)
+	}
+	g := dissentGaps[0]
+	if len(g.FindingIDs) != 1 || g.FindingIDs[0] != "find-revote" {
+		t.Fatalf("dissent gap finding = %+v, want [find-revote]", g.FindingIDs)
+	}
+	// The MOST RECENT resolution's fields survive (the re-vote), not the first.
+	if g.Severity != "high" {
+		t.Errorf("severity = %q, want %q (the re-vote's severity, not the first pass's %q)", g.Severity, "high", first.Severity)
+	}
+}
+
+// TestDetectorGaps_DissentDedupPreservesDistinctFindings proves the dedup is
+// scoped per FindingID: two DIFFERENT findings that both dissent still each
+// get their own gap candidate — the fix must not over-collapse.
+func TestDetectorGaps_DissentDedupPreservesDistinctFindings(t *testing.T) {
+	st := openStore(t)
+
+	a := resolution.Resolution{
+		FindingID: "find-a", Action: "resolve",
+		Reason: "panel majority RESOLVE. Dissent (x) cited; confidence penalized 0.10.",
+		Actor:  "dana", Severity: "medium", Source: "detector:unusual-login",
+		Timestamp: time.Unix(1_700_000_030, 0).UTC(),
+	}
+	b := resolution.Resolution{
+		FindingID: "find-b", Action: "resolve",
+		Reason: "panel majority RESOLVE. Dissent (y) cited; confidence penalized 0.10.",
+		Actor:  "erin", Severity: "low", Source: "detector:new-actor",
+		Timestamp: time.Unix(1_700_000_031, 0).UTC(),
+	}
+	appendRec(t, st, store.KindResolutions, a)
+	appendRec(t, st, store.KindResolutions, b)
+
+	gaps, err := DetectorGaps(st, nil)
+	if err != nil {
+		t.Fatalf("DetectorGaps: %v", err)
+	}
+
+	var dissentFindingIDs []string
+	for _, g := range gaps {
+		if g.Kind == GapDissent {
+			dissentFindingIDs = append(dissentFindingIDs, g.FindingIDs...)
+		}
+	}
+	if len(dissentFindingIDs) != 2 {
+		t.Fatalf("want 2 distinct dissent gaps, got %d: %v", len(dissentFindingIDs), dissentFindingIDs)
+	}
+}
+
 // TestDissentMarkerDriftGuard is the DRIFT GUARD (invariant 10 / brittle-parse
 // isolation): the dissent parse keys on an unstructured marker in
 // core/agent/fanout.go. If that marker string ever changes, the dissent collector
@@ -298,8 +389,8 @@ func TestDissentMarkerDriftGuard(t *testing.T) {
 		t.Fatalf("read fanout.go: %v", err)
 	}
 
-	var codeLines []string    // source with whole-line comments stripped
-	var reasonBuildHits int   // `reason += …` lines that still cite the marker
+	var codeLines []string  // source with whole-line comments stripped
+	var reasonBuildHits int // `reason += …` lines that still cite the marker
 	for _, line := range strings.Split(string(src), "\n") {
 		if strings.HasPrefix(strings.TrimSpace(line), "//") {
 			continue // a doc/example comment cannot satisfy the guard on its own

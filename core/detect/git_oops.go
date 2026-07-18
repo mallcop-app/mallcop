@@ -29,12 +29,12 @@ func (gitOopsDetector) Detect(events []event.Event, bl *baseline.Baseline) []fin
 // These are conservative patterns that flag high-entropy tokens and
 // known key prefixes.
 var gitOopsSecretPatterns = []*regexp.Regexp{
-	regexp.MustCompile(`AKIA[0-9A-Z]{16}`),                              // AWS access key
-	regexp.MustCompile(`ghp_[a-zA-Z0-9]{36}`),                          // GitHub PAT
-	regexp.MustCompile(`gho_[a-zA-Z0-9]{36}`),                          // GitHub OAuth
-	regexp.MustCompile(`ghs_[a-zA-Z0-9]{36}`),                          // GitHub App token
-	regexp.MustCompile(`xox[bpsa]-[0-9]{10,}-[a-zA-Z0-9]+`),            // Slack token
-	regexp.MustCompile(`sk_live_[a-zA-Z0-9]{24,}`),                     // Stripe live key
+	regexp.MustCompile(`AKIA[0-9A-Z]{16}`),                               // AWS access key
+	regexp.MustCompile(`ghp_[a-zA-Z0-9]{36}`),                            // GitHub PAT
+	regexp.MustCompile(`gho_[a-zA-Z0-9]{36}`),                            // GitHub OAuth
+	regexp.MustCompile(`ghs_[a-zA-Z0-9]{36}`),                            // GitHub App token
+	regexp.MustCompile(`xox[bpsa]-[0-9]{10,}-[a-zA-Z0-9]+`),              // Slack token
+	regexp.MustCompile(`sk_live_[a-zA-Z0-9]{24,}`),                       // Stripe live key
 	regexp.MustCompile(`(?i)(password|secret|api.?key)\s*[=:]\s*\S{8,}`), // generic assignment
 }
 
@@ -78,10 +78,11 @@ func gitOopsEvaluate(ev event.Event, _ *baseline.Baseline) []finding.Finding {
 			severity = "critical"
 		}
 		evidence, _ := json.Marshal(map[string]string{
-			"actor":  ev.Actor,
-			"ref":    pp.Ref,
-			"branch": branch,
-			"rule":   "force-push",
+			"actor":    ev.Actor,
+			"ref":      pp.Ref,
+			"branch":   branch,
+			"rule":     "force-push",
+			"event_id": ev.ID,
 		})
 		findings = append(findings, finding.Finding{
 			ID:        "finding-" + ev.ID + "-force",
@@ -92,6 +93,7 @@ func gitOopsEvaluate(ev event.Event, _ *baseline.Baseline) []finding.Finding {
 			Timestamp: ev.Timestamp,
 			Reason:    fmt.Sprintf("force push to branch %q by %q", branch, ev.Actor),
 			Evidence:  evidence,
+			EventIDs:  []string{ev.ID},
 		})
 	}
 
@@ -102,9 +104,10 @@ func gitOopsEvaluate(ev event.Event, _ *baseline.Baseline) []finding.Finding {
 			ref = "(unknown)"
 		}
 		evidence, _ := json.Marshal(map[string]string{
-			"actor": ev.Actor,
-			"ref":   ref,
-			"rule":  "branch-delete",
+			"actor":    ev.Actor,
+			"ref":      ref,
+			"rule":     "branch-delete",
+			"event_id": ev.ID,
 		})
 		findings = append(findings, finding.Finding{
 			ID:        "finding-" + ev.ID + "-delete",
@@ -115,6 +118,7 @@ func gitOopsEvaluate(ev event.Event, _ *baseline.Baseline) []finding.Finding {
 			Timestamp: ev.Timestamp,
 			Reason:    fmt.Sprintf("branch/tag deleted: %q by %q", ref, ev.Actor),
 			Evidence:  evidence,
+			EventIDs:  []string{ev.ID},
 		})
 	}
 
@@ -124,9 +128,10 @@ func gitOopsEvaluate(ev event.Event, _ *baseline.Baseline) []finding.Finding {
 			if re.MatchString(pp.CommitMessage) {
 				patternName := gitOopsSecretPatternName(re)
 				evidence, _ := json.Marshal(map[string]string{
-					"actor":   ev.Actor,
-					"pattern": patternName,
-					"rule":    "secret-in-commit-message",
+					"actor":    ev.Actor,
+					"pattern":  patternName,
+					"rule":     "secret-in-commit-message",
+					"event_id": ev.ID,
 				})
 				findings = append(findings, finding.Finding{
 					ID:        "finding-" + ev.ID + "-secret-" + patternName,
@@ -137,6 +142,7 @@ func gitOopsEvaluate(ev event.Event, _ *baseline.Baseline) []finding.Finding {
 					Timestamp: ev.Timestamp,
 					Reason:    fmt.Sprintf("commit message by %q may contain a secret (%s pattern)", ev.Actor, patternName),
 					Evidence:  evidence,
+					EventIDs:  []string{ev.ID},
 				})
 				break // one finding per commit message (first pattern match wins)
 			}

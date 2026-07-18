@@ -54,6 +54,7 @@ func (logFormatDriftDetector) Detect(events []event.Event, bl *baseline.Baseline
 				ev.Actor, pct,
 			),
 			Evidence: evidence,
+			EventIDs: []string{ev.ID},
 		})
 	}
 	return out

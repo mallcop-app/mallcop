@@ -101,6 +101,7 @@ func maliciousSkillEvaluate(ev event.Event, _ *baseline.Baseline) []finding.Find
 					"url":         u,
 					"url_pattern": truncate(re.String(), 40),
 					"rule":        "suspicious-url",
+					"event_id":    ev.ID,
 				})
 				findings = append(findings, finding.Finding{
 					ID:        "finding-" + ev.ID + "-skill-url",
@@ -111,6 +112,7 @@ func maliciousSkillEvaluate(ev event.Event, _ *baseline.Baseline) []finding.Find
 					Timestamp: ev.Timestamp,
 					Reason:    "skill references suspicious exfiltration URL: " + u,
 					Evidence:  evidence,
+					EventIDs:  []string{ev.ID},
 				})
 				break
 			}
@@ -126,6 +128,7 @@ func maliciousSkillEvaluate(ev event.Event, _ *baseline.Baseline) []finding.Find
 					"skill_name": sp.Name,
 					"permission": perm,
 					"rule":       "excessive-permissions",
+					"event_id":   ev.ID,
 				})
 				findings = append(findings, finding.Finding{
 					ID:        "finding-" + ev.ID + "-skill-perm",
@@ -136,6 +139,7 @@ func maliciousSkillEvaluate(ev event.Event, _ *baseline.Baseline) []finding.Find
 					Timestamp: ev.Timestamp,
 					Reason:    "skill requests excessive permission: " + perm,
 					Evidence:  evidence,
+					EventIDs:  []string{ev.ID},
 				})
 				break
 			}
@@ -152,6 +156,7 @@ func maliciousSkillEvaluate(ev event.Event, _ *baseline.Baseline) []finding.Find
 				"actor":      ev.Actor,
 				"skill_name": sp.Name,
 				"rule":       "encoded-payload",
+				"event_id":   ev.ID,
 			})
 			findings = append(findings, finding.Finding{
 				ID:        "finding-" + ev.ID + "-skill-encoded",
@@ -162,6 +167,7 @@ func maliciousSkillEvaluate(ev event.Event, _ *baseline.Baseline) []finding.Find
 				Timestamp: ev.Timestamp,
 				Reason:    "skill payload contains suspected encoded content",
 				Evidence:  evidence,
+				EventIDs:  []string{ev.ID},
 			})
 			break
 		}
@@ -180,6 +186,7 @@ func maliciousSkillEvaluate(ev event.Event, _ *baseline.Baseline) []finding.Find
 				"skill_name": sp.Name,
 				"keyword":    kw,
 				"rule":       "suspicious-keyword",
+				"event_id":   ev.ID,
 			})
 			findings = append(findings, finding.Finding{
 				ID:        "finding-" + ev.ID + "-skill-kw",
@@ -190,6 +197,7 @@ func maliciousSkillEvaluate(ev event.Event, _ *baseline.Baseline) []finding.Find
 				Timestamp: ev.Timestamp,
 				Reason:    "skill name/description contains suspicious keyword: " + kw,
 				Evidence:  evidence,
+				EventIDs:  []string{ev.ID},
 			})
 			break
 		}

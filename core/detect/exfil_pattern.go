@@ -106,6 +106,7 @@ func exfilEvaluate(ev event.Event, bl *baseline.Baseline) *finding.Finding {
 			Timestamp: ev.Timestamp,
 			Reason:    fmt.Sprintf("large data transfer by %q: %d MB in single event", ev.Actor, volumeMB),
 			Evidence:  evidence,
+			EventIDs:  []string{ev.ID},
 		}
 	}
 
@@ -127,6 +128,7 @@ func exfilEvaluate(ev event.Event, bl *baseline.Baseline) *finding.Finding {
 			Timestamp: ev.Timestamp,
 			Reason:    fmt.Sprintf("elevated data transfer by %q: %d MB in single event", ev.Actor, volumeMB),
 			Evidence:  evidence,
+			EventIDs:  []string{ev.ID},
 		}
 	}
 
@@ -147,6 +149,7 @@ func exfilEvaluate(ev event.Event, bl *baseline.Baseline) *finding.Finding {
 			Timestamp: ev.Timestamp,
 			Reason:    fmt.Sprintf("bulk resource access by %q: %d resources in single event", ev.Actor, resourceCount),
 			Evidence:  evidence,
+			EventIDs:  []string{ev.ID},
 		}
 	}
 
@@ -166,6 +169,7 @@ func exfilEvaluate(ev event.Event, bl *baseline.Baseline) *finding.Finding {
 			Timestamp: ev.Timestamp,
 			Reason:    fmt.Sprintf("anomalous resource access by %q: %d resources in single event", ev.Actor, resourceCount),
 			Evidence:  evidence,
+			EventIDs:  []string{ev.ID},
 		}
 	}
 
@@ -198,6 +202,7 @@ func exfilEvaluate(ev event.Event, bl *baseline.Baseline) *finding.Finding {
 				Timestamp: ev.Timestamp,
 				Reason:    fmt.Sprintf("exfil frequency anomaly for %q: %.0fx baseline (%s:%s)", ev.Actor, ratio, ev.Source, ev.Type),
 				Evidence:  evidence,
+				EventIDs:  []string{ev.ID},
 			}
 		}
 		if ratio >= float64(freqMultiplierMedium) {
@@ -219,6 +224,7 @@ func exfilEvaluate(ev event.Event, bl *baseline.Baseline) *finding.Finding {
 				Timestamp: ev.Timestamp,
 				Reason:    fmt.Sprintf("elevated exfil frequency for %q: %.0fx baseline (%s:%s)", ev.Actor, ratio, ev.Source, ev.Type),
 				Evidence:  evidence,
+				EventIDs:  []string{ev.ID},
 			}
 		}
 	}

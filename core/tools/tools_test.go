@@ -576,6 +576,44 @@ func TestSearchEventsWrappedIDPrefixAmbiguous(t *testing.T) {
 	}
 }
 
+// TestSearchEvents_ExactMatchOnHyphenatedIDWinsOverStrippedGuess mirrors
+// TestGetRawEvent_ExactMatchOnHyphenatedIDWinsOverStrippedGuess for
+// SearchEvents' independent exact-match loop (search_events.go's own
+// `for _, c := range eventIDCandidates(id) { if _, ok := pool[c]; ... }`) —
+// the code review named BOTH call sites as exposed to the same bug, since
+// both build their exact-match set straight from eventIDCandidates. A query
+// for the EXISTING, EXACT id "abc-1-2-3" must return exactly that event,
+// never fall through to the shorter, unrelated "abc" via a suffix-stripped
+// guess.
+func TestSearchEvents_ExactMatchOnHyphenatedIDWinsOverStrippedGuess(t *testing.T) {
+	s := newTempStore(t)
+	base := time.Date(2026, 4, 10, 9, 0, 0, 0, time.UTC)
+	seed := []event.Event{
+		{ID: "abc", Source: "exec", Type: "custom", Actor: "svc", Timestamp: base},
+		{ID: "abc-1-2-3", Source: "exec", Type: "custom", Actor: "svc", Timestamp: base.Add(time.Minute)},
+	}
+	for _, ev := range seed {
+		if _, err := s.Append(store.KindEvents, ev); err != nil {
+			t.Fatalf("append event %s: %v", ev.ID, err)
+		}
+	}
+
+	got, fellBack, err := SearchEvents(s, SearchEventsInput{IDs: []string{"abc-1-2-3"}})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if fellBack {
+		t.Error("fellBack = true, want false — this is an exact id match, not a time-window fallback")
+	}
+	ids := make([]string, 0, len(got))
+	for _, ev := range got {
+		ids = append(ids, ev.ID)
+	}
+	if !equalStrings(ids, []string{"abc-1-2-3"}) {
+		t.Fatalf("ids = %v, want exactly [abc-1-2-3] — a suffix-stripped guess must never steal an exact match", ids)
+	}
+}
+
 // ---- search-findings -------------------------------------------------------
 
 // TestSearchFindings drives search-findings against a REAL core/store temp repo.
@@ -717,6 +755,69 @@ func TestSearchFindingsEmptyStore(t *testing.T) {
 func TestSearchFindingsNilStore(t *testing.T) {
 	if _, err := SearchFindings(nil, SearchFindingsInput{}); err == nil {
 		t.Fatal("expected error for nil store")
+	}
+}
+
+// TestSearchFindings_SurfacesEventIDsInToolOutput proves the mallcoppro-323
+// fix reaches the model: an injection-probe-shaped finding (the compound
+// "finding-"+ev.ID+"-inj-<rule>" id, no evidence.event_id — exactly the
+// pre-fix shape of the 5 suffix-ID detector families) that carries
+// Finding.EventIDs is returned by SearchFindings AND survives being
+// marshaled to JSON — the exact step core/investigate.ExecuteTool performs
+// on SearchFindings' return value before boxing it as the tool_result text
+// the model reads (investigate.go: `resultJSON, _ = json.Marshal(out)`).
+// Before EventIDs existed, this finding's tool-output JSON carried no
+// event_ids field at all, so the model had no id to chain search_events to.
+func TestSearchFindings_SurfacesEventIDsInToolOutput(t *testing.T) {
+	s := newTempStore(t)
+
+	base := time.Date(2026, 4, 10, 9, 0, 0, 0, time.UTC)
+	injectionShaped := finding.Finding{
+		ID:        "finding-evt_ab12cd34ef56-inj-command-injection-chain",
+		Source:    "detector:injection-probe",
+		Severity:  "critical",
+		Type:      "injection-probe",
+		Actor:     "mallory",
+		Timestamp: base,
+		Evidence:  json.RawMessage(`{"actor":"mallory","pattern":"command-injection-chain","match":"...","rule":"injection-pattern","event_id":"evt_ab12cd34ef56"}`),
+		EventIDs:  []string{"evt_ab12cd34ef56"},
+	}
+	if _, err := s.Append(store.KindFindings, injectionShaped); err != nil {
+		t.Fatalf("append finding: %v", err)
+	}
+
+	got, err := SearchFindings(s, SearchFindingsInput{Type: "injection-probe"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("want 1 finding, got %d", len(got))
+	}
+	if len(got[0].EventIDs) != 1 || got[0].EventIDs[0] != "evt_ab12cd34ef56" {
+		t.Fatalf("SearchFindings result EventIDs = %v, want [evt_ab12cd34ef56]", got[0].EventIDs)
+	}
+
+	// The exact marshal step ExecuteTool performs on the tool's return value
+	// before it becomes the model-visible tool_result text.
+	toolOutputJSON, err := json.Marshal(got)
+	if err != nil {
+		t.Fatalf("marshal tool output: %v", err)
+	}
+	var decoded []map[string]any
+	if err := json.Unmarshal(toolOutputJSON, &decoded); err != nil {
+		t.Fatalf("unmarshal tool output: %v", err)
+	}
+	if len(decoded) != 1 {
+		t.Fatalf("decoded tool output has %d entries, want 1", len(decoded))
+	}
+	rawIDs, ok := decoded[0]["event_ids"]
+	if !ok {
+		t.Fatalf("tool output JSON has no event_ids key at all — the finding.EventIDs field did not "+
+			"survive the marshal step: %s", toolOutputJSON)
+	}
+	ids, ok := rawIDs.([]any)
+	if !ok || len(ids) != 1 || ids[0] != "evt_ab12cd34ef56" {
+		t.Fatalf("tool output event_ids = %v, want [evt_ab12cd34ef56]\nfull tool output: %s", rawIDs, toolOutputJSON)
 	}
 }
 

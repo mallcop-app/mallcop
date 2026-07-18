@@ -130,6 +130,134 @@ func TestResolveIDPrefixMulti_ExactFullIDStillResolvesAsPrefixOfItself(t *testin
 	}
 }
 
+// ---- eventIDCandidates / eventIDSuffixStrippedCandidates: mallcoppro-323 ---
+
+// TestEventIDCandidates_NeverSuffixStrips is the code-review regression test
+// (MAJOR finding): eventIDCandidates — the function whose output feeds the
+// SILENT exact-match set in get_raw_event.go and search_events.go — must
+// NEVER generate a suffix-stripped candidate, for ANY input, prefixed or
+// not. Suffix stripping is a heuristic guess and belongs exclusively in
+// eventIDSuffixStrippedCandidates, consumed only through the
+// ambiguity-aware resolveEventIDPrefix path.
+func TestEventIDCandidates_NeverSuffixStrips(t *testing.T) {
+	cases := []struct {
+		id   string
+		want []string
+	}{
+		{id: "cafe1234abcd", want: []string{"cafe1234abcd"}},
+		{id: "finding-cafe1234abcd", want: []string{"finding-cafe1234abcd", "cafe1234abcd"}},
+		// A BARE hyphenated id (no "finding-" prefix) — a customer's own id
+		// scheme via file/exec/sibling connectors or --events JSONL — must
+		// generate EXACTLY itself, never a stripped guess. This is the exact
+		// shape the code review's reproduction (store has "abc" and
+		// "abc-1-2-3") depends on staying un-stripped.
+		{id: "abc-1-2-3", want: []string{"abc-1-2-3"}},
+		// A "finding-"-prefixed compound suffix-ID shape: the finding-
+		// prefix strips (existing, safe, lossless), but the suffix itself
+		// does NOT get progressively stripped here anymore.
+		{id: "finding-evt_ab12cd34ef56-inj-command-injection-chain",
+			want: []string{"finding-evt_ab12cd34ef56-inj-command-injection-chain", "evt_ab12cd34ef56-inj-command-injection-chain"}},
+	}
+	for _, tc := range cases {
+		got := eventIDCandidates(tc.id)
+		if !equalStrings(got, tc.want) {
+			t.Errorf("eventIDCandidates(%q) = %v, want %v", tc.id, got, tc.want)
+		}
+	}
+}
+
+// TestEventIDSuffixStrippedCandidates_OnlyForFindingPrefixedIDs proves the
+// suffix-stripping generator is gated on the id actually carrying a
+// "finding-" prefix: a bare id (no prefix) — including one with plenty of
+// hyphens, like "abc-1-2-3" — yields NO suffix-stripped candidates at all,
+// even though it superficially looks stripable. This is the MAJOR fix: the
+// pre-review version stripped ANY id unconditionally, which is what let a
+// bare, EXISTING exact id like "abc-1-2-3" get treated as if "abc" were an
+// alternate identity for it.
+func TestEventIDSuffixStrippedCandidates_OnlyForFindingPrefixedIDs(t *testing.T) {
+	if got := eventIDSuffixStrippedCandidates("abc-1-2-3"); got != nil {
+		t.Errorf("eventIDSuffixStrippedCandidates(%q) = %v, want nil (no \"finding-\" prefix — never stripped)", "abc-1-2-3", got)
+	}
+	if got := eventIDSuffixStrippedCandidates("cafe1234abcd"); got != nil {
+		t.Errorf("eventIDSuffixStrippedCandidates(%q) = %v, want nil (no hyphens, no prefix)", "cafe1234abcd", got)
+	}
+	got := eventIDSuffixStrippedCandidates("finding-evt_ab12cd34ef56-inj-command-injection-chain")
+	want := "evt_ab12cd34ef56"
+	found := false
+	for _, c := range got {
+		if c == want {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("eventIDSuffixStrippedCandidates(finding-prefixed) = %v, want it to include the bare event id %q", got, want)
+	}
+}
+
+// TestEventIDSuffixStrippedCandidates_Bounded proves the strip loop is
+// bounded — it does not walk past eventIDSuffixStripBound iterations even
+// when the id has enough hyphens to keep going, and it never strips into a
+// leading empty/near-empty string.
+func TestEventIDSuffixStrippedCandidates_Bounded(t *testing.T) {
+	// 10 hyphen-joined segments after the "finding-" prefix — more than
+	// eventIDSuffixStripBound (6) — so the shortest candidate must stop
+	// eventIDSuffixStripBound strips short of the single first segment.
+	id := "finding-a-b-c-d-e-f-g-h-i-j"
+	got := eventIDSuffixStrippedCandidates(id)
+	if len(got) == 0 {
+		t.Fatalf("eventIDSuffixStrippedCandidates(%q) returned nothing", id)
+	}
+	if len(got) > eventIDSuffixStripBound {
+		t.Errorf("generated %d candidates, want at most %d (candidates: %v)", len(got), eventIDSuffixStripBound, got)
+	}
+	shortest := got[len(got)-1]
+	strips := strings.Count("a-b-c-d-e-f-g-h-i-j", "-") - strings.Count(shortest, "-")
+	if strips > eventIDSuffixStripBound {
+		t.Errorf("stripped %d segments, want at most %d (candidates: %v)", strips, eventIDSuffixStripBound, got)
+	}
+	// Every candidate must be non-empty and never start with a bare "-".
+	for _, c := range got {
+		if c == "" {
+			t.Errorf("candidates = %v: empty candidate produced", got)
+		}
+		if strings.HasPrefix(c, "-") {
+			t.Errorf("candidates = %v: candidate %q starts with a stray hyphen", got, c)
+		}
+	}
+}
+
+// TestResolveEventIDPrefix_SuffixIDShapeResolves proves the full resolution
+// path (as GetRawEvent/SearchEvents call it): a suffixed compound id, tried
+// against a pool containing only the bare event id, resolves via the new
+// suffix-stripped candidates.
+func TestResolveEventIDPrefix_SuffixIDShapeResolves(t *testing.T) {
+	pool := []string{"evt_ab12cd34ef56"}
+	matched, ambiguous, total := resolveEventIDPrefix("finding-evt_ab12cd34ef56-inj-command-injection-chain", pool)
+	if matched != "evt_ab12cd34ef56" || total != 1 {
+		t.Errorf("matched=%q total=%d ambiguous=%v, want the bare event id via suffix-stripped candidates",
+			matched, total, ambiguous)
+	}
+}
+
+// TestResolveEventIDPrefix_SuffixIDShapeAmbiguitySemanticsUnchanged proves
+// the suffix-stripping widening does not change ambiguity behavior: a
+// suffixed id whose stripped forms still land on more than one stored event
+// (sharing a common bare-id prefix) is reported ambiguous, exactly like any
+// other multi-match prefix.
+func TestResolveEventIDPrefix_SuffixIDShapeAmbiguitySemanticsUnchanged(t *testing.T) {
+	pool := []string{"evt_ab12cd34ef56", "evt_ab12cd34ef56extra"}
+	matched, ambiguous, total := resolveEventIDPrefix("finding-evt_ab12cd34ef56-inj-command-injection-chain", pool)
+	if matched != "" {
+		t.Fatalf("matched = %q, want \"\" (ambiguous — the stripped candidate is a prefix of BOTH stored ids)", matched)
+	}
+	if total != 2 {
+		t.Errorf("total = %d, want 2", total)
+	}
+	if len(ambiguous) != 2 {
+		t.Errorf("ambiguous = %v, want 2 candidates", ambiguous)
+	}
+}
+
 // ---- resolveEventIDPrefix / resolveFindingIDPrefix -------------------------
 
 // TestResolveEventIDPrefix_StripsFindingPrefix proves a truncated

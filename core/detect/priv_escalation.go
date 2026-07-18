@@ -334,5 +334,6 @@ func privEscalationEvaluate(ev event.Event, bl *baseline.Baseline, emitted map[s
 		Timestamp: ev.Timestamp,
 		Reason:    reason,
 		Evidence:  evidence,
+		EventIDs:  []string{ev.ID},
 	}
 }

@@ -103,6 +103,12 @@ func volumeAnomalyEvaluateAll(events []event.Event, bl *baseline.Baseline) []fin
 	type groupMeta struct {
 		firstEventID string
 		firstEvent   event.Event
+		// eventIDs is the FULL contributing set of event ids in this group
+		// (mallcoppro-323) — volume-anomaly is an aggregate detector (one
+		// finding per (source,event_type,actor) group), so Finding.EventIDs
+		// must carry every event that fed the volume total, not just
+		// firstEventID.
+		eventIDs []string
 	}
 	meta := make(map[volumeGroupKey]groupMeta)
 
@@ -110,9 +116,14 @@ func volumeAnomalyEvaluateAll(events []event.Event, bl *baseline.Baseline) []fin
 		k := volumeGroupKey{ev.Source, ev.Type, ev.Actor}
 		volumes[k] += volumeAnomalyEventWeight(ev)
 		records[k]++
-		if _, seen := meta[k]; !seen {
-			meta[k] = groupMeta{firstEventID: ev.ID, firstEvent: ev}
+		m, seen := meta[k]
+		if !seen {
+			m = groupMeta{firstEventID: ev.ID, firstEvent: ev}
 		}
+		if ev.ID != "" {
+			m.eventIDs = append(m.eventIDs, ev.ID)
+		}
+		meta[k] = m
 	}
 
 	// Sort groups for deterministic output.
@@ -179,6 +190,7 @@ func volumeAnomalyEvaluateAll(events []event.Event, bl *baseline.Baseline) []fin
 				k.source, k.eventType, currentVolume, records[k], baselineCount, ratio,
 			),
 			Evidence: evidence,
+			EventIDs: m.eventIDs,
 		})
 	}
 

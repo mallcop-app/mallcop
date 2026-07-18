@@ -311,6 +311,9 @@ func Run(ctx context.Context, cfg Config) (Summary, error) {
 	// on a steady-state re-scan, while a genuinely new actor/pattern still fires once.
 	findings := detect.Detect(events, bl)
 
+	// BACKSTOP (mallcoppro-323): see backstopEventIDs's doc comment.
+	findings = backstopEventIDs(findings)
+
 	// Persist the DERIVED baseline as a KindBaseline snapshot: it is otherwise
 	// ephemeral (built in-memory each scan), so recording it makes it observable in
 	// the git log, portable (a fresh clone reconstructs it), and loadable by the
@@ -464,6 +467,29 @@ func Run(ctx context.Context, cfg Config) (Summary, error) {
 
 	summary.Duration = time.Since(start)
 	return summary, nil
+}
+
+// backstopEventIDs is the mallcoppro-323 defense-in-depth line: every
+// detector in core/detect is REQUIRED to populate Finding.EventIDs directly
+// (enforced by core/detect's TestDetectorFindingsCarryEventLinkage lint —
+// the primary fix), but a finding can still reach this point with an empty
+// EventIDs for reasons the lint cannot catch: a third-party/sidecar detector
+// this repo does not own, or a finding replayed from an OLDER stored record
+// that predates the field. For any such finding, recover linkage from the
+// Evidence blob's conventional event_id/event_ids keys
+// (finding.ExtractEvidenceEventIDs — the SAME extraction
+// cmd/mallcop-finding-context uses, reused rather than duplicated) so
+// downstream identity resolution (core/inquest's assembleIdentity) degrades
+// only when the detector genuinely recorded no event linkage anywhere, not
+// merely because it used the older Evidence-only convention. A finding that
+// already carries EventIDs is returned unchanged.
+func backstopEventIDs(findings []finding.Finding) []finding.Finding {
+	for i := range findings {
+		if len(findings[i].EventIDs) == 0 {
+			findings[i].EventIDs = finding.ExtractEvidenceEventIDs(findings[i].Evidence)
+		}
+	}
+	return findings
 }
 
 // recordScan appends one store.ScanRecord to the store's KindScans register —

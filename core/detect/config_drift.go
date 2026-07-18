@@ -193,5 +193,6 @@ func configDriftEvaluate(ev event.Event, _ *baseline.Baseline) *finding.Finding 
 		Timestamp: ev.Timestamp,
 		Reason:    rule.reason(ev, cp),
 		Evidence:  evidence,
+		EventIDs:  []string{ev.ID},
 	}
 }

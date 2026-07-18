@@ -109,5 +109,6 @@ func newExternalAccessEvaluate(ev event.Event, emitted map[string]bool) *finding
 		Timestamp: ev.Timestamp,
 		Reason:    reason,
 		Evidence:  evidence,
+		EventIDs:  []string{ev.ID},
 	}
 }

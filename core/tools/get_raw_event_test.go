@@ -525,3 +525,88 @@ func TestGetRawEvent_PrefixZeroMatchUnchanged(t *testing.T) {
 		t.Error("Notes empty, want an explanation for the miss")
 	}
 }
+
+// ---- mallcoppro-323 code review (MAJOR): hyphenated exact-id collision ----
+
+// TestGetRawEvent_ExactMatchOnHyphenatedIDWinsOverStrippedGuess is the
+// adversarial-review reproduction: the store holds events "abc" and
+// "abc-1-2-3" (a realistic shape for a customer's own id scheme, preserved
+// verbatim by file/exec/sibling connectors and --events JSONL). Querying the
+// EXISTING, EXACT id "abc-1-2-3" must return THAT event — never silently
+// fall through to the unrelated, shorter "abc" via a suffix-stripped guess.
+// Before the fix, eventIDCandidates("abc-1-2-3") unconditionally generated
+// "abc" as one of its candidates (suffix-stripping ran on EVERY id, not
+// just "finding-"-prefixed ones), and that candidate fed the SILENT
+// exact-match set in GetRawEvent — so store iteration order alone decided
+// whether "abc" or "abc-1-2-3" won, with no error and no indication
+// anything went wrong.
+func TestGetRawEvent_ExactMatchOnHyphenatedIDWinsOverStrippedGuess(t *testing.T) {
+	s := newTempStore(t)
+	// Seed "abc" FIRST — the exact ordering that exposed the bug: the old
+	// exact-match loop iterates stored events in append order and returns on
+	// the first hit, so seeding the shorter, wrong candidate first is what
+	// makes the reproduction deterministic.
+	seedRawEvent(t, s, "abc", `{"eventName":"Short"}`)
+	seedRawEvent(t, s, "abc-1-2-3", `{"eventName":"ExactHyphenated"}`)
+
+	out, err := GetRawEvent(s, GetRawEventInput{ID: "abc-1-2-3"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !out.Found {
+		t.Fatal("Found = false, want true — \"abc-1-2-3\" is an exact stored id")
+	}
+	if out.ID != "abc-1-2-3" {
+		t.Fatalf("ID = %q, want the EXACT requested id %q — got the WRONG, unrelated event "+
+			"(a suffix-stripped guess silently won)", out.ID, "abc-1-2-3")
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(out.Payload, &payload); err != nil {
+		t.Fatalf("payload not valid JSON: %v", err)
+	}
+	if payload["eventName"] != "ExactHyphenated" {
+		t.Fatalf("payload = %v, want the \"abc-1-2-3\" event's payload, not \"abc\"'s", payload)
+	}
+}
+
+// TestGetRawEvent_BareHyphenatedIDNeverPrefixMatchesEitherDirection is a
+// second angle on the same reproduction: even if "abc-1-2-3" did NOT exist
+// (only "abc" does), a query for a bare hyphenated id must not get
+// suffix-stripped into matching "abc" via the prefix-resolution fallback —
+// suffix stripping is gated on the requested id carrying a "finding-"
+// prefix, and "abc-1-2-3" carries none.
+func TestGetRawEvent_BareHyphenatedIDNeverPrefixMatchesEitherDirection(t *testing.T) {
+	s := newTempStore(t)
+	seedRawEvent(t, s, "abc", `{"eventName":"Short"}`)
+
+	out, err := GetRawEvent(s, GetRawEventInput{ID: "abc-1-2-3"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if out.Found {
+		t.Fatalf("Found = true (resolved to %q), want false — \"abc-1-2-3\" has no \"finding-\" prefix "+
+			"so it must never be suffix-stripped into matching a shorter, unrelated stored id", out.ID)
+	}
+}
+
+// TestGetRawEvent_SuffixStrippedGuessAmbiguousAcrossTwoEventsErrors proves
+// the ambiguity-aware half of the fix: when a "finding-"-prefixed compound
+// id's suffix-stripped candidate is a prefix of MORE THAN ONE stored event
+// id, GetRawEvent reports it as an AMBIGUOUS ERROR — never silently picks
+// either one.
+func TestGetRawEvent_SuffixStrippedGuessAmbiguousAcrossTwoEventsErrors(t *testing.T) {
+	s := newTempStore(t)
+	// Both stored ids share the "evt_ab12cd34ef56" prefix that the
+	// suffix-stripped candidate from the requested compound id resolves to.
+	seedRawEvent(t, s, "evt_ab12cd34ef56", `{"eventName":"First"}`)
+	seedRawEvent(t, s, "evt_ab12cd34ef56extra", `{"eventName":"Second"}`)
+
+	out, err := GetRawEvent(s, GetRawEventInput{ID: "finding-evt_ab12cd34ef56-inj-command-injection-chain"})
+	if err == nil {
+		t.Fatalf("expected an ambiguous-prefix error, got out=%+v (a suffix-stripped guess silently picked one)", out)
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "evt_ab12cd34ef56") || !strings.Contains(msg, "evt_ab12cd34ef56extra") {
+		t.Errorf("error %q must list both candidate ids", msg)
+	}
+}
