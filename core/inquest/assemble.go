@@ -38,6 +38,16 @@ type IdentityEvidence struct {
 	SourceIP    string `json:"source_ip"`
 	Target      string `json:"target"`
 	Actor       string `json:"actor"`
+	// Grantor/Grantee/Capability describe the ACTION a trust/access-change
+	// finding represents, in direction-explicit terms: Grantor is the side
+	// that already held the authority and extended it; Grantee is the side that
+	// newly gained access; Capability names, in plain language, what the grantee
+	// can now do. They are populated ONLY for grant-aware finding types (see
+	// resolveGrantDirection) and left empty otherwise (omitempty) — a login/
+	// exfil/timing finding carries no grant, so no direction is invented for it.
+	Grantor    string `json:"grantor,omitempty"`
+	Grantee    string `json:"grantee,omitempty"`
+	Capability string `json:"capability,omitempty"`
 	// FieldPaths records which path supplied each populated field (auditable,
 	// and it teaches the narrative to cite verbatim) — only keys that were
 	// actually resolved are present.
@@ -208,6 +218,26 @@ func resolveIdentityEvent(st *store.Store, f finding.Finding) (tools.GetRawEvent
 func assembleIdentity(st *store.Store, f finding.Finding) IdentityEvidence {
 	out := IdentityEvidence{Actor: f.Actor, FieldPaths: map[string]string{}}
 
+	// The ACTION (trust direction + granted capability) is derived from the
+	// detector's OWN semantically-labeled evidence blob (f.Evidence), NOT the
+	// raw event payload the identity fields below read — so it is resolved
+	// FIRST, independent of whether the underlying event still resolves, and
+	// survives the early-return degradation paths below. Non-grant findings
+	// leave all three empty; a malformed/absent grant blob degrades ONLY these
+	// three sub-fields (no Error), never the whole identity section.
+	if grantor, grantee, capability := resolveGrantDirection(f); grantor != "" || grantee != "" || capability != "" {
+		out.Grantor, out.Grantee, out.Capability = grantor, grantee, capability
+		if grantor != "" {
+			out.FieldPaths["grantor"] = "finding.evidence (grant direction resolved by finding.type/event_type)"
+		}
+		if grantee != "" {
+			out.FieldPaths["grantee"] = "finding.evidence (grant direction resolved by finding.type/event_type)"
+		}
+		if capability != "" {
+			out.FieldPaths["capability"] = "finding.evidence (granted capability in plain language)"
+		}
+	}
+
 	res, err := resolveIdentityEvent(st, f)
 	if err != nil {
 		out.Error = err.Error()
@@ -260,6 +290,107 @@ func assembleIdentity(st *store.Store, f finding.Finding) IdentityEvidence {
 	}
 
 	return out
+}
+
+// grantAwareFindingTypes are the finding types whose evidence blob carries a
+// grantor/grantee/capability shape resolveGrantDirection can read. Any other
+// type (unusual-login, exfil, timing, …) returns all-empty — the ACTION
+// explanation is only synthesized where the detector actually recorded a grant,
+// never guessed for an unrelated finding.
+var grantAwareFindingTypes = map[string]bool{
+	"new-external-access": true,
+	"priv-escalation":     true,
+}
+
+// grantDetectorEvidence captures every evidence field the two grant-aware
+// detectors marshal (core/detect/new_external_access.go and
+// core/detect/priv_escalation.go). A json tag that does not match a detector's
+// actual key silently degrades to an empty value (fault-isolated), so these
+// tags are kept in exact lockstep with what those detectors write.
+type grantDetectorEvidence struct {
+	Actor           string `json:"actor"`
+	Grantee         string `json:"grantee"`
+	Permission      string `json:"permission"`
+	EventType       string `json:"event_type"`
+	Target          string `json:"target"`
+	Role            string `json:"role"`
+	TargetUser      string `json:"target_user"`
+	PermissionLevel string `json:"permission_level"`
+}
+
+// resolveGrantDirection reads the detector's own semantically-labeled evidence
+// blob and returns the trust DIRECTION (grantor = the side that already held
+// the authority; grantee = the side that newly gained access) and the granted
+// CAPABILITY in plain language. It is a PURE function: no store, no model call,
+// no I/O — it only unmarshals f.Evidence — so it does not weaken assemble.go's
+// "deterministic evidence assembly" invariant. Its output feeds the narrate
+// user document ONLY (via assembleIdentity -> buildUserMessage); it is never
+// read back into any escalation/resolution/verdict path — the committee has
+// already escalated the finding upstream in core/detect before this runs.
+//
+// The grantor/grantee mapping is NOT uniform across grant-aware event shapes,
+// so it switches on the evidence's own event_type (one finding.Type,
+// "new-external-access", covers several underlying event shapes with different
+// direction conventions). A malformed or absent blob returns all-empty rather
+// than erroring — this is an advisory augmentation, not a fatal section.
+func resolveGrantDirection(f finding.Finding) (grantor, grantee, capability string) {
+	if !grantAwareFindingTypes[f.Type] {
+		return "", "", ""
+	}
+	if len(f.Evidence) == 0 {
+		return "", "", ""
+	}
+	var ev grantDetectorEvidence
+	if err := json.Unmarshal(f.Evidence, &ev); err != nil {
+		return "", "", ""
+	}
+
+	// priv-escalation: the performing actor granted a role/permission to a
+	// target principal. Direction is unambiguous: actor = grantor, target_user
+	// = grantee, role/permission = capability.
+	if f.Type == "priv-escalation" {
+		return ev.Actor, ev.TargetUser, firstNonEmpty(ev.Role, ev.PermissionLevel)
+	}
+
+	// new-external-access. Switch on the UNDERLYING event_type — the direction
+	// convention differs per shape.
+	switch ev.EventType {
+	case "trust_added":
+		// AWS cross-account AssumeRole. The evidence's "grantee" field is the
+		// ASSUMED role/account (the detector sources it from the payload's
+		// "member" key) — that is the resource whose trust boundary is exercised,
+		// i.e. the GRANTOR. The evidence's "actor" is the CALLING principal that
+		// now holds the capability, i.e. the GRANTEE. This FLIP is the OPPOSITE
+		// of every other branch here; do NOT "unify the switch, it looks
+		// redundant" — collapsing it to actor=grantor/grantee=grantee reproduces
+		// the exact backwards direction Baron hit live (mallcoppro-15e). The
+		// dedicated trust_added regression test must fail loudly if it is undone.
+		cap := "can assume this role and act with its permissions"
+		if ev.Permission != "" {
+			cap = ev.Permission
+		}
+		return ev.Grantee, ev.Actor, cap
+	case "repo.add_collaborator", "org.add_member", "org.member_added", "org.add_outside_collaborator":
+		cap := ev.Permission
+		if cap == "" {
+			cap = "collaborator/member access"
+		}
+		return ev.Actor, ev.Grantee, cap
+	case "federation_settings_update", "domain_trust", "directory_settings_update":
+		return ev.Actor, ev.Grantee, "federation/domain trust relationship"
+	default:
+		return "", "", ""
+	}
+}
+
+// firstNonEmpty returns the first non-empty string in vals, or "".
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 func stringField(m map[string]any, key string) (string, bool) {

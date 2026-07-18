@@ -1,10 +1,12 @@
 package inquest
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/mallcop-app/mallcop/core/store"
 	"github.com/mallcop-app/mallcop/core/tools"
 	"github.com/mallcop-app/mallcop/pkg/event"
 	"github.com/mallcop-app/mallcop/pkg/finding"
@@ -200,6 +202,156 @@ func TestAssembleIdentity_EventIDsResolvesWhenIDLenienceCannot(t *testing.T) {
 	}
 	if out.Caller != "arn:aws:iam::111122223333:role/attacker" {
 		t.Errorf("Caller = %q", out.Caller)
+	}
+}
+
+// seedGrantEvent seeds a minimal event so a grant finding's identity section
+// resolves cleanly, then returns the finding whose Evidence carries the grant
+// blob under test. The event payload is irrelevant to grant-direction
+// resolution (which reads f.Evidence, not the event) — it exists only so
+// assembleIdentity does not degrade with a "no underlying event" Error, proving
+// the two paths coexist.
+func seedGrantEvent(t *testing.T, s *store.Store, id, actor, typ, evidence string) finding.Finding {
+	t.Helper()
+	seedEvent(t, s, event.Event{
+		ID: id, Source: "aws", Type: "trust_added", Actor: actor,
+		Timestamp: time.Now(),
+		Payload:   rawEventPayload(t, map[string]any{"caller": actor}),
+	})
+	return finding.Finding{
+		ID: "finding-" + id, Actor: actor, Type: typ,
+		Timestamp: time.Now(), EventIDs: []string{id},
+		Evidence: json.RawMessage(evidence),
+	}
+}
+
+// TestAssembleIdentity_GrantDirection_TrustAdded is the LOAD-BEARING regression
+// test for the AWS cross-account AssumeRole inversion (mallcoppro-15e). The
+// detector's evidence records actor=the CALLING principal (forge-proxy) and
+// grantee=the ASSUMED role (mallcop-bedrock-relay), but the trust DIRECTION is
+// the opposite: mallcop-bedrock-relay is the grantor (its trust boundary was
+// exercised) and forge-proxy is the grantee (it gained the capability). If a
+// future edit collapses the trust_added branch into the others, this test must
+// fail loudly rather than let the backwards direction reach a live console.
+func TestAssembleIdentity_GrantDirection_TrustAdded(t *testing.T) {
+	s := newTempStore(t)
+	const forgeProxy = "arn:aws:sts::225635015146:assumed-role/forge-proxy-bedrock-role/forge-proxy"
+	const relay = "arn:aws:iam::458526671706:role/mallcop-bedrock-relay"
+	f := seedGrantEvent(t, s, "evt-trust-1", forgeProxy, "new-external-access",
+		`{"actor":"`+forgeProxy+`","grantee":"`+relay+`","event_type":"trust_added"}`)
+
+	out := assembleIdentity(s, f)
+	if out.Grantor != relay {
+		t.Errorf("Grantor = %q, want the ASSUMED role %q (the trust boundary exercised — grantor, NOT the caller)", out.Grantor, relay)
+	}
+	if out.Grantee != forgeProxy {
+		t.Errorf("Grantee = %q, want the CALLING principal %q (it newly gained the capability — grantee)", out.Grantee, forgeProxy)
+	}
+	if out.Capability == "" {
+		t.Error("Capability is empty; want a non-empty plain-language capability for a trust_added grant")
+	}
+	if out.FieldPaths["grantor"] == "" || out.FieldPaths["grantee"] == "" {
+		t.Errorf("FieldPaths[grantor]=%q FieldPaths[grantee]=%q, both should be populated", out.FieldPaths["grantor"], out.FieldPaths["grantee"])
+	}
+}
+
+// TestAssembleIdentity_GrantDirection_TrustAddedPermission proves a trust_added
+// grant carrying an explicit permission uses it verbatim as the capability.
+func TestAssembleIdentity_GrantDirection_TrustAddedPermission(t *testing.T) {
+	s := newTempStore(t)
+	f := seedGrantEvent(t, s, "evt-trust-2", "caller-arn", "new-external-access",
+		`{"actor":"caller-arn","grantee":"role-arn","permission":"bedrock:InvokeModel","event_type":"trust_added"}`)
+	out := assembleIdentity(s, f)
+	if out.Grantor != "role-arn" || out.Grantee != "caller-arn" {
+		t.Errorf("Grantor/Grantee = %q/%q, want role-arn/caller-arn (flipped)", out.Grantor, out.Grantee)
+	}
+	if out.Capability != "bedrock:InvokeModel" {
+		t.Errorf("Capability = %q, want the explicit permission verbatim", out.Capability)
+	}
+}
+
+// TestAssembleIdentity_GrantDirection_GitHubCollaborator proves the GitHub
+// collaborator/member add shape is NOT flipped: the performing actor is the
+// grantor, the added principal is the grantee, and the permission is the
+// capability.
+func TestAssembleIdentity_GrantDirection_GitHubCollaborator(t *testing.T) {
+	s := newTempStore(t)
+	f := seedGrantEvent(t, s, "evt-collab-1", "repo-admin", "new-external-access",
+		`{"actor":"repo-admin","grantee":"newcollab","event_type":"repo.add_collaborator","permission":"write"}`)
+	out := assembleIdentity(s, f)
+	if out.Grantor != "repo-admin" {
+		t.Errorf("Grantor = %q, want repo-admin (NOT flipped for collaborator adds)", out.Grantor)
+	}
+	if out.Grantee != "newcollab" {
+		t.Errorf("Grantee = %q, want newcollab", out.Grantee)
+	}
+	if !strings.Contains(out.Capability, "write") {
+		t.Errorf("Capability = %q, want it to mention the granted role %q", out.Capability, "write")
+	}
+}
+
+// TestAssembleIdentity_GrantDirection_PrivEscalation proves the priv-escalation
+// shape maps actor=grantor, target_user=grantee, role=capability.
+func TestAssembleIdentity_GrantDirection_PrivEscalation(t *testing.T) {
+	s := newTempStore(t)
+	f := seedGrantEvent(t, s, "evt-priv-1", "admin1", "priv-escalation",
+		`{"actor":"admin1","role":"admin","target_user":"newadmin","event_type":"admin_action"}`)
+	out := assembleIdentity(s, f)
+	if out.Grantor != "admin1" {
+		t.Errorf("Grantor = %q, want admin1", out.Grantor)
+	}
+	if out.Grantee != "newadmin" {
+		t.Errorf("Grantee = %q, want newadmin (the target_user receiving the role)", out.Grantee)
+	}
+	if !strings.Contains(out.Capability, "admin") {
+		t.Errorf("Capability = %q, want it to mention the granted role %q", out.Capability, "admin")
+	}
+}
+
+// TestAssembleIdentity_GrantDirection_NotApplicable proves a non-grant finding
+// type carries NO grant direction and does not fail — the identity section
+// stays clean, no grantor/grantee/capability keys, no Error.
+func TestAssembleIdentity_GrantDirection_NotApplicable(t *testing.T) {
+	s := newTempStore(t)
+	f := seedGrantEvent(t, s, "evt-login-1", "someone", "unusual-login",
+		`{"actor":"someone","grantee":"else","event_type":"trust_added"}`)
+	out := assembleIdentity(s, f)
+	if out.Grantor != "" || out.Grantee != "" || out.Capability != "" {
+		t.Errorf("Grantor/Grantee/Capability = %q/%q/%q, want all empty for a non-grant finding type", out.Grantor, out.Grantee, out.Capability)
+	}
+	for _, k := range []string{"grantor", "grantee", "capability"} {
+		if _, ok := out.FieldPaths[k]; ok {
+			t.Errorf("FieldPaths[%q] should be absent for a non-grant finding", k)
+		}
+	}
+	if out.Error != "" {
+		t.Errorf("Error = %q, want empty — an unrecognized type is not a failure", out.Error)
+	}
+}
+
+// TestAssembleIdentity_GrantDirection_MalformedEvidence proves fault isolation:
+// a grant-aware finding whose Evidence is empty/invalid degrades ONLY the grant
+// sub-fields, not the whole identity section (Error stays empty).
+func TestAssembleIdentity_GrantDirection_MalformedEvidence(t *testing.T) {
+	s := newTempStore(t)
+	for _, tc := range []struct {
+		name     string
+		evidence string
+	}{
+		{"empty", ``},
+		{"invalid_json", `{not json`},
+		{"unrecognized_event_type", `{"actor":"a","grantee":"b","event_type":"who_knows"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := seedGrantEvent(t, s, "evt-mal-"+tc.name, "actor-x", "new-external-access", tc.evidence)
+			out := assembleIdentity(s, f)
+			if out.Grantor != "" || out.Grantee != "" || out.Capability != "" {
+				t.Errorf("Grantor/Grantee/Capability = %q/%q/%q, want all empty", out.Grantor, out.Grantee, out.Capability)
+			}
+			if out.Error != "" {
+				t.Errorf("Error = %q, want empty — a malformed grant blob must degrade only the grant sub-fields", out.Error)
+			}
+		})
 	}
 }
 
