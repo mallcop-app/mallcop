@@ -170,6 +170,54 @@ func TestPipeline_InvestigatesEscalatedFinding(t *testing.T) {
 	}
 }
 
+// TestPipeline_InvestigatesEscalatedFinding_WithOrgContext proves
+// pipeline.Config.Investigate.OwnedEntities (mallcoppro-995) reaches the
+// committed Record.Evidence.OrgContext end-to-end — the same style as
+// TestPipeline_InvestigatesEscalatedFinding's Evidence.Identity.Actor
+// assertion above, but for the new 6th evidence section.
+func TestPipeline_InvestigatesEscalatedFinding_WithOrgContext(t *testing.T) {
+	root := useShippedCorpus(t)
+	be := startCannedBackendWithNarrateReply(t,
+		`{"verdict":"suspicious","confidence":0.7,"narrative":"drive-by attempted a prompt-injection comment; no baseline history for this actor."}`)
+
+	client := &inference.DirectClient{BaseURL: be.URL(), Model: "test-model"}
+	st := newGitStore(t)
+	eventsPath := writeEventsFile(t, multiFindingFixture(t))
+
+	investigateCfg := baseInvestigateConfig()
+	investigateCfg.OwnedEntities = []inquest.OwnedEntity{
+		{Match: "drive-by", Name: "drive-by", Relationship: "operator's own test actor"},
+	}
+	cfg := pipeline.Config{
+		Connector:   connect.FromPath(eventsPath),
+		Client:      client,
+		Store:       st,
+		Baseline:    knownActorsBaseline(),
+		Cascade:     agent.CascadeOptions{RepoRoot: root, Tools: fixedTools{text: "evidence", toolCalls: 6, distinctTools: 4}},
+		Investigate: investigateCfg,
+	}
+
+	sum, err := pipeline.Run(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("pipeline.Run: %v", err)
+	}
+	if sum.Investigated != 1 {
+		t.Fatalf("Investigated = %d, want 1", sum.Investigated)
+	}
+
+	res := loadResolutions(t, st)
+	findingID := injectionProbeFindingID(t, res)
+	rec := readInvestigationRecord(t, st, findingID)
+
+	if rec.Evidence.OrgContext.ActorOwned == nil {
+		t.Fatalf("Evidence.OrgContext.ActorOwned = nil, want a match for actor %q against the configured owned entity", rec.Evidence.Identity.Actor)
+	}
+	want := inquest.OwnedMatch{Match: "drive-by", Name: "drive-by", Relationship: "operator's own test actor"}
+	if *rec.Evidence.OrgContext.ActorOwned != want {
+		t.Errorf("Evidence.OrgContext.ActorOwned = %+v, want %+v", *rec.Evidence.OrgContext.ActorOwned, want)
+	}
+}
+
 // TestPipeline_InvestigateGarbageReply_DegradesButScanUnaffected proves an
 // invalid narrate reply degrades ONLY the investigation record — the scan's
 // own exit-relevant summary counts (findings/resolved/escalated) are

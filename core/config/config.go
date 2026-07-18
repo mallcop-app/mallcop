@@ -58,6 +58,7 @@ type Config struct {
 	Sovereignty Sovereignty `yaml:"sovereignty"`
 	Budgets     Budgets     `yaml:"budgets"`
 	Investigate Investigate `yaml:"investigate"`
+	Org         Org         `yaml:"org"`
 }
 
 // Inference is the LLM rail. mode is donut (Forge managed) | byoi | offline.
@@ -240,6 +241,35 @@ type Investigate struct {
 	MaxTokens         int    `yaml:"max_tokens"`
 }
 
+// Org names the operator's OWN accounts/roles/relays (mallcoppro-995) so
+// core/inquest's detection-time investigation can resolve a recurring,
+// baseline-known actor as an OWNED entity by name and relationship, instead
+// of narrating it as a stranger. Absent org: is a safe default — Owned is nil
+// and no evidence is ever marked owned; this is a naming augmentation only,
+// never a verdict override (see core/inquest/narrate.go's systemPrompt
+// clause).
+type Org struct {
+	Owned []OwnedEntity `yaml:"owned"`
+}
+
+// OwnedEntity is one operator-configured owned account/role/relay. Match is
+// substring-matched against the finding's caller/target/actor identity
+// fields (core/inquest's assembleOrgContext) — first configured entry wins
+// per field. Name/Relationship are the plain-language labels the narrate
+// prompt is instructed to use instead of "unknown external actor".
+type OwnedEntity struct {
+	// Match identifies the entity: an account id, ARN, or role-name segment.
+	// MUST be non-empty (validate rejects "" — an empty Match would
+	// substring-match every identity field via strings.Contains(x, ""),
+	// silently marking every finding as owned).
+	Match string `yaml:"match"`
+	// Name is a short label, e.g. "mallcop-bedrock-relay".
+	Name string `yaml:"name"`
+	// Relationship is the plain-language phrase narrate must use, e.g.
+	// "operator's own hourly inference relay".
+	Relationship string `yaml:"relationship"`
+}
+
 // Defaults returns the built-in default Config — the safe OSS defaults `mallcop
 // init` generates (design §B): offline fail-safe inference, auto-mutation OFF,
 // the single sample file connector, learning.dir=detectors, the $25 cap. An
@@ -273,6 +303,7 @@ func Defaults() Config {
 			Enabled: true, Model: "", MaxPerScan: 10, Retries: 0,
 			NeighborWindow: "1h", MaxNeighbors: 50, CorrelationWindow: "10m", MaxTokens: 1024,
 		},
+		Org: Org{Owned: nil},
 	}
 }
 
@@ -392,8 +423,22 @@ func validate(cfg Config) error {
 			}
 		}
 	}
+	for i, o := range cfg.Org.Owned {
+		if strings.TrimSpace(o.Match) == "" {
+			return fmt.Errorf("org.owned[%d].match must be non-empty — an empty match string substring-matches EVERY identity field, silently marking every finding as owned", i)
+		}
+		if len(o.Match) < minOrgMatchLen {
+			return fmt.Errorf("org.owned[%d].match %q is only %d characters — must be at least %d (a full account id or ARN/role-name segment) to avoid false-positive substring matches across unrelated findings", i, o.Match, len(o.Match), minOrgMatchLen)
+		}
+	}
 	return nil
 }
+
+// minOrgMatchLen is the minimum length org.owned[].match must be — short
+// generic fragments (e.g. "aws", "role") would substring-match broadly
+// across unrelated identity fields. AWS account ids are 12 digits; ARNs and
+// role-name segments run well past this floor.
+const minOrgMatchLen = 8
 
 // marshalHeader is prepended to every generated mallcop.yaml so the file
 // announces itself and points at the one-path workflow. It is a plain YAML

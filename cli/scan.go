@@ -307,6 +307,14 @@ func runScan(args []string) error {
 		}
 		return d
 	}
+	// ownedEntities maps core/config.Org.Owned (the mallcop.yaml org: block,
+	// mallcoppro-995) onto inquest's OWN copy type — same closed-allowlist
+	// reason as every other investigateCfg field: core/inquest cannot import
+	// core/config directly (imports_test.go).
+	ownedEntities := make([]inquest.OwnedEntity, len(cfg.Org.Owned))
+	for i, o := range cfg.Org.Owned {
+		ownedEntities[i] = inquest.OwnedEntity{Match: o.Match, Name: o.Name, Relationship: o.Relationship}
+	}
 	investigateCfg := inquest.Config{
 		Enabled:           cfg.Investigate.Enabled,
 		Model:             cfg.Investigate.Model,
@@ -316,6 +324,7 @@ func runScan(args []string) error {
 		MaxNeighbors:      cfg.Investigate.MaxNeighbors,
 		CorrelationWindow: investigateWindow(cfg.Investigate.CorrelationWindow, 10*time.Minute),
 		MaxTokens:         cfg.Investigate.MaxTokens,
+		OwnedEntities:     ownedEntities,
 	}
 	if v := os.Getenv(envInvestigate); v != "" {
 		switch strings.ToLower(v) {

@@ -1,8 +1,8 @@
 // assemble.go — deterministic evidence assembly. Every function here is PURE
 // Go over data the caller already holds (store, baseline, event slices); NO
-// model call anywhere in this file. Each of the five sections is fault-
+// model call anywhere in this file. Each of the six sections is fault-
 // isolated: a panic OR a returned error inside one section fills that
-// section's own Error field and the other four still ship (see the
+// section's own Error field and the other five still ship (see the
 // safeAssemble* wrappers).
 package inquest
 
@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"math"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/mallcop-app/mallcop/core/store"
@@ -27,6 +28,7 @@ type Evidence struct {
 	Recurrence      RecurrenceEvidence      `json:"recurrence"`
 	Baseline        BaselineEvidence        `json:"baseline"`
 	ScanCorrelation ScanCorrelationEvidence `json:"scan_correlation"`
+	OrgContext      OrgContextEvidence      `json:"org_context"`
 }
 
 // IdentityEvidence is the finding's underlying event's provenance fields,
@@ -124,6 +126,29 @@ type ScanCorrelationEvidence struct {
 	Error               string  `json:"error,omitempty"`
 }
 
+// OwnedMatch is one identity field's resolved match against the operator's
+// configured owned entities — the matched Config.OwnedEntities entry's own
+// Match/Name/Relationship, unchanged, so the narrate prompt can cite the
+// exact configured relationship phrase.
+type OwnedMatch struct {
+	Match        string `json:"match"`
+	Name         string `json:"name"`
+	Relationship string `json:"relationship"`
+}
+
+// OrgContextEvidence is section 6: which of the finding's identity fields
+// (caller, target, actor) match an operator-configured owned entity, so the
+// narrate prompt can name the relationship instead of describing an owned
+// account/role/relay as an unknown external actor. Each field is nil when no
+// configured entity matches — this is informational only, never a verdict
+// override (see narrate.go's systemPrompt clause).
+type OrgContextEvidence struct {
+	CallerOwned *OwnedMatch `json:"caller_owned,omitempty"`
+	TargetOwned *OwnedMatch `json:"target_owned,omitempty"`
+	ActorOwned  *OwnedMatch `json:"actor_owned,omitempty"`
+	Error       string      `json:"error,omitempty"`
+}
+
 // correlatedMinScanCount/correlatedMatchTolerance/correlatedMinMatchedFraction
 // are the fixed thresholds ScanCorrelationEvidence.Correlated gates on (design
 // §evidenceAssembly/5): at least 5 observed scans, a per-occurrence offset
@@ -135,7 +160,7 @@ const (
 	correlatedMinMatchedFraction = 0.7
 )
 
-// assemble runs all five evidence sections for one escalated finding, each
+// assemble runs all six evidence sections for one escalated finding, each
 // under its own panic/error isolation (safeAssemble*), and returns the whole
 // Evidence chain — always, even when every section degraded.
 func assemble(st *store.Store, allEvents []event.Event, bl *baseline.Baseline, ef EscalatedFinding, cfg Config) Evidence {
@@ -161,6 +186,7 @@ func assemble(st *store.Store, allEvents []event.Event, bl *baseline.Baseline, e
 	recurrence := safeAssembleRecurrence(st, occurrences, f)
 	baselineEv := safeAssembleBaseline(bl, allEvents, f, identity)
 	correlation := safeAssembleScanCorrelation(st, occurrences, corrWindow)
+	orgContext := safeAssembleOrgContext(cfg.OwnedEntities, f.Actor, identity)
 
 	return Evidence{
 		Identity:        identity,
@@ -168,6 +194,7 @@ func assemble(st *store.Store, allEvents []event.Event, bl *baseline.Baseline, e
 		Recurrence:      recurrence,
 		Baseline:        baselineEv,
 		ScanCorrelation: correlation,
+		OrgContext:      orgContext,
 	}
 }
 
@@ -862,4 +889,46 @@ func clusterTimes(times []time.Time, window time.Duration) []time.Time {
 		}
 	}
 	return out
+}
+
+// --- section 6: ORG CONTEXT ---------------------------------------------
+
+// safeAssembleOrgContext isolates assembleOrgContext's panics into the
+// section's own Error field, same pattern as the other five safeAssemble*
+// wrappers.
+func safeAssembleOrgContext(owned []OwnedEntity, actor string, identity IdentityEvidence) (out OrgContextEvidence) {
+	defer func() {
+		if r := recover(); r != nil {
+			out = OrgContextEvidence{Error: fmt.Sprintf("panic: %v", r)}
+		}
+	}()
+	return assembleOrgContext(owned, actor, identity)
+}
+
+// assembleOrgContext is PURE — no store, no model call, no I/O — it only
+// substring-matches identity.Caller, identity.Target, and actor against the
+// operator's configured owned entities (config-time validated non-empty and
+// at least minOrgMatchLen characters, mallcoppro-995). For each identity
+// field, the FIRST configured entity whose Match is a substring of that
+// field wins (config order); no match leaves that field nil. Absent
+// owned-entity config (nil/empty owned) returns an all-nil, no-error
+// OrgContextEvidence — honest evidence for the narrative, not a degraded
+// section (mirrors TestAssembleBaselineEvidence_UnknownActor's pattern).
+func assembleOrgContext(owned []OwnedEntity, actor string, identity IdentityEvidence) OrgContextEvidence {
+	match := func(field string) *OwnedMatch {
+		if field == "" {
+			return nil
+		}
+		for _, o := range owned {
+			if o.Match != "" && strings.Contains(field, o.Match) {
+				return &OwnedMatch{Match: o.Match, Name: o.Name, Relationship: o.Relationship}
+			}
+		}
+		return nil
+	}
+	return OrgContextEvidence{
+		CallerOwned: match(identity.Caller),
+		TargetOwned: match(identity.Target),
+		ActorOwned:  match(actor),
+	}
 }
