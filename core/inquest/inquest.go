@@ -196,6 +196,19 @@ type Outcome struct {
 	// zero calls, zero writes. Not surfaced on pipeline.Summary; exists so a
 	// caller/test can assert idempotency directly.
 	Skipped int
+	// FreshOKIDs lists the finding IDs that received a FRESH "ok" verdict this
+	// run — a model call landed a trusted verdict AND it was durably written.
+	// len(FreshOKIDs) == Investigated, and the order matches RunAll's
+	// deterministic finding-ID sort. It is the per-finding companion to the
+	// Investigated tally, added for the low-confidence re-vote (core/pipeline,
+	// mallcoppro-09a): a Force deeper pass that FAILS for a finding keeps that
+	// finding's prior (first-pass) "ok" record on disk (the overwrite guard in
+	// processOne), so the two are byte-indistinguishable to a re-reader. The
+	// caller MUST re-vote only findings IN this set — a finding NOT here kept
+	// its first-pass evidence, and re-voting it would feed the committee that
+	// first-pass evidence relabeled as a "deeper investigation" that never
+	// landed, misrepresenting provenance (mallcoppro-09a review finding).
+	FreshOKIDs []string
 	// Errors carries one human-readable line per degraded/failed record, for
 	// the caller to print as a non-fatal warning. Never fails the scan.
 	Errors []string
@@ -261,6 +274,13 @@ func RunAll(ctx context.Context, in Input) (out Outcome) {
 		out.Investigated += investigated
 		out.Degraded += degraded
 		out.Skipped += skipped
+		if investigated == 1 {
+			// A fresh "ok" verdict landed AND persisted for this finding (see
+			// processOne's write-failure guard, which downgrades a failed write
+			// out of the investigated tally). Record the ID so the caller can
+			// tell a genuine deeper verdict from a preserved first-pass one.
+			out.FreshOKIDs = append(out.FreshOKIDs, ef.Finding.ID)
+		}
 		if errMsg != "" {
 			out.Errors = append(out.Errors, errMsg)
 		}
@@ -412,6 +432,17 @@ func processOne(ctx context.Context, in Input, ef EscalatedFinding, maxPerScan i
 
 	if _, werr := writeRecord(in.Store, rec); werr != nil {
 		errMsg = appendErr(errMsg, fmt.Sprintf("inquest: write record for %s: %v", ef.Finding.ID, werr))
+		if investigated == 1 {
+			// The fresh "ok" verdict never persisted — the on-disk record is
+			// UNCHANGED (still the prior/first-pass record, or absent). A failed
+			// write must never be reported as a landed fresh investigation:
+			// RunAll keys FreshOKIDs off investigated==1, and the low-confidence
+			// re-vote (mallcoppro-09a) uses that set to conclude a genuine deeper
+			// verdict exists. Re-voting on the stale on-disk record would
+			// misrepresent first-pass evidence as a deeper pass. Downgrade to
+			// Degraded so the operator sees the failed attempt, not silence.
+			investigated, degraded = 0, 1
+		}
 	}
 	return investigated, degraded, 0, errMsg
 }

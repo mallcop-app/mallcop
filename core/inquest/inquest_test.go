@@ -382,6 +382,73 @@ func TestRunAll_Force_ModelErrorDoesNotOverwriteExistingOk(t *testing.T) {
 	}
 }
 
+// perFindingClient returns a transport error for any request whose prompt
+// mentions the finding ID in errFor, and the canned reply for every other
+// finding — the seam TestRunAll_FreshOKIDs_ExcludeFailedForcePass uses to make
+// ONE Force pass land a fresh verdict for one finding while the other's deep
+// call fails. reply/errFor are read live per call so the test can flip them
+// between passes.
+type perFindingClient struct {
+	reply  string
+	errFor string
+	calls  int
+}
+
+func (c *perFindingClient) Messages(_ context.Context, req agent.MessagesRequest) (agent.MessagesResponse, error) {
+	c.calls++
+	var text string
+	if len(req.Messages) > 0 && len(req.Messages[0].Content) > 0 {
+		text = req.Messages[0].Content[0].Text
+	}
+	if c.errFor != "" && strings.Contains(text, c.errFor) {
+		return agent.MessagesResponse{}, context.DeadlineExceeded
+	}
+	return agent.MessagesResponse{
+		StopReason: "end_turn",
+		Content:    []agent.ContentBlock{{Type: "text", Text: c.reply}},
+	}, nil
+}
+
+// TestRunAll_FreshOKIDs_ExcludeFailedForcePass proves Outcome.FreshOKIDs is the
+// precise per-finding companion to Investigated that the low-confidence re-vote
+// (core/pipeline, mallcoppro-09a review finding) keys off: it lists ONLY the
+// findings whose fresh "ok" verdict actually landed AND persisted this run. A
+// Force re-pass whose fresh pass FAILED (here: model error) keeps the finding's
+// prior first-pass record and must NOT appear in FreshOKIDs — otherwise the
+// re-vote would run on first-pass evidence relabeled as a deeper investigation.
+// Two findings share one Force pass: one lands a fresh ok verdict, the other's
+// deep call errors and is dropped from the set.
+func TestRunAll_FreshOKIDs_ExcludeFailedForcePass(t *testing.T) {
+	s := newTempStore(t)
+	client := &perFindingClient{reply: `{"verdict":"benign","confidence":0.3,"narrative":"first pass, low-confidence."}`}
+	findings := []EscalatedFinding{escalatedFor("finding-00", "a"), escalatedFor("finding-01", "a")}
+	in := Input{Store: s, Client: client, Findings: findings, Config: okConfig()}
+
+	// Pass 1: both findings get a fresh ok record — both must be in FreshOKIDs.
+	out := RunAll(context.Background(), in)
+	if out.Investigated != 2 {
+		t.Fatalf("pass 1 Outcome = %+v, want Investigated=2", out)
+	}
+	if len(out.FreshOKIDs) != 2 {
+		t.Fatalf("pass 1 FreshOKIDs = %v, want both findings (len 2, == Investigated)", out.FreshOKIDs)
+	}
+
+	// Pass 2 (Force): finding-00's deep call lands a fresh ok verdict;
+	// finding-01's deep call errors, so its prior ok record is preserved (the
+	// overwrite guard) and it must be ABSENT from FreshOKIDs.
+	client.errFor = "finding-01"
+	client.reply = `{"verdict":"benign","confidence":0.95,"narrative":"deeper pass, now confident."}`
+	forced := in
+	forced.Force = true
+	out = RunAll(context.Background(), forced)
+	if out.Investigated != 1 || out.Degraded != 1 {
+		t.Fatalf("Force pass Outcome = %+v, want Investigated=1/Degraded=1", out)
+	}
+	if len(out.FreshOKIDs) != 1 || out.FreshOKIDs[0] != "finding-00" {
+		t.Fatalf("FreshOKIDs = %v, want exactly [finding-00] — the failed-deep-pass finding must NOT be reported as a fresh verdict", out.FreshOKIDs)
+	}
+}
+
 // TestAttachRevote_AdditiveAndReadRecord proves the exported ReadRecord +
 // AttachRevote path (mallcoppro-09a): a re-vote outcome is attached to an
 // existing investigation record WITHOUT touching its verdict/confidence/narrative

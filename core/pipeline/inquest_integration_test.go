@@ -757,3 +757,115 @@ func TestPipeline_LowConfidenceInvestigation_RevoteBoundedByDeepBudget(t *testin
 		}
 	}
 }
+
+// TestPipeline_LowConfidenceInvestigation_FailedDeepPassSkipsRevote proves the
+// mallcoppro-09a review finding: when a low-confidence finding's deeper pass runs
+// WITHIN budget but FAILS to land a fresh trusted verdict (the narrate call comes
+// back invalid), the re-vote must NOT run. A failed deep pass keeps the finding's
+// FIRST-pass "ok" record on disk (the overwrite guard); re-voting it would feed
+// the committee that first-pass evidence relabeled as a "deeper investigation"
+// that never happened, misrepresenting provenance and poisoning the record
+// customer-facing copy is generated from.
+//
+// The cannedbackend routes by narrate-call ORDER for the single injection-probe
+// finding (which floor-escalates with ZERO cascade model calls, so the only
+// narrate calls are inquest's): call 1 (first pass) returns a valid low-confidence
+// verdict (0.3 < 0.5 threshold), call 2 (the deeper pass) returns garbage that
+// fails validation. The finding must end up: record STILL ok at first-pass
+// confidence 0.3, Revote marked deep_pass_failed (NOT Triggered, NOT a resolve),
+// LowConfidenceRevotes == 0, and the escalate disposition untouched
+// (any-escalate-wins preserved — a finding whose deeper pass could not land is
+// never quietly de-escalated).
+func TestPipeline_LowConfidenceInvestigation_FailedDeepPassSkipsRevote(t *testing.T) {
+	root := useShippedCorpus(t)
+
+	var narrateCalls int32
+	be := &cannedbackend.CannedBackend{
+		CannedContentFunc: func(body []byte) string {
+			if strings.Contains(string(body), investigateSystemPromptMarker) {
+				// Order-route the two narrate calls for the single finding:
+				// first pass lands a valid low-confidence verdict; the deeper
+				// (second) pass fails validation with garbage.
+				if atomic.AddInt32(&narrateCalls, 1) == 1 {
+					return `{"verdict":"suspicious","confidence":0.3,"narrative":"first pass: sections conflict; low confidence per the prompt's own rule."}`
+				}
+				return "not valid JSON — the deeper pass fails to land a verdict"
+			}
+			return cascadeResolveReply // never hit: injection-probe floor-escalates with zero cascade model calls
+		},
+	}
+	if err := be.Start(); err != nil {
+		t.Fatalf("start cannedbackend: %v", err)
+	}
+	t.Cleanup(be.Stop)
+
+	st := newGitStore(t)
+	cfg := pipeline.Config{
+		Connector:   connect.FromPath(writeEventsFile(t, eightInjectionProbesFixture(t)[:1])), // exactly one low-confidence finding
+		Client:      &inference.DirectClient{BaseURL: be.URL(), Model: "test-model"},
+		Store:       st,
+		Baseline:    knownActorsBaseline(),
+		Cascade:     agent.CascadeOptions{RepoRoot: root, Tools: fixedTools{text: "evidence", toolCalls: 6, distinctTools: 4}},
+		Investigate: lowConfInvestigateConfig(), // MaxDeepPerScan=5 (budget is NOT the limiter here), LowConfidenceThreshold=0.5
+	}
+	sum, err := pipeline.Run(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("pipeline.Run: %v", err)
+	}
+
+	if sum.Escalated != 1 {
+		t.Fatalf("Escalated = %d, want 1 (the injection-probe floor-escalates)", sum.Escalated)
+	}
+	// The deeper pass ran (a second narrate call) but FAILED — so NO re-vote ran.
+	if n := atomic.LoadInt32(&narrateCalls); n < 2 {
+		t.Fatalf("narrate calls = %d, want >= 2 (first pass + a deeper pass that then failed)", n)
+	}
+	if sum.LowConfidenceRevotes != 0 {
+		t.Fatalf("LowConfidenceRevotes = %d, want 0 — a FAILED deeper pass must NOT be counted as a re-vote "+
+			"(re-voting would run on first-pass evidence relabeled as a deeper investigation)", sum.LowConfidenceRevotes)
+	}
+	if sum.RevoteDeescalations != 0 {
+		t.Fatalf("RevoteDeescalations = %d, want 0 (no re-vote ran, so nothing could de-escalate)", sum.RevoteDeescalations)
+	}
+
+	res := loadResolutions(t, st)
+	findingID := injectionProbeFindingID(t, res)
+
+	rec := readInvestigationRecord(t, st, findingID)
+	// PROVENANCE HONESTY: the record still carries the FIRST-pass verdict (the
+	// overwrite guard kept it) — the failed deeper pass did not degrade it, and
+	// no re-vote overwrote its evidence.
+	if rec.NarrativeStatus != inquest.StatusOK {
+		t.Errorf("NarrativeStatus = %q, want ok (the first-pass record is preserved; a failed deep pass never overwrites it)", rec.NarrativeStatus)
+	}
+	if rec.Confidence != 0.3 {
+		t.Errorf("Confidence = %v, want 0.3 (the untouched first-pass value — the deeper pass failed to land a fresh verdict)", rec.Confidence)
+	}
+	// The deep_pass_failed marker is present so the console can be honest, and it
+	// is explicitly NOT a Triggered re-vote and NOT a de-escalation.
+	if rec.Revote == nil {
+		t.Fatal("Revote = nil, want a deep_pass_failed marker so the console can say the deeper pass did not land")
+	}
+	if !rec.Revote.DeepPassFailed {
+		t.Errorf("Revote.DeepPassFailed = false, want true (the deeper pass failed to land a fresh verdict)")
+	}
+	if rec.Revote.Triggered {
+		t.Errorf("Revote.Triggered = true, want false — a re-vote MUST NOT run on first-pass evidence relabeled as a deeper investigation")
+	}
+	if rec.Revote.UnanimousResolve {
+		t.Errorf("Revote.UnanimousResolve = true, want false (no re-vote ran; the escalation stands)")
+	}
+	if rec.Revote.TotalVotes != 0 || rec.Revote.ResolveVotes != 0 {
+		t.Errorf("Revote tally = %d/%d, want 0/0 (no committee re-vote ran)", rec.Revote.ResolveVotes, rec.Revote.TotalVotes)
+	}
+	// CONSENSUS INVARIANT: the disposition stream is untouched — still exactly
+	// one escalate resolution for the finding.
+	if len(res) != sum.FindingsDetected {
+		t.Errorf("resolutions = %d, want %d (one per finding; the failed deep pass must NOT append a resolution)", len(res), sum.FindingsDetected)
+	}
+	for _, r := range res {
+		if r.FindingID == findingID && r.Action != "escalate" {
+			t.Errorf("finding %s Action = %q, want escalate (any-escalate-wins: a finding whose deeper pass could not land is never de-escalated)", findingID, r.Action)
+		}
+	}
+}

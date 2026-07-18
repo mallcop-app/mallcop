@@ -161,16 +161,31 @@ type Record struct {
 	Revote *RevoteOutcome `json:"revote,omitempty"`
 }
 
-// RevoteOutcome is the committee re-vote a low-confidence investigation
-// triggered (mallcoppro-09a). Triggered is always true when the field is
-// present (the pipeline only attaches it when a re-vote actually ran); it is
-// kept explicit so a consumer reading the JSON does not have to infer intent
-// from presence. UnanimousResolve is true ONLY when EVERY voter resolved
-// (any-escalate-wins: a single escalate vote keeps it false and the finding
-// stays escalated). ResolveVotes/TotalVotes are the tally; Reason is the
-// human-readable summary the committee produced.
+// RevoteOutcome is the outcome of the low-confidence deeper-pass + committee
+// re-vote step (mallcoppro-09a) for one finding. It takes exactly ONE of two
+// shapes:
+//
+//   - A re-vote that RAN: Triggered=true, DeepPassFailed=false. The deeper
+//     investigation landed a fresh trusted verdict and the committee re-weighed
+//     it. UnanimousResolve is true ONLY when EVERY voter resolved
+//     (any-escalate-wins: a single escalate vote keeps it false and the finding
+//     stays escalated). ResolveVotes/TotalVotes are the tally.
+//
+//   - A deeper pass that FAILED: DeepPassFailed=true, Triggered=false. The
+//     forced deeper investigation did NOT land a fresh trusted verdict (deep
+//     budget exhausted, model error/timeout, invalid output), so the finding
+//     kept its FIRST-pass "ok" record. NO committee re-vote ran — re-voting
+//     would have fed the committee the first-pass evidence relabeled as a
+//     "deeper investigation" that never happened, misrepresenting provenance
+//     (mallcoppro-09a review finding). The finding stays escalated at its
+//     first-pass confidence; the tally fields are zero. This lets the
+//     customer-facing console honestly say "deeper investigation attempted, no
+//     stronger verdict" instead of manufacturing a re-vote on stale evidence.
+//
+// Reason is the human-readable summary in both shapes.
 type RevoteOutcome struct {
 	Triggered        bool   `json:"triggered"`
+	DeepPassFailed   bool   `json:"deep_pass_failed,omitempty"`
 	ResolveVotes     int    `json:"resolve_votes"`
 	TotalVotes       int    `json:"total_votes"`
 	UnanimousResolve bool   `json:"unanimous_resolve"`

@@ -511,6 +511,20 @@ func Run(ctx context.Context, cfg Config) (Summary, error) {
 // scan: a read/deep-pass/attach error is collected as a warning and the finding
 // is skipped, exactly like the first investigation pass's failure semantics.
 //
+// PROVENANCE HONESTY: step (b) runs ONLY for a finding whose deeper pass
+// actually landed a FRESH trusted verdict — the set inquest.RunAll reports as
+// FreshOKIDs. A finding whose deeper pass FAILED (deep budget exhausted mid-pass,
+// model error/timeout, invalid output) keeps its FIRST-pass "ok" record on disk
+// (processOne's overwrite guard), which is byte-indistinguishable from a genuine
+// deeper verdict to a re-reader. For those, NO re-vote runs — re-voting would
+// feed the committee the first-pass evidence relabeled as a "deeper
+// investigation" that never happened, poisoning the record customer-facing copy
+// is generated from (mallcoppro-09a review finding). Instead the finding's record
+// is marked deep_pass_failed (RevoteOutcome{Triggered:false, DeepPassFailed:true})
+// so the console can say the deeper pass didn't land; the finding keeps its
+// first-pass verdict + low confidence and STAYS escalated (any-escalate-wins
+// preserved exactly). Such findings are NOT counted in the returned revote tally.
+//
 // BUDGET: the re-vote loop is bounded to AT MOST MaxDeepPerScan findings — the
 // low-confidence subset is sorted by finding ID (the same deterministic order
 // inquest.RunAll sorts by internally) and truncated to the deep budget BEFORE
@@ -593,10 +607,44 @@ func runLowConfidenceRevotes(ctx context.Context, cfg Config, escalated []inques
 	})
 	warnings = append(warnings, deepOut.Errors...)
 
+	// Which of the budget-bounded low-confidence findings did the deeper pass
+	// actually land a FRESH trusted verdict for? RunAll reports exactly those
+	// IDs (FreshOKIDs) — a Force re-pass that FAILED (deep budget exhausted mid-
+	// pass, model error/timeout, invalid output) keeps the finding's prior
+	// FIRST-pass "ok" record on disk via processOne's overwrite guard, so the
+	// re-read below cannot distinguish a genuine deeper verdict from the
+	// preserved first-pass one. Only a finding in this set has genuinely deeper
+	// evidence to re-vote on (mallcoppro-09a review finding).
+	freshOK := make(map[string]bool, len(deepOut.FreshOKIDs))
+	for _, id := range deepOut.FreshOKIDs {
+		freshOK[id] = true
+	}
+
 	// (b)+(c) Re-vote each low-confidence finding with the deeper evidence and
 	// attach the outcome. The re-vote runs the SAME cascade the resolutions came
 	// from (cfg.Cascade), so its committee is the production committee.
 	for _, ef := range lowConf {
+		if !freshOK[ef.Finding.ID] {
+			// The forced deeper pass did NOT land a fresh trusted verdict for
+			// this finding — the on-disk record is STILL the first-pass
+			// evidence. Re-voting now would hand the committee that first-pass
+			// evidence relabeled as a "deeper investigation" that never
+			// happened, misrepresenting provenance and poisoning the record the
+			// customer-facing copy is generated from (mallcoppro-09a review
+			// finding). Do NOT re-vote. Record deep_pass_failed so the console
+			// can honestly say the deeper pass didn't land; the finding keeps
+			// its first-pass verdict + low confidence and STAYS escalated
+			// (any-escalate-wins preserved exactly — a finding we could not
+			// de-escalate is never quietly cleared).
+			if err := inquest.AttachRevote(cfg.Store, ef.Finding.ID, inquest.RevoteOutcome{
+				Triggered:      false,
+				DeepPassFailed: true,
+				Reason: "Deeper investigation pass did not produce a fresh trusted verdict (deep budget exhausted, model error, or invalid output); NO committee re-vote ran — re-deciding on the first-pass evidence relabeled as a deeper investigation would misrepresent provenance. The escalation stands at its first-pass confidence.",
+			}); err != nil {
+				warnings = append(warnings, fmt.Sprintf("revote: attach deep_pass_failed for %s: %v", ef.Finding.ID, err))
+			}
+			continue
+		}
 		rec, found, err := inquest.ReadRecord(cfg.Store, ef.Finding.ID)
 		if err != nil || !found {
 			warnings = append(warnings, fmt.Sprintf("revote: re-read deep record for %s: found=%v err=%v — skipped", ef.Finding.ID, found, err))
