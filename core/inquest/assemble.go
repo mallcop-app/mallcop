@@ -137,16 +137,22 @@ type OwnedMatch struct {
 }
 
 // OrgContextEvidence is section 6: which of the finding's identity fields
-// (caller, target, actor) match an operator-configured owned entity, so the
-// narrate prompt can name the relationship instead of describing an owned
-// account/role/relay as an unknown external actor. Each field is nil when no
-// configured entity matches — this is informational only, never a verdict
-// override (see narrate.go's systemPrompt clause).
+// (caller, target, actor, grantor, grantee) match an operator-configured
+// owned entity, so the narrate prompt can name the relationship instead of
+// describing an owned account/role/relay as an unknown external actor.
+// Grantor/Grantee matter as much as Caller/Target/Actor: for a direction-
+// explicit trust/access-change finding, the owned counterparty often appears
+// ONLY in Grantor or Grantee (e.g. the member/assumed-role ARN that received
+// trust), never in Caller/Target/Actor (mallcoppro-995). Each field is nil
+// when no configured entity matches — this is informational only, never a
+// verdict override (see narrate.go's systemPrompt clause).
 type OrgContextEvidence struct {
-	CallerOwned *OwnedMatch `json:"caller_owned,omitempty"`
-	TargetOwned *OwnedMatch `json:"target_owned,omitempty"`
-	ActorOwned  *OwnedMatch `json:"actor_owned,omitempty"`
-	Error       string      `json:"error,omitempty"`
+	CallerOwned  *OwnedMatch `json:"caller_owned,omitempty"`
+	TargetOwned  *OwnedMatch `json:"target_owned,omitempty"`
+	ActorOwned   *OwnedMatch `json:"actor_owned,omitempty"`
+	GrantorOwned *OwnedMatch `json:"grantor_owned,omitempty"`
+	GranteeOwned *OwnedMatch `json:"grantee_owned,omitempty"`
+	Error        string      `json:"error,omitempty"`
 }
 
 // correlatedMinScanCount/correlatedMatchTolerance/correlatedMinMatchedFraction
@@ -906,14 +912,19 @@ func safeAssembleOrgContext(owned []OwnedEntity, actor string, identity Identity
 }
 
 // assembleOrgContext is PURE — no store, no model call, no I/O — it only
-// substring-matches identity.Caller, identity.Target, and actor against the
-// operator's configured owned entities (config-time validated non-empty and
-// at least minOrgMatchLen characters, mallcoppro-995). For each identity
-// field, the FIRST configured entity whose Match is a substring of that
-// field wins (config order); no match leaves that field nil. Absent
-// owned-entity config (nil/empty owned) returns an all-nil, no-error
-// OrgContextEvidence — honest evidence for the narrative, not a degraded
-// section (mirrors TestAssembleBaselineEvidence_UnknownActor's pattern).
+// substring-matches identity.Caller, identity.Target, identity.Grantor,
+// identity.Grantee, and actor against the operator's configured owned
+// entities (config-time validated non-empty and at least minOrgMatchLen
+// characters, mallcoppro-995). Grantor/Grantee are matched alongside
+// Caller/Target/Actor because a direction-explicit trust/access-change
+// finding often carries its owned counterparty ONLY in Grantor or Grantee
+// (e.g. the member/assumed-role ARN that received trust) — Caller/Target/
+// Actor alone miss that case entirely. For each identity field, the FIRST
+// configured entity whose Match is a substring of that field wins (config
+// order); no match leaves that field nil. Absent owned-entity config
+// (nil/empty owned) returns an all-nil, no-error OrgContextEvidence — honest
+// evidence for the narrative, not a degraded section (mirrors
+// TestAssembleBaselineEvidence_UnknownActor's pattern).
 func assembleOrgContext(owned []OwnedEntity, actor string, identity IdentityEvidence) OrgContextEvidence {
 	match := func(field string) *OwnedMatch {
 		if field == "" {
@@ -927,8 +938,10 @@ func assembleOrgContext(owned []OwnedEntity, actor string, identity IdentityEvid
 		return nil
 	}
 	return OrgContextEvidence{
-		CallerOwned: match(identity.Caller),
-		TargetOwned: match(identity.Target),
-		ActorOwned:  match(actor),
+		CallerOwned:  match(identity.Caller),
+		TargetOwned:  match(identity.Target),
+		ActorOwned:   match(actor),
+		GrantorOwned: match(identity.Grantor),
+		GranteeOwned: match(identity.Grantee),
 	}
 }

@@ -63,6 +63,90 @@ func TestAssembleOrgContext_ActorMatchesOwnedEntity(t *testing.T) {
 	}
 }
 
+// TestAssembleOrgContext_GrantorMatchesOwnedEntity proves the same match
+// logic applies independently to identity.Grantor — the motivating regression
+// (mallcoppro-995): the forge-proxy new-external-access finding's owned relay
+// counterparty (mallcop-bedrock-relay) appears ONLY in Grantor/Grantee, never
+// in Caller/Target/Actor (see TestAssembleIdentity_GrantDirection_TrustAdded,
+// identity_test.go), so without Grantor/Grantee matching, org_context can
+// never mark the relay owned and the narrate model still treats a revoke
+// recommendation against our own infra as an unknown external actor.
+func TestAssembleOrgContext_GrantorMatchesOwnedEntity(t *testing.T) {
+	const forgeProxy = "arn:aws:sts::225635015146:assumed-role/forge-proxy-bedrock-role/forge-proxy"
+	const relay = "arn:aws:iam::458526671706:role/mallcop-bedrock-relay"
+	owned := []OwnedEntity{
+		{Match: "458526671706", Name: "mallcop-bedrock-relay", Relationship: "operator's own Bedrock relay account"},
+	}
+	identity := IdentityEvidence{Caller: forgeProxy, Grantor: relay, Grantee: forgeProxy}
+
+	out := assembleOrgContext(owned, forgeProxy, identity)
+	if out.GrantorOwned == nil {
+		t.Fatal("GrantorOwned = nil, want a match — the relay is the grantor in a trust_added finding")
+	}
+	if out.GrantorOwned.Name != "mallcop-bedrock-relay" {
+		t.Errorf("GrantorOwned.Name = %q, want mallcop-bedrock-relay", out.GrantorOwned.Name)
+	}
+	if out.CallerOwned != nil || out.TargetOwned != nil || out.ActorOwned != nil {
+		t.Errorf("expected only GrantorOwned to match (relay is neither caller/target/actor here), got CallerOwned=%+v TargetOwned=%+v ActorOwned=%+v", out.CallerOwned, out.TargetOwned, out.ActorOwned)
+	}
+}
+
+// TestAssembleOrgContext_GranteeMatchesOwnedEntity proves the same match
+// logic applies independently to identity.Grantee — the other half of the
+// motivating regression: forge-proxy is the grantee (it newly gained the
+// capability) and is configured owned separately from the relay.
+func TestAssembleOrgContext_GranteeMatchesOwnedEntity(t *testing.T) {
+	const forgeProxy = "arn:aws:sts::225635015146:assumed-role/forge-proxy-bedrock-role/forge-proxy"
+	const relay = "arn:aws:iam::458526671706:role/mallcop-bedrock-relay"
+	owned := []OwnedEntity{
+		{Match: "225635015146", Name: "forge-proxy", Relationship: "operator's own hourly inference relay"},
+	}
+	identity := IdentityEvidence{Caller: forgeProxy, Grantor: relay, Grantee: forgeProxy}
+
+	out := assembleOrgContext(owned, forgeProxy, identity)
+	if out.GranteeOwned == nil {
+		t.Fatal("GranteeOwned = nil, want a match — forge-proxy is the grantee in a trust_added finding")
+	}
+	if out.GranteeOwned.Name != "forge-proxy" {
+		t.Errorf("GranteeOwned.Name = %q, want forge-proxy", out.GranteeOwned.Name)
+	}
+	// Caller and Actor are also forge-proxy here, so CallerOwned/ActorOwned
+	// legitimately match too — this test only pins GranteeOwned's behavior.
+	if out.TargetOwned != nil {
+		t.Errorf("TargetOwned = %+v, want nil (Target is empty in this fixture)", out.TargetOwned)
+	}
+}
+
+// TestAssembleOrgContext_GrantDirectionFixture_BothOwned reproduces the exact
+// motivating finding end-to-end: with BOTH the relay (grantor) and forge-proxy
+// (grantee/caller/actor) configured owned, every relevant field resolves —
+// proving the operator's org: block from the item body ("Match=458526671706
+// mallcop-bedrock-relay AND Match=225635015146 forge-proxy") now marks BOTH
+// counterparties owned, not just the caller-side one.
+func TestAssembleOrgContext_GrantDirectionFixture_BothOwned(t *testing.T) {
+	const forgeProxy = "arn:aws:sts::225635015146:assumed-role/forge-proxy-bedrock-role/forge-proxy"
+	const relay = "arn:aws:iam::458526671706:role/mallcop-bedrock-relay"
+	owned := []OwnedEntity{
+		{Match: "458526671706", Name: "mallcop-bedrock-relay", Relationship: "operator's own Bedrock relay account"},
+		{Match: "225635015146", Name: "forge-proxy", Relationship: "operator's own hourly inference relay"},
+	}
+	identity := IdentityEvidence{Caller: forgeProxy, Target: "", Grantor: relay, Grantee: forgeProxy}
+
+	out := assembleOrgContext(owned, forgeProxy, identity)
+	if out.GrantorOwned == nil || out.GrantorOwned.Name != "mallcop-bedrock-relay" {
+		t.Errorf("GrantorOwned = %+v, want mallcop-bedrock-relay match", out.GrantorOwned)
+	}
+	if out.GranteeOwned == nil || out.GranteeOwned.Name != "forge-proxy" {
+		t.Errorf("GranteeOwned = %+v, want forge-proxy match", out.GranteeOwned)
+	}
+	if out.CallerOwned == nil || out.CallerOwned.Name != "forge-proxy" {
+		t.Errorf("CallerOwned = %+v, want forge-proxy match", out.CallerOwned)
+	}
+	if out.ActorOwned == nil || out.ActorOwned.Name != "forge-proxy" {
+		t.Errorf("ActorOwned = %+v, want forge-proxy match", out.ActorOwned)
+	}
+}
+
 // TestAssembleOrgContext_NoMatch proves an actor/identity with no
 // configured-entity overlap resolves to an all-nil, no-error
 // OrgContextEvidence — honest evidence for the narrative, not a degraded
@@ -85,9 +169,9 @@ func TestAssembleOrgContext_NoMatch(t *testing.T) {
 // TestAssembleOrgContext_EmptyOwned proves nil/empty owned config (the
 // absent org: block default) is safe and resolves every field to nil.
 func TestAssembleOrgContext_EmptyOwned(t *testing.T) {
-	identity := IdentityEvidence{Caller: "anything", Target: "anything-else"}
+	identity := IdentityEvidence{Caller: "anything", Target: "anything-else", Grantor: "grantor-thing", Grantee: "grantee-thing"}
 	out := assembleOrgContext(nil, "any-actor", identity)
-	if out.CallerOwned != nil || out.TargetOwned != nil || out.ActorOwned != nil || out.Error != "" {
+	if out.CallerOwned != nil || out.TargetOwned != nil || out.ActorOwned != nil || out.GrantorOwned != nil || out.GranteeOwned != nil || out.Error != "" {
 		t.Errorf("expected all-nil, no-error evidence with nil owned config, got %+v", out)
 	}
 }
@@ -147,14 +231,15 @@ func TestSafeAssembleOrgContext_PanicIsolated(t *testing.T) {
 func TestAssembleOrgContext_EmptyIdentityFieldNeverMatches(t *testing.T) {
 	owned := []OwnedEntity{{Match: "225635015146", Name: "forge-proxy", Relationship: "x"}}
 	out := assembleOrgContext(owned, "", IdentityEvidence{})
-	if out.CallerOwned != nil || out.TargetOwned != nil || out.ActorOwned != nil {
+	if out.CallerOwned != nil || out.TargetOwned != nil || out.ActorOwned != nil || out.GrantorOwned != nil || out.GranteeOwned != nil {
 		t.Errorf("expected no matches against empty identity fields, got %+v", out)
 	}
 }
 
 // TestOrgContextEvidence_JSONFieldNames locks the wire shape's json tags —
 // the narrate prompt references these field names explicitly
-// ("evidence.org_context", "caller_owned"/"target_owned"/"actor_owned").
+// ("evidence.org_context", "caller_owned"/"target_owned"/"actor_owned"/
+// "grantor_owned"/"grantee_owned").
 func TestOrgContextEvidence_JSONFieldNames(t *testing.T) {
 	owned := []OwnedEntity{{Match: "225635015146", Name: "forge-proxy", Relationship: "operator's own relay"}}
 	out := assembleOrgContext(owned, "actor", IdentityEvidence{Caller: "arn:...225635015146:role/x"})
@@ -166,5 +251,14 @@ func TestOrgContextEvidence_JSONFieldNames(t *testing.T) {
 	// contract matches the field the prompt names.
 	if !strings.Contains(out.CallerOwned.Relationship, "operator's own relay") {
 		t.Errorf("Relationship = %q, want to carry the configured phrase verbatim", out.CallerOwned.Relationship)
+	}
+
+	grantOwned := []OwnedEntity{{Match: "458526671706", Name: "mallcop-bedrock-relay", Relationship: "operator's own relay account"}}
+	grantOut := assembleOrgContext(grantOwned, "actor", IdentityEvidence{Grantor: "arn:...458526671706:role/x"})
+	if grantOut.GrantorOwned == nil {
+		t.Fatal("expected a grantor match to serialize against")
+	}
+	if !strings.Contains(grantOut.GrantorOwned.Relationship, "operator's own relay account") {
+		t.Errorf("GrantorOwned.Relationship = %q, want to carry the configured phrase verbatim", grantOut.GrantorOwned.Relationship)
 	}
 }
