@@ -65,6 +65,24 @@ type Config struct {
 	// constant) purely so a test can drive a hung-client scenario without a
 	// real 60s wait — cli/scan.go leaves this unset in production.
 	CallTimeout time.Duration
+	// OwnedEntities is the operator's configured owned accounts/roles/relays
+	// (mallcoppro-995, mirrors core/config.Org.Owned — cli/scan.go maps that
+	// onto this field once per run), fed to section 6 (ORG CONTEXT) so a
+	// recurring, baseline-known, owned-account actor resolves with its
+	// relationship named instead of narrating as an unknown external actor.
+	// nil is the safe absent default — no evidence is ever marked owned.
+	OwnedEntities []OwnedEntity
+}
+
+// OwnedEntity is core/inquest's OWN copy of core/config.OwnedEntity (same
+// closed-allowlist reason as Config's doc comment above — core/config cannot
+// be imported here). Match is substring-matched against a finding's
+// caller/target/actor identity fields; Name/Relationship are the
+// plain-language labels the narrate prompt is instructed to use.
+type OwnedEntity struct {
+	Match        string
+	Name         string
+	Relationship string
 }
 
 // EscalatedFinding pairs one finding with the cascade resolution that

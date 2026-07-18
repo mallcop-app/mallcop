@@ -109,6 +109,41 @@ func TestBuildUserMessage_Golden_WithGrantDirection(t *testing.T) {
 	}
 }
 
+// TestSystemPrompt_RequiresOrgContextClause proves the fixed system prompt
+// still carries the org-context naming instruction (mallcoppro-995) — a
+// future prompt edit cannot silently drop the requirement to name an owned
+// entity by its configured relationship, or the "informational, not
+// dispositive" guard that keeps org-context from becoming a verdict override
+// (the forbidden family-match/force-suppress anti-pattern).
+func TestSystemPrompt_RequiresOrgContextClause(t *testing.T) {
+	for _, want := range []string{"org_context", "OWNED", "relationship", "informational, not dispositive"} {
+		if !strings.Contains(systemPrompt, want) {
+			t.Errorf("systemPrompt no longer mentions %q — the org-context naming contract was dropped", want)
+		}
+	}
+}
+
+// TestBuildUserMessage_Golden_WithOrgContext proves the org_context evidence
+// section serializes into the JSON user document so the narrate model
+// actually receives the owned-entity relationship.
+func TestBuildUserMessage_Golden_WithOrgContext(t *testing.T) {
+	f := sampleFinding()
+	res := ResolutionRef{Action: "escalate", Reason: "hard-constraint route: new-external-access"}
+	ev := Evidence{
+		OrgContext: OrgContextEvidence{
+			CallerOwned: &OwnedMatch{Match: "225635015146", Name: "forge-proxy", Relationship: "operator's own hourly inference relay"},
+		},
+	}
+	got, err := buildUserMessage(f, res, ev)
+	if err != nil {
+		t.Fatalf("buildUserMessage: %v", err)
+	}
+	want := `"org_context":{"caller_owned":{"match":"225635015146","name":"forge-proxy","relationship":"operator's own hourly inference relay"}}`
+	if !strings.Contains(got, want) {
+		t.Errorf("user document missing org_context fragment:\n  want substring: %s\n  got: %s", want, got)
+	}
+}
+
 // TestNarrate_ValidReply proves a well-formed reply parses to StatusOK with
 // the exact verdict/confidence/narrative.
 func TestNarrate_ValidReply(t *testing.T) {

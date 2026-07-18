@@ -271,6 +271,62 @@ func TestLoadRejectsUnknownInvestigateKey(t *testing.T) {
 	}
 }
 
+// TestDefaultsOrgEmpty proves org: absent-section-is-safe-default — Defaults()
+// carries a nil Owned list, same pattern as every other optional block, and
+// Load("") (no config file present) resolves to the identical empty Org.
+func TestDefaultsOrgEmpty(t *testing.T) {
+	if got := Defaults().Org; !(got.Owned == nil) {
+		t.Fatalf("Defaults().Org.Owned = %+v, want nil", got.Owned)
+	}
+	cfg, err := Load("")
+	if err != nil {
+		t.Fatalf("Load(\"\"): %v", err)
+	}
+	if cfg.Org.Owned != nil {
+		t.Fatalf("Load(\"\").Org.Owned = %+v, want nil", cfg.Org.Owned)
+	}
+}
+
+// TestLoadOrgBlockOverlay proves a partial org: yaml block round-trips
+// through Load — each configured owned entity's match/name/relationship
+// decode verbatim.
+func TestLoadOrgBlockOverlay(t *testing.T) {
+	p := writeConfig(t, t.TempDir(), "org:\n  owned:\n    - match: \"225635015146\"\n      name: forge-proxy\n      relationship: operator's own hourly inference relay\n")
+	cfg, err := Load(p)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(cfg.Org.Owned) != 1 {
+		t.Fatalf("Org.Owned len = %d, want 1", len(cfg.Org.Owned))
+	}
+	got := cfg.Org.Owned[0]
+	want := OwnedEntity{Match: "225635015146", Name: "forge-proxy", Relationship: "operator's own hourly inference relay"}
+	if got != want {
+		t.Fatalf("Org.Owned[0] = %+v, want %+v", got, want)
+	}
+}
+
+// TestValidateRejectsEmptyOrgMatch proves an empty org.owned[].match is a
+// loud load error, mirroring TestValidate's existing secret/autonomy checks —
+// an empty Match would substring-match every identity field, silently
+// marking every finding as owned.
+func TestValidateRejectsEmptyOrgMatch(t *testing.T) {
+	p := writeConfig(t, t.TempDir(), "org:\n  owned:\n    - match: \"\"\n      name: x\n      relationship: y\n")
+	if _, err := Load(p); err == nil {
+		t.Fatal("expected a load error for an empty org.owned[].match")
+	}
+}
+
+// TestValidateRejectsShortOrgMatch proves a too-short match string (below
+// minOrgMatchLen) is a loud load error — a short generic fragment like "aws"
+// would substring-match broadly across unrelated findings.
+func TestValidateRejectsShortOrgMatch(t *testing.T) {
+	p := writeConfig(t, t.TempDir(), "org:\n  owned:\n    - match: aws\n      name: x\n      relationship: y\n")
+	if _, err := Load(p); err == nil {
+		t.Fatal("expected a load error for an org.owned[].match shorter than minOrgMatchLen")
+	}
+}
+
 func TestDefaultsAutonomyIsNon(t *testing.T) {
 	if got := Defaults().Learning.Autonomy; got != AutonomyNon {
 		t.Fatalf("Defaults().Learning.Autonomy = %q, want %q", got, AutonomyNon)
