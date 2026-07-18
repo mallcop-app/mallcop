@@ -86,26 +86,43 @@ func newExternalAccessEvaluate(ev event.Event, emitted map[string]bool) *finding
 	emitted[dedupKey] = true
 
 	permission := metaStr(meta, "permission", "role")
+	// member is the raw AWS AssumeRole trust boundary (the assumed role's
+	// ARN, from aws.go's payload "member" key) and is present ONLY for
+	// AWS cross-account trust_added events. A domain-only trust_added
+	// (e.g. M365 "Set federation settings on domain.", which carries
+	// domain/domain_name but no member) leaves this empty. assemble.go's
+	// resolveGrantDirection reads this to pick the correct direction
+	// convention for the two event shapes that both use event_type
+	// "trust_added" (mallcoppro-15e).
+	member := metaStr(meta, "member")
 	evidence, _ := json.Marshal(map[string]string{
 		"actor":      ev.Actor,
 		"grantee":    grantee,
 		"permission": permission,
 		"event_type": ev.Type,
 		"target":     metaStr(meta, "target", "repo", "org"),
-		// member is the raw AWS AssumeRole trust boundary (the assumed role's
-		// ARN, from aws.go's payload "member" key) and is present ONLY for
-		// AWS cross-account trust_added events. A domain-only trust_added
-		// (e.g. M365 "Set federation settings on domain.", which carries
-		// domain/domain_name but no member) leaves this empty. assemble.go's
-		// resolveGrantDirection reads this to pick the correct direction
-		// convention for the two event shapes that both use event_type
-		// "trust_added" (mallcoppro-15e).
-		"member":   metaStr(meta, "member"),
-		"event_id": ev.ID,
+		"member":     member,
+		"event_id":   ev.ID,
 	})
 
 	reason := fmt.Sprintf("external access granted: %q added external principal %q", ev.Actor, grantee)
-	if strings.Contains(ev.Type, "federation") || strings.Contains(ev.Type, "trust") || strings.Contains(ev.Type, "directory") {
+	switch {
+	case ev.Type == "trust_added" && member != "":
+		// AWS cross-account AssumeRole trust: the assumed role (grantee) is
+		// the GRANTOR — its trust boundary was exercised — and the calling
+		// principal (ev.Actor) is the GRANTEE — it newly gained the
+		// capability to assume the role. This is the OPPOSITE of the
+		// actor-is-grantor convention every other branch here uses, and it
+		// must agree with assemble.go's resolveGrantDirection flip for this
+		// exact shape (mallcoppro-15e) — Reason and the assembled
+		// identity.grantor/grantee fields flow into the same narrate
+		// document, and a mismatch reads as a backwards trust direction in
+		// the live console (mallcoppro-dc2, live-proven on the v0.17.0
+		// replay). Do NOT apply this flip to the M365 domain-only
+		// trust_added shape below (member == "") — it has no assumed-role
+		// trust boundary to flip around.
+		reason = fmt.Sprintf("external trust added: %q added %q to its trust relationship, granting it the ability to assume the role", grantee, ev.Actor)
+	case strings.Contains(ev.Type, "federation") || strings.Contains(ev.Type, "trust") || strings.Contains(ev.Type, "directory"):
 		reason = fmt.Sprintf("external trust added: %q configured federation/domain trust for %q", ev.Actor, grantee)
 	}
 
