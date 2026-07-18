@@ -125,7 +125,7 @@ func narrate(ctx context.Context, client agent.Client, model string, maxTokens i
 	// Contract enforcement over the ONE reply (contract.go). A narrative citing
 	// evidence the record does not contain is discarded exactly like any other
 	// malformed reply — the deterministic evidence still ships.
-	if rejected, why := rejectFabricatedEvidence(narrative, ev); rejected {
+	if rejected, why := rejectFabricatedEvidence(narrative, ev, userDoc); rejected {
 		return narrateOutput{
 			Status: StatusAbsentInvalidOutput,
 			Err:    fmt.Errorf("inquest: narrate reply cites evidence absent from the record: %s", why),

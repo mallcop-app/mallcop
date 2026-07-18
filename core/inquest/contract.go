@@ -1,15 +1,18 @@
 // contract.go — deterministic, model-free enforcement of the narrate CONTRACT
-// over the single model reply (mallcoppro-044). Two jobs, both PURE Go over the
-// already-assembled Evidence numeric/bool fields — never over an actor name, a
-// finding.Type string, or a finding ID:
+// over the single model reply (mallcoppro-044). Two jobs:
 //
 //   - rejectFabricatedEvidence: a hard reject when the narrative cites a datum
-//     the record structurally does not contain (a "logs"/"audit-trail" source
-//     that no Evidence section models; a "no prior history" claim contradicted
-//     by recurrence; an "unknown actor" claim contradicted by baseline). The
-//     v0.16.2 prompt-only consistency rules (mallcop #218) DID NOT HOLD — the
-//     model named fabricated evidence to satisfy them — so the same rules are
-//     promoted here into code the model cannot talk its way past.
+//     the record does not contain (a "logs"/"audit-trail" source the assembled
+//     user document — Finding fields plus Evidence — never mentions anywhere; a
+//     "no prior history" claim contradicted by recurrence; an "unknown actor"
+//     claim contradicted by baseline). The v0.16.2 prompt-only consistency
+//     rules (mallcop #218) DID NOT HOLD — the model named fabricated evidence to
+//     satisfy them — so the same rules are promoted here into code the model
+//     cannot talk its way past. The logs/audit-trail check is grounded against
+//     the FULL document sent to the model (userDoc), not Evidence alone: a
+//     log_bucket_delete/audit_log_disabled finding's own Type/Reason legitimately
+//     names "log" — narrating that back is not fabrication (mallcoppro-044
+//     review finding 1).
 //   - calibrateVerdict: down-weights an over-confident THREAT verdict when the
 //     evidence is the signature of automated operational infrastructure (a
 //     baseline-known actor repeating an identical action hundreds of times at
@@ -23,16 +26,25 @@
 // durably committed (see the package doc). Verdict/Confidence here are the
 // investigator's OWN post-hoc assessment (Record.Role="evidence"), never the
 // committee's disposition, and this file writes to NO findings/resolutions/
-// directives stream. It also branches ONLY on generic Evidence numeric/bool
-// fields (occurrences, known_actor, known_role, cadence, target-presence) — it
-// never reads a literal actor name, detector type, or finding id — so it cannot
-// become a per-actor/per-family override. That "actor/type-string-blind"
-// property is a hard invariant a reviewer must preserve.
+// directives stream. calibrateVerdict — the ONLY function here that can move a
+// verdict — branches strictly on generic Evidence numeric/bool fields
+// (occurrences, known_actor, known_role, cadence, target-presence); it never
+// reads a literal actor name, detector type, or finding id, so it cannot become
+// a per-actor/per-family override. That "actor/type-string-blind" property is a
+// hard invariant a reviewer must preserve for calibrateVerdict.
+// rejectFabricatedEvidence's logs/audit-trail check is different in kind: it
+// grounds a literal-string claim against the literal document the model was
+// given (userDoc — Finding fields plus Evidence, exactly what buildUserMessage
+// sent), never against a finding-type allowlist/denylist. It does not decide
+// escalate/suppress; a reject only discards a malformed narrative exactly like
+// any other STRICT-validation failure, and the finding still surfaces at
+// whatever verdict the committee already resolved.
 package inquest
 
 import (
 	"fmt"
 	"regexp"
+	"strings"
 )
 
 // minOperationalOccurrences is the occurrence count at/above which a
@@ -56,29 +68,43 @@ const machineCadenceCeilingSeconds = 60
 const operationalDowngradeConfidenceCap = 0.4
 
 // reFabricatedLogs matches a narrative citing a "logs"/"audit-trail" data
-// source. The assembled Evidence chain (identity/neighbors/recurrence/baseline/
-// scan_correlation/org_context) models no such section, so ANY such mention is
-// by definition citing evidence absent from the record. \blogs?\b matches only
-// standalone "log"/"logs" — "login", "logging", "catalog" do not trip it.
+// source. \blogs?\b matches only standalone "log"/"logs" — "login", "logging",
+// "catalog" do not trip it. A match is NOT automatically a fabrication: some
+// finding families (log_bucket_delete, audit_log_disabled) are themselves ABOUT
+// a log resource, so the finding's own Type/Reason legitimately names "log" —
+// see rejectFabricatedEvidence, which grounds a match against the full userDoc
+// before rejecting.
 var reFabricatedLogs = regexp.MustCompile(`(?i)(\blogs?\b|audit trail)`)
 
 // reNoPriorHistory matches a narrative asserting the activity has never been
 // seen before — a fabrication when recurrence shows more than one occurrence.
 var reNoPriorHistory = regexp.MustCompile(`(?i)(no prior history|first time|no previous|not previously (seen|observed|recorded)|never (been )?seen before)`)
 
-// reUnknownActor matches a narrative calling the actor unknown/unrecognized — a
-// fabrication when baseline marks it a known actor.
-var reUnknownActor = regexp.MustCompile(`(?i)(unknown actor|unrecognized actor|unrecogni[sz]ed|never (been )?seen before|not (a )?known actor)`)
+// reUnknownActor matches a narrative calling the ACTOR unknown/unrecognized — a
+// fabrication when baseline marks it a known actor. Anchored to "actor" (both
+// "unrecognized"/"unrecognised" spellings) so it never trips on a narrative
+// calling some OTHER field of a known actor's own activity unrecognized/novel
+// (an unrecognized source IP, region, role, or pattern) — that is a legitimate,
+// often threat-relevant, claim about a known actor behaving anomalously, not a
+// claim that the actor itself is unknown (mallcoppro-044 review finding 2).
+var reUnknownActor = regexp.MustCompile(`(?i)(unknown actor|unrecogni[sz]ed actor|never (been )?seen before|not (a )?known actor)`)
 
 // rejectFabricatedEvidence returns (true, reason) when the narrative cites a
-// datum the assembled Evidence does not contain. A reject maps to
-// StatusAbsentInvalidOutput — the same treatment as any other malformed reply
-// (the deterministic evidence chain still ships; only the fabricated narrative
-// is discarded). It reads ONLY Evidence numeric/bool fields, never a name/type/
-// id, so it is not a family-match override.
-func rejectFabricatedEvidence(narrative string, ev Evidence) (bool, string) {
-	if reFabricatedLogs.MatchString(narrative) {
-		return true, "cites logs/audit-trail — no such section exists in the assembled evidence"
+// datum absent from the record. A reject maps to StatusAbsentInvalidOutput —
+// the same treatment as any other malformed reply (the deterministic evidence
+// chain still ships; only the fabricated narrative is discarded).
+//
+// userDoc is the EXACT document buildUserMessage sent to the model (Finding
+// fields plus Evidence, JSON-encoded) — the logs/audit-trail check is grounded
+// against it: a match only rejects when "log" appears nowhere in userDoc, so a
+// log_bucket_delete/audit_log_disabled finding whose own Type/Reason names
+// "log" is never rejected for accurately narrating its own subject. The
+// no-prior-history and unknown-actor checks read only Evidence numeric/bool
+// fields (occurrences, known_actor) — never a name/type/id — so neither can
+// become a family-match override.
+func rejectFabricatedEvidence(narrative string, ev Evidence, userDoc string) (bool, string) {
+	if reFabricatedLogs.MatchString(narrative) && !strings.Contains(strings.ToLower(userDoc), "log") {
+		return true, "cites logs/audit-trail — no such term appears anywhere in the assembled record"
 	}
 	if ev.Recurrence.Occurrences > 1 && reNoPriorHistory.MatchString(narrative) {
 		return true, fmt.Sprintf("denies prior history but recurrence records %d occurrences", ev.Recurrence.Occurrences)

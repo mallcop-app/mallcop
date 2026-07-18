@@ -5,6 +5,9 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/mallcop-app/mallcop/pkg/finding"
 )
 
 // eval_test.go — the CI eval harness (mallcoppro-044 outcome 1). It pins the
@@ -298,5 +301,77 @@ func TestNarrate_CleanReplyOnBenignInfraUnaltered(t *testing.T) {
 	}
 	if len(out.ContractNotes) != 0 {
 		t.Errorf("ContractNotes = %v, want none for an unaltered benign verdict", out.ContractNotes)
+	}
+}
+
+// TestNarrateContract_LogFindingNarrativeNotFabricated proves the fix for
+// mallcoppro-044 review finding 1: reFabricatedLogs is grounded against the
+// FULL userDoc (Finding fields + Evidence), not Evidence alone. A
+// log_bucket_delete finding's own genuine narrative necessarily names
+// "log"/"audit trail" — that IS the finding's subject, taken verbatim from
+// finding.Type/Reason which buildUserMessage puts in userDoc — so it must NOT
+// be discarded as citing evidence absent from the record. Evidence is
+// deliberately NOT the operational-infra shape (single occurrence,
+// baseline-unknown actor) so a genuine threat passes through uncalibrated,
+// isolating the fabrication-reject path from the calibration path.
+func TestNarrateContract_LogFindingNarrativeNotFabricated(t *testing.T) {
+	f := finding.Finding{
+		ID:        "f-log-1",
+		Type:      "log_bucket_delete",
+		Severity:  "critical",
+		Actor:     "attacker-x",
+		Reason:    "the CloudTrail log bucket was deleted, destroying the audit trail",
+		Timestamp: time.Now(),
+	}
+	ev := Evidence{
+		Identity:   IdentityEvidence{Actor: "attacker-x", Target: "cloudtrail-log-bucket"},
+		Recurrence: RecurrenceEvidence{Occurrences: 1},
+		Baseline:   BaselineEvidence{KnownActor: false, KnownRole: false},
+	}
+	userDoc, err := buildUserMessage(f, ResolutionRef{Action: "escalate"}, ev)
+	if err != nil {
+		t.Fatalf("buildUserMessage: %v", err)
+	}
+	reply := replyJSON("threat", 0.9,
+		"attacker-x deleted the CloudTrail log bucket, destroying the audit trail; this is a defense-evasion action and should be escalated.")
+
+	client := &scriptedClient{reply: reply}
+	out := narrate(context.Background(), client, "investigate", 1024, userDoc, ev)
+
+	if out.Status != StatusOK {
+		t.Fatalf("Status = %q, want ok — a log_bucket_delete finding's own genuine 'log'/'audit trail' narrative must not be rejected as fabricated (err=%v)", out.Status, out.Err)
+	}
+	if out.Verdict != VerdictThreat {
+		t.Fatalf("Verdict = %q, want threat (single-occurrence baseline-unknown actor is not the operational-infra shape, so calibration must not fire)", out.Verdict)
+	}
+}
+
+// TestNarrateContract_UnrecognizedIPOnKnownActorNotFabricated proves the fix
+// for mallcoppro-044 review finding 2: reUnknownActor is anchored to
+// "unrecogni[sz]ed actor" so it never trips on "unrecognized" describing some
+// OTHER field of a known actor's activity (a source IP, region, role,
+// pattern) — a legitimate, often threat-relevant, credential-theft signal
+// about a KNOWN actor behaving anomalously, not a claim that the actor itself
+// is unknown.
+func TestNarrateContract_UnrecognizedIPOnKnownActorNotFabricated(t *testing.T) {
+	ev := Evidence{
+		Identity:   IdentityEvidence{Actor: "forge-proxy", SourceIP: "203.0.113.7"},
+		Recurrence: RecurrenceEvidence{Occurrences: 1},
+		Baseline:   BaselineEvidence{KnownActor: true, KnownRole: true},
+	}
+	reply := replyJSON("threat", 0.85,
+		"forge-proxy's key was used from an unrecognized source IP inconsistent with its usual origin, a strong credential-theft indicator; revoke the key.")
+
+	client := &scriptedClient{reply: reply}
+	out := narrate(context.Background(), client, "investigate", 1024, "{}", ev)
+
+	if out.Status != StatusOK {
+		t.Fatalf("Status = %q, want ok — 'unrecognized source IP' on a known actor must not be rejected as an 'unknown actor' fabrication (err=%v)", out.Status, out.Err)
+	}
+	if out.Verdict != VerdictThreat {
+		t.Fatalf("Verdict = %q, want threat (single occurrence is not the operational-infra shape, so calibration must not fire)", out.Verdict)
+	}
+	if out.Confidence != 0.85 {
+		t.Errorf("Confidence = %v, want 0.85 unchanged (no calibration should fire)", out.Confidence)
 	}
 }
