@@ -619,7 +619,11 @@ jobs:
         run: |
           set -euo pipefail
           rm -rf store
-          git clone --quiet --depth 1 --branch "{{FINDINGS_BRANCH}}" --single-branch \
+          # depth 200 (NOT 1): core/inquest's scan-time correlation falls back to
+          # git commit history (CommitTimesFor) when the KindScans register is
+          # young — a depth-1 clone starved that fallback to ~1 commit
+          # (mallcoppro-cb4). 200 commits ~ weeks of hourly scan pushes, bounded.
+          git clone --quiet --depth 200 --branch "{{FINDINGS_BRANCH}}" --single-branch \
             "https://x-access-token:${TOKEN}@github.com/${REPO}.git" store \
             || mkdir -p store
         env:
@@ -816,7 +820,11 @@ jobs:
         run: |
           set -euo pipefail
           rm -rf store
-          git clone --quiet --depth 1 --branch "{{FINDINGS_BRANCH}}" --single-branch \
+          # depth 200 (NOT 1): core/inquest's scan-time correlation falls back to
+          # git commit history (CommitTimesFor) when the KindScans register is
+          # young — a depth-1 clone starved that fallback to ~1 commit
+          # (mallcoppro-cb4). 200 commits ~ weeks of hourly scan pushes, bounded.
+          git clone --quiet --depth 200 --branch "{{FINDINGS_BRANCH}}" --single-branch \
             "https://x-access-token:${TOKEN}@github.com/${REPO}.git" store \
             || mkdir -p store
         env:
