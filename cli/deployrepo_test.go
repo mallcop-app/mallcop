@@ -535,11 +535,19 @@ func TestScaffoldWorkflowsUseShallowGitOps(t *testing.T) {
 		return string(b)
 	}
 
-	// Both workflows restore the store with a shallow clone (mallcoppro-fce).
+	// Both workflows restore the store with a BOUNDED shallow clone
+	// (mallcoppro-fce), but not depth 1: core/inquest's scan-time correlation
+	// falls back to git commit history when the KindScans register is young,
+	// and a depth-1 clone starved that fallback to ~1 commit (mallcoppro-cb4).
+	// Depth 200 keeps the clone bounded (no full-history hang) while giving
+	// the cold-start fallback weeks of scan pushes to correlate against.
 	for _, wf := range []string{"scan.yml", "mallcop-investigate.yml"} {
 		w := read(wf)
-		if !strings.Contains(w, "git clone --quiet --depth 1 --branch") {
-			t.Fatalf("%s store restore must use `git clone --depth 1` (full history hangs on the growing store branch):\n%s", wf, w)
+		if !strings.Contains(w, "git clone --quiet --depth 200 --branch") {
+			t.Fatalf("%s store restore must use the bounded `git clone --depth 200` (depth 1 starves inquest's scan-time fallback, mallcoppro-cb4; full history hangs on the growing store branch):\n%s", wf, w)
+		}
+		if strings.Contains(w, "--depth 1 ") {
+			t.Fatalf("%s still contains a depth-1 clone:\n%s", wf, w)
 		}
 	}
 

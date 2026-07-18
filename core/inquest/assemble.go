@@ -147,7 +147,7 @@ func assemble(st *store.Store, allEvents []event.Event, bl *baseline.Baseline, e
 	identity := safeAssembleIdentity(st, f)
 	neighbors := safeAssembleNeighbors(allEvents, f, window, maxNeighbors)
 
-	occurrences := actorTypeTimestamps(allEvents, f.Actor, f.Type)
+	occurrences := actorTypeTimestamps(allEvents, f.Actor, occurrenceEventType(allEvents, f))
 	recurrence := safeAssembleRecurrence(st, occurrences, f)
 	baselineEv := safeAssembleBaseline(bl, allEvents, f, identity)
 	correlation := safeAssembleScanCorrelation(st, occurrences, corrWindow)
@@ -362,6 +362,29 @@ func assembleNeighbors(allEvents []event.Event, f finding.Finding, window time.D
 }
 
 // --- section 3: RECURRENCE CADENCE --------------------------------------
+
+// occurrenceEventType picks the event Type the occurrence set is collected
+// by. Findings carry detector-family types ("new-external-access") while
+// events carry raw source types ("trust_added") — comparing them directly
+// (the original f.Type pass-through) matched zero events for essentially
+// every detector, silently zeroing BOTH recurrence and scan-correlation
+// (mallcoppro-f4c; live-proven on the first mallcop-deploy v0.16.0 records:
+// an actor with 672 baseline events showed occurrences=0, and the narrate
+// model — starved of the cadence signal — called the operator's own hourly
+// relay a threat). Resolve the finding's SOURCE event via its EventIDs
+// linkage (first resolvable id wins) and use THAT event's type; fall back to
+// f.Type only when no linked event is present in allEvents, preserving the
+// old behavior for legacy findings with no linkage.
+func occurrenceEventType(allEvents []event.Event, f finding.Finding) string {
+	for _, id := range f.EventIDs {
+		for _, e := range allEvents {
+			if e.ID == id && e.Type != "" {
+				return e.Type
+			}
+		}
+	}
+	return f.Type
+}
 
 // actorTypeTimestamps returns the sorted timestamps of every event in
 // allEvents sharing the finding's (actor, type) — shared between the
