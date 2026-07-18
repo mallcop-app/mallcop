@@ -293,6 +293,95 @@ func TestRunAll_Force_BypassesIdempotencySkip(t *testing.T) {
 	}
 }
 
+// TestRunAll_Force_OverBudgetDoesNotOverwriteExistingOk proves the review fix
+// for mallcoppro-09a's overwrite regression: when a Force re-pass (the
+// low-confidence deeper-investigation retrigger) runs over its OWN separate
+// budget and a finding falls past that budget, processOne must NOT clobber
+// the finding's prior good "ok" record with a StatusAbsentBudget/unassessed
+// one. Concrete scenario from the review: two findings already have ok
+// records; a Force pass with a budget of 1 lets only the first (sorted by
+// ID) get a fresh call — the second must keep its original verdict,
+// confidence, narrative, and NarrativeStatus byte-for-byte.
+func TestRunAll_Force_OverBudgetDoesNotOverwriteExistingOk(t *testing.T) {
+	s := newTempStore(t)
+	client := &scriptedClient{reply: `{"verdict":"benign","confidence":0.3,"narrative":"first pass, benign, low-confidence."}`}
+	findings := []EscalatedFinding{escalatedFor("finding-00", "a"), escalatedFor("finding-01", "a")}
+	in := Input{Store: s, Client: client, Findings: findings, Config: okConfig()}
+
+	// Pass 1: both findings get an ok record.
+	if out := RunAll(context.Background(), in); out.Investigated != 2 {
+		t.Fatalf("pass 1 Outcome = %+v, want Investigated=2", out)
+	}
+	before00 := readRecord(t, in, "finding-00")
+	before01 := readRecord(t, in, "finding-01")
+	if before00.NarrativeStatus != StatusOK || before01.NarrativeStatus != StatusOK {
+		t.Fatalf("pass 1 records not both ok: %+v / %+v", before00, before01)
+	}
+
+	// Pass 2: Force=true, budget of 1 — finding-00 (sorted first) gets the
+	// fresh call, finding-01 falls past budget in processOne's budget branch.
+	client.reply = `{"verdict":"suspicious","confidence":0.95,"narrative":"deeper pass, now confident."}`
+	forced := in
+	forced.Force = true
+	forced.Config.MaxPerScan = 1
+	out := RunAll(context.Background(), forced)
+	if out.Investigated != 1 {
+		t.Errorf("Investigated = %d, want 1 (finding-00 got the sole budget slot)", out.Investigated)
+	}
+	if out.Degraded != 1 {
+		t.Errorf("Degraded = %d, want 1 (finding-01's failed Force re-pass, tallied not silent)", out.Degraded)
+	}
+	if client.calls != 3 {
+		t.Errorf("client called %d times, want 3 (2 from pass 1, 1 from the budgeted Force pass)", client.calls)
+	}
+
+	after00 := readRecord(t, in, "finding-00")
+	if after00.NarrativeStatus != StatusOK || after00.Confidence != 0.95 {
+		t.Errorf("finding-00 (within budget) = %+v, want refreshed ok/0.95", after00)
+	}
+
+	after01 := readRecord(t, in, "finding-01")
+	if after01.NarrativeStatus != StatusOK {
+		t.Fatalf("finding-01 (over Force budget) NarrativeStatus = %q, want %q — a failed Force re-pass must never overwrite a prior good record", after01.NarrativeStatus, StatusOK)
+	}
+	if after01.Verdict != before01.Verdict || after01.Confidence != before01.Confidence || after01.Narrative != before01.Narrative || after01.UpdatedAt != before01.UpdatedAt {
+		t.Errorf("finding-01 record was mutated by the failed Force re-pass:\n before=%+v\n after=%+v", before01, after01)
+	}
+}
+
+// TestRunAll_Force_ModelErrorDoesNotOverwriteExistingOk proves the same
+// overwrite guard fires on ANY deep-pass failure mode, not just the budget
+// branch — a transient model-call error (timeout/transport failure) during a
+// Force re-pass must also leave a prior ok record untouched rather than
+// downgrading it to an absent-model-error record.
+func TestRunAll_Force_ModelErrorDoesNotOverwriteExistingOk(t *testing.T) {
+	s := newTempStore(t)
+	client := &scriptedClient{reply: `{"verdict":"benign","confidence":0.3,"narrative":"first pass, benign, low-confidence."}`}
+	in := Input{Store: s, Client: client, Findings: []EscalatedFinding{escalatedFor("finding-1", "a")}, Config: okConfig()}
+
+	if out := RunAll(context.Background(), in); out.Investigated != 1 {
+		t.Fatalf("pass 1 Outcome = %+v, want Investigated=1", out)
+	}
+	before := readRecord(t, in, "finding-1")
+
+	client.reply = ""
+	client.err = context.DeadlineExceeded
+	forced := in
+	forced.Force = true
+	out := RunAll(context.Background(), forced)
+	if out.Investigated != 0 || out.Degraded != 1 {
+		t.Fatalf("Force model-error Outcome = %+v, want Investigated=0/Degraded=1", out)
+	}
+
+	after := readRecord(t, in, "finding-1")
+	if after.NarrativeStatus != StatusOK {
+		t.Fatalf("NarrativeStatus = %q, want %q — a failed Force re-pass (model error) must never overwrite a prior good record", after.NarrativeStatus, StatusOK)
+	}
+	if after.Verdict != before.Verdict || after.Confidence != before.Confidence || after.Narrative != before.Narrative || after.UpdatedAt != before.UpdatedAt {
+		t.Errorf("record was mutated by the failed Force re-pass:\n before=%+v\n after=%+v", before, after)
+	}
+}
+
 // TestAttachRevote_AdditiveAndReadRecord proves the exported ReadRecord +
 // AttachRevote path (mallcoppro-09a): a re-vote outcome is attached to an
 // existing investigation record WITHOUT touching its verdict/confidence/narrative

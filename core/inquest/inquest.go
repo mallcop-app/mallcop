@@ -167,7 +167,12 @@ type Input struct {
 	// warrants a re-pass — Force does not widen the budget, so a Force call over
 	// the full escalated set would still burn MaxPerScan re-investigating
 	// already-confident findings; the pipeline scopes it to the low-confidence
-	// subset (mallcoppro-09a risk 6).
+	// subset (mallcoppro-09a risk 6). Force also NEVER downgrades a prior "ok"
+	// record: if the fresh pass itself lands anything other than "ok" (deep
+	// budget exhausted, model error/timeout, invalid output), processOne keeps
+	// the existing ok record rather than overwriting it with a degraded one
+	// (mallcoppro-09a review fix — a Force re-pass that fails must not destroy
+	// a good verdict the customer-facing surface already reads).
 	Force bool
 }
 
@@ -180,9 +185,12 @@ type Outcome struct {
 	// Degraded counts findings this run wrote (or refreshed) a record for with
 	// any NarrativeStatus OTHER than "ok" — the deterministic evidence still
 	// shipped. ALSO counts a finding skipped after a transient error reading
-	// its existing record (readExistingRecord's error path in processOne) —
-	// that case writes NO record at all (protecting budget and CreatedAt);
-	// it is still tallied here so the operator sees it rather than silence.
+	// its existing record (readExistingRecord's error path in processOne), OR
+	// a Force re-pass that failed to reach "ok" over a finding whose prior
+	// record WAS "ok" (the overwrite guard below) — both of those cases write
+	// NO record at all (protecting budget, CreatedAt, and — for the Force
+	// case — the prior good verdict); they are still tallied here so the
+	// operator sees the failed attempt rather than silence.
 	Degraded int
 	// Skipped counts findings whose existing record was already current + ok:
 	// zero calls, zero writes. Not surfaced on pipeline.Summary; exists so a
@@ -385,6 +393,21 @@ func processOne(ctx context.Context, in Input, ef EscalatedFinding, maxPerScan i
 				errMsg = appendErr(errMsg, fmt.Sprintf("inquest: narrate %s: %v", ef.Finding.ID, res.Err))
 			}
 		}
+	}
+
+	if in.Force && found && existing.NarrativeStatus == StatusOK && rec.NarrativeStatus != StatusOK {
+		// A Force re-pass (the low-confidence deeper-investigation retrigger,
+		// mallcoppro-09a) that itself failed to land a fresh "ok" verdict —
+		// deep budget exhausted, model error/timeout, invalid output — must
+		// NEVER overwrite the prior good record. The customer-facing surface
+		// reads Verdict/Confidence/Narrative straight from the persisted
+		// record; downgrading a benign/confident "ok" to absent-budget/
+		// unassessed would ship WORSE copy than leaving the record alone.
+		// Keep the existing ok record untouched: no write, budget/CreatedAt
+		// unaffected. Tallied as Degraded (not Skipped) so the operator sees
+		// the failed re-pass rather than silence — same precedent as the
+		// transient-read-error path above.
+		return 0, 1, 0, appendErr(errMsg, fmt.Sprintf("inquest: force re-pass for %s did not reach ok (status=%s) — kept prior ok record, no overwrite", ef.Finding.ID, rec.NarrativeStatus))
 	}
 
 	if _, werr := writeRecord(in.Store, rec); werr != nil {
