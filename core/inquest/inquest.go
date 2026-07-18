@@ -315,7 +315,7 @@ func processOne(ctx context.Context, in Input, ef EscalatedFinding, maxPerScan i
 		}
 		callCtx, cancel := context.WithTimeout(ctx, timeout)
 		modelCallAttempted = true // from here on, a panic is an honest model-error, not inquest's own bug
-		res := narrate(callCtx, in.Client, in.Config.Model, in.Config.MaxTokens, userDoc)
+		res := narrate(callCtx, in.Client, in.Config.Model, in.Config.MaxTokens, userDoc, ev)
 		cancel()
 
 		rec.NarrativeStatus = res.Status
@@ -325,6 +325,7 @@ func processOne(ctx context.Context, in Input, ef EscalatedFinding, maxPerScan i
 			rec.Verdict = res.Verdict
 			rec.Confidence = res.Confidence
 			rec.Narrative = res.Narrative
+			rec.ContractNotes = res.ContractNotes
 			investigated = 1
 		} else {
 			degraded = 1

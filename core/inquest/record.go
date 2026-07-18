@@ -134,6 +134,14 @@ type Record struct {
 	Confidence      float64         `json:"confidence"`
 	Narrative       string          `json:"narrative"`
 	NarrativeStatus NarrativeStatus `json:"narrative_status"`
+	// ContractNotes records why the deterministic narrate contract (contract.go)
+	// altered the model's own verdict/confidence — a downgrade or a confidence
+	// derate on the operational-infrastructure signature. Empty when the model's
+	// verdict passed through untouched. Additive and schema-compatible (readers
+	// tolerate unknown fields); bounded to a single short line by calibrateVerdict,
+	// so — like verdict/narrative — it is never a trim target in
+	// enforceRecordSizeCap.
+	ContractNotes   []string        `json:"contract_notes,omitempty"`
 	Model           string          `json:"model"`
 	Usage           Usage           `json:"usage"`
 	Evidence        Evidence        `json:"evidence"`
