@@ -163,6 +163,19 @@ type Summary struct {
 	// narrative_status — the deterministic evidence chain still shipped, only
 	// the model narrative degraded. Omitted when zero.
 	InvestigationsDegraded int `json:"investigations_degraded,omitempty"`
+	// LowConfidenceRevotes is the number of escalated findings whose "ok" but
+	// low-confidence detection-time investigation this scan put to a committee
+	// re-vote after a deeper investigation pass (mallcoppro-09a). Omitted when
+	// zero.
+	LowConfidenceRevotes int `json:"low_confidence_revotes,omitempty"`
+	// RevoteDeescalations is how many of those re-votes came back a UNANIMOUS
+	// resolve — the committee, re-weighing the deeper evidence, agreed the
+	// finding is benign. The escalate disposition STILL stands in the audit
+	// trail (the re-vote is a second opinion for the presentation layer, never a
+	// re-resolution); this counts how many escalations a customer-facing surface
+	// may frame as investigated-benign rather than action-required. Omitted when
+	// zero.
+	RevoteDeescalations int `json:"revote_deescalations,omitempty"`
 	// InvestigationWarnings carries one human-readable line per degraded/failed
 	// investigation record this scan produced (inquest.Outcome.Errors),
 	// entirely for the CLI's own non-fatal stderr reporting — excluded from the
@@ -459,6 +472,21 @@ func Run(ctx context.Context, cfg Config) (Summary, error) {
 		summary.Investigated = outcome.Investigated
 		summary.InvestigationsDegraded = outcome.Degraded
 		summary.InvestigationWarnings = outcome.Errors
+
+		// (6) LOW-CONFIDENCE RE-VOTE (mallcoppro-09a), STRICTLY AFTER the first
+		// investigation pass. An escalated finding whose investigation came back
+		// "ok" but with LOW investigator confidence is not trustworthy enough to
+		// ship customer-facing action-required copy as-is. For that subset we run a
+		// DEEPER investigation pass (stronger evidence) and put it to a committee
+		// RE-VOTE (any-escalate-wins). The re-vote OUTCOME is attached to the
+		// EVIDENCE record only — never to the resolutions stream — so the
+		// disposition audit trail is untouched (consensus invariant: the escalation
+		// stands; the re-vote is a second opinion for the presentation layer, the
+		// SAME N-voter cascade fed better evidence, never a rule).
+		revotes, deescalations, warns := runLowConfidenceRevotes(ctx, cfg, escalated, allEvents, bl)
+		summary.LowConfidenceRevotes = revotes
+		summary.RevoteDeescalations = deescalations
+		summary.InvestigationWarnings = append(summary.InvestigationWarnings, warns...)
 	}
 
 	if err := recordScan(cfg, summary, start); err != nil {
@@ -467,6 +495,116 @@ func Run(ctx context.Context, cfg Config) (Summary, error) {
 
 	summary.Duration = time.Since(start)
 	return summary, nil
+}
+
+// runLowConfidenceRevotes implements pipeline step 6 (mallcoppro-09a). For every
+// finding in escalated whose just-written investigation record is "ok" but
+// carries an investigator Confidence BELOW cfg.Investigate.LowConfidenceThreshold,
+// it (a) re-investigates it with a DEEPER pass (inquest.RunAll Force=true, a
+// SEPARATE MaxDeepPerScan budget, optionally a stronger DeepModel), then (b) puts
+// the deeper evidence to a committee RE-VOTE (agent.RunRevoteGate, N =
+// DefaultConsensusRuns, any-escalate-wins), and (c) attaches the re-vote OUTCOME
+// to the investigation record (inquest.AttachRevote) — never to the resolutions
+// stream. It returns the number of findings re-voted, how many of those re-votes
+// were a UNANIMOUS resolve, and any non-fatal warning lines. It NEVER fails the
+// scan: a read/deep-pass/attach error is collected as a warning and the finding
+// is skipped, exactly like the first investigation pass's failure semantics.
+//
+// The whole step is a no-op (returns 0,0,nil) when the retrigger is disabled
+// (LowConfidenceThreshold <= 0), the client is nil (nothing to re-vote with — the
+// nil-client scan already escalated everything and wrote absent-no-client
+// evidence-only records, none of which are "ok"), or nothing is below threshold.
+func runLowConfidenceRevotes(ctx context.Context, cfg Config, escalated []inquest.EscalatedFinding, allEvents []event.Event, bl *baseline.Baseline) (revotes, deescalations int, warnings []string) {
+	if cfg.Investigate.LowConfidenceThreshold <= 0 || cfg.Client == nil {
+		return 0, 0, nil
+	}
+
+	// Which escalated findings came back "ok" but low-confidence? Read each
+	// just-written record and select the subset. A missing/malformed record is a
+	// warning, not a failure — the finding is simply not re-voted.
+	var lowConf []inquest.EscalatedFinding
+	for _, ef := range escalated {
+		rec, found, err := inquest.ReadRecord(cfg.Store, ef.Finding.ID)
+		if err != nil {
+			warnings = append(warnings, fmt.Sprintf("revote: read record for %s: %v — skipped", ef.Finding.ID, err))
+			continue
+		}
+		if !found || rec.NarrativeStatus != inquest.StatusOK {
+			continue // no trusted verdict to second-guess (degraded/absent records already render honestly)
+		}
+		if rec.Confidence < cfg.Investigate.LowConfidenceThreshold {
+			lowConf = append(lowConf, ef)
+		}
+	}
+	if len(lowConf) == 0 {
+		return 0, 0, nil
+	}
+
+	// (a) DEEPER investigation pass over ONLY the low-confidence subset, Force=true
+	// so the idempotency skip does not short-circuit the fresh pass, budgeted at
+	// the SEPARATE MaxDeepPerScan and pinned to the (optionally stronger)
+	// DeepModel. RunAll never errors out; it degrades individual records.
+	deepCfg := cfg.Investigate
+	deepBudget := cfg.Investigate.MaxDeepPerScan
+	if deepBudget <= 0 {
+		deepBudget = inquest.DefaultMaxDeepPerScan
+	}
+	deepCfg.MaxPerScan = deepBudget // its own budget, not shared with the first pass
+	if cfg.Investigate.DeepModel != "" {
+		deepCfg.Model = cfg.Investigate.DeepModel
+	}
+	deepOut := inquest.RunAll(ctx, inquest.Input{
+		Store:          cfg.Store,
+		Client:         cfg.Client,
+		Findings:       lowConf,
+		AllEvents:      allEvents, // same full known-event history the first pass assembled evidence from
+		Baseline:       bl,        // the SAME derived/merged baseline the first pass (and detection) gated on
+		MallcopVersion: cfg.MallcopVersion,
+		Config:         deepCfg,
+		Force:          true,
+	})
+	warnings = append(warnings, deepOut.Errors...)
+
+	// (b)+(c) Re-vote each low-confidence finding with the deeper evidence and
+	// attach the outcome. The re-vote runs the SAME cascade the resolutions came
+	// from (cfg.Cascade), so its committee is the production committee.
+	for _, ef := range lowConf {
+		rec, found, err := inquest.ReadRecord(cfg.Store, ef.Finding.ID)
+		if err != nil || !found {
+			warnings = append(warnings, fmt.Sprintf("revote: re-read deep record for %s: found=%v err=%v — skipped", ef.Finding.ID, found, err))
+			continue
+		}
+		deepEvidence := formatDeepEvidence(rec)
+		result := agent.RunRevoteGate(ctx, cfg.Client, ef.Finding, cfg.Cascade, deepEvidence, agent.DefaultConsensusRuns)
+		if err := inquest.AttachRevote(cfg.Store, ef.Finding.ID, inquest.RevoteOutcome{
+			Triggered:        true,
+			ResolveVotes:     result.ResolveVotes,
+			TotalVotes:       result.TotalVotes,
+			UnanimousResolve: result.UnanimousResolve,
+			Reason:           result.Reason,
+		}); err != nil {
+			warnings = append(warnings, fmt.Sprintf("revote: attach outcome for %s: %v", ef.Finding.ID, err))
+			continue
+		}
+		revotes++
+		if result.UnanimousResolve {
+			deescalations++
+		}
+	}
+	return revotes, deescalations, warnings
+}
+
+// formatDeepEvidence renders the deeper investigation record into the compact,
+// human-readable evidence string the re-vote committee re-weighs (as boxed,
+// untrusted context — see agent.enrichFindingWithInvestigation). It carries the
+// verdict, the numeric confidence, and the narrative; a degraded deep record
+// (no trusted verdict) contributes only its narrative_status so the committee
+// knows the deeper pass did not produce a stronger verdict.
+func formatDeepEvidence(rec inquest.Record) string {
+	if rec.NarrativeStatus != inquest.StatusOK {
+		return fmt.Sprintf("deeper investigation did not produce a trusted verdict (status %q); re-decide on the original evidence.", rec.NarrativeStatus)
+	}
+	return fmt.Sprintf("verdict=%s confidence=%.2f; %s", rec.Verdict, rec.Confidence, rec.Narrative)
 }
 
 // backstopEventIDs is the mallcoppro-323 defense-in-depth line: every

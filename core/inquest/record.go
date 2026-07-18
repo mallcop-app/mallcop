@@ -145,6 +145,36 @@ type Record struct {
 	Model           string          `json:"model"`
 	Usage           Usage           `json:"usage"`
 	Evidence        Evidence        `json:"evidence"`
+	// Revote, when present, is the SECOND-OPINION committee re-vote a
+	// low-confidence "ok" investigation triggered (mallcoppro-09a). It is
+	// ADDITIVE and OPTIONAL (omitempty, no SchemaVersion bump — readers tolerate
+	// its absence, and a pre-09a record simply has none). It NEVER changes the
+	// finding's disposition: the escalate Resolution above still stands in the
+	// KindResolutions audit trail; Revote records what a committee re-vote,
+	// handed the deeper investigation's evidence, concluded — the signal the
+	// customer-facing copy reads to decide whether to frame the finding as
+	// "action required" (a confident escalation) or "investigated further,
+	// evidence points benign" (a unanimous-resolve re-vote). Consensus invariant:
+	// this is the OUTPUT of the same any-escalate-wins N-voter cascade fed better
+	// evidence, never a family-match rule, and it lives on the evidence record,
+	// never in the disposition streams.
+	Revote *RevoteOutcome `json:"revote,omitempty"`
+}
+
+// RevoteOutcome is the committee re-vote a low-confidence investigation
+// triggered (mallcoppro-09a). Triggered is always true when the field is
+// present (the pipeline only attaches it when a re-vote actually ran); it is
+// kept explicit so a consumer reading the JSON does not have to infer intent
+// from presence. UnanimousResolve is true ONLY when EVERY voter resolved
+// (any-escalate-wins: a single escalate vote keeps it false and the finding
+// stays escalated). ResolveVotes/TotalVotes are the tally; Reason is the
+// human-readable summary the committee produced.
+type RevoteOutcome struct {
+	Triggered        bool   `json:"triggered"`
+	ResolveVotes     int    `json:"resolve_votes"`
+	TotalVotes       int    `json:"total_votes"`
+	UnanimousResolve bool   `json:"unanimous_resolve"`
+	Reason           string `json:"reason"`
 }
 
 // marshalRecordForSize renders rec with the EXACT encoding

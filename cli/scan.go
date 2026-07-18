@@ -78,6 +78,14 @@ type ScanSummary struct {
 	// zero (investigate disabled, or nothing escalated this scan).
 	Investigated           int `json:"investigated,omitempty"`
 	InvestigationsDegraded int `json:"investigations_degraded,omitempty"`
+	// LowConfidenceRevotes/RevoteDeescalations mirror pipeline.Summary's
+	// low-confidence re-vote counters (mallcoppro-09a): how many low-confidence
+	// escalated investigations were put to a deeper-pass + committee re-vote, and
+	// how many of those came back a unanimous resolve (a second opinion for the
+	// customer-facing surface — the escalate disposition still stands). Omitted
+	// when zero.
+	LowConfidenceRevotes int `json:"low_confidence_revotes,omitempty"`
+	RevoteDeescalations  int `json:"revote_deescalations,omitempty"`
 }
 
 // scanOutput collects structured Findings and Resolutions parsed from a JSONL
@@ -325,6 +333,11 @@ func runScan(args []string) error {
 		CorrelationWindow: investigateWindow(cfg.Investigate.CorrelationWindow, 10*time.Minute),
 		MaxTokens:         cfg.Investigate.MaxTokens,
 		OwnedEntities:     ownedEntities,
+		// Low-confidence re-vote knobs (mallcoppro-09a) — carried onto inquest.Config
+		// but consumed by core/pipeline's step-6 orchestration, not RunAll.
+		LowConfidenceThreshold: cfg.Investigate.LowConfidenceThreshold,
+		MaxDeepPerScan:         cfg.Investigate.MaxDeepPerScan,
+		DeepModel:              cfg.Investigate.DeepModel,
 	}
 	if v := os.Getenv(envInvestigate); v != "" {
 		switch strings.ToLower(v) {
@@ -440,6 +453,8 @@ func runScan(args []string) error {
 		Resolved:               sum.Resolved,
 		Investigated:           sum.Investigated,
 		InvestigationsDegraded: sum.InvestigationsDegraded,
+		LowConfidenceRevotes:   sum.LowConfidenceRevotes,
+		RevoteDeescalations:    sum.RevoteDeescalations,
 	}
 	if *asJSON {
 		if err := printJSON(out); err != nil {
@@ -761,6 +776,12 @@ func printSummary(s ScanSummary) {
 		fmt.Printf("  Investigated:       %d\n", s.Investigated)
 		if s.InvestigationsDegraded > 0 {
 			fmt.Printf("  Investigations degraded: %d\n", s.InvestigationsDegraded)
+		}
+	}
+	if s.LowConfidenceRevotes > 0 {
+		fmt.Printf("  Low-confidence re-votes: %d (deeper pass + committee re-vote)\n", s.LowConfidenceRevotes)
+		if s.RevoteDeescalations > 0 {
+			fmt.Printf("  Re-vote de-escalations:  %d (unanimous resolve on deeper evidence; escalation still on record)\n", s.RevoteDeescalations)
 		}
 	}
 }

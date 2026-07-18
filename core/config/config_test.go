@@ -212,6 +212,7 @@ func TestDefaultsInvestigateOnByDefault(t *testing.T) {
 	want := Investigate{
 		Enabled: true, Model: "", MaxPerScan: 10, Retries: 0,
 		NeighborWindow: "1h", MaxNeighbors: 50, CorrelationWindow: "10m", MaxTokens: 1024,
+		LowConfidenceThreshold: 0.5, MaxDeepPerScan: 5, DeepModel: "investigate",
 	}
 	if got := Defaults().Investigate; got != want {
 		t.Fatalf("Defaults().Investigate = %+v, want %+v", got, want)
@@ -268,6 +269,57 @@ func TestLoadRejectsUnknownInvestigateKey(t *testing.T) {
 	p := writeConfig(t, t.TempDir(), "investigate:\n  enabled: true\n  bogus_field: value\n")
 	if _, err := Load(p); err == nil {
 		t.Fatal("expected a load error for an unknown investigate: key")
+	}
+}
+
+// TestDefaultsLowConfidenceRevoteOn proves the low-confidence re-vote knobs
+// (mallcoppro-09a) ship ON in the binary with the documented defaults, both from
+// Defaults() and via the absent-config Load("") path — the same "no template
+// change needed" contract the rest of the investigate: block has.
+func TestDefaultsLowConfidenceRevoteOn(t *testing.T) {
+	d := Defaults().Investigate
+	if d.LowConfidenceThreshold != 0.5 {
+		t.Errorf("Defaults().Investigate.LowConfidenceThreshold = %v, want 0.5", d.LowConfidenceThreshold)
+	}
+	if d.MaxDeepPerScan != 5 {
+		t.Errorf("Defaults().Investigate.MaxDeepPerScan = %d, want 5", d.MaxDeepPerScan)
+	}
+	if d.DeepModel != "investigate" {
+		t.Errorf("Defaults().Investigate.DeepModel = %q, want investigate", d.DeepModel)
+	}
+	cfg, err := Load("")
+	if err != nil {
+		t.Fatalf("Load(\"\"): %v", err)
+	}
+	if cfg.Investigate.LowConfidenceThreshold != 0.5 || cfg.Investigate.MaxDeepPerScan != 5 || cfg.Investigate.DeepModel != "investigate" {
+		t.Fatalf("Load(\"\").Investigate low-confidence knobs = %+v, want 0.5/5/investigate", cfg.Investigate)
+	}
+}
+
+// TestLoadLowConfidenceThresholdOverlay proves a partial investigate: block can
+// override the threshold (and disable the retrigger with 0) while keeping the
+// other defaults, matching the package's partial-overlay contract.
+func TestLoadLowConfidenceThresholdOverlay(t *testing.T) {
+	p := writeConfig(t, t.TempDir(), "investigate:\n  low_confidence_threshold: 0\n")
+	cfg, err := Load(p)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Investigate.LowConfidenceThreshold != 0 {
+		t.Errorf("LowConfidenceThreshold = %v, want 0 (retrigger disabled)", cfg.Investigate.LowConfidenceThreshold)
+	}
+	if cfg.Investigate.MaxDeepPerScan != 5 {
+		t.Errorf("MaxDeepPerScan = %d, want default 5 preserved", cfg.Investigate.MaxDeepPerScan)
+	}
+}
+
+// TestLoadRejectsLowConfidenceThresholdAboveOne proves the validator rejects a
+// threshold above 1.0 — investigator confidence is a [0,1] score, and a value
+// above 1 would send every escalated investigation to the expensive re-vote path.
+func TestLoadRejectsLowConfidenceThresholdAboveOne(t *testing.T) {
+	p := writeConfig(t, t.TempDir(), "investigate:\n  low_confidence_threshold: 1.5\n")
+	if _, err := Load(p); err == nil {
+		t.Fatal("expected a load error for investigate.low_confidence_threshold > 1.0")
 	}
 }
 

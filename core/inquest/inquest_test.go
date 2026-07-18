@@ -244,6 +244,98 @@ func TestRunAll_IdempotencyDecisionTable(t *testing.T) {
 	})
 }
 
+// TestRunAll_Force_BypassesIdempotencySkip proves the low-confidence
+// deeper-pass retrigger (mallcoppro-09a): a finding whose EXISTING record is
+// already ok + current-schema (the case the normal path SKIPS) IS re-investigated
+// (a fresh metered call, a refreshed record, CreatedAt preserved) when Input.Force
+// is set — and the normal Force==false path over the identical record is still
+// skipped, unchanged.
+func TestRunAll_Force_BypassesIdempotencySkip(t *testing.T) {
+	s := newTempStore(t)
+	client := &scriptedClient{reply: `{"verdict":"benign","confidence":0.4,"narrative":"first, low-confidence pass."}`}
+	in := Input{Store: s, Client: client, Findings: []EscalatedFinding{escalatedFor("finding-1", "a")}, Config: okConfig()}
+
+	// Pass 1: writes an ok record.
+	if out := RunAll(context.Background(), in); out.Investigated != 1 {
+		t.Fatalf("pass 1 Outcome = %+v, want Investigated=1", out)
+	}
+	firstRec := readRecord(t, in, "finding-1")
+
+	// Control: a normal (Force==false) re-run over the SAME ok record is SKIPPED —
+	// zero additional calls (the existing idempotency contract, unchanged).
+	if out := RunAll(context.Background(), in); out.Skipped != 1 || out.Investigated != 0 {
+		t.Fatalf("Force==false re-run Outcome = %+v, want Skipped=1 (idempotency unchanged)", out)
+	}
+	if client.calls != 1 {
+		t.Fatalf("Force==false re-run made an extra call; total calls = %d, want 1", client.calls)
+	}
+
+	// Sleep past the 1s RFC3339 resolution so a refreshed UpdatedAt is provably new.
+	time.Sleep(1100 * time.Millisecond)
+	client.reply = `{"verdict":"benign","confidence":0.9,"narrative":"deeper pass, now confident."}`
+	forced := in
+	forced.Force = true
+	if out := RunAll(context.Background(), forced); out.Investigated != 1 || out.Skipped != 0 {
+		t.Fatalf("Force==true Outcome = %+v, want Investigated=1 (skip bypassed)", out)
+	}
+	if client.calls != 2 {
+		t.Fatalf("Force==true must make a fresh call; total calls = %d, want 2", client.calls)
+	}
+	secondRec := readRecord(t, in, "finding-1")
+	if secondRec.Confidence != 0.9 {
+		t.Errorf("forced deeper pass Confidence = %v, want 0.9 (record refreshed with the new reply)", secondRec.Confidence)
+	}
+	if secondRec.CreatedAt != firstRec.CreatedAt {
+		t.Errorf("forced refresh reset CreatedAt: first=%q second=%q, want preserved", firstRec.CreatedAt, secondRec.CreatedAt)
+	}
+	if secondRec.UpdatedAt == firstRec.UpdatedAt {
+		t.Errorf("forced refresh did not bump UpdatedAt")
+	}
+}
+
+// TestAttachRevote_AdditiveAndReadRecord proves the exported ReadRecord +
+// AttachRevote path (mallcoppro-09a): a re-vote outcome is attached to an
+// existing investigation record WITHOUT touching its verdict/confidence/narrative
+// or its Resolution disposition (the consensus invariant — the escalation stands;
+// the re-vote is a second opinion), and AttachRevote on an absent record is an
+// error (a re-vote can only attach to a finding that was investigated).
+func TestAttachRevote_AdditiveAndReadRecord(t *testing.T) {
+	s := newTempStore(t)
+	client := &scriptedClient{reply: `{"verdict":"suspicious","confidence":0.4,"narrative":"shaky verdict."}`}
+	in := Input{Store: s, Client: client, Findings: []EscalatedFinding{escalatedFor("finding-1", "a")}, Config: okConfig()}
+	if out := RunAll(context.Background(), in); out.Investigated != 1 {
+		t.Fatalf("Outcome = %+v, want Investigated=1", out)
+	}
+	before := readRecord(t, in, "finding-1")
+
+	// Absent-record attach is an error.
+	if err := AttachRevote(s, "finding-does-not-exist", RevoteOutcome{Triggered: true}); err == nil {
+		t.Fatal("AttachRevote on an absent record must error")
+	}
+
+	outcome := RevoteOutcome{Triggered: true, ResolveVotes: 3, TotalVotes: 3, UnanimousResolve: true, Reason: "unanimous"}
+	if err := AttachRevote(s, "finding-1", outcome); err != nil {
+		t.Fatalf("AttachRevote: %v", err)
+	}
+	after := readRecord(t, in, "finding-1")
+	if after.Revote == nil || *after.Revote != outcome {
+		t.Fatalf("Revote = %+v, want %+v", after.Revote, outcome)
+	}
+	// The disposition + verdict fields are untouched — additive only.
+	if after.Verdict != before.Verdict || after.Confidence != before.Confidence ||
+		after.Narrative != before.Narrative || after.NarrativeStatus != before.NarrativeStatus ||
+		after.Resolution != before.Resolution || after.CreatedAt != before.CreatedAt {
+		t.Errorf("AttachRevote mutated a non-Revote field:\n before=%+v\n after=%+v", before, after)
+	}
+	// ReadRecord's found flag: true for a real record, false (no error) for an absent one.
+	if _, found, err := ReadRecord(s, "finding-1"); err != nil || !found {
+		t.Errorf("ReadRecord(existing) = found=%v err=%v, want true/nil", found, err)
+	}
+	if _, found, err := ReadRecord(s, "nope"); err != nil || found {
+		t.Errorf("ReadRecord(absent) = found=%v err=%v, want false/nil", found, err)
+	}
+}
+
 // TestRunAll_BudgetGate proves 12 escalations against a cap of 10 produce
 // exactly 10 model calls and 2 absent-budget records — deterministic by
 // finding-ID sort order, so the SAME 10 findings get the call every run.

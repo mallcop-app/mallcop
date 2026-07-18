@@ -17,6 +17,7 @@ import (
 	"context"
 	"encoding/json"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/mallcop-app/mallcop/core/agent"
@@ -26,6 +27,7 @@ import (
 	"github.com/mallcop-app/mallcop/core/pipeline"
 	"github.com/mallcop-app/mallcop/core/store"
 	"github.com/mallcop-app/mallcop/internal/testutil/cannedbackend"
+	"github.com/mallcop-app/mallcop/pkg/event"
 	"github.com/mallcop-app/mallcop/pkg/resolution"
 )
 
@@ -456,5 +458,187 @@ func TestPipeline_ConsensusInvariant_ResolutionsUnaffectedByInvestigate(t *testi
 		if got != want {
 			t.Errorf("resolution for %s diverged between investigate on/off:\n  with:    %+v\n  without: %+v", r.FindingID, want, got)
 		}
+	}
+}
+
+// --- Low-confidence deeper-pass + re-vote (mallcoppro-09a) -------------------
+
+// cascadeEscalateReply makes a cascade tier ESCALATE — the main-scan disposition
+// for the config-drift finding in the de-escalation test below.
+const cascadeEscalateReply = `{"action":"escalate","confidence":3,"positive_evidence":false,` +
+	`"reason":"cannot positively clear MFA-disable on the prod tenant; escalating for human review."}`
+
+// revoteEnrichmentMarker is the literal enrichFindingWithInvestigation prepends to
+// a re-voted finding's reason (agent/revote.go). A cannedbackend routes on it to
+// serve the re-vote committee a DIFFERENT reply than the first-pass cascade,
+// simulating "deeper evidence flips the committee".
+const revoteEnrichmentMarker = "detection-time deeper investigation"
+
+// lowConfInvestigateConfig enables the low-confidence retrigger with a 0.5
+// threshold and a small deep budget on top of the base investigate config.
+func lowConfInvestigateConfig() inquest.Config {
+	c := baseInvestigateConfig()
+	c.LowConfidenceThreshold = 0.5
+	c.MaxDeepPerScan = 5
+	return c
+}
+
+// mfaOnlyFixture is the single config-drift (MFA-disabled) event — a finding that
+// goes through the model cascade (NOT a floor force-escalate), so a scripted
+// escalate reply escalates it via a model verdict, the case the re-vote can
+// de-escalate. Reuses multiFindingFixture's first event, drops the injection one.
+func mfaOnlyFixture(t *testing.T) []event.Event {
+	t.Helper()
+	all := multiFindingFixture(t)
+	return all[:1] // just evt-mfa-001
+}
+
+// TestPipeline_LowConfidenceInvestigation_TriggersDeepPassAndRevote proves the
+// mallcoppro-09a path fires and PRESERVES any-escalate-wins on a floor-escalated
+// finding: the injection-probe force-escalates (no model), its investigation comes
+// back "ok" but low-confidence (0.3 < 0.5), so it gets a SECOND (deeper) narrate
+// call and a committee re-vote — and because it re-cascades straight back to a
+// floor force-escalate, every voter escalates, the re-vote is NOT unanimous, the
+// escalation STANDS, and the ORIGINAL resolution is never mutated or duplicated.
+func TestPipeline_LowConfidenceInvestigation_TriggersDeepPassAndRevote(t *testing.T) {
+	root := useShippedCorpus(t)
+
+	var narrateCalls int32
+	be := &cannedbackend.CannedBackend{
+		CannedContentFunc: func(body []byte) string {
+			if strings.Contains(string(body), investigateSystemPromptMarker) {
+				atomic.AddInt32(&narrateCalls, 1)
+				return `{"verdict":"suspicious","confidence":0.3,"narrative":"sections conflict; low confidence per the prompt's own rule."}`
+			}
+			return cascadeResolveReply
+		},
+	}
+	if err := be.Start(); err != nil {
+		t.Fatalf("start cannedbackend: %v", err)
+	}
+	t.Cleanup(be.Stop)
+
+	st := newGitStore(t)
+	cfg := pipeline.Config{
+		Connector:   connect.FromPath(writeEventsFile(t, multiFindingFixture(t))),
+		Client:      &inference.DirectClient{BaseURL: be.URL(), Model: "test-model"},
+		Store:       st,
+		Baseline:    knownActorsBaseline(),
+		Cascade:     agent.CascadeOptions{RepoRoot: root, Tools: fixedTools{text: "evidence", toolCalls: 6, distinctTools: 4}},
+		Investigate: lowConfInvestigateConfig(),
+	}
+	sum, err := pipeline.Run(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("pipeline.Run: %v", err)
+	}
+
+	if sum.Escalated != 1 {
+		t.Fatalf("Escalated = %d, want 1 (injection-probe floor-escalated)", sum.Escalated)
+	}
+	if sum.LowConfidenceRevotes != 1 {
+		t.Fatalf("LowConfidenceRevotes = %d, want 1 (the low-confidence escalated investigation)", sum.LowConfidenceRevotes)
+	}
+	if sum.RevoteDeescalations != 0 {
+		t.Fatalf("RevoteDeescalations = %d, want 0 (a floor-escalated finding can never be de-escalated by re-vote)", sum.RevoteDeescalations)
+	}
+	if n := atomic.LoadInt32(&narrateCalls); n < 2 {
+		t.Fatalf("narrate calls = %d, want >= 2 (first pass + deeper pass)", n)
+	}
+
+	res := loadResolutions(t, st)
+	findingID := injectionProbeFindingID(t, res)
+
+	rec := readInvestigationRecord(t, st, findingID)
+	if rec.Revote == nil {
+		t.Fatal("investigation record has no Revote attached")
+	}
+	if rec.Revote.UnanimousResolve {
+		t.Errorf("Revote.UnanimousResolve = true, want false (any-escalate-wins on a floor-escalated finding)")
+	}
+	if rec.Revote.TotalVotes != agent.DefaultConsensusRuns {
+		t.Errorf("Revote.TotalVotes = %d, want %d", rec.Revote.TotalVotes, agent.DefaultConsensusRuns)
+	}
+	if !rec.Revote.Triggered {
+		t.Errorf("Revote.Triggered = false, want true")
+	}
+	// CONSENSUS INVARIANT: the disposition stream is UNTOUCHED — exactly one
+	// resolution per finding (no second, re-vote-driven resolution appended), and
+	// the injection-probe's is still an escalate.
+	if len(res) != sum.FindingsDetected {
+		t.Errorf("resolutions = %d, want %d (one per finding; the re-vote must NOT append a second resolution)", len(res), sum.FindingsDetected)
+	}
+	for _, r := range res {
+		if r.FindingID == findingID && r.Action != "escalate" {
+			t.Errorf("re-vote mutated the original disposition: finding %s Action = %q, want escalate", findingID, r.Action)
+		}
+	}
+}
+
+// TestPipeline_LowConfidenceInvestigation_DeescalatesOnUnanimousRevote proves the
+// de-escalation half: a MODEL-escalated finding whose investigation is low
+// confidence goes to a re-vote that, handed the deeper evidence, UNANIMOUSLY
+// resolves — recorded as a de-escalation on the EVIDENCE record while the escalate
+// disposition STILL stands in the resolutions stream (a second opinion, never a
+// re-resolution). The cannedbackend serves the main-scan cascade an ESCALATE and
+// the re-vote (identified by the enrichment marker) a RESOLVE — "deeper evidence
+// flips the committee", driven by BETTER EVIDENCE, not a rule.
+func TestPipeline_LowConfidenceInvestigation_DeescalatesOnUnanimousRevote(t *testing.T) {
+	root := useShippedCorpus(t)
+
+	be := &cannedbackend.CannedBackend{
+		CannedContentFunc: func(body []byte) string {
+			s := string(body)
+			if strings.Contains(s, investigateSystemPromptMarker) {
+				return `{"verdict":"benign","confidence":0.3,"narrative":"leans benign but sections conflict; low confidence."}`
+			}
+			if strings.Contains(s, revoteEnrichmentMarker) {
+				return cascadeResolveReply // the re-vote committee sees the deeper evidence
+			}
+			return cascadeEscalateReply // the main-scan cascade escalates
+		},
+	}
+	if err := be.Start(); err != nil {
+		t.Fatalf("start cannedbackend: %v", err)
+	}
+	t.Cleanup(be.Stop)
+
+	st := newGitStore(t)
+	cfg := pipeline.Config{
+		Connector:   connect.FromPath(writeEventsFile(t, mfaOnlyFixture(t))),
+		Client:      &inference.DirectClient{BaseURL: be.URL(), Model: "test-model"},
+		Store:       st,
+		Baseline:    knownActorsBaseline(),
+		Cascade:     agent.CascadeOptions{RepoRoot: root, Tools: fixedTools{text: "evidence", toolCalls: 6, distinctTools: 4}},
+		Investigate: lowConfInvestigateConfig(),
+	}
+	sum, err := pipeline.Run(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("pipeline.Run: %v", err)
+	}
+	if sum.Escalated != 1 {
+		t.Fatalf("Escalated = %d, want 1 (config-drift escalated by the model)", sum.Escalated)
+	}
+	if sum.LowConfidenceRevotes != 1 {
+		t.Fatalf("LowConfidenceRevotes = %d, want 1", sum.LowConfidenceRevotes)
+	}
+	if sum.RevoteDeescalations != 1 {
+		t.Fatalf("RevoteDeescalations = %d, want 1 (unanimous resolve on the deeper evidence)", sum.RevoteDeescalations)
+	}
+
+	res := loadResolutions(t, st)
+	if len(res) != 1 {
+		t.Fatalf("resolutions = %d, want 1 (the re-vote must NOT append a second resolution)", len(res))
+	}
+	// CONSENSUS INVARIANT: the disposition is STILL escalate — the de-escalation
+	// lives only on the evidence record, never mutating the audit trail.
+	if res[0].Action != "escalate" {
+		t.Fatalf("original resolution Action = %q, want escalate (the re-vote is a second opinion, not a re-resolution)", res[0].Action)
+	}
+	rec := readInvestigationRecord(t, st, res[0].FindingID)
+	if rec.Revote == nil || !rec.Revote.UnanimousResolve {
+		t.Fatalf("Revote = %+v, want a UnanimousResolve second opinion", rec.Revote)
+	}
+	if rec.Revote.ResolveVotes != agent.DefaultConsensusRuns {
+		t.Errorf("Revote.ResolveVotes = %d, want %d (unanimous)", rec.Revote.ResolveVotes, agent.DefaultConsensusRuns)
 	}
 }

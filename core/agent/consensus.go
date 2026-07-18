@@ -114,21 +114,14 @@ func runConsensusGate(ctx context.Context, client Client, f finding.Finding, opt
 	}
 
 	// Voter tally. The original run is the first "resolved" voter (it produced
-	// first, an ActionProceed). Then nRuns additional voters.
+	// first, an ActionProceed). Then nRuns additional voters, tallied by the
+	// SHARED any-escalate-wins counter (tallyConsensusVotes) that the
+	// low-confidence re-vote gate (revote.go) also uses — the exact
+	// error/panic/no-resolution == escalate rule lives in ONE place.
 	total := 1 + nRuns
-	resolveCount := 1 // the original resolve
-	escalateCount := 0
-
-	for i := 0; i < nRuns; i++ {
-		action := runOneConsensusVote(ctx, client, f, reRunOpts)
-		if action == ActionProceed {
-			resolveCount++
-		} else {
-			// ActionEscalated, an error, or no resolution all count as escalate
-			// (the safe side) — exactly the Python "error = escalate" policy.
-			escalateCount++
-		}
-	}
+	reRunResolves, reRunEscalates := tallyConsensusVotes(ctx, client, f, reRunOpts, nRuns)
+	resolveCount := 1 + reRunResolves // +1 for the original resolve
+	escalateCount := reRunEscalates
 
 	if escalateCount == 0 {
 		// UNANIMOUS resolve — accept the original result unchanged. (Token totals
@@ -150,6 +143,25 @@ func runConsensusGate(ctx context.Context, client Client, f finding.Finding, opt
 		Reason:         reason,
 		RouteID:        "", // not a corpus route
 	}
+}
+
+// tallyConsensusVotes runs nRuns INDEPENDENT cascade re-runs on f under reRunOpts
+// and returns how many resolved (terminal ActionProceed) vs escalated. Anything
+// that is not ActionProceed — an explicit escalate, a re-run error, a recovered
+// panic, or a nil/no resolution — counts as an ESCALATE (the safe side; the
+// "error = escalate" policy). This is the single any-escalate-wins counting loop
+// shared by runConsensusGate (the resolve-side gate) and RunRevoteGate (the
+// low-confidence escalate-side re-vote, mallcoppro-09a), so both apply the
+// IDENTICAL committee rule rather than duplicating it.
+func tallyConsensusVotes(ctx context.Context, client Client, f finding.Finding, reRunOpts CascadeOptions, nRuns int) (resolveCount, escalateCount int) {
+	for i := 0; i < nRuns; i++ {
+		if runOneConsensusVote(ctx, client, f, reRunOpts) == ActionProceed {
+			resolveCount++
+		} else {
+			escalateCount++
+		}
+	}
+	return resolveCount, escalateCount
 }
 
 // runOneConsensusVote runs ONE independent re-run cascade and returns its terminal

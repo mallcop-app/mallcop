@@ -21,6 +21,16 @@ import (
 // mirrors core/config.Investigate's default (10).
 const defaultMaxPerScan = 10
 
+// DefaultMaxDeepPerScan is Config.MaxDeepPerScan's fallback when unset/non-positive
+// — the low-confidence deeper-investigation retrigger's SEPARATE metered-call
+// budget (mallcoppro-09a). Deliberately smaller than defaultMaxPerScan: the deep
+// pass only fires on the subset of escalations whose first pass came back low
+// confidence, and each one also drives a full committee re-vote (several more
+// cascade calls), so its blast radius must be tightly bounded. Exported so the
+// core/pipeline orchestration that owns the retrigger (RunAll itself never reads
+// MaxDeepPerScan) can apply the same fallback the field's doc promises.
+const DefaultMaxDeepPerScan = 5
+
 // defaultModelCallTimeout bounds EACH narrate call — the scan's core output
 // can never be delayed past this per finding (failureSemantics §design). The
 // actual bound is Config.CallTimeout when set; this is its fallback.
@@ -72,6 +82,36 @@ type Config struct {
 	// relationship named instead of narrating as an unknown external actor.
 	// nil is the safe absent default — no evidence is ever marked owned.
 	OwnedEntities []OwnedEntity
+
+	// --- Low-confidence re-vote (mallcoppro-09a) -----------------------------
+	// These three fields are CARRIED THROUGH this struct (it is the resolved
+	// investigate: settings bundle cli/scan.go maps onto core/pipeline.Config)
+	// but are NOT read by RunAll itself — RunAll only makes the ONE narrate call
+	// per finding it always has. They are consumed by core/pipeline's step-6
+	// orchestration: an escalated finding whose investigation came back "ok" but
+	// with investigator Confidence < LowConfidenceThreshold is re-investigated
+	// with a deeper pass (RunAll again, Force=true, budgeted at MaxDeepPerScan)
+	// and put to a committee RE-VOTE (core/agent.RunRevoteGate, any-escalate-wins).
+	// inquest itself never runs the cascade — that would violate the consensus
+	// invariant (imports_test bans core/agent's ResolveFindingWith); the re-vote
+	// lives in core/pipeline + core/agent, and these are just the tuning knobs it
+	// reads off the resolved config.
+
+	// LowConfidenceThreshold is the investigator-confidence floor below which an
+	// "ok" escalated investigation is treated as too shaky to ship as-is and is
+	// sent to the deeper-pass + re-vote path. <= 0 DISABLES the whole
+	// low-confidence retrigger (no deep pass, no re-vote) — the pre-09a behavior.
+	LowConfidenceThreshold float64
+	// MaxDeepPerScan bounds the number of METERED deeper-investigation narrate
+	// calls the low-confidence retrigger may make THIS scan — a SEPARATE budget
+	// from MaxPerScan so a noisy scan's re-pass cannot starve (or be starved by)
+	// the first-pass budget. <= 0 uses DefaultMaxDeepPerScan (the pipeline
+	// resolves this fallback — RunAll never reads this field).
+	MaxDeepPerScan int
+	// DeepModel is the model id the deeper investigation pass pins (typically a
+	// stronger lane than the first pass — the whole point of "go deeper"). ""
+	// inherits the first pass's Model.
+	DeepModel string
 }
 
 // OwnedEntity is core/inquest's OWN copy of core/config.OwnedEntity (same
@@ -117,6 +157,18 @@ type Input struct {
 	MallcopVersion string
 	// Config is the resolved investigate: settings for this run.
 	Config Config
+	// Force, when true, bypasses the idempotency skip (processOne's
+	// found+ok+current-schema short-circuit) UNCONDITIONALLY for every finding
+	// in this call — the caller has already decided this specific subset needs a
+	// FRESH pass (the low-confidence deeper-investigation retrigger,
+	// mallcoppro-09a). It changes NOTHING on the normal (Force==false) path: the
+	// skip logic, budget gate, CreatedAt preservation, and failure semantics are
+	// all identical. The caller is responsible for passing ONLY the subset that
+	// warrants a re-pass — Force does not widen the budget, so a Force call over
+	// the full escalated set would still burn MaxPerScan re-investigating
+	// already-confident findings; the pipeline scopes it to the low-confidence
+	// subset (mallcoppro-09a risk 6).
+	Force bool
 }
 
 // Outcome is RunAll's result. RunAll NEVER returns an error the caller
@@ -268,7 +320,7 @@ func processOne(ctx context.Context, in Input, ef EscalatedFinding, maxPerScan i
 		priorCreatedAt = existing.CreatedAt
 		havePriorCreatedAt = true
 	}
-	if found && existing.SchemaVersion == SchemaVersion && existing.NarrativeStatus == StatusOK {
+	if !in.Force && found && existing.SchemaVersion == SchemaVersion && existing.NarrativeStatus == StatusOK {
 		return 0, 0, 1, errMsg
 	}
 
