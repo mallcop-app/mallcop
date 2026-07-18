@@ -128,7 +128,7 @@ func TestRunAll_GrantDirectionFlowsToModel(t *testing.T) {
 		Finding: finding.Finding{
 			ID: "finding-evt-trust", Actor: forgeProxy, Type: "new-external-access",
 			Timestamp: time.Now(),
-			Evidence:  json.RawMessage(`{"actor":"` + forgeProxy + `","grantee":"` + relay + `","event_type":"trust_added"}`),
+			Evidence:  json.RawMessage(`{"actor":"` + forgeProxy + `","grantee":"` + relay + `","member":"` + relay + `","event_type":"trust_added"}`),
 		},
 		Resolution: ResolutionRef{Action: "escalate", Reason: "test"},
 	}

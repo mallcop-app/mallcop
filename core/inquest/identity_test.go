@@ -238,7 +238,7 @@ func TestAssembleIdentity_GrantDirection_TrustAdded(t *testing.T) {
 	const forgeProxy = "arn:aws:sts::225635015146:assumed-role/forge-proxy-bedrock-role/forge-proxy"
 	const relay = "arn:aws:iam::458526671706:role/mallcop-bedrock-relay"
 	f := seedGrantEvent(t, s, "evt-trust-1", forgeProxy, "new-external-access",
-		`{"actor":"`+forgeProxy+`","grantee":"`+relay+`","event_type":"trust_added"}`)
+		`{"actor":"`+forgeProxy+`","grantee":"`+relay+`","member":"`+relay+`","event_type":"trust_added"}`)
 
 	out := assembleIdentity(s, f)
 	if out.Grantor != relay {
@@ -260,13 +260,45 @@ func TestAssembleIdentity_GrantDirection_TrustAdded(t *testing.T) {
 func TestAssembleIdentity_GrantDirection_TrustAddedPermission(t *testing.T) {
 	s := newTempStore(t)
 	f := seedGrantEvent(t, s, "evt-trust-2", "caller-arn", "new-external-access",
-		`{"actor":"caller-arn","grantee":"role-arn","permission":"bedrock:InvokeModel","event_type":"trust_added"}`)
+		`{"actor":"caller-arn","grantee":"role-arn","member":"role-arn","permission":"bedrock:InvokeModel","event_type":"trust_added"}`)
 	out := assembleIdentity(s, f)
 	if out.Grantor != "role-arn" || out.Grantee != "caller-arn" {
 		t.Errorf("Grantor/Grantee = %q/%q, want role-arn/caller-arn (flipped)", out.Grantor, out.Grantee)
 	}
 	if out.Capability != "bedrock:InvokeModel" {
 		t.Errorf("Capability = %q, want the explicit permission verbatim", out.Capability)
+	}
+}
+
+// TestAssembleIdentity_GrantDirection_TrustAddedFederationDomain is the
+// LOAD-BEARING regression test for the M365 domain-only trust_added shape
+// (mallcoppro-15e). mallcop-connectors' internal/normalize/m365.go emits
+// event_type "trust_added" for the O365 operation "Set federation settings on
+// domain.", but — unlike AWS cross-account AssumeRole — its payload carries
+// only domain/domain_name, never a member/caller (no assumed-role trust
+// boundary to flip around). The detector's evidence therefore has an empty
+// "member" field, and resolveGrantDirection must NOT apply the AWS flip: the
+// admin who ran the operation is the grantor, the named domain is the
+// grantee — the SAME convention as the sibling federation_settings_update
+// branch ("Set domain authentication.", "Update domain."). Before this fix,
+// this shape was routed through the AWS flip, reversing direction for every
+// M365 federation-trust finding (the exact bug Baron hit live, just for a
+// different connector than the AWS case the original regression test covers).
+func TestAssembleIdentity_GrantDirection_TrustAddedFederationDomain(t *testing.T) {
+	s := newTempStore(t)
+	const admin = "admin@contoso.onmicrosoft.com"
+	const domain = "evil.example.com"
+	f := seedGrantEvent(t, s, "evt-trust-m365-1", admin, "new-external-access",
+		`{"actor":"`+admin+`","grantee":"`+domain+`","event_type":"trust_added"}`)
+	out := assembleIdentity(s, f)
+	if out.Grantor != admin {
+		t.Errorf("Grantor = %q, want the configuring admin %q (NOT flipped — M365 domain-only trust_added has no member/caller)", out.Grantor, admin)
+	}
+	if out.Grantee != domain {
+		t.Errorf("Grantee = %q, want the federated domain %q", out.Grantee, domain)
+	}
+	if !strings.Contains(out.Capability, "federation") && !strings.Contains(out.Capability, "trust") {
+		t.Errorf("Capability = %q, want it to describe a federation/domain trust relationship", out.Capability)
 	}
 }
 

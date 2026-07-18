@@ -316,6 +316,15 @@ type grantDetectorEvidence struct {
 	Role            string `json:"role"`
 	TargetUser      string `json:"target_user"`
 	PermissionLevel string `json:"permission_level"`
+	// Member is the raw AWS AssumeRole trust boundary (core/detect/new_external_access.go's
+	// "member" evidence key, sourced from mallcop-connectors' aws.go payload "member"
+	// field — the assumed role's ARN). Present ONLY on AWS cross-account trust_added
+	// events; empty for M365's domain-only trust_added shape ("Set federation
+	// settings on domain." in mallcop-connectors' m365.go, which carries
+	// domain/domain_name but no member/caller). resolveGrantDirection switches on
+	// this to pick the right direction convention for the two event shapes that
+	// share event_type "trust_added" (mallcoppro-15e).
+	Member string `json:"member"`
 }
 
 // resolveGrantDirection reads the detector's own semantically-labeled evidence
@@ -356,20 +365,39 @@ func resolveGrantDirection(f finding.Finding) (grantor, grantee, capability stri
 	// convention differs per shape.
 	switch ev.EventType {
 	case "trust_added":
-		// AWS cross-account AssumeRole. The evidence's "grantee" field is the
-		// ASSUMED role/account (the detector sources it from the payload's
-		// "member" key) — that is the resource whose trust boundary is exercised,
-		// i.e. the GRANTOR. The evidence's "actor" is the CALLING principal that
-		// now holds the capability, i.e. the GRANTEE. This FLIP is the OPPOSITE
-		// of every other branch here; do NOT "unify the switch, it looks
-		// redundant" — collapsing it to actor=grantor/grantee=grantee reproduces
-		// the exact backwards direction Baron hit live (mallcoppro-15e). The
-		// dedicated trust_added regression test must fail loudly if it is undone.
-		cap := "can assume this role and act with its permissions"
-		if ev.Permission != "" {
-			cap = ev.Permission
+		// event_type "trust_added" covers TWO different underlying event shapes
+		// with OPPOSITE direction conventions, distinguished by whether the
+		// detector's "member" evidence field is populated (see its doc comment
+		// in core/detect/new_external_access.go and the Member field doc above):
+		//
+		//   - AWS cross-account AssumeRole (member is set, to the assumed
+		//     role's ARN): the evidence's "grantee" field is the ASSUMED
+		//     role/account — that is the resource whose trust boundary is
+		//     exercised, i.e. the GRANTOR. The evidence's "actor" is the
+		//     CALLING principal that now holds the capability, i.e. the
+		//     GRANTEE. This FLIP is the OPPOSITE of every other branch here.
+		//   - M365 domain-only federation trust (member is empty — the
+		//     payload carries only domain/domain_name, e.g. "Set federation
+		//     settings on domain."): there is no assumed-role trust boundary
+		//     to flip around, so this uses the SAME non-flipped convention as
+		//     the federation_settings_update branch below — actor (the admin
+		//     who configured the trust) is the grantor, the named domain is
+		//     the grantee. Routing this shape through the AWS flip reproduces
+		//     the exact backwards-direction bug this item exists to fix
+		//     (mallcoppro-15e): a reasonable-looking "unify the switch, it
+		//     looks redundant" edit that drops the member check silently
+		//     reverses every M365 federation-trust finding.
+		//
+		// The dedicated trust_added regression tests (both shapes) must fail
+		// loudly if either branch is undone.
+		if ev.Member != "" {
+			cap := "can assume this role and act with its permissions"
+			if ev.Permission != "" {
+				cap = ev.Permission
+			}
+			return ev.Grantee, ev.Actor, cap
 		}
-		return ev.Grantee, ev.Actor, cap
+		return ev.Actor, ev.Grantee, "federation/domain trust relationship"
 	case "repo.add_collaborator", "org.add_member", "org.member_added", "org.add_outside_collaborator":
 		cap := ev.Permission
 		if cap == "" {
