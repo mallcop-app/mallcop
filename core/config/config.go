@@ -239,6 +239,25 @@ type Investigate struct {
 	MaxNeighbors      int    `yaml:"max_neighbors"`
 	CorrelationWindow string `yaml:"correlation_window"`
 	MaxTokens         int    `yaml:"max_tokens"`
+
+	// LowConfidenceThreshold (mallcoppro-09a) is the investigator-confidence
+	// floor below which an "ok" but shaky escalated investigation is re-run with
+	// a DEEPER pass and put to a committee RE-VOTE (any-escalate-wins) before any
+	// customer-facing action-required copy is generated from it. 0 or negative
+	// DISABLES the retrigger entirely (the pre-09a behavior). The default (0.5)
+	// is a starting value, not a proven optimum — it directly trades cost (how
+	// often the expensive deep-pass+revote fires) against trust (too high wastes
+	// budget re-voting confident-enough findings; too low ships shaky verdicts
+	// unchallenged) and is an open tuning question (rd mallcoppro-09a).
+	LowConfidenceThreshold float64 `yaml:"low_confidence_threshold"`
+	// MaxDeepPerScan bounds the metered deeper-investigation narrate calls the
+	// low-confidence retrigger may make this scan — a SEPARATE budget from
+	// MaxPerScan (each deep pass also drives a full committee re-vote). <= 0 uses
+	// core/inquest's defaultMaxDeepPerScan (5).
+	MaxDeepPerScan int `yaml:"max_deep_per_scan"`
+	// DeepModel is the model lane the deeper investigation pass pins — typically
+	// a stronger lane than the first pass. "" inherits Model.
+	DeepModel string `yaml:"deep_model"`
 }
 
 // Org names the operator's OWN accounts/roles/relays (mallcoppro-995) so
@@ -302,6 +321,11 @@ func Defaults() Config {
 		Investigate: Investigate{
 			Enabled: true, Model: "", MaxPerScan: 10, Retries: 0,
 			NeighborWindow: "1h", MaxNeighbors: 50, CorrelationWindow: "10m", MaxTokens: 1024,
+			// Low-confidence re-vote ON by default (mallcoppro-09a): a shaky
+			// escalated investigation goes deeper + to a committee re-vote before
+			// customer-facing copy ships. 0.5 threshold, deep budget 5, deep lane
+			// "investigate" (a stronger lane than the triage default).
+			LowConfidenceThreshold: 0.5, MaxDeepPerScan: 5, DeepModel: "investigate",
 		},
 		Org: Org{Owned: nil},
 	}
@@ -422,6 +446,9 @@ func validate(cfg Config) error {
 				return fmt.Errorf("connectors[%s].env must list env-var NAMES, not inline secret values — got %q", c.ID, e)
 			}
 		}
+	}
+	if cfg.Investigate.LowConfidenceThreshold > 1 {
+		return fmt.Errorf("investigate.low_confidence_threshold must be <= 1.0 (investigator confidence is a [0,1] score) — got %v; a value above 1 would send EVERY escalated investigation to the expensive deep-pass+revote path", cfg.Investigate.LowConfidenceThreshold)
 	}
 	for i, o := range cfg.Org.Owned {
 		if strings.TrimSpace(o.Match) == "" {

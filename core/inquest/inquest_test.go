@@ -244,6 +244,254 @@ func TestRunAll_IdempotencyDecisionTable(t *testing.T) {
 	})
 }
 
+// TestRunAll_Force_BypassesIdempotencySkip proves the low-confidence
+// deeper-pass retrigger (mallcoppro-09a): a finding whose EXISTING record is
+// already ok + current-schema (the case the normal path SKIPS) IS re-investigated
+// (a fresh metered call, a refreshed record, CreatedAt preserved) when Input.Force
+// is set — and the normal Force==false path over the identical record is still
+// skipped, unchanged.
+func TestRunAll_Force_BypassesIdempotencySkip(t *testing.T) {
+	s := newTempStore(t)
+	client := &scriptedClient{reply: `{"verdict":"benign","confidence":0.4,"narrative":"first, low-confidence pass."}`}
+	in := Input{Store: s, Client: client, Findings: []EscalatedFinding{escalatedFor("finding-1", "a")}, Config: okConfig()}
+
+	// Pass 1: writes an ok record.
+	if out := RunAll(context.Background(), in); out.Investigated != 1 {
+		t.Fatalf("pass 1 Outcome = %+v, want Investigated=1", out)
+	}
+	firstRec := readRecord(t, in, "finding-1")
+
+	// Control: a normal (Force==false) re-run over the SAME ok record is SKIPPED —
+	// zero additional calls (the existing idempotency contract, unchanged).
+	if out := RunAll(context.Background(), in); out.Skipped != 1 || out.Investigated != 0 {
+		t.Fatalf("Force==false re-run Outcome = %+v, want Skipped=1 (idempotency unchanged)", out)
+	}
+	if client.calls != 1 {
+		t.Fatalf("Force==false re-run made an extra call; total calls = %d, want 1", client.calls)
+	}
+
+	// Sleep past the 1s RFC3339 resolution so a refreshed UpdatedAt is provably new.
+	time.Sleep(1100 * time.Millisecond)
+	client.reply = `{"verdict":"benign","confidence":0.9,"narrative":"deeper pass, now confident."}`
+	forced := in
+	forced.Force = true
+	if out := RunAll(context.Background(), forced); out.Investigated != 1 || out.Skipped != 0 {
+		t.Fatalf("Force==true Outcome = %+v, want Investigated=1 (skip bypassed)", out)
+	}
+	if client.calls != 2 {
+		t.Fatalf("Force==true must make a fresh call; total calls = %d, want 2", client.calls)
+	}
+	secondRec := readRecord(t, in, "finding-1")
+	if secondRec.Confidence != 0.9 {
+		t.Errorf("forced deeper pass Confidence = %v, want 0.9 (record refreshed with the new reply)", secondRec.Confidence)
+	}
+	if secondRec.CreatedAt != firstRec.CreatedAt {
+		t.Errorf("forced refresh reset CreatedAt: first=%q second=%q, want preserved", firstRec.CreatedAt, secondRec.CreatedAt)
+	}
+	if secondRec.UpdatedAt == firstRec.UpdatedAt {
+		t.Errorf("forced refresh did not bump UpdatedAt")
+	}
+}
+
+// TestRunAll_Force_OverBudgetDoesNotOverwriteExistingOk proves the review fix
+// for mallcoppro-09a's overwrite regression: when a Force re-pass (the
+// low-confidence deeper-investigation retrigger) runs over its OWN separate
+// budget and a finding falls past that budget, processOne must NOT clobber
+// the finding's prior good "ok" record with a StatusAbsentBudget/unassessed
+// one. Concrete scenario from the review: two findings already have ok
+// records; a Force pass with a budget of 1 lets only the first (sorted by
+// ID) get a fresh call — the second must keep its original verdict,
+// confidence, narrative, and NarrativeStatus byte-for-byte.
+func TestRunAll_Force_OverBudgetDoesNotOverwriteExistingOk(t *testing.T) {
+	s := newTempStore(t)
+	client := &scriptedClient{reply: `{"verdict":"benign","confidence":0.3,"narrative":"first pass, benign, low-confidence."}`}
+	findings := []EscalatedFinding{escalatedFor("finding-00", "a"), escalatedFor("finding-01", "a")}
+	in := Input{Store: s, Client: client, Findings: findings, Config: okConfig()}
+
+	// Pass 1: both findings get an ok record.
+	if out := RunAll(context.Background(), in); out.Investigated != 2 {
+		t.Fatalf("pass 1 Outcome = %+v, want Investigated=2", out)
+	}
+	before00 := readRecord(t, in, "finding-00")
+	before01 := readRecord(t, in, "finding-01")
+	if before00.NarrativeStatus != StatusOK || before01.NarrativeStatus != StatusOK {
+		t.Fatalf("pass 1 records not both ok: %+v / %+v", before00, before01)
+	}
+
+	// Pass 2: Force=true, budget of 1 — finding-00 (sorted first) gets the
+	// fresh call, finding-01 falls past budget in processOne's budget branch.
+	client.reply = `{"verdict":"suspicious","confidence":0.95,"narrative":"deeper pass, now confident."}`
+	forced := in
+	forced.Force = true
+	forced.Config.MaxPerScan = 1
+	out := RunAll(context.Background(), forced)
+	if out.Investigated != 1 {
+		t.Errorf("Investigated = %d, want 1 (finding-00 got the sole budget slot)", out.Investigated)
+	}
+	if out.Degraded != 1 {
+		t.Errorf("Degraded = %d, want 1 (finding-01's failed Force re-pass, tallied not silent)", out.Degraded)
+	}
+	if client.calls != 3 {
+		t.Errorf("client called %d times, want 3 (2 from pass 1, 1 from the budgeted Force pass)", client.calls)
+	}
+
+	after00 := readRecord(t, in, "finding-00")
+	if after00.NarrativeStatus != StatusOK || after00.Confidence != 0.95 {
+		t.Errorf("finding-00 (within budget) = %+v, want refreshed ok/0.95", after00)
+	}
+
+	after01 := readRecord(t, in, "finding-01")
+	if after01.NarrativeStatus != StatusOK {
+		t.Fatalf("finding-01 (over Force budget) NarrativeStatus = %q, want %q — a failed Force re-pass must never overwrite a prior good record", after01.NarrativeStatus, StatusOK)
+	}
+	if after01.Verdict != before01.Verdict || after01.Confidence != before01.Confidence || after01.Narrative != before01.Narrative || after01.UpdatedAt != before01.UpdatedAt {
+		t.Errorf("finding-01 record was mutated by the failed Force re-pass:\n before=%+v\n after=%+v", before01, after01)
+	}
+}
+
+// TestRunAll_Force_ModelErrorDoesNotOverwriteExistingOk proves the same
+// overwrite guard fires on ANY deep-pass failure mode, not just the budget
+// branch — a transient model-call error (timeout/transport failure) during a
+// Force re-pass must also leave a prior ok record untouched rather than
+// downgrading it to an absent-model-error record.
+func TestRunAll_Force_ModelErrorDoesNotOverwriteExistingOk(t *testing.T) {
+	s := newTempStore(t)
+	client := &scriptedClient{reply: `{"verdict":"benign","confidence":0.3,"narrative":"first pass, benign, low-confidence."}`}
+	in := Input{Store: s, Client: client, Findings: []EscalatedFinding{escalatedFor("finding-1", "a")}, Config: okConfig()}
+
+	if out := RunAll(context.Background(), in); out.Investigated != 1 {
+		t.Fatalf("pass 1 Outcome = %+v, want Investigated=1", out)
+	}
+	before := readRecord(t, in, "finding-1")
+
+	client.reply = ""
+	client.err = context.DeadlineExceeded
+	forced := in
+	forced.Force = true
+	out := RunAll(context.Background(), forced)
+	if out.Investigated != 0 || out.Degraded != 1 {
+		t.Fatalf("Force model-error Outcome = %+v, want Investigated=0/Degraded=1", out)
+	}
+
+	after := readRecord(t, in, "finding-1")
+	if after.NarrativeStatus != StatusOK {
+		t.Fatalf("NarrativeStatus = %q, want %q — a failed Force re-pass (model error) must never overwrite a prior good record", after.NarrativeStatus, StatusOK)
+	}
+	if after.Verdict != before.Verdict || after.Confidence != before.Confidence || after.Narrative != before.Narrative || after.UpdatedAt != before.UpdatedAt {
+		t.Errorf("record was mutated by the failed Force re-pass:\n before=%+v\n after=%+v", before, after)
+	}
+}
+
+// perFindingClient returns a transport error for any request whose prompt
+// mentions the finding ID in errFor, and the canned reply for every other
+// finding — the seam TestRunAll_FreshOKIDs_ExcludeFailedForcePass uses to make
+// ONE Force pass land a fresh verdict for one finding while the other's deep
+// call fails. reply/errFor are read live per call so the test can flip them
+// between passes.
+type perFindingClient struct {
+	reply  string
+	errFor string
+	calls  int
+}
+
+func (c *perFindingClient) Messages(_ context.Context, req agent.MessagesRequest) (agent.MessagesResponse, error) {
+	c.calls++
+	var text string
+	if len(req.Messages) > 0 && len(req.Messages[0].Content) > 0 {
+		text = req.Messages[0].Content[0].Text
+	}
+	if c.errFor != "" && strings.Contains(text, c.errFor) {
+		return agent.MessagesResponse{}, context.DeadlineExceeded
+	}
+	return agent.MessagesResponse{
+		StopReason: "end_turn",
+		Content:    []agent.ContentBlock{{Type: "text", Text: c.reply}},
+	}, nil
+}
+
+// TestRunAll_FreshOKIDs_ExcludeFailedForcePass proves Outcome.FreshOKIDs is the
+// precise per-finding companion to Investigated that the low-confidence re-vote
+// (core/pipeline, mallcoppro-09a review finding) keys off: it lists ONLY the
+// findings whose fresh "ok" verdict actually landed AND persisted this run. A
+// Force re-pass whose fresh pass FAILED (here: model error) keeps the finding's
+// prior first-pass record and must NOT appear in FreshOKIDs — otherwise the
+// re-vote would run on first-pass evidence relabeled as a deeper investigation.
+// Two findings share one Force pass: one lands a fresh ok verdict, the other's
+// deep call errors and is dropped from the set.
+func TestRunAll_FreshOKIDs_ExcludeFailedForcePass(t *testing.T) {
+	s := newTempStore(t)
+	client := &perFindingClient{reply: `{"verdict":"benign","confidence":0.3,"narrative":"first pass, low-confidence."}`}
+	findings := []EscalatedFinding{escalatedFor("finding-00", "a"), escalatedFor("finding-01", "a")}
+	in := Input{Store: s, Client: client, Findings: findings, Config: okConfig()}
+
+	// Pass 1: both findings get a fresh ok record — both must be in FreshOKIDs.
+	out := RunAll(context.Background(), in)
+	if out.Investigated != 2 {
+		t.Fatalf("pass 1 Outcome = %+v, want Investigated=2", out)
+	}
+	if len(out.FreshOKIDs) != 2 {
+		t.Fatalf("pass 1 FreshOKIDs = %v, want both findings (len 2, == Investigated)", out.FreshOKIDs)
+	}
+
+	// Pass 2 (Force): finding-00's deep call lands a fresh ok verdict;
+	// finding-01's deep call errors, so its prior ok record is preserved (the
+	// overwrite guard) and it must be ABSENT from FreshOKIDs.
+	client.errFor = "finding-01"
+	client.reply = `{"verdict":"benign","confidence":0.95,"narrative":"deeper pass, now confident."}`
+	forced := in
+	forced.Force = true
+	out = RunAll(context.Background(), forced)
+	if out.Investigated != 1 || out.Degraded != 1 {
+		t.Fatalf("Force pass Outcome = %+v, want Investigated=1/Degraded=1", out)
+	}
+	if len(out.FreshOKIDs) != 1 || out.FreshOKIDs[0] != "finding-00" {
+		t.Fatalf("FreshOKIDs = %v, want exactly [finding-00] — the failed-deep-pass finding must NOT be reported as a fresh verdict", out.FreshOKIDs)
+	}
+}
+
+// TestAttachRevote_AdditiveAndReadRecord proves the exported ReadRecord +
+// AttachRevote path (mallcoppro-09a): a re-vote outcome is attached to an
+// existing investigation record WITHOUT touching its verdict/confidence/narrative
+// or its Resolution disposition (the consensus invariant — the escalation stands;
+// the re-vote is a second opinion), and AttachRevote on an absent record is an
+// error (a re-vote can only attach to a finding that was investigated).
+func TestAttachRevote_AdditiveAndReadRecord(t *testing.T) {
+	s := newTempStore(t)
+	client := &scriptedClient{reply: `{"verdict":"suspicious","confidence":0.4,"narrative":"shaky verdict."}`}
+	in := Input{Store: s, Client: client, Findings: []EscalatedFinding{escalatedFor("finding-1", "a")}, Config: okConfig()}
+	if out := RunAll(context.Background(), in); out.Investigated != 1 {
+		t.Fatalf("Outcome = %+v, want Investigated=1", out)
+	}
+	before := readRecord(t, in, "finding-1")
+
+	// Absent-record attach is an error.
+	if err := AttachRevote(s, "finding-does-not-exist", RevoteOutcome{Triggered: true}); err == nil {
+		t.Fatal("AttachRevote on an absent record must error")
+	}
+
+	outcome := RevoteOutcome{Triggered: true, ResolveVotes: 3, TotalVotes: 3, UnanimousResolve: true, Reason: "unanimous"}
+	if err := AttachRevote(s, "finding-1", outcome); err != nil {
+		t.Fatalf("AttachRevote: %v", err)
+	}
+	after := readRecord(t, in, "finding-1")
+	if after.Revote == nil || *after.Revote != outcome {
+		t.Fatalf("Revote = %+v, want %+v", after.Revote, outcome)
+	}
+	// The disposition + verdict fields are untouched — additive only.
+	if after.Verdict != before.Verdict || after.Confidence != before.Confidence ||
+		after.Narrative != before.Narrative || after.NarrativeStatus != before.NarrativeStatus ||
+		after.Resolution != before.Resolution || after.CreatedAt != before.CreatedAt {
+		t.Errorf("AttachRevote mutated a non-Revote field:\n before=%+v\n after=%+v", before, after)
+	}
+	// ReadRecord's found flag: true for a real record, false (no error) for an absent one.
+	if _, found, err := ReadRecord(s, "finding-1"); err != nil || !found {
+		t.Errorf("ReadRecord(existing) = found=%v err=%v, want true/nil", found, err)
+	}
+	if _, found, err := ReadRecord(s, "nope"); err != nil || found {
+		t.Errorf("ReadRecord(absent) = found=%v err=%v, want false/nil", found, err)
+	}
+}
+
 // TestRunAll_BudgetGate proves 12 escalations against a cap of 10 produce
 // exactly 10 model calls and 2 absent-budget records — deterministic by
 // finding-ID sort order, so the SAME 10 findings get the call every run.

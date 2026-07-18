@@ -79,3 +79,53 @@ func TestImportAllowlist(t *testing.T) {
 		t.Fatal("import-lint checked 0 source files; package layout changed?")
 	}
 }
+
+// TestNoCascadeInvocation enforces — as a machine-checked guard, not merely the
+// record.go doc-comment convention it used to be — that no production source in
+// this package invokes core/agent's cascade or any committee-vote entry point.
+// core/inquest is a pure evidence-assembly + single-narrate-call package; the
+// detection-time investigation must NEVER run the resolution cascade, or a
+// committee re-vote, from inside inquest — that is exactly the write path to a
+// disposition the consensus invariant forbids here (the low-confidence re-vote,
+// mallcoppro-09a, lives in core/pipeline + core/agent, never in inquest). This is
+// a TEXTUAL scan (the allowlist above already keeps core/agent importable for its
+// Client interface, so an import check alone cannot catch a call): a future
+// contributor cannot casually add ResolveFindingWith / RunRevoteGate /
+// runConsensusGate here without this test explaining — and blocking — the
+// boundary.
+func TestNoCascadeInvocation(t *testing.T) {
+	bannedCalls := []string{
+		"ResolveFindingWith(",
+		"ResolveFinding(",
+		"RunRevoteGate(",
+		"runConsensusGate(",
+		"RunConsensusGate(",
+	}
+	entries, err := os.ReadDir(".")
+	if err != nil {
+		t.Fatalf("read package dir: %v", err)
+	}
+	checked := 0
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		src, err := os.ReadFile(name)
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		checked++
+		for _, banned := range bannedCalls {
+			if strings.Contains(string(src), banned) {
+				t.Errorf("%s calls %q — core/inquest must NEVER run the resolution cascade or a "+
+					"committee re-vote (the consensus invariant, mallcoppro-09a): the low-confidence "+
+					"deeper-pass + re-vote orchestration belongs in core/pipeline + core/agent, and "+
+					"inquest only assembles evidence and makes its ONE narrate call", name, banned)
+			}
+		}
+	}
+	if checked == 0 {
+		t.Fatal("cascade-invocation scan checked 0 source files; package layout changed?")
+	}
+}

@@ -145,6 +145,51 @@ type Record struct {
 	Model           string          `json:"model"`
 	Usage           Usage           `json:"usage"`
 	Evidence        Evidence        `json:"evidence"`
+	// Revote, when present, is the SECOND-OPINION committee re-vote a
+	// low-confidence "ok" investigation triggered (mallcoppro-09a). It is
+	// ADDITIVE and OPTIONAL (omitempty, no SchemaVersion bump — readers tolerate
+	// its absence, and a pre-09a record simply has none). It NEVER changes the
+	// finding's disposition: the escalate Resolution above still stands in the
+	// KindResolutions audit trail; Revote records what a committee re-vote,
+	// handed the deeper investigation's evidence, concluded — the signal the
+	// customer-facing copy reads to decide whether to frame the finding as
+	// "action required" (a confident escalation) or "investigated further,
+	// evidence points benign" (a unanimous-resolve re-vote). Consensus invariant:
+	// this is the OUTPUT of the same any-escalate-wins N-voter cascade fed better
+	// evidence, never a family-match rule, and it lives on the evidence record,
+	// never in the disposition streams.
+	Revote *RevoteOutcome `json:"revote,omitempty"`
+}
+
+// RevoteOutcome is the outcome of the low-confidence deeper-pass + committee
+// re-vote step (mallcoppro-09a) for one finding. It takes exactly ONE of two
+// shapes:
+//
+//   - A re-vote that RAN: Triggered=true, DeepPassFailed=false. The deeper
+//     investigation landed a fresh trusted verdict and the committee re-weighed
+//     it. UnanimousResolve is true ONLY when EVERY voter resolved
+//     (any-escalate-wins: a single escalate vote keeps it false and the finding
+//     stays escalated). ResolveVotes/TotalVotes are the tally.
+//
+//   - A deeper pass that FAILED: DeepPassFailed=true, Triggered=false. The
+//     forced deeper investigation did NOT land a fresh trusted verdict (deep
+//     budget exhausted, model error/timeout, invalid output), so the finding
+//     kept its FIRST-pass "ok" record. NO committee re-vote ran — re-voting
+//     would have fed the committee the first-pass evidence relabeled as a
+//     "deeper investigation" that never happened, misrepresenting provenance
+//     (mallcoppro-09a review finding). The finding stays escalated at its
+//     first-pass confidence; the tally fields are zero. This lets the
+//     customer-facing console honestly say "deeper investigation attempted, no
+//     stronger verdict" instead of manufacturing a re-vote on stale evidence.
+//
+// Reason is the human-readable summary in both shapes.
+type RevoteOutcome struct {
+	Triggered        bool   `json:"triggered"`
+	DeepPassFailed   bool   `json:"deep_pass_failed,omitempty"`
+	ResolveVotes     int    `json:"resolve_votes"`
+	TotalVotes       int    `json:"total_votes"`
+	UnanimousResolve bool   `json:"unanimous_resolve"`
+	Reason           string `json:"reason"`
 }
 
 // marshalRecordForSize renders rec with the EXACT encoding

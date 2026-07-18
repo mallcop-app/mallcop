@@ -21,6 +21,16 @@ import (
 // mirrors core/config.Investigate's default (10).
 const defaultMaxPerScan = 10
 
+// DefaultMaxDeepPerScan is Config.MaxDeepPerScan's fallback when unset/non-positive
+// — the low-confidence deeper-investigation retrigger's SEPARATE metered-call
+// budget (mallcoppro-09a). Deliberately smaller than defaultMaxPerScan: the deep
+// pass only fires on the subset of escalations whose first pass came back low
+// confidence, and each one also drives a full committee re-vote (several more
+// cascade calls), so its blast radius must be tightly bounded. Exported so the
+// core/pipeline orchestration that owns the retrigger (RunAll itself never reads
+// MaxDeepPerScan) can apply the same fallback the field's doc promises.
+const DefaultMaxDeepPerScan = 5
+
 // defaultModelCallTimeout bounds EACH narrate call — the scan's core output
 // can never be delayed past this per finding (failureSemantics §design). The
 // actual bound is Config.CallTimeout when set; this is its fallback.
@@ -72,6 +82,36 @@ type Config struct {
 	// relationship named instead of narrating as an unknown external actor.
 	// nil is the safe absent default — no evidence is ever marked owned.
 	OwnedEntities []OwnedEntity
+
+	// --- Low-confidence re-vote (mallcoppro-09a) -----------------------------
+	// These three fields are CARRIED THROUGH this struct (it is the resolved
+	// investigate: settings bundle cli/scan.go maps onto core/pipeline.Config)
+	// but are NOT read by RunAll itself — RunAll only makes the ONE narrate call
+	// per finding it always has. They are consumed by core/pipeline's step-6
+	// orchestration: an escalated finding whose investigation came back "ok" but
+	// with investigator Confidence < LowConfidenceThreshold is re-investigated
+	// with a deeper pass (RunAll again, Force=true, budgeted at MaxDeepPerScan)
+	// and put to a committee RE-VOTE (core/agent.RunRevoteGate, any-escalate-wins).
+	// inquest itself never runs the cascade — that would violate the consensus
+	// invariant (imports_test bans core/agent's ResolveFindingWith); the re-vote
+	// lives in core/pipeline + core/agent, and these are just the tuning knobs it
+	// reads off the resolved config.
+
+	// LowConfidenceThreshold is the investigator-confidence floor below which an
+	// "ok" escalated investigation is treated as too shaky to ship as-is and is
+	// sent to the deeper-pass + re-vote path. <= 0 DISABLES the whole
+	// low-confidence retrigger (no deep pass, no re-vote) — the pre-09a behavior.
+	LowConfidenceThreshold float64
+	// MaxDeepPerScan bounds the number of METERED deeper-investigation narrate
+	// calls the low-confidence retrigger may make THIS scan — a SEPARATE budget
+	// from MaxPerScan so a noisy scan's re-pass cannot starve (or be starved by)
+	// the first-pass budget. <= 0 uses DefaultMaxDeepPerScan (the pipeline
+	// resolves this fallback — RunAll never reads this field).
+	MaxDeepPerScan int
+	// DeepModel is the model id the deeper investigation pass pins (typically a
+	// stronger lane than the first pass — the whole point of "go deeper"). ""
+	// inherits the first pass's Model.
+	DeepModel string
 }
 
 // OwnedEntity is core/inquest's OWN copy of core/config.OwnedEntity (same
@@ -117,6 +157,23 @@ type Input struct {
 	MallcopVersion string
 	// Config is the resolved investigate: settings for this run.
 	Config Config
+	// Force, when true, bypasses the idempotency skip (processOne's
+	// found+ok+current-schema short-circuit) UNCONDITIONALLY for every finding
+	// in this call — the caller has already decided this specific subset needs a
+	// FRESH pass (the low-confidence deeper-investigation retrigger,
+	// mallcoppro-09a). It changes NOTHING on the normal (Force==false) path: the
+	// skip logic, budget gate, CreatedAt preservation, and failure semantics are
+	// all identical. The caller is responsible for passing ONLY the subset that
+	// warrants a re-pass — Force does not widen the budget, so a Force call over
+	// the full escalated set would still burn MaxPerScan re-investigating
+	// already-confident findings; the pipeline scopes it to the low-confidence
+	// subset (mallcoppro-09a risk 6). Force also NEVER downgrades a prior "ok"
+	// record: if the fresh pass itself lands anything other than "ok" (deep
+	// budget exhausted, model error/timeout, invalid output), processOne keeps
+	// the existing ok record rather than overwriting it with a degraded one
+	// (mallcoppro-09a review fix — a Force re-pass that fails must not destroy
+	// a good verdict the customer-facing surface already reads).
+	Force bool
 }
 
 // Outcome is RunAll's result. RunAll NEVER returns an error the caller
@@ -128,14 +185,30 @@ type Outcome struct {
 	// Degraded counts findings this run wrote (or refreshed) a record for with
 	// any NarrativeStatus OTHER than "ok" — the deterministic evidence still
 	// shipped. ALSO counts a finding skipped after a transient error reading
-	// its existing record (readExistingRecord's error path in processOne) —
-	// that case writes NO record at all (protecting budget and CreatedAt);
-	// it is still tallied here so the operator sees it rather than silence.
+	// its existing record (readExistingRecord's error path in processOne), OR
+	// a Force re-pass that failed to reach "ok" over a finding whose prior
+	// record WAS "ok" (the overwrite guard below) — both of those cases write
+	// NO record at all (protecting budget, CreatedAt, and — for the Force
+	// case — the prior good verdict); they are still tallied here so the
+	// operator sees the failed attempt rather than silence.
 	Degraded int
 	// Skipped counts findings whose existing record was already current + ok:
 	// zero calls, zero writes. Not surfaced on pipeline.Summary; exists so a
 	// caller/test can assert idempotency directly.
 	Skipped int
+	// FreshOKIDs lists the finding IDs that received a FRESH "ok" verdict this
+	// run — a model call landed a trusted verdict AND it was durably written.
+	// len(FreshOKIDs) == Investigated, and the order matches RunAll's
+	// deterministic finding-ID sort. It is the per-finding companion to the
+	// Investigated tally, added for the low-confidence re-vote (core/pipeline,
+	// mallcoppro-09a): a Force deeper pass that FAILS for a finding keeps that
+	// finding's prior (first-pass) "ok" record on disk (the overwrite guard in
+	// processOne), so the two are byte-indistinguishable to a re-reader. The
+	// caller MUST re-vote only findings IN this set — a finding NOT here kept
+	// its first-pass evidence, and re-voting it would feed the committee that
+	// first-pass evidence relabeled as a "deeper investigation" that never
+	// landed, misrepresenting provenance (mallcoppro-09a review finding).
+	FreshOKIDs []string
 	// Errors carries one human-readable line per degraded/failed record, for
 	// the caller to print as a non-fatal warning. Never fails the scan.
 	Errors []string
@@ -201,6 +274,13 @@ func RunAll(ctx context.Context, in Input) (out Outcome) {
 		out.Investigated += investigated
 		out.Degraded += degraded
 		out.Skipped += skipped
+		if investigated == 1 {
+			// A fresh "ok" verdict landed AND persisted for this finding (see
+			// processOne's write-failure guard, which downgrades a failed write
+			// out of the investigated tally). Record the ID so the caller can
+			// tell a genuine deeper verdict from a preserved first-pass one.
+			out.FreshOKIDs = append(out.FreshOKIDs, ef.Finding.ID)
+		}
 		if errMsg != "" {
 			out.Errors = append(out.Errors, errMsg)
 		}
@@ -268,7 +348,7 @@ func processOne(ctx context.Context, in Input, ef EscalatedFinding, maxPerScan i
 		priorCreatedAt = existing.CreatedAt
 		havePriorCreatedAt = true
 	}
-	if found && existing.SchemaVersion == SchemaVersion && existing.NarrativeStatus == StatusOK {
+	if !in.Force && found && existing.SchemaVersion == SchemaVersion && existing.NarrativeStatus == StatusOK {
 		return 0, 0, 1, errMsg
 	}
 
@@ -335,8 +415,34 @@ func processOne(ctx context.Context, in Input, ef EscalatedFinding, maxPerScan i
 		}
 	}
 
+	if in.Force && found && existing.NarrativeStatus == StatusOK && rec.NarrativeStatus != StatusOK {
+		// A Force re-pass (the low-confidence deeper-investigation retrigger,
+		// mallcoppro-09a) that itself failed to land a fresh "ok" verdict —
+		// deep budget exhausted, model error/timeout, invalid output — must
+		// NEVER overwrite the prior good record. The customer-facing surface
+		// reads Verdict/Confidence/Narrative straight from the persisted
+		// record; downgrading a benign/confident "ok" to absent-budget/
+		// unassessed would ship WORSE copy than leaving the record alone.
+		// Keep the existing ok record untouched: no write, budget/CreatedAt
+		// unaffected. Tallied as Degraded (not Skipped) so the operator sees
+		// the failed re-pass rather than silence — same precedent as the
+		// transient-read-error path above.
+		return 0, 1, 0, appendErr(errMsg, fmt.Sprintf("inquest: force re-pass for %s did not reach ok (status=%s) — kept prior ok record, no overwrite", ef.Finding.ID, rec.NarrativeStatus))
+	}
+
 	if _, werr := writeRecord(in.Store, rec); werr != nil {
 		errMsg = appendErr(errMsg, fmt.Sprintf("inquest: write record for %s: %v", ef.Finding.ID, werr))
+		if investigated == 1 {
+			// The fresh "ok" verdict never persisted — the on-disk record is
+			// UNCHANGED (still the prior/first-pass record, or absent). A failed
+			// write must never be reported as a landed fresh investigation:
+			// RunAll keys FreshOKIDs off investigated==1, and the low-confidence
+			// re-vote (mallcoppro-09a) uses that set to conclude a genuine deeper
+			// verdict exists. Re-voting on the stale on-disk record would
+			// misrepresent first-pass evidence as a deeper pass. Downgrade to
+			// Degraded so the operator sees the failed attempt, not silence.
+			investigated, degraded = 0, 1
+		}
 	}
 	return investigated, degraded, 0, errMsg
 }
