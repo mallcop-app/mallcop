@@ -83,6 +83,20 @@ const operationalDowngradeConfidenceCap = 0.4
 // before rejecting.
 var reFabricatedLogs = regexp.MustCompile(`(?i)(\blogs?\b|audit trail)`)
 
+// reLogTermInValue is the GROUNDING regex, applied to each lowercased leaf VALUE
+// of userDoc. It matches "log"/"logs"/"audit" only as a letter-delimited token
+// ((?:^|[^a-z]) … (?:[^a-z]|$)), NOT as a raw substring (mallcoppro-044 review
+// finding 1). A raw `strings.Contains(value, "log")` grounds on any coincidental
+// "log" substring — "ConsoleLogin", "catalog", "login", "dialog", "backlog" —
+// so a value that merely happens to contain those letters would ground a
+// fabricated "absence of logs" claim and silently kill the reject. The token
+// boundary keeps genuine log/audit sources that use separators (log_bucket_delete,
+// audit_log_disabled, "cloudtrail-log-bucket", "the audit trail") grounding the
+// check, while coincidental substrings do not. Separators (space, _, -, digits)
+// are boundaries; only letters are not, so "ConsoleLogin"'s "log" is glued
+// between letters ('l'…'i') and never matches.
+var reLogTermInValue = regexp.MustCompile(`(?:^|[^a-z])(logs?|audit)(?:[^a-z]|$)`)
+
 // reNoPriorHistory matches a narrative asserting the activity has never been
 // seen before — a fabrication when recurrence shows more than one occurrence.
 var reNoPriorHistory = regexp.MustCompile(`(?i)(no prior history|first time|no previous|not previously (seen|observed|recorded)|never (been )?seen before)`)
@@ -130,10 +144,10 @@ func rejectFabricatedEvidence(narrative string, ev Evidence, userDoc string) (bo
 	return false, ""
 }
 
-// logTermInDocValues reports whether the term "log" (case-insensitive, as a
-// substring — matching both "log"/"logs" and "audit trail"'s "log"-free
-// wording is handled by the caller's own regex over the NARRATIVE; this
-// grounding side only needs the bare substring) appears in some leaf VALUE of
+// logTermInDocValues reports whether a "log"/"logs"/"audit" TOKEN (matched by
+// reLogTermInValue — a letter-delimited token, not a raw substring, so a
+// coincidental "log" inside "ConsoleLogin"/"catalog"/"login"/"dialog" never
+// grounds it — mallcoppro-044 review finding 1) appears in some leaf VALUE of
 // userDoc — never a JSON object key. userDoc is re-parsed into a generic
 // JSON tree (map[string]any / []any / string / float64 / bool / nil) and
 // walked recursively, inspecting only the string leaves: struct field NAMES
@@ -155,7 +169,10 @@ func logTermInDocValues(userDoc string) bool {
 func valuesContainLogTerm(v interface{}) bool {
 	switch t := v.(type) {
 	case string:
-		return strings.Contains(strings.ToLower(t), "log")
+		// Token match (reLogTermInValue), NOT a raw substring: a coincidental
+		// "log" inside "ConsoleLogin"/"catalog"/"login"/"dialog" must NOT ground
+		// the check (mallcoppro-044 review finding 1).
+		return reLogTermInValue.MatchString(strings.ToLower(t))
 	case map[string]interface{}:
 		for _, val := range t { // keys deliberately never inspected
 			if valuesContainLogTerm(val) {
@@ -197,17 +214,40 @@ func isOperationalInfrastructureSignature(ev Evidence) bool {
 
 // evidenceNamesDeviation is the escape hatch: it reports whether some Evidence
 // section shows a genuine break the recurring-infrastructure shape does NOT
-// explain — a target/role this actor was never known to touch. Only then may a
-// threat verdict stand on operational-infra-shaped evidence.
+// explain. The operational-infra calibration may cap/downgrade a verdict ONLY
+// when the record names NO deviation at all (mallcoppro-044 review finding 2:
+// recognizing too FEW deviation kinds silently downgraded a genuine threat on a
+// known SERVICE — a novel source IP / off-hours use — to suspicious@0.4). It
+// recognizes every deviation type the assembled Evidence can carry:
 //
-// Scan-correlation is DELIBERATELY not consulted here: a sub-threshold
+//   - novel target/role — a role/target this actor was never known to touch
+//     (Target present AND !KnownRole);
+//   - novel source IP — the actor's key used from an IP absent from its baseline
+//     profile (SourceIP present AND !KnownIP): the classic credential-theft
+//     signal on an OTHERWISE-known actor;
+//   - off-hours/timing — the action fell outside the actor's known hours, and
+//     ONLY when the actor actually has an hour baseline (HourBaselined AND
+//     !KnownHour); an actor with no hour history must never read as off-hours.
+//
+// Each branch is PRESENCE-GATED on the relevant identity field (Target/SourceIP
+// present, or an hour baseline existing) so a bare false zero-value can never be
+// mistaken for a deviation. Every branch reads only generic Evidence bool/
+// string-presence fields — never an actor name, detector type, or finding id —
+// so this stays actor/type-string-blind and cannot become a family-match rule.
+//
+// This function only ever WIDENS the escape hatch: naming a deviation makes
+// calibrateVerdict pass the model's own verdict through UNCHANGED. It can never
+// force, escalate, or suppress anything — a genuine threat signal always
+// survives it, which is exactly the invariant the item requires. Scan-
+// correlation is DELIBERATELY still not consulted: a sub-threshold
 // correlated=false is a near-miss against mallcop's OWN scan schedule (the live
 // case's matched_fraction=0.64), never threat-positive evidence (item outcome
-// 2), so it can never name a deviation. Reads only Evidence bool/string-presence
-// fields — the Target CHECK is presence-only (Target != ""), never a match on
-// Target's literal value.
+// 2), so it can never name a deviation.
 func evidenceNamesDeviation(ev Evidence) bool {
-	return ev.Identity.Target != "" && !ev.Baseline.KnownRole
+	novelTarget := ev.Identity.Target != "" && !ev.Baseline.KnownRole
+	novelIP := ev.Identity.SourceIP != "" && !ev.Baseline.KnownIP
+	offHours := ev.Baseline.HourBaselined && !ev.Baseline.KnownHour
+	return novelTarget || novelIP || offHours
 }
 
 // calibrateVerdict applies the operational-infrastructure calibration to the

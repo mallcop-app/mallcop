@@ -191,6 +191,16 @@ func (b *Baseline) HasActorHours() bool {
 	return len(b.ActorHours) > 0
 }
 
+// HasActorHoursFor returns true when THIS actor has any recorded baseline hours.
+// It distinguishes "the hour is off-baseline" (actor has hours, this one isn't
+// among them) from "there is no timing baseline for this actor at all" — the
+// two states KnownHour==false conflates. Callers that treat an unknown hour as a
+// timing DEVIATION must gate on this, or an actor with no hour history would read
+// as perpetually off-hours.
+func (b *Baseline) HasActorHoursFor(actor string) bool {
+	return len(b.ActorHours[actor]) > 0
+}
+
 // RelationshipsFor returns the relationship records whose key references the given
 // entity — the scenario keys an "actor:target" pair, so a key whose actor segment
 // (before the first ':') equals the entity, OR any key that contains the entity as

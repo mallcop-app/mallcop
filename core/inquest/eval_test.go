@@ -461,3 +461,119 @@ func TestNarrateContract_UnrecognizedIPOnKnownActorNotFabricated(t *testing.T) {
 		t.Errorf("Confidence = %v, want 0.85 unchanged (no calibration should fire)", out.Confidence)
 	}
 }
+
+// TestNarrateContract_ConsoleLoginSubstringDoesNotGroundLogsFabrication is the
+// exact regression for mallcoppro-044 review finding 1: the logs/audit-trail
+// grounding must match "log"/"audit" as a letter-delimited TOKEN, not a raw
+// substring. Here the assembled record's VALUES contain "ConsoleLogin" and
+// "catalog" — both carry the coincidental substring "log" — but NOTHING that is
+// genuinely a log/audit source. A raw `strings.Contains(value, "log")` grounds
+// on "ConsoleLogin", concludes the record legitimately references logs, and so
+// SILENTLY SKIPS the reject for a narrative that fabricates "the absence of
+// justifying logs" — the exact way the guard died in production. The token
+// grounding finds no real log/audit term, so the fabricated claim is rejected.
+func TestNarrateContract_ConsoleLoginSubstringDoesNotGroundLogsFabrication(t *testing.T) {
+	f := finding.Finding{
+		ID: "f-console-login-1", Type: "unusual_console_login", Severity: "high",
+		Actor:     "forge-proxy",
+		Reason:    "ConsoleLogin from a new source; the catalog service was also queried",
+		Timestamp: time.Now(),
+	}
+	ev := Evidence{
+		// Values carry the coincidental "log" substring (ConsoleLogin / catalog),
+		// never a real log/audit token. Single occurrence + baseline-unknown role
+		// keeps this OFF the operational-infra calibration path, so the ONLY thing
+		// that can move the verdict is the fabrication reject under test.
+		Identity:   IdentityEvidence{Actor: "forge-proxy", Caller: "AWSConsoleLogin", Target: "catalog-service"},
+		Recurrence: RecurrenceEvidence{Occurrences: 1},
+		Baseline:   BaselineEvidence{KnownActor: true, KnownRole: false},
+	}
+	userDoc, err := buildUserMessage(f, ResolutionRef{Action: "escalate"}, ev)
+	if err != nil {
+		t.Fatalf("buildUserMessage: %v", err)
+	}
+	// Guard the regression is meaningful: userDoc MUST carry the raw substring
+	// "log" (via ConsoleLogin/catalog) so a substring scan WOULD have grounded —
+	// otherwise this proves nothing about the token fix.
+	if !strings.Contains(strings.ToLower(userDoc), "log") {
+		t.Fatalf("fixture invalid: userDoc must contain the coincidental substring \"log\" (ConsoleLogin/catalog) for this to be a meaningful regression proof:\n%s", userDoc)
+	}
+	reply := replyJSON("threat", 0.85,
+		"forge-proxy activity is not consistent with prior benign activity; the absence of justifying logs is concerning. Revoke the key.")
+
+	client := &scriptedClient{reply: reply}
+	out := narrate(context.Background(), client, "investigate", 1024, userDoc, ev)
+
+	if out.Status != StatusAbsentInvalidOutput {
+		t.Fatalf("Status = %q, want absent-invalid-output — a fabricated 'absence of logs' claim must be rejected even though the record's VALUES coincidentally contain \"log\" via \"ConsoleLogin\"/\"catalog\" (only a real log/audit TOKEN should ground the check)", out.Status)
+	}
+	if out.Err == nil || !strings.Contains(out.Err.Error(), "absent from the record") {
+		t.Errorf("Err = %v, want a fabrication-reject explanation", out.Err)
+	}
+}
+
+// TestNarrateContract_GenuineThreatOnKnownServiceEscapesCalibration is the exact
+// regression for mallcoppro-044 review finding 2: evidenceNamesDeviation must
+// recognize EVERY deviation kind the record can carry, so a genuine threat on a
+// baseline-KNOWN service (the operational-infra shape) is not silently
+// downgraded to suspicious@0.4 just because its deviation is a novel source IP
+// or an off-hours use rather than a novel target. calibrateVerdict may cap only
+// when the record names NO deviation at all. Both cases below are the
+// operational-infra signature (known actor, 693 occurrences, ~1s cadence) with a
+// single evidenced deviation and a CLEAN threat narrative (no fabricated
+// logs/history/unknown-actor words), so the ONLY thing that could move the
+// verdict is the calibration under test. The verdict must pass through as a
+// full-confidence threat, unchanged.
+func TestNarrateContract_GenuineThreatOnKnownServiceEscapesCalibration(t *testing.T) {
+	cases := []struct {
+		name   string
+		mutate func(ev *Evidence)
+		reply  string
+	}{
+		{
+			name: "novel_source_ip",
+			mutate: func(ev *Evidence) {
+				// Known service, but its key is used from an IP absent from the
+				// baseline profile — a classic credential-theft signal.
+				ev.Identity.SourceIP = "203.0.113.7"
+				ev.Baseline.KnownIP = false
+			},
+			reply: "forge-proxy's key was used from a source IP absent from its baseline profile, inconsistent with the recurring pattern — a credential-theft indicator. Escalate and revoke the key.",
+		},
+		{
+			name: "off_hours",
+			mutate: func(ev *Evidence) {
+				// Known service with an established hour baseline, but this action
+				// fell outside its known hours.
+				ev.Baseline.HourBaselined = true
+				ev.Baseline.KnownHour = false
+			},
+			reply: "forge-proxy assumed the role at an hour outside its established operating window; combined with the sensitivity of the grant this warrants escalation.",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			ev := benignInfraEvidence() // operational-infra shape, KnownRole=true
+			c.mutate(&ev)
+			if !isOperationalInfrastructureSignature(ev) {
+				t.Fatalf("fixture invalid: case must be the operational-infra shape so the calibration path is actually exercised: %+v", ev.Baseline)
+			}
+			userDoc := mustBuildUserDoc(t, benignInfraFinding(), ev)
+			client := &scriptedClient{reply: replyJSON("threat", 0.9, c.reply)}
+			out := narrate(context.Background(), client, "investigate", 1024, userDoc, ev)
+
+			if out.Status != StatusOK {
+				t.Fatalf("Status = %q, want ok — a clean genuine-threat narrative must not be rejected (err=%v)", out.Status, out.Err)
+			}
+			if out.Verdict != VerdictThreat {
+				t.Fatalf("Verdict = %q, want threat — an evidenced deviation (%s) on a known service must escape the operational-infra cap, not downgrade to suspicious", out.Verdict, c.name)
+			}
+			if out.Confidence != 0.9 {
+				t.Errorf("Confidence = %v, want 0.9 unchanged — an evidenced deviation must not have confidence capped at %v", out.Confidence, operationalDowngradeConfidenceCap)
+			}
+			if len(out.ContractNotes) != 0 {
+				t.Errorf("ContractNotes = %v, want none (calibration must not fire when the record names a deviation)", out.ContractNotes)
+			}
+		})
+	}
+}

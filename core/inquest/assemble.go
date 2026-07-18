@@ -105,10 +105,25 @@ type RecurrenceEvidence struct {
 // BaselineEvidence is the known-ness of the finding's actor against the SAME
 // baseline the scan gated detection on.
 type BaselineEvidence struct {
-	KnownActor      bool   `json:"known_actor"`
-	HasLoginProfile bool   `json:"has_login_profile"`
-	KnownHour       bool   `json:"known_hour"`
-	KnownRole       bool   `json:"known_role"`
+	KnownActor      bool `json:"known_actor"`
+	HasLoginProfile bool `json:"has_login_profile"`
+	KnownHour       bool `json:"known_hour"`
+	// HourBaselined records whether THIS actor has ANY recorded baseline hours.
+	// KnownHour==false conflates "the actor's known hours don't include this one"
+	// (a genuine off-hours deviation) with "there is no timing baseline for this
+	// actor at all" (no basis to call anything off-hours). A calibration/deviation
+	// consumer must read HourBaselined alongside KnownHour so an actor with no
+	// hour history never reads as perpetually off-hours (mallcoppro-044).
+	HourBaselined bool `json:"hour_baselined"`
+	KnownRole     bool `json:"known_role"`
+	// KnownIP records whether the finding's source IP is in the actor's baseline
+	// profile. It is meaningful ONLY when the identity carried a source IP; when
+	// no IP was extracted it is left false and a deviation consumer must gate on
+	// IdentityEvidence.SourceIP != "" (a bare false must never be read as a novel
+	// IP). A known actor's key used from an IP absent from its profile is a novel-
+	// source-IP deviation the operational-infra calibration must NOT suppress
+	// (mallcoppro-044).
+	KnownIP         bool   `json:"known_ip"`
 	ActorFirstSeen  string `json:"actor_first_seen,omitempty"`
 	ActorEventCount int    `json:"actor_event_count"`
 	Error           string `json:"error,omitempty"`
@@ -740,9 +755,15 @@ func assembleBaselineEvidence(bl *baseline.Baseline, allEvents []event.Event, f 
 		KnownActor:      bl.IsKnownActor(f.Actor),
 		HasLoginProfile: bl.HasLoginProfile(f.Actor),
 		KnownHour:       bl.KnownHour(f.Actor, f.Timestamp.UTC().Hour()),
+		HourBaselined:   bl.HasActorHoursFor(f.Actor),
 	}
 	if identity.Target != "" {
 		out.KnownRole = bl.IsKnownRole(f.Actor, identity.Target)
+	}
+	// KnownIP is meaningful only when a source IP was extracted; leave it false
+	// (and let deviation consumers gate on SourceIP presence) otherwise.
+	if identity.SourceIP != "" {
+		out.KnownIP = bl.KnownIP(f.Actor, identity.SourceIP)
 	}
 
 	var first time.Time
