@@ -99,16 +99,33 @@ var reLogTermInValue = regexp.MustCompile(`(?:^|[^a-z])(logs?|audit)(?:[^a-z]|$)
 
 // reNoPriorHistory matches a narrative asserting the activity has never been
 // seen before — a fabrication when recurrence shows more than one occurrence.
+// The reject is gated on !evidenceNamesDeviation in rejectFabricatedEvidence:
+// Recurrence.Occurrences counts all (actor,type) events (assemble.go's
+// actorTypeTimestamps — TARGET-BLIND and HOUR-BLIND), so the count contradicts
+// only a GLOBAL "no prior history" claim, never a novelty claim scoped to a
+// specific evidenced deviation ("first time at THIS hour", "first time assuming
+// THIS role", "first time from THIS IP"). When the record itself names a
+// deviation (novel target/IP/off-hours), such a narrative describes that REAL
+// deviation, not a fabrication, and the coarse (actor,type) count must not
+// reject it (mallcoppro-044 review finding: a legitimate off-hours/novel-target
+// genuine-threat narrative was discarded as fabrication).
 var reNoPriorHistory = regexp.MustCompile(`(?i)(no prior history|first time|no previous|not previously (seen|observed|recorded)|never (been )?seen before)`)
 
 // reUnknownActor matches a narrative calling the ACTOR unknown/unrecognized — a
-// fabrication when baseline marks it a known actor. Anchored to "actor" (both
-// "unrecognized"/"unrecognised" spellings) so it never trips on a narrative
-// calling some OTHER field of a known actor's own activity unrecognized/novel
-// (an unrecognized source IP, region, role, or pattern) — that is a legitimate,
-// often threat-relevant, claim about a known actor behaving anomalously, not a
-// claim that the actor itself is unknown (mallcoppro-044 review finding 2).
-var reUnknownActor = regexp.MustCompile(`(?i)(unknown actor|unrecogni[sz]ed actor|never (been )?seen before|not (a )?known actor)`)
+// fabrication when baseline marks it a known actor. EVERY alternative is
+// anchored to the word "actor" (both "unrecognized"/"unrecognised" spellings)
+// so it never trips on a narrative calling some OTHER field of a known actor's
+// own activity unrecognized/novel (an unrecognized source IP, region, role, or
+// pattern) — that is a legitimate, often threat-relevant, claim about a known
+// actor behaving anomalously, not a claim that the actor itself is unknown
+// (mallcoppro-044 review finding 2). In particular an UNANCHORED
+// "never (been )?seen before" alternative was REMOVED: it false-rejected a
+// legitimate novel-source-IP credential-theft narrative on a KNOWN actor
+// ("...a source IP that has never been seen before for this actor...") — the
+// exact deviation the escape hatch must preserve — because that phrasing calls
+// the IP, not the actor, novel (mallcoppro-044 review: the comment's own stated
+// intent, now enforced).
+var reUnknownActor = regexp.MustCompile(`(?i)(unknown actor|unrecogni[sz]ed actor|not (a )?known actor)`)
 
 // rejectFabricatedEvidence returns (true, reason) when the narrative cites a
 // datum absent from the record. A reject maps to StatusAbsentInvalidOutput —
@@ -129,13 +146,23 @@ var reUnknownActor = regexp.MustCompile(`(?i)(unknown actor|unrecogni[sz]ed acto
 // (narrating that back is not fabrication — mallcoppro-044 review finding 1),
 // while a bystander boolean field's KEY never does. The no-prior-history and
 // unknown-actor checks read only Evidence numeric/bool fields (occurrences,
-// known_actor) — never a name/type/id — so neither can become a family-match
-// override.
+// known_actor) plus the deviation escape hatch (evidenceNamesDeviation —
+// generic bool/string-presence fields only) — never a name/type/id — so neither
+// can become a family-match override, and the deviation gate only ever WIDENS
+// what passes, never suppresses a threat signal.
 func rejectFabricatedEvidence(narrative string, ev Evidence, userDoc string) (bool, string) {
 	if reFabricatedLogs.MatchString(narrative) && !logTermInDocValues(userDoc) {
 		return true, "cites logs/audit-trail — no such term appears anywhere in the assembled record"
 	}
-	if ev.Recurrence.Occurrences > 1 && reNoPriorHistory.MatchString(narrative) {
+	// The recurrence count is (actor,type)-scoped (target-blind, hour-blind), so
+	// it can only contradict a GLOBAL no-history claim. When the record names a
+	// genuine deviation (novel target/IP/off-hours), a "first time"/"never seen
+	// before" narrative describes that REAL evidenced deviation dimension — which
+	// the coarse (actor,type) count does not contradict — so it must not be
+	// rejected as fabrication (mallcoppro-044 review finding). This uses the same
+	// evidenceNamesDeviation escape hatch that governs calibrateVerdict, and only
+	// ever WIDENS what passes, so it can never suppress a threat signal.
+	if ev.Recurrence.Occurrences > 1 && !evidenceNamesDeviation(ev) && reNoPriorHistory.MatchString(narrative) {
 		return true, fmt.Sprintf("denies prior history but recurrence records %d occurrences", ev.Recurrence.Occurrences)
 	}
 	if ev.Baseline.KnownActor && reUnknownActor.MatchString(narrative) {

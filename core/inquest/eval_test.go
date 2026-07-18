@@ -577,3 +577,124 @@ func TestNarrateContract_GenuineThreatOnKnownServiceEscapesCalibration(t *testin
 		})
 	}
 }
+
+// TestNarrateContract_NovelIPNeverSeenBeforePhrasingNotFabricated is the exact
+// regression for the review's finding 1: reUnknownActor's UNANCHORED
+// "never (been )?seen before" alternative false-rejected a legitimate
+// novel-source-IP credential-theft narrative on a KNOWN actor. The narrative
+// phrases the novel IP (not the actor) as "never been seen before for this
+// actor" — a REAL threat-relevant deviation the escape hatch must preserve. A
+// single occurrence keeps this off the operational-infra calibration path, so
+// the ONLY thing that could reject it is the (now removed) unanchored
+// reUnknownActor alternative. The verdict must pass through unchanged.
+func TestNarrateContract_NovelIPNeverSeenBeforePhrasingNotFabricated(t *testing.T) {
+	ev := Evidence{
+		Identity:   IdentityEvidence{Actor: "forge-proxy", SourceIP: "203.0.113.7"},
+		Recurrence: RecurrenceEvidence{Occurrences: 1},
+		Baseline:   BaselineEvidence{KnownActor: true, KnownRole: true, KnownIP: false},
+	}
+	reply := replyJSON("threat", 0.9,
+		"forge-proxy's key was used from a source IP that has never been seen before for this actor; a credential-theft indicator. Escalate and revoke the key.")
+
+	client := &scriptedClient{reply: reply}
+	out := narrate(context.Background(), client, "investigate", 1024, "{}", ev)
+
+	if out.Status != StatusOK {
+		t.Fatalf("Status = %q, want ok — a novel-IP narrative phrased 'never seen before for this actor' must not be rejected as an 'unknown actor' fabrication (err=%v)", out.Status, out.Err)
+	}
+	if out.Verdict != VerdictThreat {
+		t.Fatalf("Verdict = %q, want threat (a genuine novel-IP threat must survive)", out.Verdict)
+	}
+	if out.Confidence != 0.9 {
+		t.Errorf("Confidence = %v, want 0.9 unchanged (single occurrence is not the operational-infra shape)", out.Confidence)
+	}
+}
+
+// TestNarrateContract_FirstTimeOffHoursOnKnownServiceNotFabricated is the exact
+// regression for the review's finding 2: reNoPriorHistory false-rejected a
+// legitimate off-hours / novel-target genuine-threat narrative because
+// Recurrence.Occurrences is keyed on (actor,type) — target-blind and hour-blind
+// — so a high count does NOT contradict a novelty claim scoped to THIS hour or
+// THIS role. Both cases are the operational-infra shape (known actor, 693
+// occurrences, ~1s cadence) with a single evidenced deviation and a "first
+// time"-style narrative describing that REAL deviation. The reject must be gated
+// off by evidenceNamesDeviation, and the evidenced deviation must also escape
+// the calibration cap, so the verdict passes through as a full-confidence
+// threat, unchanged.
+func TestNarrateContract_FirstTimeOffHoursOnKnownServiceNotFabricated(t *testing.T) {
+	cases := []struct {
+		name   string
+		mutate func(ev *Evidence)
+		reply  string
+	}{
+		{
+			name: "off_hours_first_time_at_this_hour",
+			mutate: func(ev *Evidence) {
+				ev.Baseline.HourBaselined = true
+				ev.Baseline.KnownHour = false
+			},
+			reply: "forge-proxy assumed the role at an hour outside its established window; this is the first time it has operated at this hour, a strong off-hours deviation. Escalate.",
+		},
+		{
+			name: "novel_target_first_time_assuming_this_role",
+			mutate: func(ev *Evidence) {
+				ev.Identity.Target = "prod-admin-role"
+				ev.Baseline.KnownRole = false
+			},
+			reply: "forge-proxy assumed prod-admin-role for the first time; the role grants broad administrative access and was never in its baseline. Escalate and revoke.",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			ev := benignInfraEvidence()
+			c.mutate(&ev)
+			if !isOperationalInfrastructureSignature(ev) {
+				t.Fatalf("fixture invalid: case must be the operational-infra shape so the reject/calibration path is exercised: %+v", ev.Baseline)
+			}
+			if ev.Recurrence.Occurrences <= 1 {
+				t.Fatalf("fixture invalid: recurrence must exceed 1 so reNoPriorHistory would fire absent the deviation gate: %d", ev.Recurrence.Occurrences)
+			}
+			userDoc := mustBuildUserDoc(t, benignInfraFinding(), ev)
+			client := &scriptedClient{reply: replyJSON("threat", 0.9, c.reply)}
+			out := narrate(context.Background(), client, "investigate", 1024, userDoc, ev)
+
+			if out.Status != StatusOK {
+				t.Fatalf("Status = %q, want ok — a 'first time'-style narrative describing a REAL evidenced deviation must not be rejected as fabrication (err=%v)", out.Status, out.Err)
+			}
+			if out.Verdict != VerdictThreat {
+				t.Fatalf("Verdict = %q, want threat — an evidenced deviation (%s) must survive both the fabrication reject and the calibration cap", out.Verdict, c.name)
+			}
+			if out.Confidence != 0.9 {
+				t.Errorf("Confidence = %v, want 0.9 unchanged", out.Confidence)
+			}
+			if len(out.ContractNotes) != 0 {
+				t.Errorf("ContractNotes = %v, want none (neither reject nor calibration must fire when the record names a deviation)", out.ContractNotes)
+			}
+		})
+	}
+}
+
+// TestNarrateContract_GlobalNoHistoryClaimStillRejectedWithoutDeviation guards
+// that the finding-2 fix only WIDENS the escape hatch and does not blind the
+// reject: when the record names NO deviation (known actor, known role, no novel
+// IP, no hour baseline), a "first time"/"no prior history" claim on a
+// high-recurrence actor is still a global fabrication contradicted by the
+// (actor,type) occurrence count, and must still be rejected.
+func TestNarrateContract_GlobalNoHistoryClaimStillRejectedWithoutDeviation(t *testing.T) {
+	ev := benignInfraEvidence() // KnownRole=true, no SourceIP, no hour baseline => no deviation
+	if evidenceNamesDeviation(ev) {
+		t.Fatalf("fixture invalid: benign-infra evidence must name NO deviation for this reject test: %+v", ev.Baseline)
+	}
+	reply := replyJSON("threat", 0.9,
+		"This is the first time forge-proxy has assumed this role; no prior history supports it.")
+	userDoc := mustBuildUserDoc(t, benignInfraFinding(), ev)
+	client := &scriptedClient{reply: reply}
+	out := narrate(context.Background(), client, "investigate", 1024, userDoc, ev)
+
+	if out.Status != StatusAbsentInvalidOutput {
+		t.Fatalf("Status = %q, want absent-invalid-output — a global no-history claim with no evidenced deviation must still be rejected as fabrication", out.Status)
+	}
+	if out.Err == nil || !strings.Contains(out.Err.Error(), "recurrence records") {
+		t.Errorf("Err = %v, want a prior-history fabrication-reject explanation", out.Err)
+	}
+}
