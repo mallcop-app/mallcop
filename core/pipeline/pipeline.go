@@ -39,6 +39,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"sync"
 	"time"
 
@@ -510,6 +511,16 @@ func Run(ctx context.Context, cfg Config) (Summary, error) {
 // scan: a read/deep-pass/attach error is collected as a warning and the finding
 // is skipped, exactly like the first investigation pass's failure semantics.
 //
+// BUDGET: the re-vote loop is bounded to AT MOST MaxDeepPerScan findings — the
+// low-confidence subset is sorted by finding ID (the same deterministic order
+// inquest.RunAll sorts by internally) and truncated to the deep budget BEFORE
+// either the deep pass or the re-vote runs. This keeps the committee re-vote —
+// the expensive part of this step — capped at the SAME budget the deep pass
+// itself is capped at; a finding that falls past the deep budget is left as a
+// normal low-confidence escalation, untouched, never re-voted on stale
+// first-pass evidence mislabeled as a "deeper investigation" that never ran
+// for it (mallcoppro-09a review finding).
+//
 // The whole step is a no-op (returns 0,0,nil) when the retrigger is disabled
 // (LowConfidenceThreshold <= 0), the client is nil (nothing to re-vote with — the
 // nil-client scan already escalated everything and wrote absent-no-client
@@ -540,15 +551,32 @@ func runLowConfidenceRevotes(ctx context.Context, cfg Config, escalated []inques
 		return 0, 0, nil
 	}
 
-	// (a) DEEPER investigation pass over ONLY the low-confidence subset, Force=true
-	// so the idempotency skip does not short-circuit the fresh pass, budgeted at
-	// the SEPARATE MaxDeepPerScan and pinned to the (optionally stronger)
-	// DeepModel. RunAll never errors out; it degrades individual records.
-	deepCfg := cfg.Investigate
+	// Bound the low-confidence subset ITSELF to the deep budget, BEFORE either
+	// the deep pass or the re-vote loop runs (mallcoppro-09a review finding: an
+	// unbounded re-vote loop over ALL low-confidence findings — while
+	// inquest.RunAll's own MaxDeepPerScan budget only lets the FIRST deepBudget
+	// of them actually receive a fresh deep pass — fed the committee
+	// first-pass evidence relabeled as a "deeper investigation" for the rest,
+	// and blew the metered-cost bound MaxDeepPerScan exists to enforce). Sort
+	// by finding ID first — the SAME deterministic order inquest.RunAll sorts
+	// by internally before spending its budget — so the truncated subset is
+	// exactly the subset RunAll will actually spend a call on, not an
+	// arbitrary prefix of escalation order.
 	deepBudget := cfg.Investigate.MaxDeepPerScan
 	if deepBudget <= 0 {
 		deepBudget = inquest.DefaultMaxDeepPerScan
 	}
+	sort.Slice(lowConf, func(i, j int) bool { return lowConf[i].Finding.ID < lowConf[j].Finding.ID })
+	if len(lowConf) > deepBudget {
+		lowConf = lowConf[:deepBudget]
+	}
+
+	// (a) DEEPER investigation pass over ONLY the (now budget-bounded)
+	// low-confidence subset, Force=true so the idempotency skip does not
+	// short-circuit the fresh pass, budgeted at the SEPARATE MaxDeepPerScan and
+	// pinned to the (optionally stronger) DeepModel. RunAll never errors out;
+	// it degrades individual records.
+	deepCfg := cfg.Investigate
 	deepCfg.MaxPerScan = deepBudget // its own budget, not shared with the first pass
 	if cfg.Investigate.DeepModel != "" {
 		deepCfg.Model = cfg.Investigate.DeepModel
