@@ -411,6 +411,22 @@ func runScan(args []string) error {
 		}
 	}
 
+	// (4.6) UNCONDITIONAL case collapse (mallcoppro-554): recurring escalated
+	// findings — same (type, actor, entity) — collapse into store/cases.json,
+	// a durable cross-scan projection. Always runs when this scan escalated
+	// anything; no env gate (unlike Discord) — mirrors findings.json's
+	// "written every scan" precedent. Reads ONLY already-committed
+	// resolutions (Action=="escalate") and their paired findings; never
+	// writes to resolutions.jsonl and cannot alter a disposition — the
+	// consensus invariant (any-escalate-wins committee decides; this block
+	// only PROJECTS a decision already made) is structurally preserved by
+	// cases.Escalation carrying no Action/Reason/Confidence field to act on.
+	if sum.FindingsDetected > 0 {
+		if err := collapseCases(st, sum.FindingsDetected); err != nil {
+			return fmt.Errorf("scan: case collapse: %w", err)
+		}
+	}
+
 	out := ScanSummary{
 		EventsScanned:          sum.EventsScanned,
 		DuplicatesSkipped:      sum.DuplicatesSkipped,
@@ -544,15 +560,14 @@ func openOrInitStore(path string) (*store.Store, error) {
 	return st, nil
 }
 
-// loadEscalatedResolutions reads the resolutions stream and returns the
-// escalated resolutions written by THIS scan. The pipeline appends exactly one
+// loadThisRunResolutions reads the resolutions stream and returns the
+// UNFILTERED resolutions written by THIS scan. The pipeline appends exactly one
 // resolution per kept finding (FindingsDetected of them, after suppression), in
-// append order, so the LAST `thisRun` resolutions are this scan's. Of those, the
-// ones with Action=="escalate" are returned for the gated Discord emit.
+// append order, so the LAST `thisRun` resolutions are this scan's.
 //
 // This keeps the pipeline's return signature unchanged: the durable store is the
 // one brain, and the scan reads its own just-written output back from it.
-func loadEscalatedResolutions(st *store.Store, thisRun int) ([]resolution.Resolution, error) {
+func loadThisRunResolutions(st *store.Store, thisRun int) ([]resolution.Resolution, error) {
 	if thisRun <= 0 {
 		return nil, nil
 	}
@@ -564,15 +579,62 @@ func loadEscalatedResolutions(st *store.Store, thisRun int) ([]resolution.Resolu
 	if start < 0 {
 		start = 0
 	}
-	var out []resolution.Resolution
+	out := make([]resolution.Resolution, 0, len(raws[start:]))
 	for _, raw := range raws[start:] {
 		var r resolution.Resolution
 		if err := json.Unmarshal(raw, &r); err != nil {
 			return nil, fmt.Errorf("decode resolution: %w", err)
 		}
+		out = append(out, r)
+	}
+	return out, nil
+}
+
+// loadEscalatedResolutions is loadThisRunResolutions filtered down to
+// Action=="escalate" — the gated Discord emit's input.
+func loadEscalatedResolutions(st *store.Store, thisRun int) ([]resolution.Resolution, error) {
+	all, err := loadThisRunResolutions(st, thisRun)
+	if err != nil {
+		return nil, err
+	}
+	var out []resolution.Resolution
+	for _, r := range all {
 		if r.Action == "escalate" {
 			out = append(out, r)
 		}
+	}
+	return out, nil
+}
+
+// loadThisRunFindings reads the findings stream and returns the findings
+// written by THIS scan, in the SAME append-order window loadThisRunResolutions
+// uses. core/pipeline.Run persists findings and resolutions as index-aligned
+// 1:1 batches for a fixed thisRun == sum.FindingsDetected (findings via ONE
+// AppendBatch(KindFindings) before resolving; resolutions written into a
+// pre-allocated, index-written []resolved slice so the worker pool cannot
+// reorder them, then appended as ONE AppendBatch(KindResolutions) — see
+// core/pipeline/pipeline.go's persistence step and resolveAll). Any future
+// pipeline change that breaks that alignment must update collapseCases'
+// length check alongside this window.
+func loadThisRunFindings(st *store.Store, thisRun int) ([]finding.Finding, error) {
+	if thisRun <= 0 {
+		return nil, nil
+	}
+	raws, err := st.Load(store.KindFindings)
+	if err != nil {
+		return nil, err
+	}
+	start := len(raws) - thisRun
+	if start < 0 {
+		start = 0
+	}
+	out := make([]finding.Finding, 0, len(raws[start:]))
+	for _, raw := range raws[start:] {
+		var f finding.Finding
+		if err := json.Unmarshal(raw, &f); err != nil {
+			return nil, fmt.Errorf("decode finding: %w", err)
+		}
+		out = append(out, f)
 	}
 	return out, nil
 }
