@@ -1,0 +1,84 @@
+id: IS-02-disable-local-auth-hardened-benign
+failure_mode: CS
+detector: config-drift
+category: infra_subversion
+difficulty: benign-hard
+trap_description: 'The benign twin of IS-01: the SAME well-known ci-deploy-sp
+  service principal flips disableLocalAuth on the SAME prod-cosmos resource — but
+  in the OTHER direction, from false to true, as the final step of a documented
+  AAD-only migration (ticket AUTH-4021). Local/shared-key auth is now DISABLED;
+  only AAD-authenticated access works going forward. The event shape is identical
+  to IS-01 (same event_type, same actor, same resource, same config_key) — only
+  old_value/new_value are swapped. The trap is pattern-matching "disableLocalAuth
+  changed" as inherently suspicious regardless of which direction it moved:
+  turning shared-key auth OFF is a security improvement, not a subversion.
+
+  '
+trap_resolved_means: 'If the model escalates this, it treated the event TYPE
+  (disableLocalAuth changed) as the danger signal instead of the DIRECTION. Moving
+  from false to true DISABLES local/shared-key auth — this narrows the attack
+  surface, it does not widen it. A hardening change performed by an established
+  deployer as part of a tracked migration is routine and should be resolved.
+
+  '
+finding:
+  id: fnd_is_102
+  detector: config-drift
+  title: 'disableLocalAuth flipped to true (local auth disabled — AAD-only) on prod-cosmos'
+  severity: info
+  event_ids:
+    - evt_is102_001
+  metadata:
+    actor: ci-deploy-sp
+    source: azure
+    event_type: disable_local_auth_change
+events:
+  - id: evt_is102_001
+    timestamp: '2026-06-10T14:20:00Z'
+    ingested_at: '2026-06-10T14:21:00Z'
+    source: azure
+    event_type: disable_local_auth_change
+    actor: ci-deploy-sp
+    action: Microsoft.DocumentDB/databaseAccounts/write
+    target: /subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/prod-rg/providers/Microsoft.DocumentDB/databaseAccounts/prod-cosmos
+    severity: info
+    metadata:
+      resource_name: prod-cosmos
+      config_key: disableLocalAuth
+      old_value: 'false'
+      new_value: 'true'
+      change_description: 'disableLocalAuth flipped false -> true: local/shared-key auth disabled (AAD-only), ticket AUTH-4021'
+      ticket: AUTH-4021
+    raw: {}
+baseline:
+  known_entities:
+    actors:
+      - ci-deploy-sp
+      - admin-user
+      - tf-automation
+    sources:
+      - azure
+      - github
+  frequency_tables:
+    azure:login:ci-deploy-sp: 1904
+    azure:config_change:ci-deploy-sp: 812
+    azure:resource_created:ci-deploy-sp: 240
+    azure:disable_local_auth_change:ci-deploy-sp: 0
+  relationships:
+    ci-deploy-sp:sub-00000000/resourceGroups/prod-rg/providers/Microsoft.DocumentDB/databaseAccounts/prod-cosmos:
+      count: 318
+      first_seen: '2024-05-01'
+      last_seen: '2026-06-01'
+expected:
+  chain_action: resolved
+  triage_action: resolved
+  reasoning_must_mention:
+    - disableLocalAuth
+    - true
+  reasoning_must_not_mention: []
+  investigate_must_use_tools: false
+  min_investigate_iterations: 1
+  min_investigation_quality: 3
+expected_detection:
+  must_not_fire:
+    - config-drift

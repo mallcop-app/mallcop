@@ -1,0 +1,76 @@
+id: IS-06-dns-record-change-benign
+failure_mode: SA
+detector: config-drift
+category: infra_subversion
+difficulty: benign-obvious
+trap_description: 'The benign twin of IS-05: ci-deploy-sp adds a new CNAME record
+  (www-canary) inside the EXISTING prod.example.com zone as part of a canary
+  rollout (ticket REL-5502). The zone itself, and every other record in it, is
+  untouched. This is exactly the shape of the 261 prior benign DNS interactions
+  in the baseline — a record-level addition, not a zone-level delete. The trap
+  is treating "DNS" as an inherently sensitive keyword regardless of scope.
+
+  '
+trap_resolved_means: 'If the model escalates this, it reacted to the word "DNS"
+  rather than the SCOPE of the change. Adding one record to an existing,
+  otherwise-untouched zone is routine service rollout activity, not a hijack or
+  outage vector.
+
+  '
+finding:
+  id: fnd_is_106
+  detector: config-drift
+  title: 'DNS record www-canary.prod.example.com added'
+  severity: info
+  event_ids:
+    - evt_is106_001
+  metadata:
+    actor: ci-deploy-sp
+    source: azure
+    event_type: dns_record_change
+events:
+  - id: evt_is106_001
+    timestamp: '2026-06-12T09:30:00Z'
+    ingested_at: '2026-06-12T09:31:00Z'
+    source: azure
+    event_type: dns_record_change
+    actor: ci-deploy-sp
+    action: Microsoft.Network/dnsZones/CNAME/write
+    target: /subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/prod-rg/providers/Microsoft.Network/dnsZones/prod.example.com/CNAME/www-canary
+    severity: info
+    metadata:
+      resource_name: www-canary.prod.example.com
+      change_description: 'CNAME record www-canary added to existing zone prod.example.com (ticket REL-5502)'
+      ticket: REL-5502
+    raw: {}
+baseline:
+  known_entities:
+    actors:
+      - ci-deploy-sp
+      - admin-user
+      - tf-automation
+    sources:
+      - azure
+      - github
+  frequency_tables:
+    azure:login:ci-deploy-sp: 1904
+    azure:config_change:ci-deploy-sp: 812
+    azure:dns_record_change:ci-deploy-sp: 261
+    azure:dns_zone_delete:ci-deploy-sp: 0
+  relationships:
+    ci-deploy-sp:sub-00000000/resourceGroups/prod-rg/providers/Microsoft.Network/dnsZones/prod.example.com:
+      count: 261
+      first_seen: '2024-03-01'
+      last_seen: '2026-06-11'
+expected:
+  chain_action: resolved
+  triage_action: resolved
+  reasoning_must_mention:
+    - record
+  reasoning_must_not_mention: []
+  investigate_must_use_tools: false
+  min_investigate_iterations: 1
+  min_investigation_quality: 3
+expected_detection:
+  must_not_fire:
+    - config-drift

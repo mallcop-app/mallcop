@@ -34,16 +34,6 @@ var externalAccessEventTypes = map[string]bool{
 	"directory_settings_update":    true,
 }
 
-// approvalSignalKeys are metadata keys whose PRESENCE marks a grant as
-// pre-approved (a vetted vendor onboarding / contractor with a ticket). When any
-// is present the grant is NOT escalated — it is a sanctioned external access
-// (AC-04 approved-vendor, AC-05 contractor with HR ticket), so the detector defers
-// rather than over-firing a benign resolve.
-var approvalSignalKeys = []string{
-	"vendor_approved", "vendor_id", "contract_ref", "ticket", "hr_ticket",
-	"approved_by", "approval_id",
-}
-
 // Detect emits a finding when the performing actor grants access to an EXTERNAL
 // principal (a collaborator/member/external grantee, or a new federated domain
 // trust) with no approval signal. It fires on ev.Actor — the performing identity,
@@ -65,11 +55,12 @@ func newExternalAccessEvaluate(ev event.Event, emitted map[string]bool) *finding
 	}
 	meta := payloadMeta(ev.Payload)
 
-	// A grant is APPROVED (and thus benign) when it carries any sanctioning signal.
-	for _, k := range approvalSignalKeys {
-		if v := metaStr(meta, k); v != "" {
-			return nil
-		}
+	// A grant is APPROVED (and thus benign) when it carries any sanctioning signal
+	// (see payload_meta.go's hasApprovalSignal — shared with config_drift.go's
+	// iam_policy_attach gate so the approval-signal vocabulary cannot diverge
+	// between the two detectors that both need to recognize it).
+	if hasApprovalSignal(ev.Payload) {
+		return nil
 	}
 
 	// Identify the external grantee. A federation/domain-trust change names a new

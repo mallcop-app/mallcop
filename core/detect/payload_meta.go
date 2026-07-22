@@ -46,6 +46,34 @@ func metaStr(meta map[string]any, aliases ...string) string {
 	return ""
 }
 
+// approvalSignalKeys are metadata keys whose PRESENCE marks a grant/change as
+// pre-approved (a vetted vendor onboarding, a contractor with an HR ticket, a
+// documented change ticket, a named approver). Shared by every detector that
+// needs to tell a SANCTIONED change from an undocumented one on the same event
+// shape: new_external_access.go's vendor/contractor onboarding gate (AC-04
+// approved-vendor, AC-05 contractor-with-ticket) and config_drift.go's
+// iam_policy_attach gate (the LAW/NIP-86 write-allowlist-grant fan-out,
+// mallcoppro-192/mallcoppro-956) both key off it. Kept in ONE place so a
+// connector's approval-signal vocabulary cannot silently diverge between
+// detectors that both need to recognize it.
+var approvalSignalKeys = []string{
+	"vendor_approved", "vendor_id", "contract_ref", "ticket", "hr_ticket",
+	"approved_by", "approval_id",
+}
+
+// hasApprovalSignal reports whether the event payload carries any
+// approvalSignalKeys entry with a non-empty value, tolerating both the
+// corpus-nested and production-flat payload shapes via payloadMeta.
+func hasApprovalSignal(payload json.RawMessage) bool {
+	meta := payloadMeta(payload)
+	for _, k := range approvalSignalKeys {
+		if metaStr(meta, k) != "" {
+			return true
+		}
+	}
+	return false
+}
+
 // metaFloat reads key k from a meta map as a float64, accepting the first present
 // alias. JSON numbers decode to float64; a string number is parsed. Returns
 // (value, true) on the first numeric alias found, else (0, false).

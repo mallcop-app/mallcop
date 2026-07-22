@@ -1,0 +1,101 @@
+id: IS-12-relay-allowlist-grant-onboarding-benign
+failure_mode: CS
+detector: config-drift
+category: infra_subversion
+difficulty: benign-hard
+trap_description: 'The benign twin of IS-11: the SAME relay-admin-sp identity
+  calls allowpubkey to add npub1newteammemberxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+  to the write-allowlist during business hours, carrying a ticket reference
+  (ONBOARD-3301) for a new engineer''s documented onboarding. The event shape
+  (event_type, actor, connector fan-out into iam_policy_attach + role_assignment)
+  is IDENTICAL to IS-11 — only the presence of an approval/onboarding signal and
+  the business-hours timing differ. The trap is treating any relay-admin
+  allowlist grant as inherently risky because the malicious twin shares the same
+  actor and event type.
+
+  '
+trap_resolved_means: 'If the model escalates this, it reacted to "write-allowlist
+  grant" as an inherently dangerous action type rather than checking whether THIS
+  grant carries the onboarding/approval context every legitimate grant in this
+  environment carries. A ticketed onboarding grant, during business hours, from
+  the established relay admin, is routine team growth.
+
+  '
+finding:
+  id: fnd_is_112
+  detector: config-drift
+  title: 'relay write-allowlist grant to npub1newteammember (documented onboarding)'
+  severity: info
+  event_ids:
+    - evt_is112_001
+  metadata:
+    actor: relay-admin-sp
+    source: nostr-relay
+    event_type: iam_policy_attach
+events:
+  # Same connector fan-out shape as IS-11 (iam_policy_attach + role_assignment)
+  # — the discriminator vs IS-11 is the ticket/approval signal, not the event
+  # shape. Neither event fires here: iam_policy_attach is gated quiet by the
+  # ticket signal (hasApprovalSignal), and role_assignment/priv-escalation
+  # never fired for this shape to begin with (mallcoppro-956).
+  - id: evt_is112_001
+    timestamp: '2026-06-15T13:40:00Z'
+    ingested_at: '2026-06-15T13:41:00Z'
+    source: nostr-relay
+    event_type: iam_policy_attach
+    actor: relay-admin-sp
+    action: nip86.allowpubkey
+    target: relay.mallcop.app
+    severity: info
+    metadata:
+      policy_name: relay-write-allowlist
+      target_user: npub1newteammemberxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+      ticket: ONBOARD-3301
+      change_description: 'allowpubkey: npub1newteammember added to write-allowlist, documented onboarding (ONBOARD-3301)'
+    raw: {}
+  - id: evt_is112_002
+    timestamp: '2026-06-15T13:40:00Z'
+    ingested_at: '2026-06-15T13:41:00Z'
+    source: nostr-relay
+    event_type: role_assignment
+    actor: relay-admin-sp
+    action: nip86.allowpubkey
+    target: relay.mallcop.app
+    severity: info
+    metadata:
+      role_name: allowpubkey
+      target_user: npub1newteammemberxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+      ticket: ONBOARD-3301
+    raw: {}
+baseline:
+  known_entities:
+    actors:
+      - relay-admin-sp
+      - admin-user
+    sources:
+      - nostr-relay
+      - azure
+    actor_roles:
+      relay-admin-sp:
+        - relay-admin
+  frequency_tables:
+    nostr-relay:iam_policy_attach:relay-admin-sp: 14
+    nostr-relay:login:relay-admin-sp: 640
+  relationships:
+    relay-admin-sp:relay.mallcop.app:
+      count: 640
+      first_seen: '2024-09-01'
+      last_seen: '2026-06-14'
+expected:
+  chain_action: resolved
+  triage_action: resolved
+  reasoning_must_mention:
+    - onboarding
+  reasoning_must_not_mention: []
+  investigate_must_use_tools: false
+  min_investigate_iterations: 1
+  min_investigation_quality: 3
+expected_detection:
+  must_not_fire:
+    - config-drift
+    - priv-escalation

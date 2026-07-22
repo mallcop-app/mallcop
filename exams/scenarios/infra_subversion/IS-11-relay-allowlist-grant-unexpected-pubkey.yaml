@@ -1,0 +1,130 @@
+id: IS-11-relay-allowlist-grant-unexpected-pubkey
+failure_mode: CS
+detector: config-drift
+category: infra_subversion
+difficulty: malicious-hard
+trap_description: 'The relay-admin service (relay-admin-sp) calls the NIP-86
+  management API''s allowpubkey method, adding npub1zqqqqqqqqqqqqqqqqqqqqqqqq86wtdz
+  — a pubkey never seen anywhere in the baseline, with no ticket, no HR onboarding
+  reference, no vendor/contract metadata — to the relay''s write-allowlist at
+  02:50 UTC. The connector fan-out for this action emits BOTH an iam_policy_attach
+  event (config-drift) and a role_assignment event (priv-escalation) for the SAME
+  underlying change. priv-escalation''s keyword gate does not recognize the raw
+  method name "allowpubkey" as an elevated role/permission value (tracked gap,
+  mallcoppro-956), so config-drift is the family that must carry this signal. The
+  trap: relay-admin-sp is the well-established, routinely-acting relay admin, and
+  allowlist additions from it are common — the model may treat this as "the admin
+  doing admin things" without checking whether THIS specific grant carries any
+  onboarding/approval context at all.
+
+  '
+trap_resolved_means: 'If the model resolves this because relay-admin-sp is the
+  known, trusted relay-admin identity, it conflated actor trust with the
+  legitimacy of an UNDOCUMENTED grant. Every other onboarding grant in this
+  baseline carries a ticket or approval reference (see IS-12); this one carries
+  none, at an off-hours timestamp, for a pubkey with zero prior history anywhere.
+  Write-allowlist access is effectively a backdoor into the relay''s data store —
+  an undocumented grant to it must escalate regardless of who performed it.
+
+  '
+finding:
+  id: fnd_is_111
+  detector: config-drift
+  title: 'relay write-allowlist grant to undocumented pubkey npub1zqqqqqqqqqqqqqqqqqqqqqqqq86wtdz'
+  severity: warn
+  event_ids:
+    - evt_is111_001
+  metadata:
+    actor: relay-admin-sp
+    source: nostr-relay
+    event_type: iam_policy_attach
+events:
+  # The re-scoped LAW connector fans this ONE relay action out into TWO event
+  # types (mallcoppro-956): iam_policy_attach (config-drift, below) and
+  # role_assignment (priv-escalation). priv-escalation's isElevated() keyword
+  # gate does not recognize the raw method name "allowpubkey" as an elevated
+  # role/permission value — TestZZPrivEscalationDoesNotFireOnAllowpubkey
+  # (core/detect, throwaway verification during authoring) confirmed
+  # containsElevatedKeyword("allowpubkey") is false — so priv-escalation is
+  # NOT expected to fire on evt_is111_002; config-drift (evt_is111_001) is the
+  # family that must carry this signal today. Tracked follow-up: mallcoppro-956.
+  - id: evt_is111_001
+    timestamp: '2026-06-09T02:50:00Z'
+    ingested_at: '2026-06-09T02:51:00Z'
+    source: nostr-relay
+    event_type: iam_policy_attach
+    actor: relay-admin-sp
+    action: nip86.allowpubkey
+    target: relay.mallcop.app
+    severity: warn
+    metadata:
+      policy_name: relay-write-allowlist
+      target_user: npub1zqqqqqqqqqqqqqqqqqqqqqqqq86wtdz
+      change_description: 'allowpubkey: npub1zqqqqqqqqqqqqqqqqqqqqqqqq86wtdz added to write-allowlist, no ticket/approval reference'
+    raw: {}
+  - id: evt_is111_002
+    timestamp: '2026-06-09T02:50:00Z'
+    ingested_at: '2026-06-09T02:51:00Z'
+    source: nostr-relay
+    event_type: role_assignment
+    actor: relay-admin-sp
+    action: nip86.allowpubkey
+    target: relay.mallcop.app
+    severity: warn
+    metadata:
+      role_name: allowpubkey
+      target_user: npub1zqqqqqqqqqqqqqqqqqqqqqqqq86wtdz
+    raw: {}
+baseline:
+  known_entities:
+    actors:
+      - relay-admin-sp
+      - admin-user
+    sources:
+      - nostr-relay
+      - azure
+    actor_roles:
+      relay-admin-sp:
+        - relay-admin
+  frequency_tables:
+    nostr-relay:iam_policy_attach:relay-admin-sp: 14
+    nostr-relay:login:relay-admin-sp: 640
+  relationships:
+    relay-admin-sp:relay.mallcop.app:
+      count: 640
+      first_seen: '2024-09-01'
+      last_seen: '2026-06-08'
+ground_truth:
+  expected_conclusion: Escalate — an undocumented write-allowlist grant, to a
+    pubkey with zero prior history anywhere in the baseline, carrying no
+    ticket/onboarding/approval reference, at an off-hours timestamp. Write-
+    allowlist access is a backdoor into the relay's data store; relay-admin-sp's
+    established history performing OTHER (documented) allowlist grants does not
+    authorize this undocumented one.
+  trap: relay-admin-sp has 14 prior allowlist-attach events in the baseline, all
+    routine, which may read as "allowlist changes from this actor are always
+    fine." The missing signal is the absence of ANY approval/onboarding context
+    on this specific grant — every legitimate onboarding in this environment
+    carries a ticket reference (see IS-12's ONBOARD-3301).
+expected:
+  chain_action: escalated
+  triage_action: escalated
+  reasoning_must_mention:
+    - allowlist
+    - unexpected
+  reasoning_must_not_mention: []
+  investigate_must_use_tools: true
+  min_investigate_iterations: 1
+  min_investigation_quality: 3
+expected_detection:
+  must_fire:
+    - config-drift
+  # priv-escalation is a TRACKED, KNOWN gap on this event shape (mallcoppro-956),
+  # not something this item's config_drift work fixes: "allowpubkey" fails
+  # priv-escalation's elevated-keyword substring gate, so it genuinely does not
+  # fire today. Pinned as must_not_fire (not omitted) so the exam-detect grader
+  # documents the CURRENT true behavior rather than being silent about it; the
+  # day mallcoppro-956 teaches priv-escalation to recognize this shape, this
+  # line should flip to must_fire alongside config-drift.
+  must_not_fire:
+    - priv-escalation

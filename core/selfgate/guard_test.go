@@ -349,7 +349,7 @@ func TestGuard_RejectsBareCorpusPinRepin(t *testing.T) {
 	real := f.copyReal("exams/scenarios/corpus.pin")
 	base := f.commit("base")
 
-	f.write("exams/scenarios/corpus.pin", replaceOnce(t, real, "count 60", "count 59"))
+	f.write("exams/scenarios/corpus.pin", replaceOnce(t, real, "count 72", "count 71"))
 	head := f.commit("proposal: bare repin")
 
 	requireRejected(t, f.guard(base, head), RuleCorpusPinPairing, "corpus.pin")
@@ -799,7 +799,7 @@ func TestGuard_AcceptsK2bShapedTuningWiden(t *testing.T) {
 
 	f.write("detectors/tuning.yaml", replaceOnce(t, tuning, "\n    - poweruser", "\n    - poweruser\n    - clusteradmin"))
 	f.write("exams/scenarios/privilege/PE-99-clusteradmin-grant.yaml", scenario) // additive new scenario
-	f.write("exams/scenarios/corpus.pin", replaceOnce(t, pin, "count 60", "count 61"))
+	f.write("exams/scenarios/corpus.pin", replaceOnce(t, pin, "count 72", "count 73"))
 	head := f.commit("proposal: K2b-shaped widen + scenario + repin")
 
 	requireClean(t, f.guard(base, head))
